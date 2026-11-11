@@ -3565,13 +3565,16 @@ dependencies = [
 name = "lightair-preview"
 version = "0.1.0"
 dependencies = [
+ "lightair-core",
  "lightair-engine",
  "objc2-core-foundation",
  "objc2-core-video",
  "objc2-io-surface",
  "objc2-video-toolbox",
  "parking_lot",
+ "serde_json",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

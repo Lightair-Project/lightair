@@ -83,6 +83,10 @@ pub struct StudioWindow {
     camera_devices: Vec<(String, String)>,
     /// The open inline rename field in the Layers or Scenes list.
     renaming: Option<Renaming>,
+    /// Studio mode (docs/07-scenes-layers-canvas.md): the stage shows the selected scene, a
+    /// monitor shows Program, and Take puts the selected scene on air.
+    studio_mode: bool,
+    program_monitor: Option<Preview>,
 }
 
 const HANDLE: f32 = 10.0;
@@ -90,7 +94,11 @@ const SNAP_PX: f32 = 8.0;
 
 impl StudioWindow {
     pub fn new(studio: Entity<Studio>, preview: Preview, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe(&studio, |_, _, cx| cx.notify()).detach();
+        cx.observe(&studio, |this, _, cx| {
+            this.sync_studio_preview(cx);
+            cx.notify()
+        })
+        .detach();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mixer = cx.new(|cx| MixerPanel::new(studio.clone(), cx));
@@ -111,6 +119,8 @@ impl StudioWindow {
             add_menu: false,
             camera_devices: vec![],
             renaming: None,
+            studio_mode: false,
+            program_monitor: None,
         }
     }
 
@@ -232,6 +242,51 @@ impl StudioWindow {
             .into_iter()
             .map(|f| f.id)
             .find(|id| bounds.get(id).is_some_and(|b| b.contains(&p)))
+    }
+
+    fn set_studio_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.studio_mode = on;
+        self.program_monitor = on.then(Preview::attach);
+        if let Some(m) = &self.program_monitor {
+            let f = self.studio.read(cx).project().primary_format().clone();
+            m.set_size(Some((512, 512 * f.height / f.width.max(1))));
+        }
+        self.sync_studio_preview(cx);
+        cx.notify();
+    }
+
+    /// In Studio mode the primary stage shows the selected scene rather than Program.
+    fn sync_studio_preview(&mut self, cx: &mut Context<Self>) {
+        let studio = self.studio.read(cx);
+        let format = studio.project().primary_format().id;
+        let Some(preview) = self.previews.get(&format) else { return };
+        let want = studio.selected_scene.filter(|_| self.studio_mode);
+        let current = preview.source().map(|p| p as usize);
+        let engine = studio.engine().clone();
+        let next = match want {
+            None => None,
+            Some(scene) => {
+                // Only take a new reference when the libobs scene changed (rebuilds replace it).
+                let ptr = engine.call(move |s| s.reconciler.scene_source(scene, format).map(|p| p as usize));
+                if ptr == current {
+                    return;
+                }
+                engine.call(move |s| s.reconciler.scene_source_ref(scene, format).map(|p| p as usize))
+            }
+        };
+        if next.is_some() || current.is_some() {
+            preview.set_source(next.map(|p| p as *mut _));
+        }
+    }
+
+    /// Studio mode's Take: the selected scene goes on air with the current transition.
+    fn take(&mut self, cx: &mut Context<Self>) {
+        let studio = self.studio.read(cx);
+        let Some(scene) = studio.selected_scene else { return };
+        if studio.project().program == Some(scene) {
+            return;
+        }
+        self.exec(Command::SetProgram { scene: Some(scene) }, cx);
     }
 
     /// Creates previews for new formats and drops those of removed ones.
@@ -947,10 +1002,15 @@ impl StudioWindow {
                         this.start_rename(target, &name, window, cx);
                         return;
                     }
+                    let studio_mode = this.studio_mode;
                     this.studio.update(cx, |s, cx| {
                         s.selected_scene = Some(id);
                         s.selected_layer = None;
-                        let _ = s.execute(Command::SetProgram { scene: Some(id) }, cx);
+                        if studio_mode {
+                            cx.notify();
+                        } else {
+                            let _ = s.execute(Command::SetProgram { scene: Some(id) }, cx);
+                        }
                     })
                 }))
                 .on_drag(dragged, |row, _, _, cx| cx.new(|_| row.clone()))
@@ -1041,8 +1101,26 @@ impl StudioWindow {
                     })),
             );
         }
+        bar = bar.child(div().flex_1()).child(
+            div()
+                .id("studio-mode")
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .h(px(26.))
+                .px_2()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .when(self.studio_mode, |d| d.bg(tok::bg_selected()))
+                .hover(|d| d.bg(tok::bg_raised()))
+                .child(ui::icon("columns-2").size(px(14.)).text_color(tok::text_secondary()))
+                .child("Studio mode")
+                .tooltip(|w, cx| Tooltip::new("Edit a scene off air, then Take it live").build(w, cx))
+                .on_click(cx.listener(|this, _, _, cx| this.set_studio_mode(!this.studio_mode, cx))),
+        );
         if !project.formats.iter().any(|f| f.height > f.width) {
-            bar = bar.child(div().flex_1()).child(
+            bar = bar.child(
                 Button::new("add-vertical")
                     .label("Add vertical")
                     .xsmall()
@@ -1146,7 +1224,7 @@ impl StudioWindow {
         let live = runtime().any_stream_running();
         let stages: Vec<AnyElement> =
             self.visible_formats(project).iter().map(|f| self.stage(project, f, cx).into_any_element()).collect();
-        div().flex().flex_col().flex_1().min_h_0().child(self.format_tabs(project, cx)).child(
+        let well = div().flex().flex_1().min_h_0().child(
             div()
                 .id("canvas")
                 .relative()
@@ -1160,7 +1238,71 @@ impl StudioWindow {
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::canvas_up))
                 .on_mouse_up_out(MouseButton::Left, cx.listener(Self::canvas_up))
                 .children(stages),
-        )
+        );
+        let well = match self.studio_mode.then(|| self.program_column(project, cx)) {
+            Some(column) => well.child(column),
+            None => well,
+        };
+        div().flex().flex_col().flex_1().min_h_0().child(self.format_tabs(project, cx)).child(well)
+    }
+
+    /// Studio mode's Program monitor and Take button.
+    fn program_column(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        let studio = self.studio.read(cx);
+        let frame = self.program_monitor.as_ref().and_then(|p| p.latest_frame());
+        let program_name = project.program.and_then(|id| project.scene(id)).map(|s| s.name.clone());
+        let preview_name = studio.selected_scene.and_then(|id| project.scene(id)).map(|s| s.name.clone());
+        let can_take = studio.selected_scene.is_some() && studio.selected_scene != project.program;
+        let f = project.primary_format();
+        let label = |text: &str, name: Option<String>, color: Hsla| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_size(px(11.))
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(color).child(text.to_string()))
+                .child(div().text_color(tok::text_secondary()).child(name.unwrap_or_else(|| "—".into())))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(280.))
+            .p_3()
+            .border_l_1()
+            .border_color(tok::border())
+            .bg(tok::bg_panel())
+            .child(label("PREVIEW", preview_name, tok::text()))
+            .child(label("PROGRAM", program_name, tok::live()))
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(256. * f.height as f32 / f.width.max(1) as f32))
+                    .rounded(px(4.))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(tok::live())
+                    .bg(tok::bg_canvas_well())
+                    .when_some(frame, |d, frame| {
+                        d.child(surface(frame).absolute().size_full().object_fit(ObjectFit::Contain))
+                    }),
+            )
+            .child(
+                Button::new("take")
+                    .label("Take")
+                    .primary()
+                    .w_full()
+                    .disabled(!can_take)
+                    .tooltip("Put the scene you're editing on air")
+                    .on_click(cx.listener(|this, _, _, cx| this.take(cx))),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(tok::text_tertiary())
+                    .child("Clicking a scene selects it for editing; Take puts it on air with the current transition."),
+            )
     }
 
     fn right_column(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
