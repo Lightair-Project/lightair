@@ -57,6 +57,10 @@ impl Studio {
         studio
     }
 
+    pub fn engine(&self) -> &Arc<Engine> {
+        &self.engine
+    }
+
     pub fn project(&self) -> &Arc<Project> {
         self.doc.project()
     }
@@ -164,8 +168,10 @@ impl Studio {
         };
         // Make the journal durable before outputs start (docs/14, "Saving, autosave & recovery").
         self.flush();
+        let format = settings.format;
         self.engine.post(move |s| {
-            if let Err(e) = s.outputs.start_recording(&cfg) {
+            let video = format.and_then(|f| s.reconciler.format_video(f));
+            if let Err(e) = s.outputs.start_recording(&cfg, video) {
                 tracing::error!(%e, "recording failed to start");
             }
         });
@@ -197,8 +203,10 @@ impl Studio {
                     true,
                 ),
             };
+            let format = d.format;
             self.engine.post(move |s| {
-                if let Err(e) = s.outputs.start_stream(&cfg) {
+                let video = format.and_then(|f| s.reconciler.format_video(f));
+                if let Err(e) = s.outputs.start_stream(&cfg, video) {
                     tracing::error!(%e, "stream failed to start");
                 }
             });

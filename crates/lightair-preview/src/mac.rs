@@ -265,7 +265,12 @@ struct Shared {
     active: AtomicBool,
     frames: AtomicU64,
     transfer: Mutex<Option<CFRetained<VTPixelTransferSession>>>,
+    /// `None`: the main canvas (program). `Some`: another canvas (an additional format); we
+    /// own one strong reference.
+    canvas: Option<CanvasRef>,
 }
+
+struct CanvasRef(*mut sys::obs_canvas_t);
 
 // SAFETY: `Shared` is used by libobs's graphics thread and the UI thread. Every field is either
 // atomic or behind a mutex; the CoreVideo/VideoToolbox objects inside are reference-counted
@@ -286,6 +291,16 @@ struct Handle {
 impl Preview {
     /// Starts rendering the main canvas into preview buffers. libobs must be running.
     pub fn attach() -> Self {
+        Self::attach_to(None)
+    }
+
+    /// Previews another canvas (an additional format). Takes ownership of the strong reference
+    /// in `canvas` (e.g. from `Reconciler::canvas_ref`).
+    pub fn attach_canvas(canvas: *mut sys::obs_canvas_t) -> Self {
+        Self::attach_to((!canvas.is_null()).then_some(CanvasRef(canvas)))
+    }
+
+    fn attach_to(canvas: Option<CanvasRef>) -> Self {
         let mut session: *mut VTPixelTransferSession = ptr::null_mut();
         let rc = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut session)) };
         let transfer =
@@ -300,6 +315,7 @@ impl Preview {
             active: AtomicBool::new(true),
             frames: AtomicU64::new(0),
             transfer: Mutex::new(transfer),
+            canvas,
         });
         unsafe { sys::obs_add_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&shared) as *mut c_void) };
         Self(Arc::new(Handle { shared }))
@@ -337,6 +353,9 @@ impl Drop for Handle {
                 pool.destroy();
                 sys::obs_leave_graphics();
             }
+            if let Some(c) = &self.shared.canvas {
+                sys::obs_canvas_release(c.0);
+            }
         }
     }
 }
@@ -352,7 +371,16 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     if main.is_null() {
         return;
     }
-    let (base_w, base_h) = unsafe { (sys::gs_texture_get_width(main), sys::gs_texture_get_height(main)) };
+    let (base_w, base_h) = match &shared.canvas {
+        None => unsafe { (sys::gs_texture_get_width(main), sys::gs_texture_get_height(main)) },
+        Some(c) => {
+            let mut ovi = sys::obs_video_info::default();
+            if !unsafe { sys::obs_canvas_get_video_info(c.0, &mut ovi) } {
+                return;
+            }
+            (ovi.base_width, ovi.base_height)
+        }
+    };
     let packed = shared.size.load(Ordering::Relaxed);
     let (w, h) = if packed == 0 { (base_w & !1, base_h & !1) } else { ((packed >> 32) as u32, packed as u32) };
 
@@ -365,7 +393,10 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     }
     let Some(pool) = guard.as_mut() else { return };
 
-    unsafe { draw_scaled(main, base_w, base_h, pool.target, w, h) };
+    match &shared.canvas {
+        None => unsafe { draw_scaled(main, base_w, base_h, pool.target, w, h) },
+        Some(c) => unsafe { draw_canvas(c.0, base_w, base_h, pool.target, w, h) },
+    }
     if !unsafe { pool.blit_to_surface() } {
         return;
     }
@@ -379,6 +410,28 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     pool.latest.store(idx as isize, Ordering::Release);
     *shared.latest.lock() = Some(dst.clone());
     shared.frames.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Renders a canvas's view (its program scene) directly into `dst`, scaled to the preview.
+unsafe fn draw_canvas(canvas: *mut sys::obs_canvas_t, cw: u32, ch: u32, dst: *mut sys::gs_texture_t, dw: u32, dh: u32) {
+    unsafe {
+        let prev_rt = sys::gs_get_render_target();
+        let prev_zs = sys::gs_get_zstencil_target();
+        sys::gs_viewport_push();
+        sys::gs_projection_push();
+        sys::gs_matrix_push();
+        sys::gs_matrix_identity();
+        sys::gs_set_render_target(dst, ptr::null_mut());
+        sys::gs_set_viewport(0, 0, dw as i32, dh as i32);
+        sys::gs_ortho(0.0, cw as f32, 0.0, ch as f32, -100.0, 100.0);
+        let black = sys::vec4::default();
+        sys::gs_clear(sys::GS_CLEAR_COLOR, &black, 1.0, 0);
+        sys::obs_canvas_render(canvas);
+        sys::gs_set_render_target(prev_rt, prev_zs);
+        sys::gs_matrix_pop();
+        sys::gs_projection_pop();
+        sys::gs_viewport_pop();
+    }
 }
 
 unsafe fn draw_scaled(src: *mut sys::gs_texture_t, sw: u32, sh: u32, dst: *mut sys::gs_texture_t, dw: u32, dh: u32) {

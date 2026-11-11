@@ -45,6 +45,40 @@ fn host_of(server: &str) -> String {
     server.split("://").nth(1).unwrap_or(server).split(['/', ':']).next().unwrap_or(server).to_string()
 }
 
+/// "16:9", "9:16", "1:1" for a format.
+fn aspect_label(f: &lightair_core::Format) -> String {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let g = gcd(f.width, f.height).max(1);
+    format!("{}:{}", f.width / g, f.height / g)
+}
+
+/// The format after `current` in the project's list (wrapping), for the badge's click.
+fn next_format(project: &lightair_core::Project, current: Option<Id>) -> Option<Id> {
+    let cur = current.unwrap_or(project.primary_format().id);
+    let i = project.formats.iter().position(|f| f.id == cur).unwrap_or(0);
+    let next = &project.formats[(i + 1) % project.formats.len()];
+    (next.id != project.primary_format().id).then_some(next.id)
+}
+
+fn format_badge(id: impl Into<ElementId>, project: &lightair_core::Project, format: Option<Id>) -> Stateful<Div> {
+    let f = format.and_then(|id| project.format(id)).unwrap_or(project.primary_format());
+    div()
+        .id(id)
+        .px_1p5()
+        .h(px(18.))
+        .flex()
+        .items_center()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(tok::border_strong())
+        .text_size(px(10.))
+        .text_color(tok::text_secondary())
+        .when(project.formats.len() > 1, |d| d.cursor_pointer().hover(|d| d.bg(tok::bg_selected())))
+        .child(aspect_label(f))
+}
+
 impl OutputsPanel {
     pub fn new(studio: Entity<Studio>, cx: &mut Context<Self>) -> Self {
         cx.observe(&studio, |_, _, cx| cx.notify()).detach();
@@ -69,7 +103,7 @@ impl OutputsPanel {
             });
             return;
         }
-        let destination = Destination { id: Id::new(), name: host_of(&server), server, enabled: true };
+        let destination = Destination { id: Id::new(), name: host_of(&server), server, enabled: true, format: None };
         if let Err(e) = crate::secrets::set_stream_key(destination.id, &key) {
             self.studio.update(cx, |s, cx| {
                 s.issue = Some(format!("Couldn't save the stream key: {e}").into());
@@ -125,17 +159,33 @@ impl Render for OutputsPanel {
                 .child(div().text_size(px(11.)).font_family("Menlo").text_color(status.1).child(status.0))
         };
 
-        let mut list = div().flex().flex_col().gap_0p5().child(row(
-            "out-rec".into(),
-            "circle",
-            "Recording".into(),
-            format!(
-                "{} · {}",
-                project.outputs.recording.container.to_uppercase(),
-                folder.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
-            ),
-            (rec_text, rec_color),
-        ));
+        let rec_settings = project.outputs.recording.clone();
+        let rec_badge = format_badge("rec-format", &project, rec_settings.format).on_click(cx.listener({
+            let project = project.clone();
+            move |this, _, _, cx| {
+                let settings = lightair_core::RecordingSettings {
+                    format: next_format(&project, rec_settings.format),
+                    ..rec_settings.clone()
+                };
+                this.studio.update(cx, |s, cx| {
+                    let _ = s.execute(Command::SetRecordingSettings { settings }, cx);
+                })
+            }
+        }));
+        let mut list = div().flex().flex_col().gap_0p5().child(
+            row(
+                "out-rec".into(),
+                "circle",
+                "Recording".into(),
+                format!(
+                    "{} · {}",
+                    project.outputs.recording.container.to_uppercase(),
+                    folder.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
+                ),
+                (rec_text, rec_color),
+            )
+            .child(rec_badge),
+        );
         for (i, d) in project.outputs.destinations.iter().enumerate() {
             let id = d.id;
             let enabled = d.enabled;
@@ -147,6 +197,16 @@ impl Render for OutputsPanel {
             };
             list = list.child(
                 row(("out-dest", i).into(), "radio", d.name.clone(), d.server.clone(), (text, color))
+                    .child(format_badge(("dest-format", i), &project, d.format).on_click(cx.listener({
+                        let project = project.clone();
+                        let current = d.format;
+                        move |this, _, _, cx| {
+                            let format = next_format(&project, current);
+                            this.studio.update(cx, |s, cx| {
+                                let _ = s.execute(Command::SetDestinationFormat { destination: id, format }, cx);
+                            })
+                        }
+                    })))
                     .child(
                         div()
                             .id(("dest-toggle", i))
@@ -172,7 +232,7 @@ impl Render for OutputsPanel {
                                 })
                             })),
                     )
-                    .child(ui::icon_button(("dest-remove", i), "trash-2", tok::text_tertiary()).on_click(cx.listener(
+                    .child(ui::icon_button(("dest-remove", i), "trash", tok::text_tertiary()).on_click(cx.listener(
                         move |this, _, _, cx| {
                             crate::secrets::delete_stream_key(id);
                             this.studio.update(cx, |s, cx| {

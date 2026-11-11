@@ -77,6 +77,47 @@ fn incremental_reconcile_matches_full_rebuild() {
     assert_eq!(incremental, rebuilt);
     assert!(incremental.iter().any(|l| l.contains("(program)")));
     assert_eq!(engine.call(|s| s.reconciler.counts()), (2, 2, 3));
+
+    // ---- add a vertical format: every scene gets a second libobs scene in a new canvas
+    let vertical = lightair_core::Format::vertical();
+    let vid = vertical.id;
+    let mut commands = vec![Command::AddFormat { format: vertical }];
+    for scene in &doc.project().scenes {
+        for layer in &scene.layers {
+            commands.push(Command::SetLayout {
+                scene: scene.id,
+                layer: layer.id,
+                format: vid,
+                layout: Layout::boxed(0.0, 420.0, 1080.0, 1080.0),
+            });
+        }
+    }
+    let change = doc.apply(&Command::Batch { label: "Add vertical".into(), commands }).unwrap();
+    let patches = diff(&change.before, &change.after);
+    let project = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let incremental = engine.call(|s| s.reconciler.describe());
+    let final_project = doc.project().clone();
+    let rebuilt = engine.call(move |s| {
+        s.reconciler.clear();
+        let patches = diff(&final_project.empty_like(), &final_project);
+        s.reconciler.apply(&final_project, &patches);
+        s.reconciler.describe()
+    });
+    assert_eq!(incremental, rebuilt);
+    assert_eq!(engine.call(|s| s.reconciler.counts()), (2, 4, 6), "scenes and items doubled across two formats");
+    assert!(
+        incremental.iter().any(|l| l.contains(&vid.to_string()) && l.contains("(program)")),
+        "vertical canvas has the program"
+    );
+    let canvas_ok = engine.call(move |s| {
+        let Some(c) = s.reconciler.canvas_ref(vid) else { return false };
+        let mut ovi = lightair_engine::sys::obs_video_info::default();
+        let ok = unsafe { lightair_engine::sys::obs_canvas_get_video_info(c, &mut ovi) };
+        unsafe { lightair_engine::sys::obs_canvas_release(c) };
+        ok && ovi.base_width == 1080 && ovi.base_height == 1920
+    });
+    assert!(canvas_ok, "vertical canvas is 1080x1920");
 }
 
 /// A layer id that doesn't exist: the last edit must fail validation and change nothing.

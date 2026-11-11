@@ -119,7 +119,7 @@ fn record_and_stream() {
     // ---- recording
     let file = dir.join("take.mp4");
     let cfg = RecordingConfig { path: file.clone(), container: Container::HybridMp4, encoders: encoders.clone() };
-    engine.call(move |s| s.outputs.start_recording(&cfg)).expect("recording starts");
+    engine.call(move |s| s.outputs.start_recording(&cfg, None)).expect("recording starts");
     let state = wait_for(OutputKey::Recording, Duration::from_secs(3), |s| matches!(s, OutputState::Active { .. }));
     assert!(matches!(state, OutputState::Active { .. }), "recording active: {state:?}");
     std::thread::sleep(Duration::from_millis(2500));
@@ -164,7 +164,7 @@ fn record_and_stream() {
             key: "test".into(),
             encoders: default_encoders(&engine.capabilities.encoders, 2500, true),
         };
-        engine.call(move |s| s.outputs.start_stream(&cfg)).expect("stream starts");
+        engine.call(move |s| s.outputs.start_stream(&cfg, None)).expect("stream starts");
         let state =
             wait_for(OutputKey::Stream(id), Duration::from_secs(5), |s| matches!(s, OutputState::Active { .. }));
         assert!(matches!(state, OutputState::Active { .. }), "stream active: {state:?}");

@@ -2,6 +2,7 @@
 
 mod mixer;
 mod outputs_panel;
+mod reframe;
 mod secrets;
 mod shell;
 mod starter;
