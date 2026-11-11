@@ -5,6 +5,7 @@ mod mixer;
 mod outputs_panel;
 mod reframe;
 mod secrets;
+mod selftest;
 mod shell;
 mod starter;
 mod studio;
@@ -49,6 +50,10 @@ fn main() {
         .unwrap_or_else(|e| panic!("could not start the engine: {e}")),
     );
     tracing::info!(version = engine.version, project = %project_dir.display(), "libobs started");
+    if let Ok(what) = std::env::var("LIGHTAIR_SELFTEST") {
+        selftest::run(&engine, &what);
+        return;
+    }
     let preview = Preview::attach();
 
     gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx: &mut App| {

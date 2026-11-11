@@ -560,14 +560,16 @@ impl StudioWindow {
             )
             .child(go_live)
             .child(record)
-            .child(
+            .child({
+                let ready = self.studio.read(cx).clips_ready();
                 Button::new("clip")
                     .label("Clip")
                     .small()
                     .outline()
-                    .disabled(true)
-                    .tooltip("Clips (replay buffer) arrive later in M6"),
-            )
+                    .disabled(!ready)
+                    .tooltip(if ready { "Save the last seconds as a clip" } else { "Turn on Clips in Outputs" })
+                    .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.save_clip(cx))))
+            })
     }
 
     fn left_column(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {

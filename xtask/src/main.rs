@@ -2,6 +2,7 @@
 //!
 //!   cargo xtask modules    configure and build every in-tree libobs module (modules/*)
 //!   cargo xtask bundle     assemble target/debug/Lightair.app for development (macOS)
+//!   cargo xtask dev        link OBS's helper programs next to target/debug for `cargo run`
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -71,6 +72,8 @@ fn bundle() -> anyhow::Result<()> {
         std::fs::create_dir_all(app.join(dir))?;
     }
     std::fs::copy(root.join("target/debug/lightair"), app.join("MacOS/lightair"))?;
+    // libobs runs this helper (from next to the executable) to write clips and MKV recordings.
+    std::os::unix::fs::symlink(obs.join("Contents/MacOS/obs-ffmpeg-mux"), app.join("MacOS/obs-ffmpeg-mux"))?;
     std::fs::write(app.join("Info.plist"), INFO_PLIST)?;
     let icns = root.join("branding/final/icon/Lightair.icns");
     if icns.exists() {
@@ -97,12 +100,26 @@ fn bundle() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Links OBS's helper programs next to the debug binary (development without the bundle).
+fn dev() -> anyhow::Result<()> {
+    let obs = PathBuf::from(std::env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into()));
+    for dir in [root().join("target/debug"), root().join("target/debug/deps")] {
+        std::fs::create_dir_all(&dir)?;
+        let link = dir.join("obs-ffmpeg-mux");
+        if !link.exists() {
+            std::os::unix::fs::symlink(obs.join("Contents/MacOS/obs-ffmpeg-mux"), &link)?;
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("modules") => modules(),
         Some("bundle") => bundle(),
+        Some("dev") => dev(),
         _ => {
-            eprintln!("usage: cargo xtask (modules | bundle)");
+            eprintln!("usage: cargo xtask (modules | bundle | dev)");
             Ok(())
         }
     }

@@ -52,11 +52,13 @@ pub struct OutputStatus {
     pub bytes: u64,
     pub dropped_frames: i32,
     pub total_frames: i32,
+    /// Clips saved since the replay buffer started.
+    pub saved_clips: u32,
 }
 
 impl Default for OutputStatus {
     fn default() -> Self {
-        Self { state: OutputState::Idle, path: None, bytes: 0, dropped_frames: 0, total_frames: 0 }
+        Self { state: OutputState::Idle, path: None, bytes: 0, dropped_frames: 0, total_frames: 0, saved_clips: 0 }
     }
 }
 
@@ -64,6 +66,8 @@ impl Default for OutputStatus {
 pub enum OutputKey {
     Recording,
     Stream(Id),
+    /// The replay buffer behind the Clip button.
+    Clips,
 }
 
 #[derive(Default)]
@@ -146,6 +150,13 @@ pub struct RecordingConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct ClipsConfig {
+    pub folder: PathBuf,
+    pub seconds: u32,
+    pub encoders: EncoderConfig,
+}
+
+#[derive(Debug, Clone)]
 pub struct StreamConfig {
     pub id: Id,
     pub server: String,
@@ -188,8 +199,51 @@ impl Running {
 }
 
 type SignalCb = unsafe extern "C" fn(*mut c_void, *mut sys::calldata_t);
-const SIGNALS: &[(&str, SignalCb)] =
-    &[("start", on_start), ("stop", on_stop), ("reconnect", on_reconnect), ("reconnect_success", on_start)];
+const SIGNALS: &[(&str, SignalCb)] = &[
+    ("start", on_start),
+    ("stop", on_stop),
+    ("reconnect", on_reconnect),
+    ("reconnect_success", on_start),
+    ("saved", on_saved),
+];
+
+/// Replay buffer saved a clip: record its path (the UI shows it and counts clips).
+unsafe extern "C" fn on_saved(param: *mut c_void, _: *mut sys::calldata_t) {
+    let key = unsafe { *(param as *const OutputKey) };
+    let path = CLIPS_OUTPUT.lock().as_ref().and_then(|p| unsafe { last_replay(p.0) });
+    runtime().update(key, |s| {
+        s.path = path;
+        s.saved_clips += 1;
+    });
+}
+
+struct OutputPtr(*mut sys::obs_output_t);
+unsafe impl Send for OutputPtr {}
+static CLIPS_OUTPUT: Mutex<Option<OutputPtr>> = Mutex::new(None);
+
+unsafe fn proc_call(output: *mut sys::obs_output_t, name: &str, cd: &mut sys::calldata_t) -> bool {
+    unsafe {
+        let ph = sys::obs_output_get_proc_handler(output);
+        sys::proc_handler_call(ph, c(name).as_ptr(), cd)
+    }
+}
+
+unsafe fn last_replay(output: *mut sys::obs_output_t) -> Option<PathBuf> {
+    let mut cd = sys::calldata_t::default();
+    let mut path = None;
+    unsafe {
+        if proc_call(output, "get_last_replay", &mut cd) {
+            let mut p: *const std::ffi::c_char = std::ptr::null();
+            if sys::calldata_get_string(&cd, c"path".as_ptr(), &mut p) && !p.is_null() {
+                path = Some(PathBuf::from(CStr::from_ptr(p).to_string_lossy().into_owned()));
+            }
+        }
+        if !cd.fixed && !cd.stack.is_null() {
+            sys::bfree(cd.stack as *mut c_void);
+        }
+    }
+    path
+}
 
 unsafe extern "C" fn on_start(param: *mut c_void, _: *mut sys::calldata_t) {
     let key = unsafe { *(param as *const OutputKey) };
@@ -267,6 +321,7 @@ fn describe_stop(code: i32, detail: Option<String>) -> String {
 pub struct Outputs {
     recording: Option<Running>,
     streams: HashMap<Id, Running>,
+    clips: Option<Running>,
 }
 
 fn c(s: &str) -> CString {
@@ -327,6 +382,7 @@ unsafe fn start(
     let name = match key {
         OutputKey::Recording => "Recording".to_string(),
         OutputKey::Stream(id) => format!("Stream {id}"),
+        OutputKey::Clips => "Clips".to_string(),
     };
     unsafe {
         let release_service = || {
@@ -463,6 +519,61 @@ impl Outputs {
         }
     }
 
+    /// Starts the replay buffer (docs/11-outputs-streaming-recording.md, "Clips").
+    pub fn start_clips(&mut self, cfg: &ClipsConfig, video: Option<VideoOutput>) -> Result<(), String> {
+        let video_output = video.map_or(std::ptr::null_mut(), |v| v.0);
+        if self.clips.as_ref().is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
+            return Ok(());
+        }
+        self.drop_clips();
+        std::fs::create_dir_all(&cfg.folder).map_err(|e| format!("Can't create the clips folder: {e}"))?;
+        let mut settings = Data::new();
+        settings
+            .set_str("directory", &cfg.folder.to_string_lossy())
+            .set_str("format", "Clip %CCYY-%MM-%DD %hh-%mm-%ss")
+            .set_str("extension", "mp4")
+            .set_int("max_time_sec", cfg.seconds as i64)
+            .set_int("max_size_mb", 0);
+        let running = unsafe {
+            start(OutputKey::Clips, "replay_buffer", &settings, &cfg.encoders, std::ptr::null_mut(), video_output)?
+        };
+        *CLIPS_OUTPUT.lock() = Some(OutputPtr(running.output));
+        self.clips = Some(running);
+        Ok(())
+    }
+
+    pub fn stop_clips(&mut self) {
+        if let Some(r) = &self.clips {
+            runtime().update(OutputKey::Clips, |s| {
+                if s.state.is_running() {
+                    s.state = OutputState::Stopping
+                }
+            });
+            unsafe { sys::obs_output_stop(r.output) };
+        }
+    }
+
+    fn drop_clips(&mut self) {
+        CLIPS_OUTPUT.lock().take();
+        if let Some(old) = self.clips.take() {
+            unsafe { old.release() };
+        }
+    }
+
+    /// Saves the last N seconds as a clip; the "saved" signal reports the file.
+    pub fn save_clip(&mut self) -> bool {
+        let Some(r) = &self.clips else { return false };
+        if !unsafe { sys::obs_output_active(r.output) } {
+            return false;
+        }
+        let mut cd = sys::calldata_t::default();
+        let ok = unsafe { proc_call(r.output, "save", &mut cd) };
+        if !cd.fixed && !cd.stack.is_null() {
+            unsafe { sys::bfree(cd.stack as *mut c_void) };
+        }
+        ok
+    }
+
     /// Updates byte and frame counters for running outputs (called by the stats sampler).
     pub fn sample(&self) {
         let sample = |key: OutputKey, r: &Running| unsafe {
@@ -487,6 +598,10 @@ impl Outputs {
 
     /// Stops and releases everything (engine shutdown).
     pub fn shutdown(&mut self) {
+        if let Some(r) = &self.clips {
+            unsafe { sys::obs_output_stop(r.output) };
+        }
+        self.drop_clips();
         if let Some(r) = self.recording.take() {
             unsafe {
                 sys::obs_output_stop(r.output);

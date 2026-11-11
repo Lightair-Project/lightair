@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use lightair_core::{Command, Document, Input, Layer, Layout, Project, Scene, Track, diff};
 use lightair_engine::outputs::{
-    Container, OutputKey, OutputState, RecordingConfig, StreamConfig, default_encoders, runtime,
+    ClipsConfig, Container, OutputKey, OutputState, RecordingConfig, StreamConfig, default_encoders, runtime,
 };
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -90,6 +90,12 @@ fn record_and_stream() {
     let wav = dir.join("tone.wav");
     tone_wav(&wav);
 
+    // libobs's replay buffer writes clips through the obs-ffmpeg-mux helper, which it looks for
+    // next to the running executable.
+    let helper = std::env::current_exe().unwrap().with_file_name("obs-ffmpeg-mux");
+    if !helper.exists() {
+        let _ = std::os::unix::fs::symlink("/Applications/OBS.app/Contents/MacOS/obs-ffmpeg-mux", &helper);
+    }
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
     let mut doc = Document::new(Project::new("Outputs"));
     let format = doc.project().primary_format().id;
@@ -133,6 +139,33 @@ fn record_and_stream() {
     assert!(streams.iter().any(|s| s == "video:h264"), "{streams:?}");
     assert!(streams.iter().any(|s| s == "audio:aac"), "{streams:?}");
     assert!(duration > 1.8, "duration {duration}");
+
+    // ---- clips: rolling buffer, save the last seconds
+    let clips_dir = dir.join("clips");
+    let cfg = ClipsConfig { folder: clips_dir.clone(), seconds: 5, encoders: encoders.clone() };
+    engine.call(move |s| s.outputs.start_clips(&cfg, None)).expect("replay buffer starts");
+    let state = wait_for(OutputKey::Clips, Duration::from_secs(3), |s| matches!(s, OutputState::Active { .. }));
+    assert!(matches!(state, OutputState::Active { .. }), "replay buffer active: {state:?}");
+    std::thread::sleep(Duration::from_millis(3000));
+    assert!(engine.call(|s| s.outputs.save_clip()), "save accepted");
+    let start = Instant::now();
+    while runtime().get(OutputKey::Clips).saved_clips == 0 && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let status = runtime().get(OutputKey::Clips);
+    eprintln!(
+        "clips status: saved={} path={:?} files={:?}",
+        status.saved_clips,
+        status.path,
+        std::fs::read_dir(&clips_dir).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+    );
+    let clip = status.path.expect("clip path reported");
+    let (streams, duration) = probe(&clip);
+    eprintln!("clip {}: {streams:?}, {duration:.2} s", clip.display());
+    assert!(streams.iter().any(|s| s == "video:h264"), "{streams:?}");
+    assert!(duration > 1.5 && duration < 6.0, "clip length {duration}");
+    engine.call(|s| s.outputs.stop_clips());
+    wait_for(OutputKey::Clips, Duration::from_secs(5), |s| !s.is_running());
 
     // ---- streaming to a local RTMP server
     if have("ffmpeg") {

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use gpui_kit::{Context, SharedString};
 use lightair_core::{Command, CommandError, Document, Id, Project, diff};
 use lightair_engine::outputs::{
-    Container, OutputKey, OutputState, RecordingConfig, StreamConfig, default_encoders, runtime,
+    ClipsConfig, Container, OutputKey, OutputState, RecordingConfig, StreamConfig, default_encoders, runtime,
 };
 use lightair_engine::{Engine, Stats};
 use lightair_store::Package;
@@ -25,6 +25,8 @@ pub struct Studio {
     /// Last user-visible problem, shown in the status bar.
     pub issue: Option<SharedString>,
     pub stats: Stats,
+    /// Clips announced so far (to report each new one once).
+    clips_seen: u32,
     /// Frames libobs lagged since the previous stats sample (health is about now, not startup).
     pub recent_lagged: u32,
 }
@@ -43,7 +45,7 @@ impl Studio {
             }
         };
         let selected_scene = project.program.or(project.scenes.first().map(|s| s.id));
-        let studio = Self {
+        let mut studio = Self {
             doc: Document::new(project),
             package,
             engine,
@@ -51,9 +53,11 @@ impl Studio {
             selected_layer: None,
             issue,
             stats: Stats::default(),
+            clips_seen: 0,
             recent_lagged: 0,
         };
         studio.rebuild_engine();
+        studio.sync_clips();
         studio
     }
 
@@ -76,6 +80,7 @@ impl Studio {
                 }
                 self.push(change.before, change.after);
                 self.fix_selection();
+                self.sync_clips();
                 cx.notify();
                 Ok(())
             }
@@ -143,6 +148,52 @@ impl Studio {
             .folder
             .clone()
             .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("Movies/Lightair"))
+    }
+
+    /// Keeps the replay buffer running exactly when clips are on.
+    fn sync_clips(&mut self) {
+        let settings = self.project().outputs.clips;
+        let running = runtime().get(OutputKey::Clips).state.is_running();
+        if settings.enabled && !running {
+            let cfg = ClipsConfig {
+                folder: self.recording_folder().join("Clips"),
+                seconds: settings.seconds,
+                encoders: default_encoders(&self.engine.capabilities.encoders, 8000, false),
+            };
+            let format = settings.format;
+            self.engine.post(move |s| {
+                let video = format.and_then(|f| s.reconciler.format_video(f));
+                if let Err(e) = s.outputs.start_clips(&cfg, video) {
+                    tracing::error!(%e, "replay buffer failed to start");
+                }
+            });
+        } else if !settings.enabled && running {
+            self.engine.post(|s| s.outputs.stop_clips());
+        }
+    }
+
+    pub fn clips_ready(&self) -> bool {
+        matches!(runtime().get(OutputKey::Clips).state, OutputState::Active { .. })
+    }
+
+    pub fn save_clip(&mut self, cx: &mut Context<Self>) {
+        if !self.clips_ready() {
+            self.issue = Some("Turn on Clips in Outputs to save clips.".into());
+            cx.notify();
+            return;
+        }
+        self.engine.post(|s| {
+            s.outputs.save_clip();
+        });
+    }
+
+    fn announce_clips(&mut self) {
+        let status = runtime().get(OutputKey::Clips);
+        if status.saved_clips > self.clips_seen {
+            self.clips_seen = status.saved_clips;
+            let name = status.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+            self.issue = Some(format!("Clip saved: {}", name.unwrap_or_default()).into());
+        }
     }
 
     pub fn is_recording(&self) -> bool {
@@ -221,12 +272,13 @@ impl Studio {
 
     /// Surfaces output failures as issues (called on the stats tick).
     fn check_outputs(&mut self) {
-        let mut keys = vec![OutputKey::Recording];
+        let mut keys = vec![OutputKey::Recording, OutputKey::Clips];
         keys.extend(self.project().outputs.destinations.iter().map(|d| OutputKey::Stream(d.id)));
         for key in keys {
             if let OutputState::Failed(msg) = runtime().get(key).state {
                 let label = match key {
                     OutputKey::Recording => "Recording".to_string(),
+                    OutputKey::Clips => "Clips".to_string(),
                     OutputKey::Stream(id) => self
                         .project()
                         .outputs
@@ -250,6 +302,7 @@ impl Studio {
             s.reconciler.cleanup();
         });
         self.check_outputs();
+        self.announce_clips();
         let stats = lightair_engine::read_stats();
         self.recent_lagged = stats.lagged_frames.saturating_sub(self.stats.lagged_frames);
         self.stats = stats;
