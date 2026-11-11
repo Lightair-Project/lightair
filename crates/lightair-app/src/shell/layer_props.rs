@@ -28,6 +28,9 @@ pub(super) struct TextEdit {
 pub(super) struct LayerProps {
     text: Option<TextEdit>,
     media: Option<(Id, MediaStatus, Instant)>,
+    /// Effects section: the add menu is open; the effect whose controls are shown.
+    effect_menu: bool,
+    open_effect: Option<Id>,
 }
 
 pub(super) fn is_text(kind: &str) -> bool {
@@ -147,6 +150,125 @@ impl StudioWindow {
         } else {
             None
         }
+    }
+
+    /// The layer's video effects (except Camera Studio, which has its own section).
+    pub(super) fn effects_section(&self, input: &Input, cx: &mut Context<Self>) -> AnyElement {
+        use crate::video_effects as fx;
+        let iid = input.id;
+        let add = Button::new("add-effect")
+            .label(if self.props.effect_menu { "Close" } else { "Add" })
+            .xsmall()
+            .ghost()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.props.effect_menu = !this.props.effect_menu;
+                cx.notify();
+            }));
+        let mut col = section("Effects");
+        col = col.child(div().flex().justify_end().mt(px(-26.)).child(add));
+        if self.props.effect_menu {
+            let mut menu = div().flex().flex_wrap().gap_1();
+            for (i, d) in fx::CATALOG.iter().enumerate() {
+                menu = menu.child(
+                    Button::new(("effect-def", i))
+                        .label(d.name)
+                        .icon(crate::ui::icon(d.icon))
+                        .xsmall()
+                        .outline()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let effect = fx::create(&fx::CATALOG[i]);
+                            this.props.open_effect = Some(effect.id);
+                            this.props.effect_menu = false;
+                            this.exec(Command::AddInputEffect { input: iid, effect, index: None }, cx);
+                        })),
+                );
+            }
+            col = col.child(menu);
+        }
+        let shown: Vec<_> = input.effects.iter().filter(|e| e.kind != crate::camera_studio::KIND).cloned().collect();
+        if shown.is_empty() && !self.props.effect_menu {
+            col = col.child(div().text_color(tok::text_tertiary()).child("No effects"));
+        }
+        for (i, e) in shown.into_iter().enumerate() {
+            let (eid, enabled) = (e.id, e.enabled);
+            let open = self.props.open_effect == Some(eid);
+            let def = fx::def(&e.kind);
+            col = col.child(
+                div()
+                    .id(("effect-row", i))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(28.))
+                    .px_1()
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(tok::bg_raised()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.props.open_effect = if open { None } else { Some(eid) };
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .id(("effect-on", i))
+                            .size(px(10.))
+                            .rounded_full()
+                            .bg(if enabled { tok::accent_primary() } else { tok::border_strong() })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.exec(
+                                    Command::SetInputEffectEnabled { input: iid, effect: eid, enabled: !enabled },
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(if enabled { tok::text() } else { tok::text_tertiary() })
+                            .child(e.name.clone()),
+                    )
+                    .when(def.is_none(), |d| {
+                        d.child(div().text_size(px(10.)).text_color(tok::text_tertiary()).child("plugin"))
+                    })
+                    .child(crate::ui::icon_button(("effect-remove", i), "trash", tok::text_tertiary()).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.exec(Command::RemoveInputEffect { input: iid, effect: eid }, cx)
+                        }),
+                    )),
+            );
+            if let (true, Some(def)) = (open, def) {
+                for (j, p) in def.params.iter().enumerate() {
+                    let (minus, plus) = (fx::stepped(&e.settings, p, -1.0), fx::stepped(&e.settings, p, 1.0));
+                    let id = i * 16 + j;
+                    col = col.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .pl_4()
+                            .child(div().w(px(84.)).text_color(tok::text_secondary()).child(p.label))
+                            .child(Button::new(("fx-minus", id)).label("−").xsmall().ghost().on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    let settings = minus.clone();
+                                    this.exec(Command::SetInputEffectSettings { input: iid, effect: eid, settings }, cx)
+                                },
+                            )))
+                            .child(
+                                div().w(px(56.)).text_center().font_family("Menlo").child(fx::display(&e.settings, p)),
+                            )
+                            .child(Button::new(("fx-plus", id)).label("+").xsmall().ghost().on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    let settings = plus.clone();
+                                    this.exec(Command::SetInputEffectSettings { input: iid, effect: eid, settings }, cx)
+                                },
+                            ))),
+                    );
+                }
+            }
+        }
+        col.into_any_element()
     }
 
     fn swatches(&self, input: &Input, key: &'static str, keys: &'static [&'static str], cx: &mut Context<Self>) -> Div {

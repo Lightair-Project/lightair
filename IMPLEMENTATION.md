@@ -86,11 +86,12 @@ Done:
 - Transition settings in the document (Cut, Fade, Move; duration). Every format's output channel goes through its own libobs transition.
 - Move: a temporary scene per format where layers that continue (same input, then same name) glide from A's layout to B's with easing, driven by a libobs tick callback; entering layers fade in, leaving layers fade out; the canvas then lands on B. A test samples the glide halfway and checks the landing.
 - Transition picker under Scenes: Cut, Fade, Move, Slide, Wipe, Dip (through black), with duration and a direction for Slide and Wipe. Each format's output transition swaps to the right libobs type when the kind changes; a test samples Slide, Wipe and Dip halfway through. Imported OBS transitions map onto these.
+- Video effects on any layer (Inspector → Effects): Colour correction, Green screen, Luma key, Sharpen, Scroll, Delay from libobs's core filters, each with the few controls that matter; on/off, remove, and imported plugin filters listed as plugins. A render test checks Colour correction and Green screen with the exact settings the app sends.
 - Studio mode: the stage shows the scene you're editing (rendered off air from its libobs scene, held "showing" so its inputs run), a Program monitor beside it, and Take (⌘↩) puts it on air with the current transition. A test checks the preview renders an off-air scene while Program stays put.
 
 Remaining:
 - Morph, Stinger (track mattes), more wipe shapes; per-scene and per-pair overrides; per-format transitions; studio mode for additional formats (they show Program today).
-- `lightair-video-fx` effect catalog with the effect stack UI and presets; masks; layer animations.
+- More effects (blur, LUT and mask with file pickers, presets, drag to reorder the stack); masks; layer animations.
 
 ## M9 · Camera Studio 🔨
 Done:
