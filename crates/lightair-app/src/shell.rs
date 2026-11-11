@@ -660,6 +660,19 @@ impl StudioWindow {
         self.add_input_layer("Text", "text_ft2_source_v2", settings, (720.0, 180.0), cx)
     }
 
+    /// A 5-minute countdown that starts when its scene goes on air.
+    fn add_timer(&mut self, cx: &mut Context<Self>) {
+        let settings = json!({
+            "mode": "countdown",
+            "seconds": 300,
+            "autostart": true,
+            "font": {"face": "Helvetica Neue", "size": 160, "flags": 1},
+            "color1": 0xFFFFFFFFu32,
+            "color2": 0xFFFFFFFFu32,
+        });
+        self.add_input_layer("Countdown", lightair_engine::timers::TIMER_KIND, settings, (560.0, 200.0), cx)
+    }
+
     fn add_colour(&mut self, cx: &mut Context<Self>) {
         let settings = json!({"color": 0xFF4A3BFFu32, "width": 400, "height": 400});
         self.add_input_layer("Colour", "color_source_v3", settings, (400.0, 400.0), cx)
@@ -1082,6 +1095,7 @@ impl StudioWindow {
             )
             .child(item("add-text", "type", "Text").on_click(cx.listener(|this, _, _, cx| this.add_text(cx))))
             .child(item("add-colour", "square", "Colour").on_click(cx.listener(|this, _, _, cx| this.add_colour(cx))))
+            .child(item("add-timer", "timer", "Timer").on_click(cx.listener(|this, _, _, cx| this.add_timer(cx))))
     }
 
     fn transition_picker(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {

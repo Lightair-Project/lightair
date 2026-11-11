@@ -15,6 +15,7 @@ use lightair_core::{
 };
 use parking_lot::Mutex;
 
+use crate::timers::{TIMER_KIND, TIMER_SOURCE, TimerAction, TimerStatus, Timers, on_timers_tick, tick_param};
 use crate::transition::{FormatMove, MoveAnim, Tween, item_fade, match_layer};
 
 use crate::meters::{MeterCell, db_to_mul, meters};
@@ -48,6 +49,9 @@ pub struct Reconciler {
     tick_registered: bool,
     /// Inputs held "showing" off air (e.g. to learn their size), released with `release_inputs`.
     held: HashSet<Id>,
+    /// Countdown/stopwatch/clock inputs, driven by their own tick callback.
+    timers: Arc<Timers>,
+    timers_tick: bool,
 }
 
 /// libobs state for one mixer track: its output channel, volume meter and effect filters.
@@ -91,8 +95,14 @@ impl Reconciler {
                 Patch::FormatChanged(format) => self.resize_format(format),
                 Patch::InputAdded(input) => {
                     let settings = data_from_json(&input.settings);
-                    match Source::create(&input.kind, &input.id.to_string(), Some(&settings)) {
+                    let timer = input.kind == TIMER_KIND;
+                    let kind = if timer { TIMER_SOURCE } else { input.kind.as_str() };
+                    match Source::create(kind, &input.id.to_string(), Some(&settings)) {
                         Some(src) => {
+                            if timer {
+                                self.timers.add(input.id, src.as_ptr(), &input.settings);
+                                self.ensure_timers_tick();
+                            }
                             let chain = unsafe { chain_build(src.as_ptr(), &input.effects) };
                             self.input_effects.insert(input.id, chain);
                             self.inputs.insert(input.id, src);
@@ -104,12 +114,16 @@ impl Reconciler {
                     if let Some(src) = self.inputs.get(&after.id) {
                         if before.settings != after.settings {
                             src.update(&data_from_json(&after.settings));
+                            if after.kind == TIMER_KIND {
+                                self.timers.configure(after.id, &after.settings);
+                            }
                         }
                         let chain = self.input_effects.entry(after.id).or_default();
                         unsafe { chain_update(src.as_ptr(), chain, &before.effects, &after.effects) };
                     }
                 }
                 Patch::InputRemoved(id) => {
+                    self.timers.remove(*id);
                     if self.held.remove(id)
                         && let Some(src) = self.inputs.get(id)
                     {
@@ -440,6 +454,31 @@ impl Reconciler {
         true
     }
 
+    fn ensure_timers_tick(&mut self) {
+        if !self.timers_tick {
+            unsafe { sys::obs_add_tick_callback(Some(on_timers_tick), tick_param(&self.timers)) };
+            self.timers_tick = true;
+        }
+    }
+
+    pub fn timer_action(&self, input: Id, action: TimerAction) {
+        self.timers.action(input, action);
+    }
+
+    pub fn timer_status(&self, input: Id) -> Option<TimerStatus> {
+        self.timers.status(input)
+    }
+
+    /// The text a timer is showing.
+    pub fn timer_text(&self, input: Id) -> Option<String> {
+        self.timers.text(input)
+    }
+
+    /// Countdowns that ended since the last call (their end actions are the app's to run).
+    pub fn take_ended_timers(&self) -> Vec<Id> {
+        self.timers.take_ended()
+    }
+
     fn ensure_tick(&mut self) {
         if !self.tick_registered {
             unsafe { sys::obs_add_tick_callback(Some(on_tick), Arc::as_ptr(&self.anim) as *mut _) };
@@ -640,6 +679,11 @@ impl Reconciler {
     /// Releases everything in dependency order (scenes before the inputs they use).
     pub fn clear(&mut self) {
         self.release_inputs();
+        if self.timers_tick {
+            unsafe { sys::obs_remove_tick_callback(Some(on_timers_tick), tick_param(&self.timers)) };
+            self.timers_tick = false;
+        }
+        self.timers.clear();
         self.finish_move();
         if self.tick_registered {
             unsafe { sys::obs_remove_tick_callback(Some(on_tick), Arc::as_ptr(&self.anim) as *mut _) };

@@ -25,6 +25,7 @@ pub(super) enum PaletteAction {
     AddVideo,
     AddText,
     AddColour,
+    AddTimer,
     AddVertical,
     ImportObs,
     Transition(TransitionKind),
@@ -99,6 +100,7 @@ fn entries(project: &Project, studio_mode: bool) -> Vec<Entry> {
         ("Add video layer", "", "clapperboard", AddVideo),
         ("Add text layer", "", "type", AddText),
         ("Add colour layer", "", "square", AddColour),
+        ("Add timer layer", "", "timer", AddTimer),
         ("Add vertical format", "", "smartphone", AddVertical),
         ("Import OBS scenes", "", "import", ImportObs),
         ("Undo", "⌘Z", "undo-2", Undo),
@@ -200,6 +202,7 @@ impl StudioWindow {
             AddVideo => self.add_video(window, cx),
             AddText => self.add_text(cx),
             AddColour => self.add_colour(cx),
+            AddTimer => self.add_timer(cx),
             AddVertical => self.add_vertical(cx),
             ImportObs => self.import_obs(window, cx),
             Transition(kind) => {

@@ -115,6 +115,7 @@ pub fn input_icon(kind: &str) -> &'static str {
         "text_ft2_source_v2" => "type",
         "color_source_v3" => "square",
         "ffmpeg_source" | "vlc_source" => "clapperboard",
+        "lightair_timer" => "timer",
         "coreaudio_input_capture" | "sck_audio_capture" => "mic",
         _ => "layers",
     }
