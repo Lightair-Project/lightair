@@ -12,7 +12,7 @@ use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{
-    Command, Fit, Format, Id, Input, Layer, Layout, Project, Scene, TransitionKind, TransitionSettings,
+    Command, Direction, Fit, Format, Id, Input, Layer, Layout, Project, Scene, TransitionKind, TransitionSettings,
 };
 use lightair_preview::Preview;
 use serde_json::json;
@@ -932,10 +932,10 @@ impl StudioWindow {
 
     fn transition_picker(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         let current = project.transition;
-        let seg = |id: &'static str, label: &'static str, kind: TransitionKind| {
+        let seg = |i: usize, kind: TransitionKind| {
             let active = current.kind == kind;
             div()
-                .id(id)
+                .id(("tr-kind", i))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -950,7 +950,7 @@ impl StudioWindow {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.exec(Command::SetTransition { settings: TransitionSettings { kind, ..current } }, cx)
                 }))
-                .child(label)
+                .child(kind.label())
         };
         let next_ms = match current.duration_ms {
             0..=300 => 500,
@@ -958,17 +958,32 @@ impl StudioWindow {
             501..=800 => 1200,
             _ => 300,
         };
+        let direction = current.kind.directional().then(|| {
+            let icon = match current.direction {
+                Direction::Left => "arrow-left",
+                Direction::Right => "arrow-right",
+                Direction::Up => "arrow-up",
+                Direction::Down => "arrow-down",
+            };
+            ui::icon_button("tr-direction", icon, tok::text_secondary())
+                .tooltip(|w, cx| Tooltip::new("Direction").build(w, cx))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let settings = TransitionSettings { direction: current.direction.next(), ..current };
+                    this.exec(Command::SetTransition { settings }, cx)
+                }))
+        });
+        let kinds: Vec<_> = TransitionKind::ALL.iter().enumerate().map(|(i, k)| seg(i, *k)).collect();
         div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_1()
             .px_3()
             .pb_2()
             .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).mr_1().child("Transition"))
-            .child(seg("tr-cut", "Cut", TransitionKind::Cut))
-            .child(seg("tr-fade", "Fade", TransitionKind::Fade))
-            .child(seg("tr-move", "Move", TransitionKind::Move))
+            .children(kinds)
             .child(div().flex_1())
+            .children(direction)
             .child(
                 div()
                     .id("tr-duration")

@@ -39,7 +39,7 @@ Remaining:
 - `lightair-ui` crate with the studio components (scrubbable fields, `LayerRow`, `SceneCard`, `FormatTabs`).
 - gpui-kit dock layout (resize, collapse, pop-out, workspaces); command palette (⌘K).
 - Groups, multi-select, rotation and crop handles, rulers and guides.
-- Studio mode, onboarding, settings window.
+- Onboarding, settings window.
 
 ## M5 · Audio 🔨
 Done:
@@ -81,11 +81,11 @@ Remaining:
 Done:
 - Transition settings in the document (Cut, Fade, Move; duration). Every format's output channel goes through its own libobs transition.
 - Move: a temporary scene per format where layers that continue (same input, then same name) glide from A's layout to B's with easing, driven by a libobs tick callback; entering layers fade in, leaving layers fade out; the canvas then lands on B. A test samples the glide halfway and checks the landing.
-- Transition picker (Cut / Fade / Move, duration) under Scenes.
+- Transition picker under Scenes: Cut, Fade, Move, Slide, Wipe, Dip (through black), with duration and a direction for Slide and Wipe. Each format's output transition swaps to the right libobs type when the kind changes; a test samples Slide, Wipe and Dip halfway through. Imported OBS transitions map onto these.
 - Studio mode: the stage shows the scene you're editing (rendered off air from its libobs scene, held "showing" so its inputs run), a Program monitor beside it, and Take puts it on air with the current transition. A test checks the preview renders an off-air scene while Program stays put.
 
 Remaining:
-- Morph, Stinger (track mattes), wipes, slide; per-scene and per-pair overrides; per-format transitions; studio mode for additional formats (they show Program today); a Take shortcut.
+- Morph, Stinger (track mattes), more wipe shapes; per-scene and per-pair overrides; per-format transitions; studio mode for additional formats (they show Program today); a Take shortcut.
 - `lightair-video-fx` effect catalog with the effect stack UI and presets; masks; layer animations.
 
 ## M9 · Camera Studio 🔨
