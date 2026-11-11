@@ -302,6 +302,32 @@ impl Studio {
         cx.notify();
     }
 
+    pub fn pause_recording(&mut self, cx: &mut Context<Self>) {
+        let pause = !runtime().get(OutputKey::Recording).paused;
+        self.engine.post(move |s| {
+            s.outputs.pause_recording(pause);
+        });
+        cx.notify();
+    }
+
+    pub fn add_marker(&mut self, cx: &mut Context<Self>) {
+        let n = runtime().get(OutputKey::Recording).markers + 1;
+        let ok = self.engine.call(move |s| s.outputs.add_marker(&format!("Marker {n}")));
+        self.issue = Some(if ok {
+            format!("Marker {n} added").into()
+        } else {
+            "Markers need a recording in MP4 or MOV.".into()
+        });
+        cx.notify();
+    }
+
+    pub fn split_recording(&mut self, cx: &mut Context<Self>) {
+        if self.engine.call(|s| s.outputs.split_recording()) {
+            self.issue = Some("Continuing in a new file".into());
+        }
+        cx.notify();
+    }
+
     /// Starts every enabled destination.
     pub fn go_live(&mut self, cx: &mut Context<Self>) {
         let project = self.project().clone();
