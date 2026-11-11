@@ -1,0 +1,13 @@
+#include <obs.h>
+#include <obs-module.h>
+#include <graphics/graphics.h>
+#include <graphics/vec4.h>
+#include <util/platform.h>
+#include <util/profiler.h>
+#include <util/base.h>
+#include <util/bmem.h>
+#include <util/config-file.h>
+#include <callback/signal.h>
+#include <callback/calldata.h>
+#include <media-io/video-io.h>
+#include <media-io/audio-io.h>

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+# internal
+libobs-sys = { path = "crates/libobs-sys" }
+lightair-core = { path = "crates/lightair-core" }
+lightair-engine = { path = "crates/lightair-engine" }
+lightair-preview = { path = "crates/lightair-preview" }
+lightair-store = { path = "crates/lightair-store" }
+lightair-ui = { path = "crates/lightair-ui" }
+
+# external
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+gpui-kit = "0.9.1"
+
+[profile.dev]
+# Dependencies (GPUI, gpui-kit) are slow when unoptimised; keep our own code debuggable.
+[profile.dev.package."*"]
+opt-level = 2

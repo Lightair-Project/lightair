@@ -1,0 +1,15 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+# Inside Lightair.app, libobs and its dependencies live in Contents/Frameworks.
+# Development builds also look in an installed OBS 33 so tests can run outside the bundle
+# (see docs/15-platform-distribution-licensing.md#building).
+[target.aarch64-apple-darwin]
+rustflags = [
+  "-C", "link-args=-Wl,-rpath,@executable_path/../Frameworks -Wl,-rpath,/Applications/OBS.app/Contents/Frameworks",
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+  "-C", "link-args=-Wl,-rpath,@executable_path/../Frameworks -Wl,-rpath,/Applications/OBS.app/Contents/Frameworks",
+]
