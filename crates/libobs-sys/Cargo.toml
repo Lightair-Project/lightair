@@ -1,0 +1,11 @@
+[package]
+name = "libobs-sys"
+description = "Raw FFI bindings to libobs (OBS Studio's engine), generated with bindgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+links = "obs"
+
+[build-dependencies]
+bindgen = "0.72"
