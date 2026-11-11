@@ -72,6 +72,18 @@ impl Source {
         };
         NonNull::new(ptr).map(Self)
     }
+    /// A private source (filters, helpers): not listed in libobs's public source table.
+    pub fn create_private(type_id: &str, name: &str, settings: Option<&Data>) -> Option<Self> {
+        let ptr = unsafe {
+            sys::obs_source_create_private(
+                cstr(type_id).as_ptr(),
+                cstr(name).as_ptr(),
+                settings.map_or(std::ptr::null_mut(), Data::as_ptr),
+            )
+        };
+        NonNull::new(ptr).map(Self)
+    }
+
     /// Takes an additional reference to a borrowed source pointer.
     ///
     /// # Safety

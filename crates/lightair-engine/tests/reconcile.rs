@@ -68,7 +68,7 @@ fn incremental_reconcile_matches_full_rebuild() {
     let final_project = doc.project().clone();
     let rebuilt = engine.call(move |s| {
         s.reconciler.clear();
-        let empty = Project { inputs: Default::default(), scenes: vec![], program: None, ..(*final_project).clone() };
+        let empty = final_project.empty_like();
         let patches = diff(&empty, &final_project);
         s.reconciler.apply(&final_project, &patches);
         s.reconciler.describe()

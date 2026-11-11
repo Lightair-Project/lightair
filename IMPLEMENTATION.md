@@ -40,8 +40,17 @@ Remaining:
 - Rename layers/scenes inline, drag to reorder, groups, multi-select, rotation and crop handles, rulers and guides.
 - Studio mode, onboarding, settings window.
 
-## M5 · Audio
-Tracks from inputs, faders, meters (volmeter rings), mute/cue, mixes and routing, Voice Clarity and the built-in effect set ([10](docs/10-audio.md)).
+## M5 · Audio 🔨
+Done:
+- `Track` and `Effect` in the document (commands, undo, diff, persisted in `audio.json`).
+- Reconciler: each global track's input sits on its own output channel; volume, mute and cue (monitoring) map to libobs; effects are libobs audio filters, rebuilt when the chain's shape changes and updated in place otherwise.
+- Lock-free meter cells fed by libobs volume meters; the end-to-end test checks a −6 dBFS tone reads −6.0 and drops by exactly the fader amount.
+- Mixer panel: channel strips with effect list (bypass dot, remove, presets), L/R meters with zones and falling peaks, dB-taper fader (one undo step per drag, double-click for unity), Cue, Mute, input name. Microphone and desktop-audio tracks; new mic tracks get the Voice Clarity chain.
+
+Remaining:
+- Voice Clarity as one native effect with calibration (`lightair-audio-fx`), plus EQ, de-esser, ducking, reverb, delay, pitch.
+- Mixes and routing (Stream, Recording n, Cue, VOD), master chains, LUFS meters.
+- Scene tracks, per-scene volume (link/unlink), folders, channel remap, sync offset and auto-sync, VST3/AU host, hardware mixer integrations.
 
 ## M6 · Outputs
 Recording, streaming (RTMP/RTMPS/SRT/WHIP), multistream with encoder sharing, Go Live review, clips/replay, virtual camera ([11](docs/11-outputs-streaming-recording.md)).
