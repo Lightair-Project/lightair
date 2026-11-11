@@ -116,7 +116,7 @@ impl Drop for Source {
 }
 
 /// A strong reference to an `obs_scene_t`.
-pub struct Scene(NonNull<sys::obs_scene_t>);
+pub struct Scene(pub(crate) NonNull<sys::obs_scene_t>);
 unsafe impl Send for Scene {}
 
 impl Scene {
@@ -164,6 +164,54 @@ impl Drop for Scene {
         unsafe {
             sys::obs_source_remove(self.source_ptr());
             sys::obs_scene_release(self.as_ptr());
+        }
+    }
+}
+
+/// An additional libobs canvas (a Lightair format other than the primary one). Dropping it
+/// removes the canvas.
+pub struct Canvas(NonNull<sys::obs_canvas_t>);
+unsafe impl Send for Canvas {}
+
+fn canvas_video_info(width: u32, height: u32, fps_num: u32, fps_den: u32) -> sys::obs_video_info {
+    let mut ovi = sys::obs_video_info::default();
+    unsafe { sys::obs_get_video_info(&mut ovi) };
+    ovi.base_width = width;
+    ovi.base_height = height;
+    ovi.output_width = width;
+    ovi.output_height = height;
+    ovi.fps_num = fps_num;
+    ovi.fps_den = fps_den.max(1);
+    ovi
+}
+
+impl Canvas {
+    pub fn create(name: &str, width: u32, height: u32, fps_num: u32, fps_den: u32) -> Option<Self> {
+        let mut ovi = canvas_video_info(width, height, fps_num, fps_den);
+        // Sources activate and scenes are referenced, but audio is mixed once, by the main canvas.
+        let flags = sys::ACTIVATE | sys::SCENE_REF;
+        NonNull::new(unsafe { sys::obs_canvas_create(cstr(name).as_ptr(), &mut ovi, flags) }).map(Self)
+    }
+
+    pub fn as_ptr(&self) -> *mut sys::obs_canvas_t {
+        self.0.as_ptr()
+    }
+
+    pub fn create_scene(&self, name: &str) -> Option<Scene> {
+        NonNull::new(unsafe { sys::obs_canvas_scene_create(self.as_ptr(), cstr(name).as_ptr()) }).map(Scene)
+    }
+
+    pub fn reset(&self, width: u32, height: u32, fps_num: u32, fps_den: u32) {
+        let mut ovi = canvas_video_info(width, height, fps_num, fps_den);
+        unsafe { sys::obs_canvas_reset_video(self.as_ptr(), &mut ovi) };
+    }
+}
+
+impl Drop for Canvas {
+    fn drop(&mut self) {
+        unsafe {
+            sys::obs_canvas_remove(self.as_ptr());
+            sys::obs_canvas_release(self.as_ptr());
         }
     }
 }

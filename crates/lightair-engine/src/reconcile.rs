@@ -9,19 +9,26 @@ use std::collections::HashMap;
 use std::ffi::CString;
 
 use libobs_sys as sys;
-use lightair_core::{Effect, Fit, Id, Layer, LayerPatch, Layout, Patch, Project, Track, diff_layers};
+use lightair_core::{Effect, Fit, Format, Id, Layer, LayerPatch, Layout, Patch, Project, Track, diff_layers};
 
 use crate::meters::{MeterCell, db_to_mul, meters};
-use crate::obs::{Data, Scene, Source, vec2};
+use crate::obs::{Canvas, Data, Scene, Source, vec2};
 use std::sync::Arc;
 
 /// libobs state owned on behalf of the document.
+///
+/// Every document scene exists once per format: one libobs scene in that format's canvas,
+/// all sharing the same input sources (docs/07-scenes-layers-canvas.md, "Formats").
 #[derive(Default)]
 pub struct Reconciler {
     inputs: HashMap<Id, Source>,
-    scenes: HashMap<Id, Scene>,
-    /// Scene items are owned by their scene; we keep the pointer to update or remove them.
-    items: HashMap<(Id, Id), ItemPtr>,
+    /// Canvases for additional formats. The primary format uses libobs's main canvas.
+    canvases: HashMap<Id, Canvas>,
+    /// (scene, format) → libobs scene.
+    scenes: HashMap<(Id, Id), Scene>,
+    /// Scene items are owned by their scene; (scene, format, layer) → item.
+    items: HashMap<(Id, Id, Id), ItemPtr>,
+    formats: Vec<Id>,
     primary_format: Option<Id>,
     program: Option<Id>,
     tracks: HashMap<Id, TrackState>,
@@ -48,11 +55,22 @@ impl Reconciler {
     /// Applies patches computed from two snapshots; `project` is the newer one.
     pub fn apply(&mut self, project: &Project, patches: &[Patch]) {
         self.primary_format = Some(project.primary_format().id);
+        // Formats are synced from the snapshot itself, so a rebuild against `empty_like()`
+        // (which keeps the formats) still creates every canvas.
+        for format in &project.formats {
+            if !self.formats.contains(&format.id) {
+                self.add_format(project, format);
+            }
+        }
+        for id in self.formats.clone() {
+            if project.format(id).is_none() {
+                self.remove_format(id);
+            }
+        }
         for patch in patches {
             match patch {
-                Patch::FormatAdded(_) | Patch::FormatChanged(_) | Patch::FormatRemoved(_) => {
-                    // Additional canvases arrive with multi-format support (IMPLEMENTATION.md, M7).
-                }
+                Patch::FormatAdded(_) | Patch::FormatRemoved(_) => {}
+                Patch::FormatChanged(format) => self.resize_format(format),
                 Patch::InputAdded(input) => {
                     let settings = data_from_json(&input.settings);
                     match Source::create(&input.kind, &input.id.to_string(), Some(&settings)) {
@@ -71,33 +89,32 @@ impl Reconciler {
                     self.inputs.remove(id);
                 }
                 Patch::SceneAdded(scene) => {
-                    let Some(obs_scene) = Scene::create(&scene.id.to_string()) else { continue };
-                    self.scenes.insert(scene.id, obs_scene);
-                    for (index, layer) in scene.layers.iter().enumerate() {
-                        self.add_layer(scene.id, layer, index);
+                    for format in self.formats.clone() {
+                        self.add_scene_in(scene, format);
                     }
                 }
                 Patch::SceneChanged { before, after } => {
-                    for lp in diff_layers(before, after) {
-                        match lp {
-                            LayerPatch::Added { layer, index } => self.add_layer(after.id, layer, index),
-                            LayerPatch::Removed { layer } => {
-                                if let Some(item) = self.items.remove(&(after.id, layer)) {
-                                    unsafe { sys::obs_sceneitem_remove(item.0) };
+                    for format in self.formats.clone() {
+                        for lp in diff_layers(before, after) {
+                            match lp {
+                                LayerPatch::Added { layer, index } => self.add_layer(after.id, format, layer, index),
+                                LayerPatch::Removed { layer } => {
+                                    if let Some(item) = self.items.remove(&(after.id, format, layer)) {
+                                        unsafe { sys::obs_sceneitem_remove(item.0) };
+                                    }
                                 }
+                                LayerPatch::Changed { layer } => self.update_layer(after.id, format, layer),
+                                LayerPatch::Order(order) => self.reorder(after.id, format, &order),
                             }
-                            LayerPatch::Changed { layer } => self.update_layer(after.id, layer),
-                            LayerPatch::Order(order) => self.reorder(after.id, &order),
                         }
                     }
                 }
                 Patch::SceneRemoved(id) => {
-                    self.items.retain(|(scene, _), _| scene != id);
                     if self.program == Some(*id) {
-                        unsafe { sys::obs_set_output_source(0, std::ptr::null_mut()) };
-                        self.program = None;
+                        self.set_program(None);
                     }
-                    self.scenes.remove(id);
+                    self.items.retain(|(scene, _, _), _| scene != id);
+                    self.scenes.retain(|(scene, _), _| scene != id);
                 }
                 Patch::ProgramChanged(program) => self.set_program(*program),
                 Patch::TrackAdded(track) => self.add_track(track),
@@ -108,14 +125,98 @@ impl Reconciler {
         }
     }
 
+    // ------------------------------------------------------------ formats
+    fn add_format(&mut self, project: &Project, format: &Format) {
+        if self.formats.contains(&format.id) {
+            return;
+        }
+        if Some(format.id) != self.primary_format {
+            match Canvas::create(&format.id.to_string(), format.width, format.height, format.fps_num, format.fps_den) {
+                Some(canvas) => {
+                    self.canvases.insert(format.id, canvas);
+                }
+                None => {
+                    tracing::error!(format = format.name, "could not create a canvas");
+                    return;
+                }
+            }
+        }
+        self.formats.push(format.id);
+        // Scenes that already exist get their version in the new format; scenes added later in
+        // the same patch list arrive through SceneAdded.
+        for scene in &project.scenes {
+            if self.scenes.keys().any(|(s, _)| *s == scene.id) {
+                self.add_scene_in(scene, format.id);
+            }
+        }
+        if let Some(program) = self.program {
+            self.set_program(Some(program));
+        }
+    }
+
+    fn resize_format(&mut self, format: &Format) {
+        if Some(format.id) == self.primary_format {
+            tracing::warn!("changing the primary canvas size needs an engine restart");
+        } else if let Some(canvas) = self.canvases.get(&format.id) {
+            canvas.reset(format.width, format.height, format.fps_num, format.fps_den);
+        }
+    }
+
+    fn remove_format(&mut self, id: Id) {
+        self.items.retain(|(_, f, _), _| *f != id);
+        self.scenes.retain(|(_, f), _| *f != id);
+        self.canvases.remove(&id);
+        self.formats.retain(|f| *f != id);
+    }
+
+    fn add_scene_in(&mut self, scene: &lightair_core::Scene, format: Id) {
+        if self.scenes.contains_key(&(scene.id, format)) {
+            return;
+        }
+        let name = format!("{}:{}", scene.id, format);
+        let obs_scene = match self.canvases.get(&format) {
+            Some(canvas) => canvas.create_scene(&name),
+            None => Scene::create(&name),
+        };
+        let Some(obs_scene) = obs_scene else { return };
+        self.scenes.insert((scene.id, format), obs_scene);
+        for (index, layer) in scene.layers.iter().enumerate() {
+            self.add_layer(scene.id, format, layer, index);
+        }
+    }
+
+    /// The canvas behind a format, as a new strong reference (for previews).
+    pub fn canvas_ref(&self, format: Id) -> Option<*mut sys::obs_canvas_t> {
+        if Some(format) == self.primary_format {
+            return Some(unsafe { sys::obs_get_main_canvas() });
+        }
+        self.canvases.get(&format).map(|c| unsafe { sys::obs_canvas_get_ref(c.as_ptr()) })
+    }
+
+    /// The canvas's video output, for encoders recording or streaming a format.
+    pub fn format_video(&self, format: Id) -> Option<crate::outputs::VideoOutput> {
+        if Some(format) == self.primary_format {
+            return Some(crate::outputs::VideoOutput(unsafe { sys::obs_get_video() }));
+        }
+        self.canvases
+            .get(&format)
+            .map(|c| crate::outputs::VideoOutput(unsafe { sys::obs_canvas_get_video(c.as_ptr()) }))
+    }
+
     fn set_program(&mut self, program: Option<Id>) {
-        let source = program.and_then(|id| self.scenes.get(&id)).map_or(std::ptr::null_mut(), |s| s.source_ptr());
-        unsafe { sys::obs_set_output_source(0, source) };
+        for format in self.formats.clone() {
+            let source =
+                program.and_then(|id| self.scenes.get(&(id, format))).map_or(std::ptr::null_mut(), |s| s.source_ptr());
+            match self.canvases.get(&format) {
+                Some(canvas) => unsafe { sys::obs_canvas_set_channel(canvas.as_ptr(), 0, source) },
+                None => unsafe { sys::obs_set_output_source(0, source) },
+            }
+        }
         self.program = program;
     }
 
-    fn add_layer(&mut self, scene: Id, layer: &Layer, index: usize) {
-        let (Some(obs_scene), Some(input)) = (self.scenes.get(&scene), self.inputs.get(&layer.input)) else {
+    fn add_layer(&mut self, scene: Id, format: Id, layer: &Layer, index: usize) {
+        let (Some(obs_scene), Some(input)) = (self.scenes.get(&(scene, format)), self.inputs.get(&layer.input)) else {
             tracing::warn!(%scene, layer = %layer.id, "layer references a missing scene or input");
             return;
         };
@@ -124,17 +225,17 @@ impl Reconciler {
             return;
         }
         unsafe { sys::obs_sceneitem_set_order_position(item, index as i32) };
-        self.items.insert((scene, layer.id), ItemPtr(item));
-        self.update_layer(scene, layer);
+        self.items.insert((scene, format, layer.id), ItemPtr(item));
+        self.update_layer(scene, format, layer);
     }
 
-    fn update_layer(&mut self, scene: Id, layer: &Layer) {
-        let Some(item) = self.items.get(&(scene, layer.id)).copied() else { return };
-        let layout = self.primary_format.and_then(|f| layer.layouts.get(&f)).copied();
+    fn update_layer(&mut self, scene: Id, format: Id, layer: &Layer) {
+        let Some(item) = self.items.get(&(scene, format, layer.id)).copied() else { return };
         unsafe {
             sys::obs_sceneitem_set_locked(item.0, layer.locked);
-            match layout {
-                Some(l) => apply_layout(item.0, &l),
+            match layer.layouts.get(&format) {
+                Some(l) => apply_layout(item.0, l),
+                // No layout in this format: the layer is hidden there.
                 None => {
                     sys::obs_sceneitem_set_visible(item.0, false);
                 }
@@ -142,17 +243,17 @@ impl Reconciler {
         }
     }
 
-    fn reorder(&mut self, scene: Id, order: &[Id]) {
+    fn reorder(&mut self, scene: Id, format: Id, order: &[Id]) {
         for (index, layer) in order.iter().enumerate() {
-            if let Some(item) = self.items.get(&(scene, *layer)) {
+            if let Some(item) = self.items.get(&(scene, format, *layer)) {
                 unsafe { sys::obs_sceneitem_set_order_position(item.0, index as i32) };
             }
         }
     }
 
-    /// What libobs actually holds, read back from libobs (not from our maps): per scene, the
-    /// items bottom-to-top with source, position, bounds, rotation and visibility. Used to check
-    /// that incremental reconciliation and a full rebuild produce identical state.
+    /// What libobs actually holds, read back from libobs (not from our maps): per scene and
+    /// format, the items bottom-to-top with source, position, bounds, rotation and visibility.
+    /// Used to check that incremental reconciliation and a full rebuild produce identical state.
     pub fn describe(&self) -> Vec<String> {
         unsafe extern "C" fn each(
             _: *mut sys::obs_scene_t,
@@ -180,12 +281,16 @@ impl Reconciler {
             }
             true
         }
-        let mut ids: Vec<&Id> = self.scenes.keys().collect();
-        ids.sort();
+        let mut keys: Vec<&(Id, Id)> = self.scenes.keys().collect();
+        keys.sort();
         let mut out = Vec::new();
-        for id in ids {
-            out.push(format!("scene {id}{}", if self.program == Some(*id) { " (program)" } else { "" }));
-            unsafe { sys::obs_scene_enum_items(self.scenes[id].as_ptr(), Some(each), &mut out as *mut _ as *mut _) };
+        for key in keys {
+            let (scene, format) = key;
+            out.push(format!(
+                "scene {scene} format {format}{}",
+                if self.program == Some(*scene) { " (program)" } else { "" }
+            ));
+            unsafe { sys::obs_scene_enum_items(self.scenes[key].as_ptr(), Some(each), &mut out as *mut _ as *mut _) };
         }
         out
     }
@@ -272,8 +377,13 @@ impl Reconciler {
             self.remove_track(id);
         }
         unsafe { sys::obs_set_output_source(0, std::ptr::null_mut()) };
+        for canvas in self.canvases.values() {
+            unsafe { sys::obs_canvas_set_channel(canvas.as_ptr(), 0, std::ptr::null_mut()) };
+        }
         self.items.clear();
         self.scenes.clear();
+        self.canvases.clear();
+        self.formats.clear();
         self.inputs.clear();
         self.program = None;
     }

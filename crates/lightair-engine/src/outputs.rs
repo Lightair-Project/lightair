@@ -103,6 +103,11 @@ pub fn runtime() -> &'static OutputsRuntime {
     RUNTIME.get_or_init(OutputsRuntime::default)
 }
 
+/// A canvas's video output, as returned by `Reconciler::format_video`. Only the engine creates
+/// these, so the pointer is always a live libobs video output.
+#[derive(Clone, Copy)]
+pub struct VideoOutput(pub(crate) *mut sys::video_t);
+
 // ---------------------------------------------------------------- configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Container {
@@ -271,6 +276,7 @@ fn c(s: &str) -> CString {
 unsafe fn create_encoders(
     name: &str,
     cfg: &EncoderConfig,
+    video_output: *mut sys::video_t,
 ) -> Result<(*mut sys::obs_encoder_t, *mut sys::obs_encoder_t), String> {
     let mut v = Data::new();
     v.set_int("bitrate", cfg.video_bitrate_kbps as i64)
@@ -303,7 +309,8 @@ unsafe fn create_encoders(
             sys::obs_encoder_release(video);
             return Err(format!("Couldn't create the audio encoder ({}).", cfg.audio_encoder));
         }
-        sys::obs_encoder_set_video(video, sys::obs_get_video());
+        // The format's canvas (main canvas when null).
+        sys::obs_encoder_set_video(video, if video_output.is_null() { sys::obs_get_video() } else { video_output });
         sys::obs_encoder_set_audio(audio, sys::obs_get_audio());
         Ok((video, audio))
     }
@@ -315,6 +322,7 @@ unsafe fn start(
     output_settings: &Data,
     encoders: &EncoderConfig,
     service: *mut sys::obs_service_t,
+    video_output: *mut sys::video_t,
 ) -> Result<Running, String> {
     let name = match key {
         OutputKey::Recording => "Recording".to_string(),
@@ -326,7 +334,7 @@ unsafe fn start(
                 sys::obs_service_release(service);
             }
         };
-        let (video, audio) = match create_encoders(&name, encoders) {
+        let (video, audio) = match create_encoders(&name, encoders, video_output) {
             Ok(v) => v,
             Err(e) => {
                 release_service();
@@ -368,7 +376,10 @@ unsafe fn start(
 }
 
 impl Outputs {
-    pub fn start_recording(&mut self, cfg: &RecordingConfig) -> Result<(), String> {
+    /// `video` is the format's canvas video (`Reconciler::format_video`); `None` means the
+    /// primary format.
+    pub fn start_recording(&mut self, cfg: &RecordingConfig, video: Option<VideoOutput>) -> Result<(), String> {
+        let video_output = video.map_or(std::ptr::null_mut(), |v| v.0);
         if self.recording.as_ref().is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
             return Ok(());
         }
@@ -385,8 +396,9 @@ impl Outputs {
         };
         let mut settings = Data::new();
         settings.set_str(path_key, &cfg.path.to_string_lossy());
-        let running =
-            unsafe { start(OutputKey::Recording, output_type, &settings, &cfg.encoders, std::ptr::null_mut())? };
+        let running = unsafe {
+            start(OutputKey::Recording, output_type, &settings, &cfg.encoders, std::ptr::null_mut(), video_output)?
+        };
         runtime().update(OutputKey::Recording, |s| s.path = Some(cfg.path.clone()));
         self.recording = Some(running);
         Ok(())
@@ -403,7 +415,8 @@ impl Outputs {
         }
     }
 
-    pub fn start_stream(&mut self, cfg: &StreamConfig) -> Result<(), String> {
+    pub fn start_stream(&mut self, cfg: &StreamConfig, video: Option<VideoOutput>) -> Result<(), String> {
+        let video_output = video.map_or(std::ptr::null_mut(), |v| v.0);
         let key = OutputKey::Stream(cfg.id);
         if self.streams.get(&cfg.id).is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
             return Ok(());
@@ -427,7 +440,7 @@ impl Outputs {
         let mut output_settings = Data::new();
         output_settings.set_bool("low_latency_mode_enabled", false);
         // On failure `start` releases everything it was given, the service included.
-        let running = unsafe { start(key, "rtmp_output", &output_settings, &cfg.encoders, service)? };
+        let running = unsafe { start(key, "rtmp_output", &output_settings, &cfg.encoders, service, video_output)? };
         self.streams.insert(cfg.id, running);
         Ok(())
     }

@@ -64,8 +64,15 @@ Remaining:
 - Go Live review sheet, stream manager (titles, categories), platform sign-in (with M11).
 - Clips (replay buffer) and the clip library, virtual camera, NDI, SRT/WHIP, ISO and multitrack recording, pause/split, markers, test recording.
 
-## M7 · Formats
-Vertical and custom canvases (`obs_canvas_*`), per-format layouts, side-by-side editing, per-format outputs ([07](docs/07-scenes-layers-canvas.md#formats)).
+## M7 · Formats 🔨
+Done:
+- Every scene exists once per format: one libobs scene per (scene, format) in that format's canvas (`obs_canvas_create`, activate + scene-ref, audio mixed once), sharing inputs. Program switches every canvas. The reconciler syncs formats from the snapshot, and a test checks incremental reconciliation matches a full rebuild across two canvases.
+- Previews for any canvas (`obs_canvas_render` into the preview pipeline).
+- Format tabs, side-by-side editing (the pointer edits whichever stage it is over), "Add vertical" with auto-reframe (backgrounds fill, other layers keep their arrangement in a centred band). Layers panel and inspector follow the active format; new layers get a layout in every format.
+- Recording and each destination can target a format (aspect badge); a vertical recording is 1080×1920.
+
+Remaining:
+- Per-format visibility toggle in the UI, copy layout from another format, safe-area overlays, square and custom formats, smarter reframe (face-aware with Camera Studio), Twitch Dual Format.
 
 ## M8 · Effects & transitions
 `lightair-video-fx` module: effect catalog, presets; Move/Morph/Stinger/Wipe transitions; studio mode ([08](docs/08-video-effects.md), [07](docs/07-scenes-layers-canvas.md#transitions)).
