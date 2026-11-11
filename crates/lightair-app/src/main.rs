@@ -1,109 +1,95 @@
 //! Lightair application entry point.
-//!
-//! M2: a native GPUI window showing the live program canvas rendered by libobs, with zero-copy
-//! preview (IMPLEMENTATION.md). The studio shell arrives in M4.
+
+mod shell;
+mod starter;
+mod studio;
+mod ui;
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::Arc;
+use std::time::Duration;
 
 use gpui_kit::*;
-use lightair_engine::obs::{Data, Scene, Source};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::Preview;
-use parking_lot::Mutex;
 
-/// The engine lives until the app quits; GPUI's run loop owns everything else.
-static ENGINE: OnceLock<Mutex<Option<Engine>>> = OnceLock::new();
+use crate::shell::StudioWindow;
+use crate::studio::Studio;
 
-const CANVAS: (u32, u32) = (1920, 1080);
+fn projects_dir() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    home.join("Library/Application Support/Lightair/Projects")
+}
 
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("LIGHTAIR_LOG").unwrap_or_else(|_| "info,libobs=warn".into()))
         .init();
 
-    let engine = Engine::start(EngineConfig { canvas: CANVAS, output: CANVAS, ..Default::default() })
-        .unwrap_or_else(|e| panic!("could not start the engine: {e}"));
-    tracing::info!(version = engine.version, "libobs started");
-    engine.call(build_demo_scene);
-    let preview = Preview::attach();
-    ENGINE.get_or_init(|| Mutex::new(Some(engine)));
+    // The canvas size comes from the project's primary format; read it before starting libobs.
+    let project_dir = std::env::var_os("LIGHTAIR_PROJECT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| projects_dir().join("Default.lightair"));
+    let canvas = lightair_store::load_snapshot(&project_dir)
+        .map(|p| (p.primary_format().width, p.primary_format().height))
+        .unwrap_or((1920, 1080));
 
-    gpui_kit::application().run(move |cx: &mut App| {
+    let engine = Arc::new(
+        Engine::start(EngineConfig { canvas, output: canvas, ..Default::default() })
+            .unwrap_or_else(|e| panic!("could not start the engine: {e}")),
+    );
+    tracing::info!(version = engine.version, project = %project_dir.display(), "libobs started");
+    let preview = Preview::attach();
+
+    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx: &mut App| {
         gpui_kit::init(cx);
-        cx.on_window_closed(|cx, _| cx.quit()).detach();
-        cx.on_app_quit(|_| async {
-            if let Some(engine) = ENGINE.get().and_then(|e| e.lock().take()) {
-                drop(engine);
+        ui::apply_theme(cx);
+        shell::bind_keys(cx);
+
+        let studio = cx.new(|_| Studio::open(engine.clone(), project_dir.clone(), starter::starter_project));
+
+        // Stats at 1 Hz; journal flush and periodic compaction.
+        let ticker = studio.downgrade();
+        cx.spawn(async move |cx| {
+            let mut ticks = 0u32;
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                ticks += 1;
+                let alive = ticker.update(cx, |s, cx| {
+                    s.refresh_stats();
+                    s.flush();
+                    if ticks.is_multiple_of(60) {
+                        s.compact();
+                    }
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break;
+                }
             }
         })
         .detach();
 
+        let on_quit = studio.clone();
+        cx.on_app_quit(move |cx| {
+            on_quit.update(cx, |s, _| s.compact());
+            async {}
+        })
+        .detach();
+        cx.on_window_closed(|cx, _| cx.quit()).detach();
+
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1280.), px(800.)), cx))),
-            titlebar: Some(TitlebarOptions { title: Some("Lightair".into()), ..Default::default() }),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1440.), px(900.)), cx))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Lightair".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(16.), px(15.))),
+            }),
             ..Default::default()
         };
-        gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| CanvasView { preview: preview.clone() }))
+        let preview = preview.clone();
+        gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| StudioWindow::new(studio, preview, window, cx)))
             .expect("open window");
         cx.activate(true);
     });
-}
-
-/// Background, the main display, and the Lightair icon: enough to see live compositing.
-fn build_demo_scene(state: &mut lightair_engine::EngineState) {
-    let (w, h) = (CANVAS.0 as f32, CANVAS.1 as f32);
-    let Some(scene) = Scene::create("Demo") else { return };
-
-    let mut bg = Data::new();
-    bg.set_int("color", 0xFF1B1B1C_u32 as i64).set_int("width", CANVAS.0 as i64).set_int("height", CANVAS.1 as i64);
-    if let Some(src) = Source::create("color_source_v3", "Background", Some(&bg)) {
-        scene.add(&src);
-        state.sources.insert("background".into(), src);
-    }
-
-    // ScreenCaptureKit display capture; shows nothing until Screen Recording is allowed.
-    let mut display = Data::new();
-    display.set_int("type", 0).set_bool("show_cursor", true).set_bool("hide_obs", true);
-    if let Some(uuid) = lightair_engine::displays::main_display_uuid() {
-        display.set_str("display_uuid", &uuid);
-    }
-    if let Some(src) = Source::create("screen_capture", "Display", Some(&display)) {
-        scene.add_fitted(&src, w * 0.05, h * 0.08, w * 0.9, h * 0.84);
-        state.sources.insert("display".into(), src);
-    }
-
-    let icon = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../branding/final/icon/lightair-icon-256.png");
-    let mut img = Data::new();
-    img.set_str("file", &icon.to_string_lossy());
-    if let Some(src) = Source::create("image_source", "Lightair icon", Some(&img)) {
-        scene.add_fitted(&src, w - 200.0, h - 200.0, 160.0, 160.0);
-        state.sources.insert("icon".into(), src);
-    }
-
-    state.scenes.insert("demo".into(), scene);
-    state.set_program("demo");
-}
-
-struct CanvasView {
-    preview: Preview,
-}
-
-impl Render for CanvasView {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // The canvas is live video: repaint every display frame.
-        window.request_animation_frame();
-        let canvas = match self.preview.latest_frame() {
-            Some(frame) => surface(frame).size_full().object_fit(ObjectFit::Contain).into_any_element(),
-            None => div().text_color(rgb(0xA1A1A6)).child("Starting preview…").into_any_element(),
-        };
-        div()
-            .size_full()
-            .bg(rgb(0x0E0E0F))
-            .flex()
-            .items_center()
-            .justify_center()
-            .p_4()
-            .child(canvas)
-    }
 }
