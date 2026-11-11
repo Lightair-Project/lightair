@@ -11,4 +11,4 @@
 mod mac;
 
 #[cfg(target_os = "macos")]
-pub use mac::{Frame, Preview};
+pub use mac::{Frame, Preview, sample_ycbcr};

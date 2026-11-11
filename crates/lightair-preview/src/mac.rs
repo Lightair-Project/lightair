@@ -268,9 +268,24 @@ struct Shared {
     /// `None`: the main canvas (program). `Some`: another canvas (an additional format); we
     /// own one strong reference.
     canvas: Option<CanvasRef>,
+    /// When set, renders this source (a scene that isn't on air: Studio mode's preview)
+    /// instead of the canvas's program. Held "showing" so its inputs run.
+    source: Mutex<Option<SourceRef>>,
 }
 
 struct CanvasRef(*mut sys::obs_canvas_t);
+
+/// A strong, showing reference to a source.
+struct SourceRef(*mut sys::obs_source_t);
+
+impl Drop for SourceRef {
+    fn drop(&mut self) {
+        unsafe {
+            sys::obs_source_dec_showing(self.0);
+            sys::obs_source_release(self.0);
+        }
+    }
+}
 
 // SAFETY: `Shared` is used by libobs's graphics thread and the UI thread. Every field is either
 // atomic or behind a mutex; the CoreVideo/VideoToolbox objects inside are reference-counted
@@ -316,6 +331,7 @@ impl Preview {
             frames: AtomicU64::new(0),
             transfer: Mutex::new(transfer),
             canvas,
+            source: Mutex::new(None),
         });
         unsafe { sys::obs_add_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&shared) as *mut c_void) };
         Self(Arc::new(Handle { shared }))
@@ -326,6 +342,23 @@ impl Preview {
     pub fn set_size(&self, size: Option<(u32, u32)>) {
         let packed = size.map_or(0, |(w, h)| (((w.max(2) & !1) as u64) << 32) | (h.max(2) & !1) as u64);
         self.0.shared.size.store(packed, Ordering::Relaxed);
+    }
+
+    /// Shows `source` (e.g. a scene that isn't on air) instead of the program, or the program
+    /// again with `None`. Takes ownership of the strong reference in `source`.
+    pub fn set_source(&self, source: Option<*mut sys::obs_source_t>) {
+        let new = source.filter(|p| !p.is_null()).map(|p| {
+            unsafe { sys::obs_source_inc_showing(p) };
+            SourceRef(p)
+        });
+        // Swap under the lock (the graphics thread renders under it); release afterwards.
+        let old = std::mem::replace(&mut *self.0.shared.source.lock(), new);
+        drop(old);
+    }
+
+    /// The source shown instead of the program, if any (borrowed pointer, for comparison).
+    pub fn source(&self) -> Option<*mut sys::obs_source_t> {
+        self.0.shared.source.lock().as_ref().map(|s| s.0)
     }
 
     /// Pauses or resumes rendering (hidden views cost nothing).
@@ -356,6 +389,7 @@ impl Drop for Handle {
             if let Some(c) = &self.shared.canvas {
                 sys::obs_canvas_release(c.0);
             }
+            self.shared.source.lock().take();
         }
     }
 }
@@ -393,10 +427,15 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     }
     let Some(pool) = guard.as_mut() else { return };
 
-    match &shared.canvas {
-        None => unsafe { draw_scaled(main, base_w, base_h, pool.target, w, h) },
-        Some(c) => unsafe { draw_canvas(c.0, base_w, base_h, pool.target, w, h) },
+    let source = shared.source.lock();
+    match (&*source, &shared.canvas) {
+        (Some(src), _) => unsafe {
+            draw_with(base_w, base_h, pool.target, w, h, || sys::obs_source_video_render(src.0))
+        },
+        (None, None) => unsafe { draw_scaled(main, base_w, base_h, pool.target, w, h) },
+        (None, Some(c)) => unsafe { draw_with(base_w, base_h, pool.target, w, h, || sys::obs_canvas_render(c.0)) },
     }
+    drop(source);
     if !unsafe { pool.blit_to_surface() } {
         return;
     }
@@ -412,8 +451,9 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     shared.frames.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Renders a canvas's view (its program scene) directly into `dst`, scaled to the preview.
-unsafe fn draw_canvas(canvas: *mut sys::obs_canvas_t, cw: u32, ch: u32, dst: *mut sys::gs_texture_t, dw: u32, dh: u32) {
+/// Renders `render` (a canvas's view or a source, in a `cw`×`ch` coordinate space) directly
+/// into `dst`, scaled to the preview.
+unsafe fn draw_with(cw: u32, ch: u32, dst: *mut sys::gs_texture_t, dw: u32, dh: u32, render: impl FnOnce()) {
     unsafe {
         let prev_rt = sys::gs_get_render_target();
         let prev_zs = sys::gs_get_zstencil_target();
@@ -426,7 +466,7 @@ unsafe fn draw_canvas(canvas: *mut sys::obs_canvas_t, cw: u32, ch: u32, dst: *mu
         sys::gs_ortho(0.0, cw as f32, 0.0, ch as f32, -100.0, 100.0);
         let black = sys::vec4::default();
         sys::gs_clear(sys::GS_CLEAR_COLOR, &black, 1.0, 0);
-        sys::obs_canvas_render(canvas);
+        render();
         sys::gs_set_render_target(prev_rt, prev_zs);
         sys::gs_matrix_pop();
         sys::gs_projection_pop();
@@ -467,5 +507,30 @@ unsafe fn draw_scaled(src: *mut sys::gs_texture_t, sw: u32, sh: u32, dst: *mut s
         sys::gs_matrix_pop();
         sys::gs_projection_pop();
         sys::gs_viewport_pop();
+    }
+}
+
+/// Reads the (Y, Cb, Cr) values at a point of a frame, given as fractions of its size
+/// (diagnostics and tests).
+pub fn sample_ycbcr(frame: &Frame, fx: f32, fy: f32) -> Option<(u8, u8, u8)> {
+    use objc2_core_video::{
+        CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight,
+        CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    };
+    let (w, h) = (CVPixelBufferGetWidth(frame), CVPixelBufferGetHeight(frame));
+    let (x, y) = (((w as f32 * fx) as usize).min(w - 1), ((h as f32 * fy) as usize).min(h - 1));
+    unsafe {
+        if CVPixelBufferLockBaseAddress(frame, CVPixelBufferLockFlags::ReadOnly) != 0 {
+            return None;
+        }
+        let luma = CVPixelBufferGetBaseAddressOfPlane(frame, 0) as *const u8;
+        let chroma = CVPixelBufferGetBaseAddressOfPlane(frame, 1) as *const u8;
+        let out = (!luma.is_null() && !chroma.is_null()).then(|| {
+            let yv = *luma.add(y * CVPixelBufferGetBytesPerRowOfPlane(frame, 0) + x);
+            let c = chroma.add((y / 2) * CVPixelBufferGetBytesPerRowOfPlane(frame, 1) + (x / 2) * 2);
+            (yv, *c, *c.add(1))
+        });
+        CVPixelBufferUnlockBaseAddress(frame, CVPixelBufferLockFlags::ReadOnly);
+        out
     }
 }

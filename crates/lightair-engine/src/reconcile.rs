@@ -220,6 +220,17 @@ impl Reconciler {
     }
 
     /// The canvas behind a format, as a new strong reference (for previews).
+    /// The libobs scene source for a document scene in a format, if it exists.
+    pub fn scene_source(&self, scene: Id, format: Id) -> Option<*mut sys::obs_source_t> {
+        self.scenes.get(&(scene, format)).map(|s| s.source_ptr())
+    }
+
+    /// A new strong reference to that scene source (the caller releases it), e.g. for Studio
+    /// mode's preview of a scene that isn't on air.
+    pub fn scene_source_ref(&self, scene: Id, format: Id) -> Option<*mut sys::obs_source_t> {
+        self.scene_source(scene, format).map(|s| unsafe { sys::obs_source_get_ref(s) }).filter(|p| !p.is_null())
+    }
+
     pub fn canvas_ref(&self, format: Id) -> Option<*mut sys::obs_canvas_t> {
         if Some(format) == self.primary_format {
             return Some(unsafe { sys::obs_get_main_canvas() });
