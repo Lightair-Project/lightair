@@ -4,12 +4,12 @@ The design docs in [`docs/`](docs/README.md) describe the finished product. This
 
 Status key: ✅ done · 🔨 in progress · ⬜ not started
 
-## M0 · Foundation ⬜
+## M0 · Foundation ✅
 - Cargo workspace with the crate layout from [03 · Architecture](docs/03-architecture.md#crate-graph).
 - GPL-3.0-or-later licence, `.gitignore`, README.
 - `cargo xtask` entry point.
 
-## M1 · Engine bootstrap ⬜
+## M1 · Engine bootstrap ✅
 - `libobs-sys`: bindgen bindings against the pinned libobs headers (33.0.0).
 - **Dev runtime**: link against an installed OBS 33 (`/Applications/OBS.app`) and assemble a dev `Lightair.app` bundle whose `Frameworks/` and `PlugIns/` point at OBS's, so OBS core modules resolve their rpaths ([04](docs/04-engine-libobs.md), [15](docs/15-platform-distribution-licensing.md#building)).
 - `lightair-engine`: engine actor thread; `obs_startup`, audio/video reset, core module loading with the safe-module allowlist, capability discovery, clean shutdown.

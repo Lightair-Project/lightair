@@ -37,7 +37,7 @@ fn main() {
         .clang_arg(format!("-I{}", include_dir.display()))
         .clang_arg(format!("-I{}", simde.display()))
         .allowlist_function("(obs|gs|os|calldata|signal_handler|proc_handler|video_output|audio_output|bmalloc|bfree|bzalloc|bstrdup|blog|base_set_log_handler|base_get_log_handler|profiler|config|vec4)_.*")
-        .allowlist_function("blog|bfree|bmalloc|bstrdup|base_set_log_handler|base_get_log_handler")
+        .allowlist_function("blog|bfree|bmalloc|bstrdup|base_set_log_handler|base_get_log_handler|bnum_allocs")
         .allowlist_type("(obs|gs|video|audio|speaker)_.*")
         .allowlist_type("(calldata|signal_handler|proc_handler|profiler_name_store|config)_t")
         .allowlist_var("(OBS|GS|LOG|MODULE|LIBOBS|VIDEO|AUDIO|MAX)_.*")
