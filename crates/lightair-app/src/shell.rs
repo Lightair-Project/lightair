@@ -42,7 +42,8 @@ actions!(
         Deselect,
         RenameSelection,
         OpenPalette,
-        Take
+        Take,
+        AddMarker
     ]
 );
 
@@ -60,6 +61,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", RenameSelection, Some("Studio")),
         KeyBinding::new("cmd-k", OpenPalette, Some("Studio")),
         KeyBinding::new("cmd-enter", Take, Some("Studio")),
+        KeyBinding::new("cmd-m", AddMarker, Some("Studio")),
     ]);
 }
 
@@ -667,6 +669,11 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &Deselect, _, cx| this.select_layer(None, cx)))
             .on_action(cx.listener(|this, _: &RenameSelection, window, cx| this.rename_selection(window, cx)))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
+            .on_action(cx.listener(|this, _: &AddMarker, _, cx| {
+                if this.studio.read(cx).is_recording() {
+                    this.studio.update(cx, |s, cx| s.add_marker(cx))
+                }
+            }))
             .on_action(cx.listener(|this, _: &Take, _, cx| {
                 if this.studio_mode {
                     this.take(cx)
@@ -701,10 +708,15 @@ impl StudioWindow {
         let fps_color = if stats.active_fps > 0.0 && recent_lagged == 0 { tok::ok() } else { tok::warn() };
         let has_destination = project.outputs.destinations.iter().any(|d| d.enabled);
 
-        let rec = runtime().get(OutputKey::Recording).state;
+        let rec_status = runtime().get(OutputKey::Recording);
+        let rec = rec_status.state.clone();
+        let recording = matches!(rec, OutputState::Active { .. });
         let record = match rec {
             OutputState::Active { since } | OutputState::Reconnecting { since } => {
-                Button::new("record").label(format!("● {}", elapsed(since))).small().danger().tooltip("Stop recording")
+                let t = rec_status.recorded(since).as_secs();
+                let time = format!("{:02}:{:02}:{:02}", t / 3600, (t / 60) % 60, t % 60);
+                let label = if rec_status.paused { format!("❚❚ {time}") } else { format!("● {time}") };
+                Button::new("record").label(label).small().danger().tooltip("Stop recording")
             }
             OutputState::Starting | OutputState::Stopping => {
                 Button::new("record").label("Record").small().outline().loading(true)
@@ -712,6 +724,29 @@ impl StudioWindow {
             _ => Button::new("record").label("Record").small().outline().tooltip("Start recording"),
         }
         .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.toggle_recording(cx))));
+        let paused = rec_status.paused;
+        let recording_tools = recording.then(|| {
+            div()
+                .flex()
+                .items_center()
+                .child(
+                    ui::icon_button("rec-pause", if paused { "play" } else { "pause" }, tok::text_secondary())
+                        .tooltip(move |w, cx| {
+                            Tooltip::new(if paused { "Resume recording" } else { "Pause recording" }).build(w, cx)
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.pause_recording(cx)))),
+                )
+                .child(
+                    ui::icon_button("rec-marker", "bookmark", tok::text_secondary())
+                        .tooltip(|w, cx| Tooltip::new("Add marker (⌘M)").build(w, cx))
+                        .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.add_marker(cx)))),
+                )
+                .child(
+                    ui::icon_button("rec-split", "split", tok::text_secondary())
+                        .tooltip(|w, cx| Tooltip::new("Continue in a new file").build(w, cx))
+                        .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.split_recording(cx)))),
+                )
+        });
 
         let live_since = runtime().stream_since();
         let streaming = runtime().any_stream_running();
@@ -782,6 +817,7 @@ impl StudioWindow {
                     .child(format!("{:.1} ms", stats.average_frame_time_ms)),
             )
             .child(go_live)
+            .children(recording_tools)
             .child(record)
             .child({
                 let ready = self.studio.read(cx).clips_ready();

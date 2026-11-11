@@ -54,11 +54,40 @@ pub struct OutputStatus {
     pub total_frames: i32,
     /// Clips saved since the replay buffer started.
     pub saved_clips: u32,
+    /// Recording: paused (the file holds no time while paused).
+    pub paused: bool,
+    /// Recording: time spent paused before the current pause, and when the current one began.
+    pub paused_for: std::time::Duration,
+    pub paused_since: Option<Instant>,
+    /// Recording: markers added (chapters in MP4/MOV).
+    pub markers: u32,
+    /// Recording: files written so far (1 + splits); `path` is the current one.
+    pub files: u32,
+}
+
+impl OutputStatus {
+    /// Time actually recorded since `since` (excludes pauses).
+    pub fn recorded(&self, since: Instant) -> std::time::Duration {
+        let paused = self.paused_for + self.paused_since.map_or_default(|t| t.elapsed());
+        since.elapsed().saturating_sub(paused)
+    }
 }
 
 impl Default for OutputStatus {
     fn default() -> Self {
-        Self { state: OutputState::Idle, path: None, bytes: 0, dropped_frames: 0, total_frames: 0, saved_clips: 0 }
+        Self {
+            state: OutputState::Idle,
+            path: None,
+            bytes: 0,
+            dropped_frames: 0,
+            total_frames: 0,
+            saved_clips: 0,
+            paused: false,
+            paused_for: std::time::Duration::ZERO,
+            paused_since: None,
+            markers: 0,
+            files: 0,
+        }
     }
 }
 
@@ -172,6 +201,7 @@ struct Running {
     service: *mut sys::obs_service_t,
     /// Heap-pinned key passed to signal callbacks; freed after disconnecting.
     signal_param: *mut OutputKey,
+    signals: &'static [(&'static str, SignalCb)],
 }
 
 unsafe impl Send for Running {}
@@ -180,7 +210,7 @@ impl Running {
     unsafe fn release(self) {
         unsafe {
             let handler = sys::obs_output_get_signal_handler(self.output);
-            for (name, cb) in SIGNALS {
+            for (name, cb) in self.signals {
                 let n = CString::new(*name).unwrap();
                 sys::signal_handler_disconnect(handler, n.as_ptr(), Some(*cb), self.signal_param as *mut c_void);
             }
@@ -199,13 +229,30 @@ impl Running {
 }
 
 type SignalCb = unsafe extern "C" fn(*mut c_void, *mut sys::calldata_t);
-const SIGNALS: &[(&str, SignalCb)] = &[
-    ("start", on_start),
-    ("stop", on_stop),
-    ("reconnect", on_reconnect),
-    ("reconnect_success", on_start),
-    ("saved", on_saved),
-];
+/// Signals each kind of output declares (libobs warns about connecting to undeclared ones).
+fn signals_for(key: OutputKey) -> &'static [(&'static str, SignalCb)] {
+    match key {
+        OutputKey::Recording => &[("start", on_start), ("stop", on_stop), ("file_changed", on_file_changed)],
+        OutputKey::Stream(_) => {
+            &[("start", on_start), ("stop", on_stop), ("reconnect", on_reconnect), ("reconnect_success", on_start)]
+        }
+        OutputKey::Clips => &[("start", on_start), ("stop", on_stop), ("saved", on_saved)],
+    }
+}
+
+/// The recording moved on to a new file (a split).
+unsafe extern "C" fn on_file_changed(param: *mut c_void, data: *mut sys::calldata_t) {
+    let key = unsafe { *(param as *const OutputKey) };
+    let mut p: *const std::ffi::c_char = std::ptr::null();
+    let path = unsafe { sys::calldata_get_string(data, c"next_file".as_ptr(), &mut p) && !p.is_null() }
+        .then(|| PathBuf::from(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()));
+    runtime().update(key, |s| {
+        if path.is_some() {
+            s.path = path;
+        }
+        s.files += 1;
+    });
+}
 
 /// Replay buffer saved a clip: record its path (the UI shows it and counts clips).
 unsafe extern "C" fn on_saved(param: *mut c_void, _: *mut sys::calldata_t) {
@@ -416,10 +463,11 @@ unsafe fn start(
         }
         let signal_param = Box::into_raw(Box::new(key));
         let handler = sys::obs_output_get_signal_handler(output);
-        for (sig, cb) in SIGNALS {
+        let signals = signals_for(key);
+        for (sig, cb) in signals {
             sys::signal_handler_connect(handler, c(sig).as_ptr(), Some(*cb), signal_param as *mut c_void);
         }
-        let running = Running { output, video, audio, service, signal_param };
+        let running = Running { output, video, audio, service, signal_param, signals };
         runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
         if !sys::obs_output_start(output) {
             let err = last_error(output).unwrap_or_else(|| "The output couldn't start.".into());
@@ -452,10 +500,23 @@ impl Outputs {
         };
         let mut settings = Data::new();
         settings.set_str(path_key, &cfg.path.to_string_lossy());
+        // Manual splits only (no size/time limits); later files go next to the first one.
+        settings.set_bool("split_file", true);
+        settings.set_int("max_time_sec", 0);
+        settings.set_int("max_size_mb", 0);
+        if let Some(dir) = cfg.path.parent() {
+            settings.set_str("directory", &dir.to_string_lossy());
+        }
+        settings.set_str("format", "Lightair %CCYY-%MM-%DD %hh-%mm-%ss");
+        settings.set_str("extension", cfg.container.extension());
+        settings.set_bool("allow_spaces", true);
         let running = unsafe {
             start(OutputKey::Recording, output_type, &settings, &cfg.encoders, std::ptr::null_mut(), video_output)?
         };
-        runtime().update(OutputKey::Recording, |s| s.path = Some(cfg.path.clone()));
+        runtime().update(OutputKey::Recording, |s| {
+            s.path = Some(cfg.path.clone());
+            s.files = 1;
+        });
         self.recording = Some(running);
         Ok(())
     }
@@ -469,6 +530,74 @@ impl Outputs {
             });
             unsafe { sys::obs_output_stop(r.output) };
         }
+    }
+
+    fn active_recording(&self) -> Option<*mut sys::obs_output_t> {
+        self.recording.as_ref().map(|r| r.output).filter(|o| unsafe { sys::obs_output_active(*o) })
+    }
+
+    /// Pauses or resumes the recording. Returns whether the recording is now in that state.
+    pub fn pause_recording(&mut self, pause: bool) -> bool {
+        let Some(output) = self.active_recording() else { return false };
+        let ok = unsafe { sys::obs_output_pause(output, pause) };
+        let paused = unsafe { sys::obs_output_paused(output) };
+        runtime().update(OutputKey::Recording, |s| {
+            match (s.paused, paused) {
+                (false, true) => s.paused_since = Some(Instant::now()),
+                (true, false) => s.paused_for += s.paused_since.take().map_or_default(|t| t.elapsed()),
+                _ => {}
+            }
+            s.paused = paused;
+        });
+        ok && paused == pause
+    }
+
+    /// Ends the current file and continues in a new one, without a gap.
+    pub fn split_recording(&mut self) -> bool {
+        let Some(output) = self.active_recording() else { return false };
+        let mut cd = sys::calldata_t::default();
+        let mut enabled = false;
+        unsafe {
+            if proc_call(output, "split_file", &mut cd) {
+                // calldata_get_bool is a header inline over calldata_get_data.
+                sys::calldata_get_data(
+                    &cd,
+                    c"split_file_enabled".as_ptr(),
+                    &mut enabled as *mut bool as *mut c_void,
+                    std::mem::size_of::<bool>(),
+                );
+            }
+            if !cd.fixed && !cd.stack.is_null() {
+                sys::bfree(cd.stack as *mut c_void);
+            }
+        }
+        enabled
+    }
+
+    /// Adds a marker (an MP4/MOV chapter) at the current time. Returns false when the recording
+    /// can't hold markers (MKV) or isn't running.
+    pub fn add_marker(&mut self, name: &str) -> bool {
+        let Some(output) = self.active_recording() else { return false };
+        let id = unsafe { CStr::from_ptr(sys::obs_output_get_id(output)) };
+        if !matches!(id.to_bytes(), b"mp4_output" | b"mov_output") {
+            return false;
+        }
+        let mut cd = sys::calldata_t::default();
+        let name = c(name);
+        let ok = unsafe {
+            // calldata_set_string is a header inline: the string with its terminator.
+            let bytes = name.as_bytes_with_nul();
+            sys::calldata_set_data(&mut cd, c"chapter_name".as_ptr(), bytes.as_ptr() as *const c_void, bytes.len());
+            let ok = proc_call(output, "add_chapter", &mut cd);
+            if !cd.fixed && !cd.stack.is_null() {
+                sys::bfree(cd.stack as *mut c_void);
+            }
+            ok
+        };
+        if ok {
+            runtime().update(OutputKey::Recording, |s| s.markers += 1);
+        }
+        ok
     }
 
     pub fn start_stream(&mut self, cfg: &StreamConfig, video: Option<VideoOutput>) -> Result<(), String> {
