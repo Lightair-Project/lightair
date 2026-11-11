@@ -9,7 +9,13 @@ use std::collections::HashMap;
 use std::ffi::CString;
 
 use libobs_sys as sys;
-use lightair_core::{Effect, Fit, Format, Id, Layer, LayerPatch, Layout, Patch, Project, Track, diff_layers};
+use lightair_core::{
+    Effect, Fit, Format, Id, Layer, LayerPatch, Layout, Patch, Project, Track, TransitionKind, TransitionSettings,
+    diff_layers,
+};
+use parking_lot::Mutex;
+
+use crate::transition::{FormatMove, MoveAnim, Tween, item_fade, match_layer};
 
 use crate::meters::{MeterCell, db_to_mul, meters};
 use crate::obs::{Canvas, Data, Scene, Source, vec2};
@@ -32,6 +38,12 @@ pub struct Reconciler {
     primary_format: Option<Id>,
     program: Option<Id>,
     tracks: HashMap<Id, TrackState>,
+    /// Each format's output channel goes through its own transition.
+    transitions: HashMap<Id, Source>,
+    transition_settings: TransitionSettings,
+    /// The running Move, driven by a libobs tick callback.
+    anim: Arc<Mutex<Option<MoveAnim>>>,
+    tick_registered: bool,
 }
 
 /// libobs state for one mixer track: its output channel, volume meter and effect filters.
@@ -55,6 +67,8 @@ impl Reconciler {
     /// Applies patches computed from two snapshots; `project` is the newer one.
     pub fn apply(&mut self, project: &Project, patches: &[Patch]) {
         self.primary_format = Some(project.primary_format().id);
+        self.transition_settings = project.transition;
+        self.cleanup();
         // Formats are synced from the snapshot itself, so a rebuild against `empty_like()`
         // (which keeps the formats) still creates every canvas.
         for format in &project.formats {
@@ -111,12 +125,12 @@ impl Reconciler {
                 }
                 Patch::SceneRemoved(id) => {
                     if self.program == Some(*id) {
-                        self.set_program(None);
+                        self.set_program(None, project);
                     }
                     self.items.retain(|(scene, _, _), _| scene != id);
                     self.scenes.retain(|(scene, _), _| scene != id);
                 }
-                Patch::ProgramChanged(program) => self.set_program(*program),
+                Patch::ProgramChanged(program) => self.set_program(*program, project),
                 Patch::TrackAdded(track) => self.add_track(track),
                 Patch::TrackChanged { before, after } => self.update_track(before, after),
                 Patch::TrackRemoved(id) => self.remove_track(*id),
@@ -142,6 +156,13 @@ impl Reconciler {
             }
         }
         self.formats.push(format.id);
+        if let Some(tr) = Source::create_private("fade_transition", &format!("transition:{}", format.id), None) {
+            match self.canvases.get(&format.id) {
+                Some(canvas) => unsafe { sys::obs_canvas_set_channel(canvas.as_ptr(), 0, tr.as_ptr()) },
+                None => unsafe { sys::obs_set_output_source(0, tr.as_ptr()) },
+            }
+            self.transitions.insert(format.id, tr);
+        }
         // Scenes that already exist get their version in the new format; scenes added later in
         // the same patch list arrive through SceneAdded.
         for scene in &project.scenes {
@@ -150,7 +171,7 @@ impl Reconciler {
             }
         }
         if let Some(program) = self.program {
-            self.set_program(Some(program));
+            self.land(Some(program));
         }
     }
 
@@ -163,6 +184,8 @@ impl Reconciler {
     }
 
     fn remove_format(&mut self, id: Id) {
+        self.finish_move();
+        self.transitions.remove(&id);
         self.items.retain(|(_, f, _), _| *f != id);
         self.scenes.retain(|(_, f), _| *f != id);
         self.canvases.remove(&id);
@@ -203,16 +226,153 @@ impl Reconciler {
             .map(|c| crate::outputs::VideoOutput(unsafe { sys::obs_canvas_get_video(c.as_ptr()) }))
     }
 
-    fn set_program(&mut self, program: Option<Id>) {
+    fn dest(&self, program: Option<Id>, format: Id) -> *mut sys::obs_source_t {
+        program.and_then(|id| self.scenes.get(&(id, format))).map_or(std::ptr::null_mut(), |s| s.source_ptr())
+    }
+
+    /// Puts `program` on air in every format instantly.
+    fn land(&mut self, program: Option<Id>) {
         for format in self.formats.clone() {
-            let source =
-                program.and_then(|id| self.scenes.get(&(id, format))).map_or(std::ptr::null_mut(), |s| s.source_ptr());
-            match self.canvases.get(&format) {
-                Some(canvas) => unsafe { sys::obs_canvas_set_channel(canvas.as_ptr(), 0, source) },
-                None => unsafe { sys::obs_set_output_source(0, source) },
+            if let Some(tr) = self.transitions.get(&format) {
+                unsafe { sys::obs_transition_set(tr.as_ptr(), self.dest(program, format)) };
+            }
+        }
+    }
+
+    fn set_program(&mut self, program: Option<Id>, project: &Project) {
+        let previous = self.program;
+        self.finish_move();
+        let kind = match (previous, program) {
+            (Some(a), Some(b)) if a != b => self.transition_settings.kind,
+            _ => TransitionKind::Cut,
+        };
+        let ms = self.transition_settings.duration_ms;
+        match kind {
+            TransitionKind::Cut => self.land(program),
+            TransitionKind::Fade => {
+                for format in self.formats.clone() {
+                    if let Some(tr) = self.transitions.get(&format) {
+                        unsafe {
+                            sys::obs_transition_start(
+                                tr.as_ptr(),
+                                sys::OBS_TRANSITION_MODE_AUTO,
+                                ms,
+                                self.dest(program, format),
+                            )
+                        };
+                    }
+                }
+            }
+            TransitionKind::Move => {
+                let (Some(a), Some(b)) = (previous, program) else { unreachable!() };
+                if !self.start_move(a, b, project) {
+                    self.land(program);
+                }
             }
         }
         self.program = program;
+    }
+
+    /// Builds the temporary scenes for a Move from `a` to `b` and starts the animation.
+    fn start_move(&mut self, a: Id, b: Id, project: &Project) -> bool {
+        let (Some(scene_a), Some(scene_b)) = (project.scene(a), project.scene(b)) else { return false };
+        let ms = self.transition_settings.duration_ms;
+        let mut formats = Vec::new();
+        for format in self.formats.clone() {
+            let (Some(tr), dest) = (self.transitions.get(&format), self.dest(Some(b), format)) else { continue };
+            let name = format!("move:{format}:{}", Id::new());
+            let temp = match self.canvases.get(&format) {
+                Some(canvas) => canvas.create_scene(&name),
+                None => Scene::create(&name),
+            };
+            let Some(temp) = temp else { continue };
+            let mut tweens = Vec::new();
+            let mut fades = Vec::new();
+            // Which of A's layers continue into B.
+            let mut used: Vec<Id> = Vec::new();
+            let matches: Vec<Option<Layer>> = scene_b
+                .layers
+                .iter()
+                .map(|l| {
+                    let m = match_layer(scene_a, l).filter(|m| !used.contains(&m.id)).cloned();
+                    if let Some(m) = &m {
+                        used.push(m.id);
+                    }
+                    m
+                })
+                .collect();
+            // Layers leaving: at the bottom, fading out.
+            for l in scene_a.layers.iter().filter(|l| !used.contains(&l.id)) {
+                let (Some(lo), Some(input)) = (l.layouts.get(&format), self.inputs.get(&l.input)) else { continue };
+                if !lo.visible {
+                    continue;
+                }
+                let item = temp.add(input);
+                if item.is_null() {
+                    continue;
+                }
+                unsafe { apply_layout(item, lo) };
+                item_fade(item, false, ms, &mut fades);
+                unsafe {
+                    sys::obs_sceneitem_set_visible(item, false);
+                }
+            }
+            // B's layers: gliding from A's layout when they continue, fading in otherwise.
+            for (l, m) in scene_b.layers.iter().zip(&matches) {
+                let (Some(to), Some(input)) = (l.layouts.get(&format), self.inputs.get(&l.input)) else { continue };
+                if !to.visible {
+                    continue;
+                }
+                let item = temp.add(input);
+                if item.is_null() {
+                    continue;
+                }
+                match m.as_ref().and_then(|m| m.layouts.get(&format)).filter(|f| f.visible) {
+                    Some(from) => {
+                        unsafe { apply_layout(item, from) };
+                        tweens.push(Tween { item, from: *from, to: *to });
+                    }
+                    None => unsafe {
+                        apply_layout(item, to);
+                        sys::obs_sceneitem_set_visible(item, false);
+                        item_fade(item, true, ms, &mut fades);
+                        sys::obs_sceneitem_set_visible(item, true);
+                    },
+                }
+            }
+            unsafe { sys::obs_transition_set(tr.as_ptr(), temp.source_ptr()) };
+            formats.push(FormatMove { temp, tweens, transition: tr.as_ptr(), dest, fades });
+        }
+        if formats.is_empty() {
+            return false;
+        }
+        self.ensure_tick();
+        *self.anim.lock() =
+            Some(MoveAnim { formats, start: std::time::Instant::now(), duration: ms as f32 / 1000.0, done: false });
+        true
+    }
+
+    fn ensure_tick(&mut self) {
+        if !self.tick_registered {
+            unsafe { sys::obs_add_tick_callback(Some(on_tick), Arc::as_ptr(&self.anim) as *mut _) };
+            self.tick_registered = true;
+        }
+    }
+
+    /// Lands a running Move on its destination immediately.
+    fn finish_move(&mut self) {
+        if let Some(anim) = self.anim.lock().as_mut() {
+            anim.finish();
+        }
+        self.cleanup();
+    }
+
+    /// Releases a finished Move's temporary scenes (engine thread).
+    pub fn cleanup(&mut self) {
+        let mut guard = self.anim.lock();
+        if guard.as_ref().is_some_and(|a| a.done) {
+            guard.take();
+        }
     }
 
     fn add_layer(&mut self, scene: Id, format: Id, layer: &Layer, index: usize) {
@@ -365,6 +525,41 @@ impl Reconciler {
         meters().remove(id);
     }
 
+    /// Items of what a format's canvas is showing right now (through its transition), as
+    /// "name x y" lines with positions of the item centres. For tests and diagnostics.
+    pub fn describe_on_air(&self, format: Id) -> Vec<String> {
+        unsafe extern "C" fn each(
+            _: *mut sys::obs_scene_t,
+            item: *mut sys::obs_sceneitem_t,
+            param: *mut std::ffi::c_void,
+        ) -> bool {
+            let out = unsafe { &mut *(param as *mut Vec<String>) };
+            unsafe {
+                let src = sys::obs_sceneitem_get_source(item);
+                let name = std::ffi::CStr::from_ptr(sys::obs_source_get_name(src)).to_string_lossy().into_owned();
+                let mut pos = vec2(0.0, 0.0);
+                sys::obs_sceneitem_get_pos(item, &mut pos);
+                let p = pos.__bindgen_anon_1.__bindgen_anon_1;
+                out.push(format!("{name} {:.0} {:.0}", p.x, p.y));
+            }
+            true
+        }
+        let mut out = Vec::new();
+        let Some(tr) = self.transitions.get(&format) else { return out };
+        unsafe {
+            let active = sys::obs_transition_get_active_source(tr.as_ptr());
+            if active.is_null() {
+                return out;
+            }
+            let scene = sys::obs_scene_from_source(active);
+            if !scene.is_null() {
+                sys::obs_scene_enum_items(scene, Some(each), &mut out as *mut _ as *mut _);
+            }
+            sys::obs_source_release(active);
+        }
+        out
+    }
+
     /// Number of live libobs objects (tests and diagnostics).
     pub fn counts(&self) -> (usize, usize, usize) {
         (self.inputs.len(), self.scenes.len(), self.items.len())
@@ -372,6 +567,11 @@ impl Reconciler {
 
     /// Releases everything in dependency order (scenes before the inputs they use).
     pub fn clear(&mut self) {
+        self.finish_move();
+        if self.tick_registered {
+            unsafe { sys::obs_remove_tick_callback(Some(on_tick), Arc::as_ptr(&self.anim) as *mut _) };
+            self.tick_registered = false;
+        }
         let ids: Vec<Id> = self.tracks.keys().copied().collect();
         for id in ids {
             self.remove_track(id);
@@ -380,6 +580,7 @@ impl Reconciler {
         for canvas in self.canvases.values() {
             unsafe { sys::obs_canvas_set_channel(canvas.as_ptr(), 0, std::ptr::null_mut()) };
         }
+        self.transitions.clear();
         self.items.clear();
         self.scenes.clear();
         self.canvases.clear();
@@ -389,7 +590,7 @@ impl Reconciler {
     }
 }
 
-unsafe fn apply_layout(item: *mut sys::obs_sceneitem_t, l: &Layout) {
+pub(crate) unsafe fn apply_layout(item: *mut sys::obs_sceneitem_t, l: &Layout) {
     unsafe {
         // Centre alignment: position is the box centre, and rotation turns around it.
         sys::obs_sceneitem_set_alignment(item, sys::OBS_ALIGN_CENTER);
@@ -448,6 +649,17 @@ unsafe fn build_filters(src: *mut sys::obs_source_t, state: &mut TrackState, eff
 unsafe fn remove_filters(src: *mut sys::obs_source_t, state: &mut TrackState) {
     for (_, filter) in state.filters.drain(..) {
         unsafe { sys::obs_source_filter_remove(src, filter.as_ptr()) };
+    }
+}
+
+/// libobs tick (video thread): advance a running Move. Never blocks: if the engine thread holds
+/// the lock, this frame is skipped.
+unsafe extern "C" fn on_tick(param: *mut std::ffi::c_void, _seconds: f32) {
+    let anim = unsafe { &*(param as *const Mutex<Option<MoveAnim>>) };
+    if let Some(mut guard) = anim.try_lock()
+        && let Some(a) = guard.as_mut()
+    {
+        a.step();
     }
 }
 

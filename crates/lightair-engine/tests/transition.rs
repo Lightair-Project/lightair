@@ -1,0 +1,60 @@
+//! The Move transition: a matching layer glides from its layout in scene A to its layout in
+//! scene B, then the canvas lands on B.
+
+use std::time::Duration;
+
+use lightair_core::{
+    Command, Document, Input, Layer, Layout, Project, Scene, TransitionKind, TransitionSettings, diff,
+};
+use lightair_engine::{Engine, EngineConfig};
+use serde_json::json;
+
+#[test]
+fn move_glides_matching_layers_then_lands() {
+    let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+    let engine =
+        Engine::start(EngineConfig { canvas: (1280, 720), output: (1280, 720), ..Default::default() }).unwrap();
+    let mut doc = Document::new(Project::new("Move"));
+    let format = doc.project().primary_format().id;
+    let cam = Input::new("Cam", "color_source_v3", json!({"color": 0xFFFFFFFFu32, "width": 400, "height": 400}));
+    let cam_id = cam.id;
+    let mut a = Scene::new("A");
+    a.layers.push(Layer::new("Cam", cam_id, [(format, Layout::boxed(0.0, 0.0, 200.0, 200.0))]));
+    let mut b = Scene::new("B");
+    b.layers.push(Layer::new("Cam", cam_id, [(format, Layout::boxed(1000.0, 400.0, 200.0, 200.0))]));
+    let (a_id, b_id) = (a.id, b.id);
+    let apply = |doc: &mut Document, cmd: Command| {
+        let change = doc.apply(&cmd).unwrap();
+        let patches = diff(&change.before, &change.after);
+        let project = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&project, &patches));
+    };
+    apply(&mut doc, Command::AddInput { input: cam });
+    apply(&mut doc, Command::AddScene { scene: a, index: None });
+    apply(&mut doc, Command::AddScene { scene: b, index: None });
+    apply(
+        &mut doc,
+        Command::SetTransition { settings: TransitionSettings { kind: TransitionKind::Move, duration_ms: 800 } },
+    );
+    assert_eq!(doc.project().program, Some(a_id));
+    let on_air = engine.call(move |s| s.reconciler.describe_on_air(format));
+    assert_eq!(on_air.len(), 1, "{on_air:?}");
+    assert!(on_air[0].ends_with(" 100 100"), "A: item centred at (100,100): {on_air:?}");
+
+    apply(&mut doc, Command::SetProgram { scene: Some(b_id) });
+    std::thread::sleep(Duration::from_millis(400));
+    let mid = engine.call(move |s| s.reconciler.describe_on_air(format));
+    let xy: Vec<f32> = mid[0].split(' ').skip(1).map(|v| v.parse().unwrap()).collect();
+    eprintln!("halfway: {mid:?}");
+    assert!(xy[0] > 150.0 && xy[0] < 1050.0, "x between A and B mid-move: {mid:?}");
+    assert!(xy[1] > 110.0 && xy[1] < 490.0, "y between A and B mid-move: {mid:?}");
+
+    std::thread::sleep(Duration::from_millis(700));
+    let end = engine.call(move |s| {
+        s.reconciler.cleanup();
+        s.reconciler.describe_on_air(format)
+    });
+    eprintln!("landed: {end:?}");
+    assert!(end[0].ends_with(" 1100 500"), "lands on B's layout: {end:?}");
+    drop(engine);
+}
