@@ -418,6 +418,25 @@ impl StudioWindow {
         .detach();
     }
 
+    /// Imports an OBS scene collection (OBS keeps them in
+    /// ~/Library/Application Support/obs-studio/basic/scenes) as one undo step.
+    fn import_obs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path): Option<PathBuf> = paths.into_iter().next() else { return };
+            let _ = this.update(cx, |this, cx| {
+                this.studio.update(cx, |s, cx| s.import_obs(&path, cx));
+            });
+        })
+        .detach();
+    }
+
     fn add_scene(&mut self, cx: &mut Context<Self>) {
         let n = self.studio.read(cx).project().scenes.len() + 1;
         let scene = Scene::new(format!("Scene {n}"));
@@ -822,6 +841,10 @@ impl StudioWindow {
         let add = ui::icon_button("add-scene", "plus", tok::text_secondary())
             .tooltip(|w, cx| Tooltip::new("Add scene").build(w, cx))
             .on_click(cx.listener(|this, _, _, cx| this.add_scene(cx)));
+        let import = ui::icon_button("import-obs", "import", tok::text_secondary())
+            .tooltip(|w, cx| Tooltip::new("Import OBS scenes…").build(w, cx))
+            .on_click(cx.listener(|this, _, window, cx| this.import_obs(window, cx)));
+        let actions = div().flex().gap_1().child(import).child(add);
         let rows = project.scenes.iter().enumerate().map(|(i, scene)| {
             let id = scene.id;
             let on_air = program == Some(id);
@@ -871,7 +894,7 @@ impl StudioWindow {
             .flex()
             .flex_col()
             .h(px(280.))
-            .child(ui::panel_header("Scenes", Some(add.into_any_element())))
+            .child(ui::panel_header("Scenes", Some(actions.into_any_element())))
             .child(picker)
             .child(div().id("scenes-scroll").flex().flex_col().gap_0p5().overflow_y_scroll().children(rows))
     }

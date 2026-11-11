@@ -3553,6 +3553,7 @@ dependencies = [
  "libc",
  "libobs-sys",
  "lightair-core",
+ "lightair-store",
  "parking_lot",
  "serde_json",
  "thiserror 2.0.21",

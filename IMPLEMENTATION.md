@@ -103,8 +103,15 @@ Text, shapes, counters/timers, browser layer (CEF), media, phone camera, NDI, sc
 ## M11 · Audience & control
 Platform sign-in, stream manager, unified chat, activity, alerts, widgets, captions, hotkeys, Stream Deck, MIDI/OSC, remote API ([12](docs/12-chat-alerts-integrations.md)).
 
-## M12 · Compatibility & import
+## M12 · Compatibility & import 🔨
 OBS plugin classifier, frontend API shim, custom browser docks, Qt runtime, OBS scene collection import ([13](docs/13-extensibility-and-compatibility.md), [14](docs/14-data-persistence-settings.md#importing-from-obs)).
+
+Done:
+- OBS scene collection import (`lightair_store::import_obs_collection`): sources become inputs of the same libobs type and settings, filters become input effects, items become layers (alignment point + scale/bounds → box, crop, visibility, lock), global and in-scene audio sources become mixer tracks (volume in dB, mute, monitoring → cue), transition and program scene carry over, scene names stay unique. Dewy becomes Camera Studio with its settings. One undo step, with a report: converted, replaced by built-in features, kept as plugins, needs attention. "Import OBS scenes…" button in the Scenes header. Dry run: `cargo run -p lightair-store --example obs_import_report -- <collection.json>`.
+
+Remaining:
+- Import: nested scenes and groups, refine estimated layer sizes from live source dimensions after import, per-scene audio once scene tracks exist, importing OBS profiles (outputs, encoders, stream service).
+- Plugin classifier, frontend API shim, custom browser docks, Qt runtime.
 
 ## M13 · Engine from source & distribution 🔨
 Done:
