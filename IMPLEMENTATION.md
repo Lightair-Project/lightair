@@ -34,12 +34,13 @@ Done:
 - Add layer: display, image (file picker), text, colour. Add scene. Layer visibility and lock.
 - Inspector: position, size, rotation steppers; fit mode; fill canvas; delete.
 - Rename layers and scenes inline (double-click, or Enter on the selection; Enter or clicking away commits); drag rows to reorder layers and scenes.
+- Rotation handle above the selection (⇧ snaps to 15°) and crop by ⌥-dragging a corner (the picture keeps its scale; Reset crop in the Inspector).
 - Command palette (⌘K): fuzzy search over scenes and actions (Take, Studio mode, record, go live, clip, add layers and scenes, add vertical, import, transitions, undo/redo); ↑↓ ↩ Esc.
 
 Remaining:
 - `lightair-ui` crate with the studio components (scrubbable fields, `LayerRow`, `SceneCard`, `FormatTabs`).
 - gpui-kit dock layout (resize, collapse, pop-out, workspaces).
-- Groups, multi-select, rotation and crop handles, rulers and guides.
+- Groups, multi-select, rotated selection outlines and hit-testing, rulers and guides.
 - Onboarding, settings window.
 
 ## M5 · Audio 🔨
