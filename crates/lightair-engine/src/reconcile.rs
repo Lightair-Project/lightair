@@ -220,6 +220,11 @@ impl Reconciler {
     }
 
     /// The canvas behind a format, as a new strong reference (for previews).
+    /// The libobs source of an input (borrowed; valid while the input exists).
+    pub(crate) fn input_ptr(&self, input: Id) -> Option<*mut sys::obs_source_t> {
+        self.inputs.get(&input).map(|s| s.as_ptr())
+    }
+
     /// The libobs scene source for a document scene in a format, if it exists.
     pub fn scene_source(&self, scene: Id, format: Id) -> Option<*mut sys::obs_source_t> {
         self.scenes.get(&(scene, format)).map(|s| s.source_ptr())

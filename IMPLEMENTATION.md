@@ -99,8 +99,15 @@ Remaining:
 - Background blur/remove/replace, auto-frame, multi-face (new features beyond Dewy).
 - Verify with a live camera (needs the macOS camera permission for Lightair).
 
-## M10 · Layers & creator features
+## M10 · Layers & creator features 🔨
 Text, shapes, counters/timers, browser layer (CEF), media, phone camera, NDI, screen draw, templates, automations ([07](docs/07-scenes-layers-canvas.md)).
+
+Done:
+- Video layer (`ffmpeg_source`, loops and restarts when its scene goes on air) with transport in the Inspector: play/pause, restart, loop, position and duration. Transport is runtime state through the engine (`media_status`, `media_action`); a test plays, pauses, seeks and restarts a file.
+- Inspector content sections: text (content, size, colour swatches) and colour layers; edits are undoable input-settings changes.
+
+Remaining:
+- Rich text styling (fonts, outline, shadow, background), shapes, counters/timers, browser layer (CEF), phone camera, NDI, screen draw, templates, automations; playlists and media scrubbing.
 
 ## M11 · Audience & control
 Platform sign-in, stream manager, unified chat, activity, alerts, widgets, captions, hotkeys, Stream Deck, MIDI/OSC, remote API ([12](docs/12-chat-alerts-integrations.md)).

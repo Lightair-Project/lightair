@@ -17,6 +17,8 @@ use lightair_core::{
 use lightair_preview::Preview;
 use serde_json::json;
 
+mod layer_props;
+
 use crate::mixer::MixerPanel;
 use crate::outputs_panel::{OutputsPanel, elapsed};
 use crate::rows::{DraggedRow, Renaming, RowTarget};
@@ -87,6 +89,8 @@ pub struct StudioWindow {
     /// monitor shows Program, and Take puts the selected scene on air.
     studio_mode: bool,
     program_monitor: Option<Preview>,
+    /// Inspector content sections (text field, media status).
+    props: layer_props::LayerProps,
 }
 
 const HANDLE: f32 = 10.0;
@@ -121,6 +125,7 @@ impl StudioWindow {
             renaming: None,
             studio_mode: false,
             program_monitor: None,
+            props: Default::default(),
         }
     }
 
@@ -544,6 +549,27 @@ impl StudioWindow {
         .detach();
     }
 
+    /// A video file layer: plays when its scene goes on air, loops by default.
+    fn add_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_menu = false;
+        let paths =
+            cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path): Option<PathBuf> = paths.into_iter().next() else { return };
+            let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Video".into());
+            let settings = json!({
+                "local_file": path.to_string_lossy(),
+                "is_local_file": true,
+                "looping": true,
+                "restart_on_activate": true,
+            });
+            let _ = this
+                .update(cx, |this, cx| this.add_input_layer(&name, "ffmpeg_source", settings, (1920.0, 1080.0), cx));
+        })
+        .detach();
+    }
+
     /// Imports an OBS scene collection (OBS keeps them in
     /// ~/Library/Application Support/obs-studio/basic/scenes) as one undo step.
     fn import_obs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -581,6 +607,7 @@ impl Render for StudioWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.request_animation_frame();
         self.sync_previews(cx);
+        self.sync_layer_props(window, cx);
         let studio = self.studio.read(cx);
         let project = studio.project().clone();
 
@@ -888,6 +915,7 @@ impl StudioWindow {
             })))
             .children(cameras)
             .child(item("add-image", "image", "Image…").on_click(cx.listener(|this, _, window, cx| this.add_image(window, cx))))
+            .child(item("add-video", "clapperboard", "Video…").on_click(cx.listener(|this, _, window, cx| this.add_video(window, cx))))
             .child(item("add-text", "type", "Text").on_click(cx.listener(|this, _, _, cx| {
                 this.add_input_layer(
                     "Text",
@@ -1445,6 +1473,7 @@ impl StudioWindow {
                             move |this, _, _, cx| this.exec(Command::RemoveLayer { scene: sid, layer: lid }, cx),
                         ))),
                 )
+                .children(project.inputs.get(&layer.input).and_then(|input| self.content_section(input, cx)))
                 .children(camera_studio)
                 .into_any_element()
             }
