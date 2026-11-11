@@ -11,7 +11,9 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Fit, Format, Id, Input, Layer, Layout, Project, Scene};
+use lightair_core::{
+    Command, Fit, Format, Id, Input, Layer, Layout, Project, Scene, TransitionKind, TransitionSettings,
+};
 use lightair_preview::Preview;
 use serde_json::json;
 
@@ -700,7 +702,73 @@ impl StudioWindow {
             })))
     }
 
+    fn transition_picker(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = project.transition;
+        let seg = |id: &'static str, label: &'static str, kind: TransitionKind| {
+            let active = current.kind == kind;
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(px(22.))
+                .px_2()
+                .rounded(px(4.))
+                .text_size(px(11.))
+                .cursor_pointer()
+                .when(active, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                .when(!active, |d| d.text_color(tok::text_secondary()))
+                .hover(|d| d.bg(tok::bg_raised()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.exec(Command::SetTransition { settings: TransitionSettings { kind, ..current } }, cx)
+                }))
+                .child(label)
+        };
+        let next_ms = match current.duration_ms {
+            0..=300 => 500,
+            301..=500 => 800,
+            501..=800 => 1200,
+            _ => 300,
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_3()
+            .pb_2()
+            .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).mr_1().child("Transition"))
+            .child(seg("tr-cut", "Cut", TransitionKind::Cut))
+            .child(seg("tr-fade", "Fade", TransitionKind::Fade))
+            .child(seg("tr-move", "Move", TransitionKind::Move))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("tr-duration")
+                    .px_1p5()
+                    .h(px(22.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(tok::border_strong())
+                    .text_size(px(11.))
+                    .font_family("Menlo")
+                    .text_color(tok::text_secondary())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(tok::bg_raised()))
+                    .when(current.kind == TransitionKind::Cut, |d| d.opacity(0.4))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.exec(
+                            Command::SetTransition { settings: TransitionSettings { duration_ms: next_ms, ..current } },
+                            cx,
+                        )
+                    }))
+                    .child(format!("{} ms", current.duration_ms)),
+            )
+    }
+
     fn scenes_panel(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        let picker = self.transition_picker(project, cx).into_any_element();
         let studio = self.studio.read(cx);
         let selected = studio.selected_scene;
         let program = project.program;
@@ -757,6 +825,7 @@ impl StudioWindow {
             .flex_col()
             .h(px(280.))
             .child(ui::panel_header("Scenes", Some(add.into_any_element())))
+            .child(picker)
             .child(div().id("scenes-scroll").flex().flex_col().gap_0p5().overflow_y_scroll().children(rows))
     }
 

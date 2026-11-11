@@ -12,6 +12,7 @@ pub mod obs;
 pub mod outputs;
 mod reconcile;
 mod runtime;
+mod transition;
 
 pub use engine::{Capabilities, Engine, EngineConfig, EngineError, EngineState, Graphics, Modules, Stats, read_stats};
 pub use libobs_sys as sys;

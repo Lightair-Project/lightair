@@ -74,8 +74,15 @@ Done:
 Remaining:
 - Per-format visibility toggle in the UI, copy layout from another format, safe-area overlays, square and custom formats, smarter reframe (face-aware with Camera Studio), Twitch Dual Format.
 
-## M8 · Effects & transitions
-`lightair-video-fx` module: effect catalog, presets; Move/Morph/Stinger/Wipe transitions; studio mode ([08](docs/08-video-effects.md), [07](docs/07-scenes-layers-canvas.md#transitions)).
+## M8 · Effects & transitions 🔨
+Done:
+- Transition settings in the document (Cut, Fade, Move; duration). Every format's output channel goes through its own libobs transition.
+- Move: a temporary scene per format where layers that continue (same input, then same name) glide from A's layout to B's with easing, driven by a libobs tick callback; entering layers fade in, leaving layers fade out; the canvas then lands on B. A test samples the glide halfway and checks the landing.
+- Transition picker (Cut / Fade / Move, duration) under Scenes.
+
+Remaining:
+- Morph, Stinger (track mattes), wipes, slide; per-scene and per-pair overrides; per-format transitions; studio mode (preview/program, Take).
+- `lightair-video-fx` effect catalog with the effect stack UI and presets; masks; layer animations.
 
 ## M9 · Camera Studio
 Port the Dewy pipeline into `lightair-camera-fx` and the native Camera Studio panel ([09](docs/09-camera-studio.md)).

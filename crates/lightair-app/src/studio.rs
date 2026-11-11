@@ -245,7 +245,10 @@ impl Studio {
     }
 
     pub fn refresh_stats(&mut self) {
-        self.engine.post(|s| s.outputs.sample());
+        self.engine.post(|s| {
+            s.outputs.sample();
+            s.reconciler.cleanup();
+        });
         self.check_outputs();
         let stats = lightair_engine::read_stats();
         self.recent_lagged = stats.lagged_frames.saturating_sub(self.stats.lagged_frames);
