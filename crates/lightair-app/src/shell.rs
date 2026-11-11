@@ -77,6 +77,8 @@ pub struct StudioWindow {
     drag: Option<Drag>,
     guides: Guides,
     add_menu: bool,
+    /// Camera devices (label, id), refreshed when the Add Layer menu opens.
+    camera_devices: Vec<(String, String)>,
 }
 
 const HANDLE: f32 = 10.0;
@@ -103,10 +105,11 @@ impl StudioWindow {
             drag: None,
             guides: vec![],
             add_menu: false,
+            camera_devices: vec![],
         }
     }
 
-    fn exec(&self, cmd: Command, cx: &mut Context<Self>) {
+    pub(crate) fn exec(&self, cmd: Command, cx: &mut Context<Self>) {
         self.studio.update(cx, |s, cx| {
             let _ = s.execute(cmd, cx);
         });
@@ -389,6 +392,17 @@ impl StudioWindow {
         self.select_layer(Some(layer_id), cx);
     }
 
+    /// A camera layer; the input gets Camera Studio (off until a look is chosen).
+    fn add_camera(&mut self, label: &str, uid: &str, cx: &mut Context<Self>) {
+        self.add_input_layer(label, "macos-avcapture", json!({"device": uid}), (1280.0, 720.0), cx);
+        let project = self.studio.read(cx).project().clone();
+        if let Some(input) = project.inputs.values().find(|i| i.settings["device"] == uid && i.effects.is_empty())
+            && let Some(cmd) = crate::camera_studio::ensure_effect(input)
+        {
+            self.exec(cmd, cx);
+        }
+    }
+
     fn add_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.add_menu = false;
         let paths =
@@ -579,6 +593,15 @@ impl StudioWindow {
             .tooltip(|w, cx| Tooltip::new("Add layer").build(w, cx))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.add_menu = !this.add_menu;
+                // OBS 33's camera source can't list devices without an instance; the legacy source
+                // lists the same AVFoundation device ids.
+                if this.add_menu {
+                    this.camera_devices = this
+                        .studio
+                        .read(cx)
+                        .engine()
+                        .call(|_| lightair_engine::obs::property_items("av_capture_input_v2", "device"));
+                }
                 cx.notify();
             }));
         let mut col =
@@ -669,6 +692,27 @@ impl StudioWindow {
                 .child(ui::icon(icon).size(px(14.)).text_color(tok::text_secondary()))
                 .child(label)
         };
+        let mut cameras = Vec::new();
+        for (i, (label, uid)) in self.camera_devices.iter().enumerate() {
+            let (label, uid) = (label.clone(), uid.clone());
+            cameras.push(
+                div()
+                    .id(("add-camera", i))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(30.))
+                    .px_2()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(tok::bg_selected()))
+                    .child(ui::icon("camera").size(px(14.)).text_color(tok::text_secondary()))
+                    .child(label.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.add_camera(&label, &uid, cx);
+                    })),
+            );
+        }
         let display_settings = {
             let mut v = json!({"type": 0, "show_cursor": true, "hide_obs": true});
             if let Some(uuid) = lightair_engine::displays::main_display_uuid() {
@@ -687,6 +731,7 @@ impl StudioWindow {
             .child(item("add-display", "monitor", "Display").on_click(cx.listener(move |this, _, _, cx| {
                 this.add_input_layer("Display", "screen_capture", display_settings.clone(), (1280.0, 720.0), cx)
             })))
+            .children(cameras)
             .child(item("add-image", "image", "Image…").on_click(cx.listener(|this, _, window, cx| this.add_image(window, cx))))
             .child(item("add-text", "type", "Text").on_click(cx.listener(|this, _, _, cx| {
                 this.add_input_layer(
@@ -1029,6 +1074,21 @@ impl StudioWindow {
                 let lo = layer.layouts.get(&format.id).copied().unwrap_or(Layout::boxed(0., 0., 100., 100.));
                 let (sid, lid, fid) = (scene.id, layer.id, format.id);
                 let kind = project.inputs.get(&layer.input).map(|i| i.kind.clone()).unwrap_or_default();
+                let camera_studio: Option<AnyElement> = project.inputs.get(&layer.input).and_then(|input| {
+                    self.camera_studio_section(input, cx).or_else(|| {
+                        let cmd = crate::camera_studio::is_camera(&input.kind)
+                            .then(|| crate::camera_studio::ensure_effect(input))
+                            .flatten()?;
+                        Some(
+                            Button::new("add-camera-studio")
+                                .label("Add Camera Studio")
+                                .small()
+                                .outline()
+                                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)))
+                                .into_any_element(),
+                        )
+                    })
+                });
                 let set = move |f: fn(&mut Layout)| {
                     let mut l = lo;
                     f(&mut l);
@@ -1129,6 +1189,7 @@ impl StudioWindow {
                             move |this, _, _, cx| this.exec(Command::RemoveLayer { scene: sid, layer: lid }, cx),
                         ))),
                 )
+                .children(camera_studio)
                 .into_any_element()
             }
             (Some(scene), None) => body
@@ -1149,7 +1210,13 @@ impl StudioWindow {
                 .into_any_element(),
             _ => body.child(div().text_color(tok::text_tertiary()).child("Nothing selected")).into_any_element(),
         };
-        div().flex().flex_col().flex_1().min_h_0().child(ui::panel_header("Inspector", None)).child(content)
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(ui::panel_header("Inspector", None))
+            .child(div().id("inspector-scroll").flex_1().min_h_0().pb_3().overflow_y_scroll().child(content))
     }
 
     fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {

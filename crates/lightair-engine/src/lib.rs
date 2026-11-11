@@ -27,6 +27,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "coreaudio-encoder",
     "decklink",
     "image-source",
+    "lightair-camera-fx",
     "mac-avcapture",
     "mac-avcapture-legacy",
     "mac-capture",

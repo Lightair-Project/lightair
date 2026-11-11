@@ -1,5 +1,6 @@
 //! Lightair application entry point.
 
+mod camera_studio;
 mod mixer;
 mod outputs_panel;
 mod reframe;
@@ -39,8 +40,13 @@ fn main() {
         .unwrap_or((1920, 1080));
 
     let engine = Arc::new(
-        Engine::start(EngineConfig { canvas, output: canvas, ..Default::default() })
-            .unwrap_or_else(|e| panic!("could not start the engine: {e}")),
+        Engine::start(EngineConfig {
+            canvas,
+            output: canvas,
+            extra_plugin_dirs: camera_studio::plugin_dir().into_iter().collect(),
+            ..Default::default()
+        })
+        .unwrap_or_else(|e| panic!("could not start the engine: {e}")),
     );
     tracing::info!(version = engine.version, project = %project_dir.display(), "libobs started");
     let preview = Preview::attach();
