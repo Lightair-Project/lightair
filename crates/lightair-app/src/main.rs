@@ -73,6 +73,7 @@ fn main() {
                 ticks += 1;
                 let alive = ticker.update(cx, |s, cx| {
                     s.refresh_stats();
+                    s.refit_imported(cx);
                     s.flush();
                     if ticks.is_multiple_of(60) {
                         s.compact();
