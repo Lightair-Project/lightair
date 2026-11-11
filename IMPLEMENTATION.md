@@ -52,8 +52,17 @@ Remaining:
 - Mixes and routing (Stream, Recording n, Cue, VOD), master chains, LUFS meters.
 - Scene tracks, per-scene volume (link/unlink), folders, channel remap, sync offset and auto-sync, VST3/AU host, hardware mixer integrations.
 
-## M6 · Outputs
-Recording, streaming (RTMP/RTMPS/SRT/WHIP), multistream with encoder sharing, Go Live review, clips/replay, virtual camera ([11](docs/11-outputs-streaming-recording.md)).
+## M6 · Outputs 🔨
+Done:
+- Engine output manager: recording (hybrid MP4, MKV, MOV) and RTMP(S) streaming, each with its own encoders; Apple hardware H.264 picked automatically. libobs output signals drive a runtime status table (starting, active, reconnecting, stopping, failed with a plain-language reason).
+- End-to-end test, verified with ffprobe: a recording has H.264 + AAC of the right length, and a stream reaches a local ffmpeg RTMP server.
+- Output settings and destinations in the document (`outputs.json`); stream keys only in the Keychain.
+- UI: Record with live timer, Go live for every enabled destination, LIVE badge and live canvas border, two-click End stream, Outputs panel with recording status, destination rows (toggle, status, remove) and an add-destination form.
+
+Remaining:
+- Encoder sharing between destinations with identical settings; per-destination formats and bitrates.
+- Go Live review sheet, stream manager (titles, categories), platform sign-in (with M11).
+- Clips (replay buffer) and the clip library, virtual camera, NDI, SRT/WHIP, ISO and multitrack recording, pause/split, markers, test recording.
 
 ## M7 · Formats
 Vertical and custom canvases (`obs_canvas_*`), per-format layouts, side-by-side editing, per-format outputs ([07](docs/07-scenes-layers-canvas.md#formats)).

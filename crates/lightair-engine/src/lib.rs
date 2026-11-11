@@ -9,6 +9,7 @@ mod engine;
 mod log;
 pub mod meters;
 pub mod obs;
+pub mod outputs;
 mod reconcile;
 mod runtime;
 

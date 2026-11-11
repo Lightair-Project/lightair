@@ -101,6 +101,8 @@ pub struct EngineState {
     pub scenes: HashMap<String, Scene>,
     /// libobs objects mirroring the Lightair document.
     pub reconciler: crate::Reconciler,
+    /// Running recordings and streams.
+    pub outputs: crate::outputs::Outputs,
 }
 
 impl EngineState {
@@ -364,7 +366,8 @@ unsafe fn shutdown(state: EngineState) {
     // destruction thread; shutting down before that queue drains crashes inside scene_destroy.
     // The render thread can hold a scene for one more frame after its channel is cleared, so
     // let a few frames pass and keep draining until nothing is left to destroy.
-    let EngineState { sources, scenes, mut reconciler } = state;
+    let EngineState { sources, scenes, mut reconciler, mut outputs } = state;
+    outputs.shutdown();
     reconciler.clear();
     drop(scenes);
     drop(sources);

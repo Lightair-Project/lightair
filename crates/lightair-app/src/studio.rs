@@ -9,6 +9,9 @@ use std::sync::Arc;
 
 use gpui_kit::{Context, SharedString};
 use lightair_core::{Command, CommandError, Document, Id, Project, diff};
+use lightair_engine::outputs::{
+    Container, OutputKey, OutputState, RecordingConfig, StreamConfig, default_encoders, runtime,
+};
 use lightair_engine::{Engine, Stats};
 use lightair_store::Package;
 
@@ -128,7 +131,114 @@ impl Studio {
         }
     }
 
+    // ------------------------------------------------------------ outputs
+    pub fn recording_folder(&self) -> PathBuf {
+        self.project()
+            .outputs
+            .recording
+            .folder
+            .clone()
+            .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("Movies/Lightair"))
+    }
+
+    pub fn is_recording(&self) -> bool {
+        runtime().get(OutputKey::Recording).state.is_running()
+    }
+
+    pub fn toggle_recording(&mut self, cx: &mut Context<Self>) {
+        if self.is_recording() {
+            self.engine.post(|s| s.outputs.stop_recording());
+            return;
+        }
+        let settings = self.project().outputs.recording.clone();
+        let container = match settings.container.as_str() {
+            "mkv" => Container::Mkv,
+            "mov" => Container::Mov,
+            _ => Container::HybridMp4,
+        };
+        let name = format!("Lightair {}.{}", chrono::Local::now().format("%Y-%m-%d %H-%M-%S"), container.extension());
+        let cfg = RecordingConfig {
+            path: self.recording_folder().join(name),
+            container,
+            encoders: default_encoders(&self.engine.capabilities.encoders, settings.bitrate_kbps, false),
+        };
+        // Make the journal durable before outputs start (docs/14, "Saving, autosave & recovery").
+        self.flush();
+        self.engine.post(move |s| {
+            if let Err(e) = s.outputs.start_recording(&cfg) {
+                tracing::error!(%e, "recording failed to start");
+            }
+        });
+        cx.notify();
+    }
+
+    /// Starts every enabled destination.
+    pub fn go_live(&mut self, cx: &mut Context<Self>) {
+        let project = self.project().clone();
+        let enabled: Vec<_> = project.outputs.destinations.iter().filter(|d| d.enabled).cloned().collect();
+        if enabled.is_empty() {
+            self.issue = Some("Add a destination in Outputs to go live.".into());
+            cx.notify();
+            return;
+        }
+        self.flush();
+        for d in enabled {
+            let Some(key) = crate::secrets::stream_key(d.id) else {
+                self.issue = Some(format!("No stream key saved for {}.", d.name).into());
+                continue;
+            };
+            let cfg = StreamConfig {
+                id: d.id,
+                server: d.server.clone(),
+                key,
+                encoders: default_encoders(
+                    &self.engine.capabilities.encoders,
+                    project.outputs.stream_bitrate_kbps,
+                    true,
+                ),
+            };
+            self.engine.post(move |s| {
+                if let Err(e) = s.outputs.start_stream(&cfg) {
+                    tracing::error!(%e, "stream failed to start");
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    pub fn end_stream(&mut self, cx: &mut Context<Self>) {
+        self.engine.post(|s| s.outputs.stop_all_streams());
+        cx.notify();
+    }
+
+    /// Surfaces output failures as issues (called on the stats tick).
+    fn check_outputs(&mut self) {
+        let mut keys = vec![OutputKey::Recording];
+        keys.extend(self.project().outputs.destinations.iter().map(|d| OutputKey::Stream(d.id)));
+        for key in keys {
+            if let OutputState::Failed(msg) = runtime().get(key).state {
+                let label = match key {
+                    OutputKey::Recording => "Recording".to_string(),
+                    OutputKey::Stream(id) => self
+                        .project()
+                        .outputs
+                        .destinations
+                        .iter()
+                        .find(|d| d.id == id)
+                        .map(|d| d.name.clone())
+                        .unwrap_or_default(),
+                };
+                let text = SharedString::from(format!("{label}: {msg}"));
+                if self.issue.as_ref() != Some(&text) {
+                    self.issue = Some(text);
+                }
+            }
+        }
+    }
+
     pub fn refresh_stats(&mut self) {
+        self.engine.post(|s| s.outputs.sample());
+        self.check_outputs();
         let stats = lightair_engine::read_stats();
         self.recent_lagged = stats.lagged_frames.saturating_sub(self.stats.lagged_frames);
         self.stats = stats;

@@ -1,6 +1,8 @@
 //! Lightair application entry point.
 
 mod mixer;
+mod outputs_panel;
+mod secrets;
 mod shell;
 mod starter;
 mod studio;
