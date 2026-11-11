@@ -18,6 +18,7 @@ use lightair_preview::Preview;
 use serde_json::json;
 
 mod layer_props;
+mod palette;
 
 use crate::mixer::MixerPanel;
 use crate::outputs_panel::{OutputsPanel, elapsed};
@@ -28,7 +29,22 @@ use crate::ui::{self, tok};
 use lightair_engine::outputs::{OutputKey, OutputState, runtime};
 use std::time::Instant;
 
-actions!(lightair, [Undo, Redo, DeleteSelection, NudgeLeft, NudgeRight, NudgeUp, NudgeDown, Deselect, RenameSelection]);
+actions!(
+    lightair,
+    [
+        Undo,
+        Redo,
+        DeleteSelection,
+        NudgeLeft,
+        NudgeRight,
+        NudgeUp,
+        NudgeDown,
+        Deselect,
+        RenameSelection,
+        OpenPalette,
+        Take
+    ]
+);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -42,6 +58,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", NudgeDown, Some("Studio")),
         KeyBinding::new("escape", Deselect, Some("Studio")),
         KeyBinding::new("enter", RenameSelection, Some("Studio")),
+        KeyBinding::new("cmd-k", OpenPalette, Some("Studio")),
+        KeyBinding::new("cmd-enter", Take, Some("Studio")),
     ]);
 }
 
@@ -95,6 +113,8 @@ pub struct StudioWindow {
     /// Safe-area overlay shown on landscape and on vertical stages.
     safe_landscape: Option<Profile>,
     safe_vertical: Option<Profile>,
+    /// The open command palette (⌘K).
+    palette: Option<palette::Palette>,
 }
 
 const HANDLE: f32 = 10.0;
@@ -132,6 +152,7 @@ impl StudioWindow {
             props: Default::default(),
             safe_landscape: None,
             safe_vertical: None,
+            palette: None,
         }
     }
 
@@ -555,6 +576,21 @@ impl StudioWindow {
         .detach();
     }
 
+    fn add_text(&mut self, cx: &mut Context<Self>) {
+        let settings = json!({
+            "text": "Lightair",
+            "font": {"face": "Helvetica Neue", "size": 128, "flags": 1},
+            "color1": 0xFFFFFFFFu32,
+            "color2": 0xFFFFFFFFu32,
+        });
+        self.add_input_layer("Text", "text_ft2_source_v2", settings, (720.0, 180.0), cx)
+    }
+
+    fn add_colour(&mut self, cx: &mut Context<Self>) {
+        let settings = json!({"color": 0xFF4A3BFFu32, "width": 400, "height": 400});
+        self.add_input_layer("Colour", "color_source_v3", settings, (400.0, 400.0), cx)
+    }
+
     /// A video file layer: plays when its scene goes on air, loops by default.
     fn add_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.add_menu = false;
@@ -618,6 +654,7 @@ impl Render for StudioWindow {
         let project = studio.project().clone();
 
         div()
+            .relative()
             .key_context("Studio")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.studio.update(cx, |s, cx| s.undo(cx))))
@@ -629,6 +666,12 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &NudgeDown, _, cx| this.nudge(0.0, 1.0, cx)))
             .on_action(cx.listener(|this, _: &Deselect, _, cx| this.select_layer(None, cx)))
             .on_action(cx.listener(|this, _: &RenameSelection, window, cx| this.rename_selection(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
+            .on_action(cx.listener(|this, _: &Take, _, cx| {
+                if this.studio_mode {
+                    this.take(cx)
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -646,6 +689,7 @@ impl Render for StudioWindow {
                     .child(self.right_column(&project, cx)),
             )
             .child(self.status_bar(cx))
+            .children(self.palette_overlay(cx))
     }
 }
 
@@ -920,20 +964,16 @@ impl StudioWindow {
                 this.add_input_layer("Display", "screen_capture", display_settings.clone(), (1280.0, 720.0), cx)
             })))
             .children(cameras)
-            .child(item("add-image", "image", "Image…").on_click(cx.listener(|this, _, window, cx| this.add_image(window, cx))))
-            .child(item("add-video", "clapperboard", "Video…").on_click(cx.listener(|this, _, window, cx| this.add_video(window, cx))))
-            .child(item("add-text", "type", "Text").on_click(cx.listener(|this, _, _, cx| {
-                this.add_input_layer(
-                    "Text",
-                    "text_ft2_source_v2",
-                    json!({"text": "Lightair", "font": {"face": "Helvetica Neue", "size": 128, "flags": 1}, "color1": 0xFFFFFFFFu32, "color2": 0xFFFFFFFFu32}),
-                    (720.0, 180.0),
-                    cx,
-                )
-            })))
-            .child(item("add-colour", "square", "Colour").on_click(cx.listener(|this, _, _, cx| {
-                this.add_input_layer("Colour", "color_source_v3", json!({"color": 0xFF4A3BFFu32, "width": 400, "height": 400}), (400.0, 400.0), cx)
-            })))
+            .child(
+                item("add-image", "image", "Image…")
+                    .on_click(cx.listener(|this, _, window, cx| this.add_image(window, cx))),
+            )
+            .child(
+                item("add-video", "clapperboard", "Video…")
+                    .on_click(cx.listener(|this, _, window, cx| this.add_video(window, cx))),
+            )
+            .child(item("add-text", "type", "Text").on_click(cx.listener(|this, _, _, cx| this.add_text(cx))))
+            .child(item("add-colour", "square", "Colour").on_click(cx.listener(|this, _, _, cx| this.add_colour(cx))))
     }
 
     fn transition_picker(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
