@@ -13,20 +13,14 @@ fn main() {
     let root = manifest.join("../..").canonicalize().expect("workspace root");
     let libobs = root.join("third_party/obs-studio/libobs");
     let simde = root.join("third_party/simde");
-    assert!(
-        libobs.join("obs.h").exists(),
-        "libobs headers missing: run `git submodule update --init --depth 1`"
-    );
+    assert!(libobs.join("obs.h").exists(), "libobs headers missing: run `git submodule update --init --depth 1`");
 
     // libobs.h includes a CMake-generated obsconfig.h; provide the release values.
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let include_dir = out.join("include");
     fs::create_dir_all(&include_dir).unwrap();
-    fs::write(
-        include_dir.join("obsconfig.h"),
-        "#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n",
-    )
-    .unwrap();
+    fs::write(include_dir.join("obsconfig.h"), "#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n")
+        .unwrap();
 
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-env-changed=OBS_APP");
@@ -49,9 +43,7 @@ fn main() {
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("bindgen failed for libobs");
-    bindings
-        .write_to_file(out.join("bindings.rs"))
-        .expect("write bindings");
+    bindings.write_to_file(out.join("bindings.rs")).expect("write bindings");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         let obs_app = env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into());

@@ -19,6 +19,10 @@ impl Data {
     pub fn new() -> Self {
         Self(NonNull::new(unsafe { sys::obs_data_create() }).expect("obs_data_create"))
     }
+    /// Takes ownership of an `obs_data_t` reference (e.g. from `obs_data_create_from_json`).
+    pub fn from_raw(ptr: *mut sys::obs_data_t) -> Option<Self> {
+        NonNull::new(ptr).map(Self)
+    }
     pub fn set_str(&mut self, key: &str, value: &str) -> &mut Self {
         unsafe { sys::obs_data_set_string(self.as_ptr(), cstr(key).as_ptr(), cstr(value).as_ptr()) };
         self
