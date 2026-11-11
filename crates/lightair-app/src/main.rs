@@ -5,6 +5,7 @@ mod mixer;
 mod outputs_panel;
 mod reframe;
 mod rows;
+mod safe_areas;
 mod secrets;
 mod selftest;
 mod shell;

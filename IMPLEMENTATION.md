@@ -73,9 +73,11 @@ Done:
 - Previews for any canvas (`obs_canvas_render` into the preview pipeline).
 - Format tabs, side-by-side editing (the pointer edits whichever stage it is over), "Add vertical" with auto-reframe (backgrounds fill, other layers keep their arrangement in a centred band). Layers panel and inspector follow the active format; new layers get a layout in every format.
 - Recording and each destination can target a format (aspect badge); a vertical recording is 1080×1920.
+- Inspector "Formats" section: show or hide the layer per format, and "Use this layout" copies another format's layout into the one being edited (reframed to its shape).
+- Safe-area overlays: a chip cycles Title/Action safe and Twitch player controls on landscape stages, TikTok, Shorts and Reels UI zones on vertical ones (approximate zones, drawn as GPUI overlays).
 
 Remaining:
-- Per-format visibility toggle in the UI, copy layout from another format, safe-area overlays, square and custom formats, smarter reframe (face-aware with Camera Studio), Twitch Dual Format.
+- Square and custom formats, per-destination safe areas (from the destination's platform), smarter reframe (face-aware with Camera Studio), Twitch Dual Format.
 
 ## M8 · Effects & transitions 🔨
 Done:

@@ -22,6 +22,7 @@ mod layer_props;
 use crate::mixer::MixerPanel;
 use crate::outputs_panel::{OutputsPanel, elapsed};
 use crate::rows::{DraggedRow, Renaming, RowTarget};
+use crate::safe_areas::{self, Profile};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 use lightair_engine::outputs::{OutputKey, OutputState, runtime};
@@ -91,6 +92,9 @@ pub struct StudioWindow {
     program_monitor: Option<Preview>,
     /// Inspector content sections (text field, media status).
     props: layer_props::LayerProps,
+    /// Safe-area overlay shown on landscape and on vertical stages.
+    safe_landscape: Option<Profile>,
+    safe_vertical: Option<Profile>,
 }
 
 const HANDLE: f32 = 10.0;
@@ -126,6 +130,8 @@ impl StudioWindow {
             studio_mode: false,
             program_monitor: None,
             props: Default::default(),
+            safe_landscape: None,
+            safe_vertical: None,
         }
     }
 
@@ -1144,7 +1150,38 @@ impl StudioWindow {
                     })),
             );
         }
+        let shape = self.format(project).clone();
+        let vertical = shape.height > shape.width;
+        let safe = if vertical { self.safe_vertical } else { self.safe_landscape };
         bar = bar.child(div().flex_1()).child(
+            div()
+                .id("safe-areas")
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .h(px(26.))
+                .px_2()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .when(safe.is_some(), |d| d.bg(tok::bg_selected()))
+                .hover(|d| d.bg(tok::bg_raised()))
+                .child(ui::icon("scan").size(px(14.)).text_color(tok::text_secondary()))
+                .child(safe.map_or("Safe areas", Profile::label))
+                .tooltip(|w, cx| {
+                    Tooltip::new("Where platforms draw their own buttons and captions (approximate)").build(w, cx)
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let next = safe_areas::next(safe, shape.width, shape.height);
+                    if vertical {
+                        this.safe_vertical = next;
+                    } else {
+                        this.safe_landscape = next;
+                    }
+                    cx.notify();
+                })),
+        );
+        bar = bar.child(
             div()
                 .id("studio-mode")
                 .flex()
@@ -1215,6 +1252,25 @@ impl StudioWindow {
         let bounds = self.stage_bounds.borrow().get(&fid).copied();
         if let (Some((ox, oy, s)), Some(b)) = (self.mapping(project, fid), bounds) {
             let (lx, ly) = (ox - f32::from(b.origin.x), oy - f32::from(b.origin.y));
+            let profile = if format.height > format.width { self.safe_vertical } else { self.safe_landscape };
+            let (cw, ch) = (format.width as f32 * s, format.height as f32 * s);
+            for z in profile.map_or(&[][..], Profile::zones) {
+                let (zx, zy, zw, zh) = z.rect;
+                let zone = div()
+                    .absolute()
+                    .left(px(lx + zx * cw))
+                    .top(px(ly + zy * ch))
+                    .w(px(zw * cw))
+                    .h(px(zh * ch))
+                    .border_1()
+                    .border_color(tok::canvas_safe_area())
+                    .p_1()
+                    .text_size(px(10.))
+                    .text_color(tok::canvas_safe_area())
+                    .child(z.label);
+                stage =
+                    stage.child(if z.outline { zone.border_dashed() } else { zone.bg(tok::canvas_safe_area_fill()) });
+            }
             let selected = studio
                 .selected_scene
                 .and_then(|id| project.scene(id))
@@ -1287,6 +1343,60 @@ impl StudioWindow {
             None => well,
         };
         div().flex().flex_col().flex_1().min_h_0().child(self.format_tabs(project, cx)).child(well)
+    }
+
+    /// Per-format visibility, and copying this layer's layout from another format.
+    fn formats_section(&self, project: &Project, layer: &Layer, scene: Id, cx: &mut Context<Self>) -> AnyElement {
+        let active = self.format_id(project);
+        let mut col = div().flex().flex_col().gap_1p5().pt_3().mt_1().border_t_1().border_color(tok::border()).child(
+            div()
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(tok::text_secondary())
+                .child("FORMATS"),
+        );
+        let Some(here) = project.format(active).cloned() else { return col.into_any_element() };
+        for (i, f) in project.formats.iter().enumerate() {
+            let (fid, lid) = (f.id, layer.id);
+            let visible = layer.layouts.get(&fid).is_some_and(|l| l.visible);
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    ui::icon_button(
+                        ("format-eye", i),
+                        if visible { "eye" } else { "eye-off" },
+                        if visible { tok::text_secondary() } else { tok::text_tertiary() },
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.exec(Command::SetLayerVisible { scene, layer: lid, format: fid, visible: !visible }, cx)
+                    })),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(if visible { tok::text() } else { tok::text_tertiary() })
+                        .child(format!("{} {}×{}", f.name, f.width, f.height)),
+                );
+            // Copy this format's layout into the format being edited (reframed to its shape).
+            if fid != active
+                && let (Some(from), Some(current)) = (layer.layouts.get(&fid), layer.layouts.get(&active))
+            {
+                let layout = Layout { visible: current.visible, ..crate::reframe::reframe(from, f, &here) };
+                let cmd = Command::SetLayout { scene, layer: lid, format: active, layout };
+                row = row.child(
+                    Button::new(("copy-layout", i))
+                        .label("Use this layout")
+                        .xsmall()
+                        .ghost()
+                        .tooltip(format!("Copy the {} layout into {}", f.name, here.name))
+                        .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
+                );
+            }
+            col = col.child(row);
+        }
+        col.into_any_element()
     }
 
     /// Studio mode's Program monitor and Take button.
@@ -1488,6 +1598,7 @@ impl StudioWindow {
                             move |this, _, _, cx| this.exec(Command::RemoveLayer { scene: sid, layer: lid }, cx),
                         ))),
                 )
+                .children((project.formats.len() > 1).then(|| self.formats_section(project, &layer, sid, cx)))
                 .children(project.inputs.get(&layer.input).and_then(|input| self.content_section(input, cx)))
                 .children(camera_studio)
                 .into_any_element()

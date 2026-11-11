@@ -69,6 +69,13 @@ pub mod tok {
     pub fn canvas_guide() -> Hsla {
         rgb(0xFF4FD8).into()
     }
+    /// Safe-area overlays (`canvas.safe-area`).
+    pub fn canvas_safe_area() -> Hsla {
+        rgba(0xFFFFFF2E).into()
+    }
+    pub fn canvas_safe_area_fill() -> Hsla {
+        rgba(0xFFFFFF14).into()
+    }
     pub fn scrim() -> Hsla {
         rgba(0x00000066).into()
     }
