@@ -34,7 +34,9 @@ fn move_glides_matching_layers_then_lands() {
     apply(&mut doc, Command::AddScene { scene: b, index: None });
     apply(
         &mut doc,
-        Command::SetTransition { settings: TransitionSettings { kind: TransitionKind::Move, duration_ms: 800 } },
+        Command::SetTransition {
+            settings: TransitionSettings { kind: TransitionKind::Move, duration_ms: 800, ..Default::default() },
+        },
     );
     assert_eq!(doc.project().program, Some(a_id));
     let on_air = engine.call(move |s| s.reconciler.describe_on_air(format));

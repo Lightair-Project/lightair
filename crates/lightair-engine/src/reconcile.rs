@@ -276,8 +276,10 @@ impl Reconciler {
         let ms = self.transition_settings.duration_ms;
         match kind {
             TransitionKind::Cut => self.land(program),
-            TransitionKind::Fade => {
+            TransitionKind::Fade | TransitionKind::Slide | TransitionKind::Wipe | TransitionKind::Dip => {
+                let (type_id, settings) = transition_source(&self.transition_settings);
                 for format in self.formats.clone() {
+                    self.ensure_transition(format, type_id, &settings);
                     if let Some(tr) = self.transitions.get(&format) {
                         unsafe {
                             sys::obs_transition_start(
@@ -298,6 +300,31 @@ impl Reconciler {
             }
         }
         self.program = program;
+    }
+
+    /// Makes `format`'s output transition a `type_id` source with `settings`, swapping the
+    /// source on the output channel when the type changes (libobs carries over what's showing).
+    fn ensure_transition(&mut self, format: Id, type_id: &str, settings: &serde_json::Value) {
+        let Some(current) = self.transitions.get(&format) else { return };
+        let current_type = unsafe { std::ffi::CStr::from_ptr(sys::obs_source_get_id(current.as_ptr())) };
+        let data = data_from_json(settings);
+        if current_type.to_bytes() == type_id.as_bytes() {
+            current.update(&data);
+            return;
+        }
+        let Some(next) = Source::create_private(type_id, &format!("transition:{format}"), Some(&data)) else {
+            tracing::warn!(type_id, "transition type unavailable");
+            return;
+        };
+        unsafe {
+            sys::obs_transition_swap_begin(next.as_ptr(), current.as_ptr());
+            match self.canvases.get(&format) {
+                Some(canvas) => sys::obs_canvas_set_channel(canvas.as_ptr(), 0, next.as_ptr()),
+                None => sys::obs_set_output_source(0, next.as_ptr()),
+            }
+            sys::obs_transition_swap_end(next.as_ptr(), current.as_ptr());
+        }
+        self.transitions.insert(format, next);
     }
 
     /// Builds the temporary scenes for a Move from `a` to `b` and starts the animation.
@@ -718,6 +745,26 @@ unsafe extern "C" fn on_levels(
     let n = sys::MAX_AUDIO_CHANNELS as usize;
     let (magnitude, peak) = unsafe { (std::slice::from_raw_parts(magnitude, n), std::slice::from_raw_parts(peak, n)) };
     cell.store(peak, magnitude);
+}
+
+/// The libobs transition type and settings for a transition (Cut and Move use a fade source:
+/// Cut sets it directly, Move lands through it).
+fn transition_source(t: &TransitionSettings) -> (&'static str, serde_json::Value) {
+    match t.kind {
+        TransitionKind::Slide => ("slide_transition", serde_json::json!({"direction": t.direction.as_str()})),
+        TransitionKind::Wipe => {
+            // Gradient images shipped with the transitions module; the dark end is revealed
+            // first, so `linear-h` travels right and `linear-v` travels down.
+            use lightair_core::Direction::*;
+            let image = if matches!(t.direction, Left | Right) { "linear-h.png" } else { "linear-v.png" };
+            let invert = matches!(t.direction, Left | Up);
+            ("wipe_transition", serde_json::json!({"luma_image": image, "luma_invert": invert, "luma_softness": 0.05}))
+        }
+        TransitionKind::Dip => {
+            ("fade_to_color_transition", serde_json::json!({"color": 0xFF000000u32, "switch_point": 50}))
+        }
+        TransitionKind::Cut | TransitionKind::Fade | TransitionKind::Move => ("fade_transition", serde_json::json!({})),
+    }
 }
 
 fn data_from_json(value: &serde_json::Value) -> Data {
