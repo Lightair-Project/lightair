@@ -17,9 +17,10 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use lightair_engine::sys;
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType};
 use objc2_core_video::{
-    CVAttachmentMode, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetIOSurface, kCVImageBufferYCbCrMatrix_ITU_R_601_4,
-    kCVImageBufferYCbCrMatrixKey, kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
-    kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVReturnSuccess,
+    CVAttachmentMode, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetIOSurface,
+    kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVImageBufferYCbCrMatrixKey, kCVPixelBufferIOSurfacePropertiesKey,
+    kCVPixelBufferMetalCompatibilityKey, kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVReturnSuccess,
 };
 use objc2_video_toolbox::VTPixelTransferSession;
 use parking_lot::Mutex;
@@ -59,9 +60,16 @@ mod gl {
         pub fn glFramebufferTexture2D(target: GLenum, attachment: GLenum, textarget: GLenum, tex: GLuint, level: GLint);
         pub fn glCheckFramebufferStatus(target: GLenum) -> GLenum;
         pub fn glBlitFramebuffer(
-            sx0: GLint, sy0: GLint, sx1: GLint, sy1: GLint,
-            dx0: GLint, dy0: GLint, dx1: GLint, dy1: GLint,
-            mask: u32, filter: GLenum,
+            sx0: GLint,
+            sy0: GLint,
+            sx1: GLint,
+            sy1: GLint,
+            dx0: GLint,
+            dy0: GLint,
+            dx1: GLint,
+            dy1: GLint,
+            mask: u32,
+            filter: GLenum,
         );
         pub fn glGenTextures(n: i32, ids: *mut GLuint);
         pub fn glDeleteTextures(n: i32, ids: *const GLuint);
@@ -70,8 +78,15 @@ mod gl {
         pub fn glFinish();
         pub fn CGLGetCurrentContext() -> *mut c_void;
         pub fn CGLTexImageIOSurface2D(
-            ctx: *mut c_void, target: GLenum, internal_format: GLenum, width: i32, height: i32,
-            format: GLenum, kind: GLenum, surface: *const c_void, plane: u32,
+            ctx: *mut c_void,
+            target: GLenum,
+            internal_format: GLenum,
+            width: i32,
+            height: i32,
+            format: GLenum,
+            kind: GLenum,
+            surface: *const c_void,
+            plane: u32,
         ) -> i32;
     }
 }
@@ -84,7 +99,14 @@ fn pixel_buffer(width: u32, height: u32, format: u32) -> Option<CFRetained<CVPix
     let attrs = CFDictionary::from_slices(&keys, &values);
     let mut out: *mut CVPixelBuffer = ptr::null_mut();
     let rc = unsafe {
-        CVPixelBufferCreate(None, width as usize, height as usize, format, Some(attrs.as_opaque()), NonNull::from(&mut out))
+        CVPixelBufferCreate(
+            None,
+            width as usize,
+            height as usize,
+            format,
+            Some(attrs.as_opaque()),
+            NonNull::from(&mut out),
+        )
     };
     if rc != kCVReturnSuccess || out.is_null() {
         tracing::error!(rc, width, height, format, "CVPixelBufferCreate failed");
@@ -133,13 +155,22 @@ impl Pool {
         let ring = (0..RING)
             .map(|_| pixel_buffer(width, height, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))
             .collect::<Option<Vec<_>>>()?;
-        let target = unsafe { sys::gs_texture_create(width, height, sys::GS_BGRA, 1, ptr::null_mut(), sys::GS_RENDER_TARGET) };
+        let target =
+            unsafe { sys::gs_texture_create(width, height, sys::GS_BGRA, 1, ptr::null_mut(), sys::GS_RENDER_TARGET) };
         if target.is_null() {
             return None;
         }
         let surface = CVPixelBufferGetIOSurface(Some(&bgra))?;
         let mut pool = Self {
-            width, height, target, bgra, bgra_tex: 0, read_fbo: 0, draw_fbo: 0, ring, next: 0,
+            width,
+            height,
+            target,
+            bgra,
+            bgra_tex: 0,
+            read_fbo: 0,
+            draw_fbo: 0,
+            ring,
+            next: 0,
             latest: AtomicIsize::new(-1),
         };
         unsafe {
@@ -148,8 +179,15 @@ impl Pool {
             gl::glGenTextures(1, &mut pool.bgra_tex);
             gl::glBindTexture(gl::TEXTURE_RECTANGLE, pool.bgra_tex);
             let err = gl::CGLTexImageIOSurface2D(
-                gl::CGLGetCurrentContext(), gl::TEXTURE_RECTANGLE, gl::RGBA8, width as i32, height as i32,
-                gl::BGRA, gl::UNSIGNED_INT_8_8_8_8_REV, CFRetained::as_ptr(&surface).as_ptr() as *const c_void, 0,
+                gl::CGLGetCurrentContext(),
+                gl::TEXTURE_RECTANGLE,
+                gl::RGBA8,
+                width as i32,
+                height as i32,
+                gl::BGRA,
+                gl::UNSIGNED_INT_8_8_8_8_REV,
+                CFRetained::as_ptr(&surface).as_ptr() as *const c_void,
+                0,
             );
             gl::glBindTexture(gl::TEXTURE_RECTANGLE, prev_rect as gl::GLuint);
             if err != 0 {
@@ -195,7 +233,13 @@ impl Pool {
             gl::glBindFramebuffer(gl::READ_FRAMEBUFFER, self.read_fbo);
             gl::glFramebufferTexture2D(gl::READ_FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, src, 0);
             gl::glBindFramebuffer(gl::DRAW_FRAMEBUFFER, self.draw_fbo);
-            gl::glFramebufferTexture2D(gl::DRAW_FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_RECTANGLE, self.bgra_tex, 0);
+            gl::glFramebufferTexture2D(
+                gl::DRAW_FRAMEBUFFER,
+                gl::COLOR_ATTACHMENT0,
+                gl::TEXTURE_RECTANGLE,
+                self.bgra_tex,
+                0,
+            );
             let ok = gl::glCheckFramebufferStatus(gl::READ_FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE
                 && gl::glCheckFramebufferStatus(gl::DRAW_FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE;
             if ok {
@@ -244,7 +288,8 @@ impl Preview {
     pub fn attach() -> Self {
         let mut session: *mut VTPixelTransferSession = ptr::null_mut();
         let rc = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut session)) };
-        let transfer = (rc == 0 && !session.is_null()).then(|| unsafe { CFRetained::from_raw(NonNull::new_unchecked(session)) });
+        let transfer =
+            (rc == 0 && !session.is_null()).then(|| unsafe { CFRetained::from_raw(NonNull::new_unchecked(session)) });
         if transfer.is_none() {
             tracing::error!(rc, "VTPixelTransferSessionCreate failed; preview disabled");
         }
@@ -327,11 +372,7 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     let idx = pool.next;
     pool.next = (pool.next + 1) % RING;
     let dst = &pool.ring[idx];
-    let ok = shared
-        .transfer
-        .lock()
-        .as_ref()
-        .is_some_and(|t| unsafe { t.transfer_image(&pool.bgra, dst) } == 0);
+    let ok = shared.transfer.lock().as_ref().is_some_and(|t| unsafe { t.transfer_image(&pool.bgra, dst) } == 0);
     if !ok {
         return;
     }

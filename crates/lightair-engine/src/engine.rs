@@ -96,8 +96,11 @@ pub struct Stats {
 /// State owned by the engine thread. Jobs receive `&mut EngineState`.
 #[derive(Default)]
 pub struct EngineState {
+    /// Ad-hoc libobs objects (tests, diagnostics). The document lives in `reconciler`.
     pub sources: HashMap<String, Source>,
     pub scenes: HashMap<String, Scene>,
+    /// libobs objects mirroring the Lightair document.
+    pub reconciler: crate::Reconciler,
 }
 
 impl EngineState {
@@ -247,8 +250,13 @@ unsafe fn bootstrap(cfg: &EngineConfig) -> Result<(Runtime, Capabilities, String
 
     unsafe { load_modules(cfg, &runtime) };
     let capabilities = discover(cfg);
-    tracing::info!(version, inputs = capabilities.inputs.len(), encoders = capabilities.encoders.len(),
-        modules = capabilities.modules.len(), "engine ready");
+    tracing::info!(
+        version,
+        inputs = capabilities.inputs.len(),
+        encoders = capabilities.encoders.len(),
+        modules = capabilities.modules.len(),
+        "engine ready"
+    );
     Ok((runtime, capabilities, version))
 }
 
@@ -356,7 +364,8 @@ unsafe fn shutdown(state: EngineState) {
     // destruction thread; shutting down before that queue drains crashes inside scene_destroy.
     // The render thread can hold a scene for one more frame after its channel is cleared, so
     // let a few frames pass and keep draining until nothing is left to destroy.
-    let EngineState { sources, scenes } = state;
+    let EngineState { sources, scenes, mut reconciler } = state;
+    reconciler.clear();
     drop(scenes);
     drop(sources);
     let mut idle_rounds = 0;
@@ -375,4 +384,20 @@ unsafe fn shutdown(state: EngineState) {
         tracing::warn!(leaks, "libobs reported unfreed allocations at shutdown");
     }
     tracing::info!("engine stopped");
+}
+
+/// Reads frame statistics directly from libobs. Safe from any thread (libobs exposes these as
+/// atomics), so the UI never waits on the engine thread for numbers.
+pub fn read_stats() -> Stats {
+    unsafe {
+        if !sys::obs_initialized() {
+            return Stats::default();
+        }
+        Stats {
+            active_fps: sys::obs_get_active_fps(),
+            average_frame_time_ms: sys::obs_get_average_frame_time_ns() as f64 / 1e6,
+            total_frames: sys::obs_get_total_frames(),
+            lagged_frames: sys::obs_get_lagged_frames(),
+        }
+    }
 }

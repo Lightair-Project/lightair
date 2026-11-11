@@ -3509,9 +3509,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "lightair-core",
  "lightair-engine",
  "lightair-preview",
+ "lightair-store",
  "parking_lot",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3535,6 +3538,8 @@ dependencies = [
  "crossbeam-channel",
  "libc",
  "libobs-sys",
+ "lightair-core",
+ "serde_json",
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
@@ -3550,6 +3555,18 @@ dependencies = [
  "objc2-io-surface",
  "objc2-video-toolbox",
  "parking_lot",
+ "tracing",
+]
+
+[[package]]
+name = "lightair-store"
+version = "0.1.0"
+dependencies = [
+ "lightair-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
  "tracing",
 ]
 

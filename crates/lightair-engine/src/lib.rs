@@ -8,10 +8,12 @@ pub mod displays;
 mod engine;
 mod log;
 pub mod obs;
+mod reconcile;
 mod runtime;
 
-pub use engine::{Capabilities, Engine, EngineConfig, EngineError, EngineState, Graphics, Modules, Stats};
+pub use engine::{Capabilities, Engine, EngineConfig, EngineError, EngineState, Graphics, Modules, Stats, read_stats};
 pub use libobs_sys as sys;
+pub use reconcile::Reconciler;
 pub use runtime::Runtime;
 
 /// OBS modules Lightair loads from an OBS 33 plugin set: the ones that only need libobs.
