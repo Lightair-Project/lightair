@@ -14,6 +14,7 @@ use lightair_core::{Command, Fit, Id, Input, Layer, Layout, Project, Scene};
 use lightair_preview::Preview;
 use serde_json::json;
 
+use crate::mixer::MixerPanel;
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 
@@ -55,6 +56,7 @@ type Guides = Vec<(bool, f32)>;
 
 pub struct StudioWindow {
     studio: Entity<Studio>,
+    mixer: Entity<MixerPanel>,
     preview: Preview,
     focus: FocusHandle,
     canvas_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -71,7 +73,9 @@ impl StudioWindow {
         cx.observe(&studio, |_, _, cx| cx.notify()).detach();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let mixer = cx.new(|cx| MixerPanel::new(studio.clone(), cx));
         Self {
+            mixer,
             studio,
             preview,
             focus,
@@ -362,7 +366,8 @@ impl Render for StudioWindow {
 impl StudioWindow {
     fn title_bar(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         let stats = self.studio.read(cx).stats;
-        let fps_color = if stats.active_fps > 0.0 && stats.lagged_frames == 0 { tok::ok() } else { tok::warn() };
+        let recent_lagged = self.studio.read(cx).recent_lagged;
+        let fps_color = if stats.active_fps > 0.0 && recent_lagged == 0 { tok::ok() } else { tok::warn() };
         let soon = |id: &'static str, label: &'static str| {
             Button::new(id).label(label).small().outline().disabled(true).tooltip("Outputs arrive in milestone M6")
         };
@@ -608,21 +613,7 @@ impl StudioWindow {
     }
 
     fn centre(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
-        div().flex().flex_col().flex_1().min_w_0().child(self.canvas(project, cx)).child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .h(px(44.))
-                .px_3()
-                .border_t_1()
-                .border_color(tok::border())
-                .bg(tok::bg_panel())
-                .child(div().font_weight(FontWeight::SEMIBOLD).child("Audio Mixer"))
-                .child(
-                    div().text_color(tok::text_tertiary()).text_size(px(12.)).child("Tracks arrive in milestone M5"),
-                ),
-        )
+        div().flex().flex_col().flex_1().min_w_0().child(self.canvas(project, cx)).child(self.mixer.clone())
     }
 
     fn canvas(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {

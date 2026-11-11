@@ -22,6 +22,8 @@ pub struct Studio {
     /// Last user-visible problem, shown in the status bar.
     pub issue: Option<SharedString>,
     pub stats: Stats,
+    /// Frames libobs lagged since the previous stats sample (health is about now, not startup).
+    pub recent_lagged: u32,
 }
 
 impl Studio {
@@ -46,6 +48,7 @@ impl Studio {
             selected_layer: None,
             issue,
             stats: Stats::default(),
+            recent_lagged: 0,
         };
         studio.rebuild_engine();
         studio
@@ -125,12 +128,10 @@ impl Studio {
         }
     }
 
-    pub fn refresh_stats(&mut self) -> bool {
+    pub fn refresh_stats(&mut self) {
         let stats = lightair_engine::read_stats();
-        let changed =
-            (stats.active_fps - self.stats.active_fps).abs() > 0.05 || stats.lagged_frames != self.stats.lagged_frames;
+        self.recent_lagged = stats.lagged_frames.saturating_sub(self.stats.lagged_frames);
         self.stats = stats;
-        changed
     }
 
     fn push(&self, before: Arc<Project>, after: Arc<Project>) {
@@ -143,8 +144,7 @@ impl Studio {
 
     fn rebuild_engine(&self) {
         let project = self.doc.project().clone();
-        let empty =
-            Arc::new(Project { inputs: Default::default(), scenes: vec![], program: None, ..(*project).clone() });
+        let empty = Arc::new(project.empty_like());
         self.push(empty, project);
     }
 

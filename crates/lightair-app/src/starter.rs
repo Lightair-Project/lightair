@@ -1,7 +1,7 @@
 //! The project a first launch starts with (until onboarding generates one from the user's
 //! devices; docs/05-interface-shell.md, "Onboarding").
 
-use lightair_core::{Command, Input, Layer, Layout, Project, Scene};
+use lightair_core::{Command, Input, Layer, Layout, Project, Scene, Track};
 use serde_json::json;
 
 pub fn starter_project() -> Project {
@@ -43,6 +43,12 @@ pub fn starter_project() -> Project {
         Layer::new("Logo", logo.id, [(format.id, Layout::boxed(80.0, h - 240.0, 160.0, 160.0))]),
     ];
 
+    let mic = Input::new("Mic", "coreaudio_input_capture", json!({"device_id": "default"}));
+    let desktop = Input::new("Desktop audio", "sck_audio_capture", json!({"type": 0}));
+    let mut mic_track = Track::new("Mic", mic.id);
+    mic_track.effects = crate::mixer::voice_clarity();
+    let desktop_track = Track::new("Desktop audio", desktop.id);
+
     for cmd in [
         Command::AddInput { input: background },
         Command::AddInput { input: display },
@@ -50,6 +56,10 @@ pub fn starter_project() -> Project {
         Command::AddScene { scene: soon, index: None },
         Command::AddScene { scene: main, index: None },
         Command::AddScene { scene: brb, index: None },
+        Command::AddInput { input: mic },
+        Command::AddInput { input: desktop },
+        Command::AddTrack { track: mic_track, index: None },
+        Command::AddTrack { track: desktop_track, index: None },
     ] {
         cmd.apply(&mut p).expect("starter project is valid");
     }
