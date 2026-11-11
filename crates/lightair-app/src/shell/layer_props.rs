@@ -1,0 +1,329 @@
+//! Inspector sections for what a layer shows (docs/07-scenes-layers-canvas.md): media
+//! transport, text content and style, colour. Content edits are input settings changes, so
+//! they're undoable and apply wherever the input appears.
+
+use std::time::{Duration, Instant};
+
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
+use gpui_kit::component::{Disableable, Sizable};
+use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::*;
+use lightair_core::{Command, Id, Input};
+use lightair_engine::media::{MediaAction, MediaState, MediaStatus};
+use serde_json::{Value, json};
+
+use super::StudioWindow;
+use crate::ui::tok;
+
+/// The text field for the selected text layer.
+pub(super) struct TextEdit {
+    input: Id,
+    state: Entity<InputState>,
+    _events: Subscription,
+}
+
+/// Inspector state for content sections.
+#[derive(Default)]
+pub(super) struct LayerProps {
+    text: Option<TextEdit>,
+    media: Option<(Id, MediaStatus, Instant)>,
+}
+
+pub(super) fn is_text(kind: &str) -> bool {
+    kind.starts_with("text_ft2_source") || kind.starts_with("text_gdiplus")
+}
+pub(super) fn is_colour(kind: &str) -> bool {
+    kind.starts_with("color_source")
+}
+pub(super) fn is_media(kind: &str) -> bool {
+    kind == "ffmpeg_source" || kind == "vlc_source"
+}
+
+/// libobs colours are 0xAABBGGRR.
+fn abgr(rgb: u32) -> u32 {
+    0xFF00_0000 | ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF)
+}
+fn rgb_of(abgr: u32) -> u32 {
+    ((abgr & 0xFF) << 16) | (abgr & 0xFF00) | ((abgr >> 16) & 0xFF)
+}
+
+/// Swatches offered for text and colour layers (RGB).
+const PALETTE: &[u32] = &[0xFFFFFF, 0x0B0B0F, 0xFF4A3B, 0xFFB020, 0x2BD67B, 0x3B82F6, 0x8B5CF6, 0xF472B6];
+
+/// `settings` with `key` set (a merged copy: the reconciler updates libobs from the whole object).
+fn with(settings: &Value, key: &str, value: Value) -> Value {
+    let mut s = settings.clone();
+    if !s.is_object() {
+        s = json!({});
+    }
+    s[key] = value;
+    s
+}
+
+fn clock(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+impl StudioWindow {
+    /// Keeps the text field and the media status in step with the selection. Called from render.
+    pub(super) fn sync_layer_props(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let studio = self.studio.read(cx);
+        let project = studio.project().clone();
+        let input = studio
+            .selected_scene
+            .and_then(|s| project.scene(s))
+            .and_then(|s| studio.selected_layer.and_then(|l| s.layer(l)))
+            .and_then(|l| project.inputs.get(&l.input))
+            .cloned();
+        let engine = studio.engine().clone();
+
+        // Text field: one per selected text input; refreshed when the text changes elsewhere
+        // (undo) and the field isn't being typed in.
+        match input.as_ref().filter(|i| is_text(&i.kind)) {
+            Some(i) => {
+                let text = i.settings["text"].as_str().unwrap_or("").to_string();
+                let same = self.props.text.as_ref().is_some_and(|t| t.input == i.id);
+                if !same {
+                    let state = cx.new(|cx| InputState::new(window, cx));
+                    let id = i.id;
+                    let events = cx.subscribe_in(&state, window, move |this, state, ev: &InputEvent, _, cx| {
+                        if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                            let value = state.read(cx).value().to_string();
+                            this.set_text(id, value, cx);
+                        }
+                    });
+                    self.props.text = Some(TextEdit { input: i.id, state, _events: events });
+                }
+                let t = self.props.text.as_ref().unwrap();
+                let focused = t.state.read(cx).focus_handle(cx).is_focused(window);
+                if !focused && t.state.read(cx).value() != text.as_str() {
+                    t.state.update(cx, |s, cx| s.set_value(text, window, cx));
+                }
+            }
+            None => self.props.text = None,
+        }
+
+        // Media status, polled a few times a second while a media layer is selected.
+        match input.as_ref().filter(|i| is_media(&i.kind)) {
+            Some(i) => {
+                let stale = self
+                    .props
+                    .media
+                    .as_ref()
+                    .is_none_or(|(id, _, at)| *id != i.id || at.elapsed() > Duration::from_millis(200));
+                if stale {
+                    let id = i.id;
+                    self.props.media =
+                        engine.call(move |s| s.reconciler.media_status(id)).map(|status| (id, status, Instant::now()));
+                }
+            }
+            None => self.props.media = None,
+        }
+    }
+
+    fn set_text(&mut self, input: Id, text: String, cx: &mut Context<Self>) {
+        let project = self.studio.read(cx).project().clone();
+        let Some(i) = project.inputs.get(&input) else { return };
+        if i.settings["text"].as_str() == Some(text.as_str()) {
+            return;
+        }
+        self.exec(Command::SetInputSettings { input, settings: with(&i.settings, "text", json!(text)) }, cx);
+    }
+
+    fn media(&self, input: Id, action: MediaAction, cx: &mut Context<Self>) {
+        self.studio.read(cx).engine().post(move |s| s.reconciler.media_action(input, action));
+    }
+
+    /// The content section for a layer's input, if its kind has one.
+    pub(super) fn content_section(&self, input: &Input, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if is_text(&input.kind) {
+            Some(self.text_section(input, cx).into_any_element())
+        } else if is_colour(&input.kind) {
+            Some(self.colour_section(input, cx).into_any_element())
+        } else if is_media(&input.kind) {
+            Some(self.media_section(input, cx).into_any_element())
+        } else {
+            None
+        }
+    }
+
+    fn swatches(&self, input: &Input, key: &'static str, keys: &'static [&'static str], cx: &mut Context<Self>) -> Div {
+        let current = input.settings[key].as_u64().map(|c| rgb_of(c as u32));
+        let mut row = div().flex().flex_wrap().gap_1p5();
+        for (i, &rgb) in PALETTE.iter().enumerate() {
+            let (id, settings) = (input.id, input.settings.clone());
+            row = row.child(
+                div()
+                    .id(("swatch", i))
+                    .size(px(22.))
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .bg(rgb_to_hsla(rgb))
+                    .border_2()
+                    .border_color(if current == Some(rgb) { tok::text() } else { tok::border() })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let mut s = settings.clone();
+                        for k in keys {
+                            s = with(&s, k, json!(abgr(rgb)));
+                        }
+                        this.exec(Command::SetInputSettings { input: id, settings: s }, cx);
+                    })),
+            );
+        }
+        row
+    }
+
+    fn text_section(&self, input: &Input, cx: &mut Context<Self>) -> impl IntoElement {
+        let size = input.settings["font"]["size"].as_i64().unwrap_or(128);
+        let (id, settings) = (input.id, input.settings.clone());
+        let resize = move |delta: i64| {
+            let mut s = settings.clone();
+            let mut font = s["font"].clone();
+            if !font.is_object() {
+                font = json!({"face": "Helvetica Neue", "flags": 0});
+            }
+            font["size"] = json!((size + delta).clamp(8, 1024));
+            s = with(&s, "font", font);
+            Command::SetInputSettings { input: id, settings: s }
+        };
+        let (smaller, bigger) = (resize(-8), resize(8));
+        section("Text")
+            .when_some(self.props.text.as_ref().filter(|t| t.input == input.id), |d, t| {
+                d.child(TextInput::new(&t.state).small())
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().w(px(76.)).text_color(tok::text_secondary()).child("Size"))
+                    .child(
+                        Button::new("text-smaller")
+                            .label("−")
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| this.exec(smaller.clone(), cx))),
+                    )
+                    .child(div().w(px(48.)).text_center().font_family("Menlo").child(size.to_string()))
+                    .child(
+                        Button::new("text-bigger")
+                            .label("+")
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| this.exec(bigger.clone(), cx))),
+                    ),
+            )
+            .child(self.swatches(input, "color1", &["color1", "color2"], cx))
+    }
+
+    fn colour_section(&self, input: &Input, cx: &mut Context<Self>) -> impl IntoElement {
+        section("Colour").child(self.swatches(input, "color", &["color"], cx))
+    }
+
+    fn media_section(&self, input: &Input, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = input.id;
+        let status = self.props.media.as_ref().filter(|(i, ..)| *i == id).map(|(_, s, _)| *s);
+        let playing = status
+            .is_some_and(|s| matches!(s.state, MediaState::Playing | MediaState::Opening | MediaState::Buffering));
+        let looping = input.settings["looping"].as_bool().unwrap_or(false);
+        let file = input.settings["local_file"]
+            .as_str()
+            .and_then(|p| std::path::Path::new(p).file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "No file".into());
+        let (time, duration) = status.map_or((0, 0), |s| (s.time_ms, s.duration_ms));
+        let progress = if duration > 0 { (time as f32 / duration as f32).clamp(0.0, 1.0) } else { 0.0 };
+        let state_label = match status.map(|s| s.state) {
+            Some(MediaState::Error) => "Couldn't play this file",
+            Some(MediaState::Ended) => "Ended",
+            Some(MediaState::Stopped) => "Stopped",
+            _ => "",
+        };
+        let loop_settings = with(&input.settings, "looping", json!(!looping));
+        section("Media")
+            .child(div().text_color(tok::text_secondary()).overflow_hidden().text_ellipsis().child(file))
+            .child(
+                div()
+                    .id("media-progress")
+                    .h(px(4.))
+                    .w_full()
+                    .rounded_full()
+                    .bg(tok::border())
+                    .child(div().h_full().rounded_full().bg(tok::accent_primary()).w(relative(progress))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .text_size(px(11.))
+                    .font_family("Menlo")
+                    .text_color(tok::text_tertiary())
+                    .child(clock(time))
+                    .child(state_label)
+                    .child(clock(duration)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(
+                        Button::new("media-play")
+                            .label(if playing { "Pause" } else { "Play" })
+                            .small()
+                            .outline()
+                            .disabled(status.is_none())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let action = if playing { MediaAction::Pause } else { MediaAction::Play };
+                                this.media(id, action, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("media-restart")
+                            .label("Restart")
+                            .small()
+                            .ghost()
+                            .disabled(status.is_none())
+                            .on_click(cx.listener(move |this, _, _, cx| this.media(id, MediaAction::Restart, cx))),
+                    )
+                    .child({
+                        let b = Button::new("media-loop").label("Loop").small().on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.exec(Command::SetInputSettings { input: id, settings: loop_settings.clone() }, cx)
+                            },
+                        ));
+                        if looping { b.primary() } else { b.ghost() }
+                    }),
+            )
+    }
+}
+
+fn rgb_to_hsla(rgb_value: u32) -> Hsla {
+    rgb(rgb_value).into()
+}
+
+fn section(title: &'static str) -> Div {
+    div().flex().flex_col().gap_2().pt_3().mt_1().border_t_1().border_color(tok::border()).child(
+        div()
+            .text_size(px(11.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(tok::text_secondary())
+            .child(title.to_uppercase()),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{abgr, clock, rgb_of, with};
+    use serde_json::json;
+
+    #[test]
+    fn colour_order() {
+        assert_eq!(abgr(0xFF4A3B), 0xFF3B4AFF);
+        assert_eq!(rgb_of(abgr(0x123456)), 0x123456);
+        assert_eq!(clock(83_500), "1:23");
+        let s = with(&json!({"text": "a", "font": {"size": 10}}), "text", json!("b"));
+        assert_eq!(s, json!({"text": "b", "font": {"size": 10}}));
+    }
+}
