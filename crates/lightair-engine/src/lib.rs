@@ -13,6 +13,7 @@ pub mod obs;
 pub mod outputs;
 mod reconcile;
 mod runtime;
+pub mod timers;
 mod transition;
 
 pub use engine::{Capabilities, Engine, EngineConfig, EngineError, EngineState, Graphics, Modules, Stats, read_stats};

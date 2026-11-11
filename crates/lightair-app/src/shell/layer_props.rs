@@ -11,6 +11,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{Command, Id, Input};
 use lightair_engine::media::{MediaAction, MediaState, MediaStatus};
+use lightair_engine::timers::{TIMER_KIND, TimerAction, TimerStatus};
 use serde_json::{Value, json};
 
 use super::StudioWindow;
@@ -31,6 +32,7 @@ pub(super) struct LayerProps {
     /// Effects section: the add menu is open; the effect whose controls are shown.
     effect_menu: bool,
     open_effect: Option<Id>,
+    timer: Option<(Id, TimerStatus, Instant)>,
 }
 
 pub(super) fn is_text(kind: &str) -> bool {
@@ -108,6 +110,23 @@ impl StudioWindow {
             None => self.props.text = None,
         }
 
+        // Timer status, polled the same way.
+        match input.as_ref().filter(|i| i.kind == TIMER_KIND) {
+            Some(i) => {
+                let stale = self
+                    .props
+                    .timer
+                    .as_ref()
+                    .is_none_or(|(id, _, at)| *id != i.id || at.elapsed() > Duration::from_millis(200));
+                if stale {
+                    let id = i.id;
+                    self.props.timer =
+                        engine.call(move |s| s.reconciler.timer_status(id)).map(|status| (id, status, Instant::now()));
+                }
+            }
+            None => self.props.timer = None,
+        }
+
         // Media status, polled a few times a second while a media layer is selected.
         match input.as_ref().filter(|i| is_media(&i.kind)) {
             Some(i) => {
@@ -141,7 +160,9 @@ impl StudioWindow {
 
     /// The content section for a layer's input, if its kind has one.
     pub(super) fn content_section(&self, input: &Input, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if is_text(&input.kind) {
+        if input.kind == TIMER_KIND {
+            Some(div().child(self.timer_section(input, cx)).child(self.text_section(input, cx)).into_any_element())
+        } else if is_text(&input.kind) {
             Some(self.text_section(input, cx).into_any_element())
         } else if is_colour(&input.kind) {
             Some(self.colour_section(input, cx).into_any_element())
@@ -338,6 +359,135 @@ impl StudioWindow {
                     ),
             )
             .child(self.swatches(input, "color1", &["color1", "color2"], cx))
+    }
+
+    fn timer_section(&self, input: &Input, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = input.id;
+        let settings = input.settings.clone();
+        let mode = settings["mode"].as_str().unwrap_or("countdown").to_string();
+        let seconds = settings["seconds"].as_i64().unwrap_or(300);
+        let status = self.props.timer.as_ref().filter(|(i, ..)| *i == id).map(|(_, s, _)| *s);
+        let running = status.is_some_and(|s| s.running);
+        let set = move |key: &str, value: Value| Command::SetInputSettings {
+            input: id,
+            settings: with(&settings, key, value),
+        };
+        let mut modes = div().flex().gap_1();
+        for (i, (value, label)) in
+            [("countdown", "Countdown"), ("stopwatch", "Stopwatch"), ("clock", "Clock")].into_iter().enumerate()
+        {
+            let cmd = set("mode", json!(value));
+            let b = Button::new(("timer-mode", i))
+                .label(label)
+                .xsmall()
+                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)));
+            modes = modes.child(if mode == value { b.primary() } else { b.ghost() });
+        }
+        let action = move |a: TimerAction| {
+            move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                this.studio.read(cx).engine().post(move |s| s.reconciler.timer_action(id, a));
+                this.props.timer = None;
+                cx.notify();
+            }
+        };
+        let mut col = section("Timer").child(modes);
+        if mode == "countdown" {
+            let (shorter, longer) =
+                (set("seconds", json!((seconds - 60).max(10))), set("seconds", json!(seconds + 60)));
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().w(px(76.)).text_color(tok::text_secondary()).child("Length"))
+                    .child(
+                        Button::new("timer-shorter")
+                            .label("−")
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| this.exec(shorter.clone(), cx))),
+                    )
+                    .child(div().w(px(56.)).text_center().font_family("Menlo").child(format!(
+                        "{}:{:02}",
+                        seconds / 60,
+                        seconds % 60
+                    )))
+                    .child(
+                        Button::new("timer-longer")
+                            .label("+")
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| this.exec(longer.clone(), cx))),
+                    ),
+            );
+            // Then: which scene to go to when it ends.
+            let project = self.studio.read(cx).project().clone();
+            let end = input.settings["end_scene"].as_str().map(str::to_string);
+            let current = project.scenes.iter().position(|sc| Some(sc.id.to_string()) == end);
+            let next = match current {
+                None => project.scenes.first().map(|sc| json!(sc.id.to_string())),
+                Some(i) => project.scenes.get(i + 1).map(|sc| json!(sc.id.to_string())),
+            }
+            .unwrap_or(Value::Null);
+            let label = current.map_or("Nothing".to_string(), |i| project.scenes[i].name.clone());
+            let cycle = set("end_scene", next);
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().w(px(76.)).text_color(tok::text_secondary()).child("Then"))
+                    .child(
+                        Button::new("timer-end")
+                            .label(if current.is_some() { format!("Go to {label}") } else { label })
+                            .xsmall()
+                            .outline()
+                            .tooltip("What happens when the countdown ends (click to change)")
+                            .on_click(cx.listener(move |this, _, _, cx| this.exec(cycle.clone(), cx))),
+                    ),
+            );
+        }
+        if mode == "clock" {
+            let secs = input.settings["show_seconds"].as_bool().unwrap_or(false);
+            let toggle = set("show_seconds", json!(!secs));
+            let b = Button::new("clock-seconds")
+                .label("Seconds")
+                .xsmall()
+                .on_click(cx.listener(move |this, _, _, cx| this.exec(toggle.clone(), cx)));
+            col = col.child(if secs { b.primary() } else { b.ghost() });
+        } else {
+            col = col.child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(
+                        Button::new("timer-run")
+                            .label(if running { "Pause" } else { "Start" })
+                            .small()
+                            .outline()
+                            .on_click(cx.listener(action(if running {
+                                TimerAction::Pause
+                            } else {
+                                TimerAction::Start
+                            }))),
+                    )
+                    .child(
+                        Button::new("timer-reset")
+                            .label("Reset")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(action(TimerAction::Reset))),
+                    )
+                    .child(
+                        Button::new("timer-add")
+                            .label("+1 min")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(action(TimerAction::Add(60)))),
+                    ),
+            );
+        }
+        col
     }
 
     fn colour_section(&self, input: &Input, cx: &mut Context<Self>) -> impl IntoElement {

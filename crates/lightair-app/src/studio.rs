@@ -128,6 +128,24 @@ impl Studio {
         cx.notify();
     }
 
+    /// Runs the end action of countdowns that just ended ("Then go to" a scene).
+    pub fn run_timer_ends(&mut self, cx: &mut Context<Self>) {
+        let ended = self.engine.call(|s| s.reconciler.take_ended_timers());
+        for id in ended {
+            let target = self
+                .project()
+                .inputs
+                .get(&id)
+                .and_then(|i| i.settings["end_scene"].as_str().map(str::to_string))
+                .and_then(|s| self.project().scenes.iter().find(|sc| sc.id.to_string() == s).map(|sc| sc.id));
+            if let Some(scene) = target
+                && self.project().program != Some(scene)
+            {
+                let _ = self.execute(Command::SetProgram { scene: Some(scene) }, cx);
+            }
+        }
+    }
+
     /// Corrects imported layers whose source size was guessed, once the sources report their
     /// real size (or after a few seconds, with whatever is known). Layers changed since the
     /// import are left alone. One undo step.
