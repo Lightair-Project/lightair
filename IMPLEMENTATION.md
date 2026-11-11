@@ -20,15 +20,25 @@ Status key: ✅ done · 🔨 in progress · ⬜ not started
 - `lightair-preview`: libobs renders the program canvas into its own render target, a GL blit copies it into a BGRA IOSurface, and VideoToolbox converts it on the GPU to full-range NV12 (the format GPUI's `surface()` draws). No CPU copies.
 - A display capture or camera visible live in the window.
 
-## M3 · Core document ⬜
+## M3 · Core document ✅
 - `lightair-core`: Project / Format / Scene / Layer / Input / Track / Output model with stable IDs, commands, validation, undo/redo with gesture coalescing.
 - Engine reconciler applies patches to libobs (idempotent).
 - `lightair-store`: project package read/write, autosave journal, recovery.
 
-## M4 · Studio shell ⬜
-- `lightair-ui` tokens and theme (from [06](docs/06-design-system.md)); gpui-component themed.
-- Title bar (health strip, Go Live / Record / Clip), Layers, Scenes, Canvas, Mixer, Outputs, Inspector, status bar, command palette.
-- Canvas editing overlays: select, move, resize, rotate, crop, snapping.
+## M4 · Studio shell 🔨
+Done:
+- Design tokens applied to gpui-component's theme; Lucide icons.
+- Window anatomy from [05](docs/05-interface-shell.md): title bar with health strip and primary actions, Layers, Scenes (ON AIR tally), live Canvas, Mixer strip, Outputs, Inspector, status bar.
+- Canvas editing: click to select (topmost visible layer), drag to move with snapping guides to canvas edges and centre (⌘ disables), corner-handle resize (⇧ keeps aspect), arrow-key nudge, delete, Esc to deselect.
+- Every edit is a command: journaled, undoable (⌘Z / ⇧⌘Z), one undo step per drag gesture; scene switching is not undone.
+- Add layer: display, image (file picker), text, colour. Add scene. Layer visibility and lock.
+- Inspector: position, size, rotation steppers; fit mode; fill canvas; delete.
+
+Remaining:
+- `lightair-ui` crate with the studio components (scrubbable fields, `LayerRow`, `SceneCard`, `FormatTabs`).
+- gpui-kit dock layout (resize, collapse, pop-out, workspaces); command palette (⌘K).
+- Rename layers/scenes inline, drag to reorder, groups, multi-select, rotation and crop handles, rulers and guides.
+- Studio mode, onboarding, settings window.
 
 ## M5 · Audio
 Tracks from inputs, faders, meters (volmeter rings), mute/cue, mixes and routing, Voice Clarity and the built-in effect set ([10](docs/10-audio.md)).

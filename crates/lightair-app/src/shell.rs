@@ -1,0 +1,917 @@
+//! The studio window (docs/05-interface-shell.md): title bar, Layers + Scenes, Canvas, Mixer,
+//! Outputs + Inspector, status bar. Every edit goes through `Studio::execute`.
+
+use std::cell::Cell;
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Disableable, Sizable};
+use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::*;
+use lightair_core::{Command, Fit, Id, Input, Layer, Layout, Project, Scene};
+use lightair_preview::Preview;
+use serde_json::json;
+
+use crate::studio::Studio;
+use crate::ui::{self, tok};
+
+actions!(lightair, [Undo, Redo, DeleteSelection, NudgeLeft, NudgeRight, NudgeUp, NudgeDown, Deselect]);
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-z", Undo, Some("Studio")),
+        KeyBinding::new("cmd-shift-z", Redo, Some("Studio")),
+        KeyBinding::new("backspace", DeleteSelection, Some("Studio")),
+        KeyBinding::new("delete", DeleteSelection, Some("Studio")),
+        KeyBinding::new("left", NudgeLeft, Some("Studio")),
+        KeyBinding::new("right", NudgeRight, Some("Studio")),
+        KeyBinding::new("up", NudgeUp, Some("Studio")),
+        KeyBinding::new("down", NudgeDown, Some("Studio")),
+        KeyBinding::new("escape", Deselect, Some("Studio")),
+    ]);
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+struct Drag {
+    scene: Id,
+    layer: Id,
+    format: Id,
+    corner: Option<Corner>,
+    start: (f32, f32),
+    layout: Layout,
+}
+
+/// Snap guides shown while dragging: (vertical?, canvas coordinate).
+type Guides = Vec<(bool, f32)>;
+
+pub struct StudioWindow {
+    studio: Entity<Studio>,
+    preview: Preview,
+    focus: FocusHandle,
+    canvas_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    drag: Option<Drag>,
+    guides: Guides,
+    add_menu: bool,
+}
+
+const HANDLE: f32 = 10.0;
+const SNAP_PX: f32 = 8.0;
+
+impl StudioWindow {
+    pub fn new(studio: Entity<Studio>, preview: Preview, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.observe(&studio, |_, _, cx| cx.notify()).detach();
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        Self {
+            studio,
+            preview,
+            focus,
+            canvas_bounds: Rc::new(Cell::new(None)),
+            drag: None,
+            guides: vec![],
+            add_menu: false,
+        }
+    }
+
+    fn exec(&self, cmd: Command, cx: &mut Context<Self>) {
+        self.studio.update(cx, |s, cx| {
+            let _ = s.execute(cmd, cx);
+        });
+    }
+
+    fn select_layer(&self, layer: Option<Id>, cx: &mut Context<Self>) {
+        self.studio.update(cx, |s, cx| {
+            s.selected_layer = layer;
+            cx.notify();
+        });
+    }
+
+    /// Canvas-space rectangle mapping: (origin x, origin y, scale) in window pixels.
+    fn mapping(&self, project: &Project) -> Option<(f32, f32, f32)> {
+        let b = self.canvas_bounds.get()?;
+        let f = project.primary_format();
+        let (cw, ch) = (f.width as f32, f.height as f32);
+        let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
+        let s = (bw / cw).min(bh / ch);
+        Some((f32::from(b.origin.x) + (bw - cw * s) / 2.0, f32::from(b.origin.y) + (bh - ch * s) / 2.0, s))
+    }
+
+    fn to_canvas(&self, project: &Project, p: Point<Pixels>) -> Option<(f32, f32)> {
+        let (ox, oy, s) = self.mapping(project)?;
+        Some(((f32::from(p.x) - ox) / s, (f32::from(p.y) - oy) / s))
+    }
+
+    // ------------------------------------------------------------ canvas interaction
+    fn canvas_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        self.add_menu = false;
+        let studio = self.studio.read(cx);
+        let project = studio.project().clone();
+        let (Some(scene_id), Some((x, y)), Some((_, _, s))) =
+            (studio.selected_scene, self.to_canvas(&project, ev.position), self.mapping(&project))
+        else {
+            return;
+        };
+        let format = project.primary_format().id;
+        let Some(scene) = project.scene(scene_id) else { return };
+        let tol = HANDLE / s;
+
+        // A corner handle of the selected layer?
+        if let Some(sel) = studio.selected_layer.and_then(|id| scene.layer(id))
+            && let Some(l) = sel.layouts.get(&format).filter(|_| !sel.locked)
+        {
+            let corners = [
+                (Corner::TopLeft, l.x, l.y),
+                (Corner::TopRight, l.x + l.width, l.y),
+                (Corner::BottomLeft, l.x, l.y + l.height),
+                (Corner::BottomRight, l.x + l.width, l.y + l.height),
+            ];
+            if let Some((corner, ..)) =
+                corners.iter().find(|(_, cx_, cy_)| (x - cx_).abs() <= tol && (y - cy_).abs() <= tol)
+            {
+                self.drag = Some(Drag {
+                    scene: scene_id,
+                    layer: sel.id,
+                    format,
+                    corner: Some(*corner),
+                    start: (x, y),
+                    layout: *l,
+                });
+                self.studio.update(cx, |s, _| s.begin_gesture());
+                return;
+            }
+        }
+        // Topmost visible layer under the pointer.
+        let hit = scene.layers.iter().rev().find(|l| {
+            l.layouts
+                .get(&format)
+                .is_some_and(|lo| lo.visible && x >= lo.x && x <= lo.x + lo.width && y >= lo.y && y <= lo.y + lo.height)
+        });
+        match hit {
+            Some(layer) => {
+                let id = layer.id;
+                if !layer.locked {
+                    let layout = layer.layouts[&format];
+                    self.drag = Some(Drag { scene: scene_id, layer: id, format, corner: None, start: (x, y), layout });
+                    self.studio.update(cx, |s, _| s.begin_gesture());
+                }
+                self.select_layer(Some(id), cx);
+            }
+            None => self.select_layer(None, cx),
+        }
+    }
+
+    fn canvas_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = &self.drag else { return };
+        if ev.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let project = self.studio.read(cx).project().clone();
+        let (Some((x, y)), Some((_, _, s))) = (self.to_canvas(&project, ev.position), self.mapping(&project)) else {
+            return;
+        };
+        let (dx, dy) = (x - drag.start.0, y - drag.start.1);
+        let f = project.primary_format();
+        let (cw, ch) = (f.width as f32, f.height as f32);
+        let mut l = drag.layout;
+        let mut guides = Guides::new();
+        match drag.corner {
+            None => {
+                l.x += dx;
+                l.y += dy;
+                if !ev.modifiers.platform {
+                    // Snap edges and centre to the canvas edges and centre.
+                    let thr = SNAP_PX / s;
+                    let snap = |pos: f32, size: f32, extent: f32, guides: &mut Guides, vertical: bool| -> f32 {
+                        for (offset, target) in [(0.0, 0.0), (size / 2.0, extent / 2.0), (size, extent)] {
+                            for t in [0.0, extent / 2.0, extent] {
+                                if (pos + offset - t).abs() < thr {
+                                    guides.push((vertical, t));
+                                    return t - offset;
+                                }
+                            }
+                            let _ = target;
+                        }
+                        pos
+                    };
+                    l.x = snap(l.x, l.width, cw, &mut guides, true);
+                    l.y = snap(l.y, l.height, ch, &mut guides, false);
+                }
+            }
+            Some(corner) => {
+                let min = 8.0;
+                let (mut left, mut top, mut right, mut bottom) = (l.x, l.y, l.x + l.width, l.y + l.height);
+                match corner {
+                    Corner::TopLeft => (left, top) = (left + dx, top + dy),
+                    Corner::TopRight => (right, top) = (right + dx, top + dy),
+                    Corner::BottomLeft => (left, bottom) = (left + dx, bottom + dy),
+                    Corner::BottomRight => (right, bottom) = (right + dx, bottom + dy),
+                }
+                if ev.modifiers.shift {
+                    // Keep aspect ratio, driven by the width.
+                    let aspect = l.height / l.width.max(1.0);
+                    let h = (right - left).abs() * aspect;
+                    match corner {
+                        Corner::TopLeft | Corner::TopRight => top = bottom - h,
+                        _ => bottom = top + h,
+                    }
+                }
+                l.x = left.min(right - min);
+                l.y = top.min(bottom - min);
+                l.width = (right - left).max(min);
+                l.height = (bottom - top).max(min);
+            }
+        }
+        self.guides = guides;
+        let cmd = Command::SetLayout { scene: drag.scene, layer: drag.layer, format: drag.format, layout: l };
+        self.exec(cmd, cx);
+    }
+
+    fn canvas_up(&mut self, _: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.drag.take().is_some() {
+            self.guides.clear();
+            self.studio.update(cx, |s, cx| {
+                s.end_gesture();
+                cx.notify();
+            });
+        }
+    }
+
+    fn nudge(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) {
+        let studio = self.studio.read(cx);
+        let project = studio.project().clone();
+        let format = project.primary_format().id;
+        let (Some(scene), Some(layer)) = (studio.selected_scene, studio.selected_layer) else { return };
+        let Some(l) = project.scene(scene).and_then(|s| s.layer(layer)).and_then(|l| l.layouts.get(&format)).copied()
+        else {
+            return;
+        };
+        let layout = Layout { x: l.x + dx, y: l.y + dy, ..l };
+        self.exec(Command::SetLayout { scene, layer, format, layout }, cx);
+    }
+
+    fn delete_selection(&mut self, cx: &mut Context<Self>) {
+        let studio = self.studio.read(cx);
+        if let (Some(scene), Some(layer)) = (studio.selected_scene, studio.selected_layer) {
+            self.exec(Command::RemoveLayer { scene, layer }, cx);
+        }
+    }
+
+    // ------------------------------------------------------------ adding things
+    fn add_input_layer(
+        &mut self,
+        name: &str,
+        kind: &str,
+        settings: serde_json::Value,
+        size: (f32, f32),
+        cx: &mut Context<Self>,
+    ) {
+        self.add_menu = false;
+        let studio = self.studio.read(cx);
+        let project = studio.project().clone();
+        let Some(scene) = studio.selected_scene else { return };
+        let f = project.primary_format();
+        let (w, h) = size;
+        let layout = Layout::boxed((f.width as f32 - w) / 2.0, (f.height as f32 - h) / 2.0, w, h);
+        let input = Input::new(name, kind, settings);
+        let layer = Layer::new(name, input.id, [(f.id, layout)]);
+        let layer_id = layer.id;
+        let cmd = Command::Batch {
+            label: format!("Add {name}"),
+            commands: vec![Command::AddInput { input }, Command::AddLayer { scene, layer, index: None }],
+        };
+        self.exec(cmd, cx);
+        self.select_layer(Some(layer_id), cx);
+    }
+
+    fn add_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_menu = false;
+        let paths =
+            cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path): Option<PathBuf> = paths.into_iter().next() else { return };
+            let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Image".into());
+            let _ = this.update(cx, |this, cx| {
+                this.add_input_layer(&name, "image_source", json!({"file": path.to_string_lossy()}), (640.0, 360.0), cx)
+            });
+        })
+        .detach();
+    }
+
+    fn add_scene(&mut self, cx: &mut Context<Self>) {
+        let n = self.studio.read(cx).project().scenes.len() + 1;
+        let scene = Scene::new(format!("Scene {n}"));
+        let id = scene.id;
+        self.exec(Command::AddScene { scene, index: None }, cx);
+        self.studio.update(cx, |s, cx| {
+            s.selected_scene = Some(id);
+            s.selected_layer = None;
+            cx.notify();
+        });
+    }
+}
+
+// ================================================================= render
+impl Render for StudioWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.request_animation_frame();
+        let studio = self.studio.read(cx);
+        let project = studio.project().clone();
+
+        div()
+            .key_context("Studio")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &Undo, _, cx| this.studio.update(cx, |s, cx| s.undo(cx))))
+            .on_action(cx.listener(|this, _: &Redo, _, cx| this.studio.update(cx, |s, cx| s.redo(cx))))
+            .on_action(cx.listener(|this, _: &DeleteSelection, _, cx| this.delete_selection(cx)))
+            .on_action(cx.listener(|this, _: &NudgeLeft, _, cx| this.nudge(-1.0, 0.0, cx)))
+            .on_action(cx.listener(|this, _: &NudgeRight, _, cx| this.nudge(1.0, 0.0, cx)))
+            .on_action(cx.listener(|this, _: &NudgeUp, _, cx| this.nudge(0.0, -1.0, cx)))
+            .on_action(cx.listener(|this, _: &NudgeDown, _, cx| this.nudge(0.0, 1.0, cx)))
+            .on_action(cx.listener(|this, _: &Deselect, _, cx| this.select_layer(None, cx)))
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(tok::bg_app())
+            .text_color(tok::text())
+            .text_size(px(13.))
+            .child(self.title_bar(&project, cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.left_column(&project, cx))
+                    .child(self.centre(&project, cx))
+                    .child(self.right_column(&project, cx)),
+            )
+            .child(self.status_bar(cx))
+    }
+}
+
+impl StudioWindow {
+    fn title_bar(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        let stats = self.studio.read(cx).stats;
+        let fps_color = if stats.active_fps > 0.0 && stats.lagged_frames == 0 { tok::ok() } else { tok::warn() };
+        let soon = |id: &'static str, label: &'static str| {
+            Button::new(id).label(label).small().outline().disabled(true).tooltip("Outputs arrive in milestone M6")
+        };
+        div()
+            .flex()
+            .items_center()
+            .h(px(44.))
+            .pl(px(84.))
+            .pr_3()
+            .gap_3()
+            .border_b_1()
+            .border_color(tok::border())
+            .bg(tok::bg_app())
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(project.name.clone()))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(11.))
+                    .text_color(tok::text_secondary())
+                    .child(div().size(px(8.)).rounded_full().bg(fps_color))
+                    .child(format!("{:.1} FPS", stats.active_fps))
+                    .child(format!("{:.1} ms", stats.average_frame_time_ms)),
+            )
+            .child(
+                Button::new("go-live")
+                    .label("Go live")
+                    .small()
+                    .primary()
+                    .disabled(true)
+                    .tooltip("Streaming arrives in milestone M6"),
+            )
+            .child(soon("record", "Record"))
+            .child(soon("clip", "Clip"))
+    }
+
+    fn left_column(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .w(px(264.))
+            .h_full()
+            .border_r_1()
+            .border_color(tok::border())
+            .bg(tok::bg_panel())
+            .child(self.layers_panel(project, cx))
+            .child(div().h(px(1.)).bg(tok::border()))
+            .child(self.scenes_panel(project, cx))
+    }
+
+    fn layers_panel(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        let studio = self.studio.read(cx);
+        let format = project.primary_format().id;
+        let scene = studio.selected_scene.and_then(|id| project.scene(id)).cloned();
+        let selected = studio.selected_layer;
+        let add = ui::icon_button("add-layer", "plus", tok::text_secondary())
+            .tooltip(|w, cx| Tooltip::new("Add layer").build(w, cx))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.add_menu = !this.add_menu;
+                cx.notify();
+            }));
+        let mut col =
+            div().flex().flex_col().flex_1().min_h_0().child(ui::panel_header("Layers", Some(add.into_any_element())));
+        if self.add_menu {
+            col = col.child(self.add_menu(cx));
+        }
+        let Some(scene) = scene else {
+            return col.child(div().px_3().text_color(tok::text_tertiary()).child("No scene selected"));
+        };
+        if scene.layers.is_empty() {
+            col = col.child(
+                div().px_3().py_2().text_color(tok::text_tertiary()).child("This scene is empty. Add a layer with +."),
+            );
+        }
+        let scene_id = scene.id;
+        let rows = scene.layers.iter().rev().enumerate().map(|(i, layer)| {
+            let id = layer.id;
+            let kind = project.inputs.get(&layer.input).map(|i| i.kind.clone()).unwrap_or_default();
+            let visible = layer.layouts.get(&format).is_some_and(|l| l.visible);
+            let locked = layer.locked;
+            let is_sel = selected == Some(id);
+            div()
+                .id(("layer", i))
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(36.))
+                .mx_2()
+                .px_2()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .when(is_sel, |d| d.bg(tok::bg_selected()))
+                .hover(|d| d.bg(tok::bg_raised()))
+                .on_click(cx.listener(move |this, _, _, cx| this.select_layer(Some(id), cx)))
+                .child(ui::icon(ui::input_icon(&kind)).size(px(15.)).text_color(if visible {
+                    tok::text_secondary()
+                } else {
+                    tok::text_tertiary()
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_color(if visible { tok::text() } else { tok::text_tertiary() })
+                        .child(layer.name.clone()),
+                )
+                .child(
+                    ui::icon_button(
+                        ("lock", i),
+                        if locked { "lock" } else { "lock-open" },
+                        if locked { tok::text() } else { tok::text_tertiary() },
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.exec(Command::SetLayerLocked { scene: scene_id, layer: id, locked: !locked }, cx)
+                    })),
+                )
+                .child(
+                    ui::icon_button(
+                        ("eye", i),
+                        if visible { "eye" } else { "eye-off" },
+                        if visible { tok::text_secondary() } else { tok::text_tertiary() },
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.exec(
+                            Command::SetLayerVisible { scene: scene_id, layer: id, format, visible: !visible },
+                            cx,
+                        )
+                    })),
+                )
+        });
+        col.child(div().id("layers-scroll").flex().flex_col().gap_0p5().overflow_y_scroll().children(rows))
+    }
+
+    fn add_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let item = |id: &'static str, icon: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(30.))
+                .px_2()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|d| d.bg(tok::bg_selected()))
+                .child(ui::icon(icon).size(px(14.)).text_color(tok::text_secondary()))
+                .child(label)
+        };
+        let display_settings = {
+            let mut v = json!({"type": 0, "show_cursor": true, "hide_obs": true});
+            if let Some(uuid) = lightair_engine::displays::main_display_uuid() {
+                v["display_uuid"] = uuid.into();
+            }
+            v
+        };
+        div()
+            .mx_2()
+            .mb_2()
+            .p_1()
+            .rounded(px(10.))
+            .bg(tok::bg_raised())
+            .border_1()
+            .border_color(tok::border())
+            .child(item("add-display", "monitor", "Display").on_click(cx.listener(move |this, _, _, cx| {
+                this.add_input_layer("Display", "screen_capture", display_settings.clone(), (1280.0, 720.0), cx)
+            })))
+            .child(item("add-image", "image", "Image…").on_click(cx.listener(|this, _, window, cx| this.add_image(window, cx))))
+            .child(item("add-text", "type", "Text").on_click(cx.listener(|this, _, _, cx| {
+                this.add_input_layer(
+                    "Text",
+                    "text_ft2_source_v2",
+                    json!({"text": "Lightair", "font": {"face": "Helvetica Neue", "size": 128, "flags": 1}, "color1": 0xFFFFFFFFu32, "color2": 0xFFFFFFFFu32}),
+                    (720.0, 180.0),
+                    cx,
+                )
+            })))
+            .child(item("add-colour", "square", "Colour").on_click(cx.listener(|this, _, _, cx| {
+                this.add_input_layer("Colour", "color_source_v3", json!({"color": 0xFF4A3BFFu32, "width": 400, "height": 400}), (400.0, 400.0), cx)
+            })))
+    }
+
+    fn scenes_panel(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        let studio = self.studio.read(cx);
+        let selected = studio.selected_scene;
+        let program = project.program;
+        let add = ui::icon_button("add-scene", "plus", tok::text_secondary())
+            .tooltip(|w, cx| Tooltip::new("Add scene").build(w, cx))
+            .on_click(cx.listener(|this, _, _, cx| this.add_scene(cx)));
+        let rows = project.scenes.iter().enumerate().map(|(i, scene)| {
+            let id = scene.id;
+            let on_air = program == Some(id);
+            div()
+                .id(("scene", i))
+                .relative()
+                .flex()
+                .items_center()
+                .h(px(36.))
+                .mx_2()
+                .px_3()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .when(selected == Some(id), |d| d.bg(tok::bg_selected()))
+                .hover(|d| d.bg(tok::bg_raised()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.studio.update(cx, |s, cx| {
+                        s.selected_scene = Some(id);
+                        s.selected_layer = None;
+                        let _ = s.execute(Command::SetProgram { scene: Some(id) }, cx);
+                    })
+                }))
+                .when(on_air, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .left(px(0.))
+                            .top(px(8.))
+                            .bottom(px(8.))
+                            .w(px(3.))
+                            .rounded_full()
+                            .bg(tok::live()),
+                    )
+                })
+                .child(div().flex_1().child(scene.name.clone()))
+                .when(on_air, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(tok::live())
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("ON AIR"),
+                    )
+                })
+        });
+        div()
+            .flex()
+            .flex_col()
+            .h(px(280.))
+            .child(ui::panel_header("Scenes", Some(add.into_any_element())))
+            .child(div().id("scenes-scroll").flex().flex_col().gap_0p5().overflow_y_scroll().children(rows))
+    }
+
+    fn centre(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        div().flex().flex_col().flex_1().min_w_0().child(self.canvas(project, cx)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(44.))
+                .px_3()
+                .border_t_1()
+                .border_color(tok::border())
+                .bg(tok::bg_panel())
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("Audio Mixer"))
+                .child(
+                    div().text_color(tok::text_tertiary()).text_size(px(12.)).child("Tracks arrive in milestone M5"),
+                ),
+        )
+    }
+
+    fn canvas(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        let bounds_cell = self.canvas_bounds.clone();
+        let studio = self.studio.read(cx);
+        let format = project.primary_format().clone();
+        let mapping = self.mapping(project);
+        let frame = self.preview.latest_frame();
+
+        let mut stage = div()
+            .absolute()
+            .top(px(16.))
+            .left(px(16.))
+            .right(px(16.))
+            .bottom(px(16.))
+            .child(canvas(move |b, _, _| bounds_cell.set(Some(b)), |_, _, _, _| {}).absolute().size_full())
+            .child(match frame {
+                Some(f) => surface(f).absolute().size_full().object_fit(ObjectFit::Contain).into_any_element(),
+                None => div()
+                    .absolute()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(tok::text_tertiary())
+                    .child("Starting preview…")
+                    .into_any_element(),
+            });
+
+        // Selection overlay and guides, in the stage's local coordinates.
+        if let (Some((ox, oy, s)), Some(b)) = (mapping, self.canvas_bounds.get()) {
+            let (lx, ly) = (ox - f32::from(b.origin.x), oy - f32::from(b.origin.y));
+            let selected = studio
+                .selected_scene
+                .and_then(|id| project.scene(id))
+                .and_then(|scene| studio.selected_layer.and_then(|l| scene.layer(l)))
+                .and_then(|l| l.layouts.get(&format.id).map(|lo| (*lo, l.locked)));
+            if let Some((l, locked)) = selected {
+                let (x, y, w, h) = (lx + l.x * s, ly + l.y * s, l.width * s, l.height * s);
+                stage = stage.child(
+                    div()
+                        .absolute()
+                        .left(px(x - 1.))
+                        .top(px(y - 1.))
+                        .w(px(w + 2.))
+                        .h(px(h + 2.))
+                        .border_1()
+                        .border_color(tok::canvas_selection_edge())
+                        .child(div().size_full().border_1().border_color(tok::canvas_selection())),
+                );
+                if !locked {
+                    for (cx_, cy_) in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)] {
+                        stage = stage.child(
+                            div()
+                                .absolute()
+                                .left(px(cx_ - 4.))
+                                .top(px(cy_ - 4.))
+                                .size(px(8.))
+                                .bg(tok::canvas_selection())
+                                .border_1()
+                                .border_color(tok::canvas_selection_edge()),
+                        );
+                    }
+                }
+            }
+            for (vertical, at) in &self.guides {
+                let g = div().absolute().bg(tok::canvas_guide());
+                stage = stage.child(if *vertical {
+                    g.left(px(lx + at * s)).top(px(ly)).w(px(1.)).h(px(format.height as f32 * s))
+                } else {
+                    g.top(px(ly + at * s)).left(px(lx)).h(px(1.)).w(px(format.width as f32 * s))
+                });
+            }
+        }
+
+        div()
+            .id("canvas")
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .bg(tok::bg_canvas_well())
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::canvas_down))
+            .on_mouse_move(cx.listener(Self::canvas_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::canvas_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::canvas_up))
+            .child(stage)
+    }
+
+    fn right_column(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .w(px(300.))
+            .h_full()
+            .border_l_1()
+            .border_color(tok::border())
+            .bg(tok::bg_panel())
+            .child(self.outputs_panel())
+            .child(div().h(px(1.)).bg(tok::border()))
+            .child(self.inspector(project, cx))
+    }
+
+    fn outputs_panel(&self) -> impl IntoElement {
+        let row = |icon: &'static str, label: &'static str| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(34.))
+                .mx_2()
+                .px_2()
+                .text_color(tok::text_tertiary())
+                .child(ui::icon(icon).size(px(15.)).text_color(tok::text_tertiary()))
+                .child(div().flex_1().child(label))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .pb_2()
+            .child(ui::panel_header("Outputs", None))
+            .child(row("circle", "Recording"))
+            .child(row("video", "Virtual camera"))
+            .child(row("radio", "Streaming destinations"))
+            .child(
+                div()
+                    .px_4()
+                    .pt_1()
+                    .text_size(px(11.))
+                    .text_color(tok::text_tertiary())
+                    .child("Outputs arrive in milestone M6."),
+            )
+    }
+
+    fn inspector(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        let studio = self.studio.read(cx);
+        let format = project.primary_format().clone();
+        let scene = studio.selected_scene.and_then(|id| project.scene(id)).cloned();
+        let layer = scene.as_ref().and_then(|s| studio.selected_layer.and_then(|l| s.layer(l))).cloned();
+        let body = div().flex().flex_col().gap_3().px_3();
+        let content = match (scene, layer) {
+            (Some(scene), Some(layer)) => {
+                let lo = layer.layouts.get(&format.id).copied().unwrap_or(Layout::boxed(0., 0., 100., 100.));
+                let (sid, lid, fid) = (scene.id, layer.id, format.id);
+                let kind = project.inputs.get(&layer.input).map(|i| i.kind.clone()).unwrap_or_default();
+                let set = move |f: fn(&mut Layout)| {
+                    let mut l = lo;
+                    f(&mut l);
+                    Command::SetLayout { scene: sid, layer: lid, format: fid, layout: l }
+                };
+                let stepper = |id: &'static str, label: &'static str, value: f32, minus: Command, plus: Command| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(div().w(px(76.)).text_color(tok::text_secondary()).child(label))
+                        .child(
+                            Button::new((id, 0usize))
+                                .label("−")
+                                .xsmall()
+                                .ghost()
+                                .on_click(cx.listener(move |this, _, _, cx| this.exec(minus.clone(), cx))),
+                        )
+                        .child(div().w(px(64.)).text_center().font_family("Menlo").child(format!("{value:.0}")))
+                        .child(
+                            Button::new((id, 1usize))
+                                .label("+")
+                                .xsmall()
+                                .ghost()
+                                .on_click(cx.listener(move |this, _, _, cx| this.exec(plus.clone(), cx))),
+                        )
+                };
+                let fit_button = |id: &'static str, label: &'static str, fit: Fit| {
+                    let cmd = Command::SetLayout { scene: sid, layer: lid, format: fid, layout: Layout { fit, ..lo } };
+                    let b = Button::new(id)
+                        .label(label)
+                        .xsmall()
+                        .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)));
+                    if lo.fit == fit { b.primary() } else { b.ghost() }
+                };
+                body.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(ui::icon(ui::input_icon(&kind)).size(px(16.)).text_color(tok::text_secondary()))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(layer.name.clone())),
+                )
+                .child(stepper("x", "X", lo.x, set(|l| l.x -= 10.0), set(|l| l.x += 10.0)))
+                .child(stepper("y", "Y", lo.y, set(|l| l.y -= 10.0), set(|l| l.y += 10.0)))
+                .child(stepper(
+                    "w",
+                    "Width",
+                    lo.width,
+                    set(|l| l.width = (l.width - 10.0).max(8.0)),
+                    set(|l| l.width += 10.0),
+                ))
+                .child(stepper(
+                    "h",
+                    "Height",
+                    lo.height,
+                    set(|l| l.height = (l.height - 10.0).max(8.0)),
+                    set(|l| l.height += 10.0),
+                ))
+                .child(stepper("r", "Rotation", lo.rotation, set(|l| l.rotation -= 15.0), set(|l| l.rotation += 15.0)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(div().w(px(76.)).text_color(tok::text_secondary()).child("Fit"))
+                        .child(fit_button("fit-fit", "Fit", Fit::Fit))
+                        .child(fit_button("fit-fill", "Fill", Fit::Fill))
+                        .child(fit_button("fit-stretch", "Stretch", Fit::Stretch))
+                        .child(fit_button("fit-original", "Original", Fit::Original)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .pt_2()
+                        .child({
+                            let full = Command::SetLayout {
+                                scene: sid,
+                                layer: lid,
+                                format: fid,
+                                layout: Layout {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: format.width as f32,
+                                    height: format.height as f32,
+                                    rotation: 0.0,
+                                    ..lo
+                                },
+                            };
+                            Button::new("fill-canvas")
+                                .label("Fill canvas")
+                                .small()
+                                .outline()
+                                .on_click(cx.listener(move |this, _, _, cx| this.exec(full.clone(), cx)))
+                        })
+                        .child(Button::new("delete-layer").label("Delete").small().danger().on_click(cx.listener(
+                            move |this, _, _, cx| this.exec(Command::RemoveLayer { scene: sid, layer: lid }, cx),
+                        ))),
+                )
+                .into_any_element()
+            }
+            (Some(scene), None) => body
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(scene.name.clone()))
+                .child(div().text_color(tok::text_secondary()).child(format!(
+                    "{} layer{} · {}×{} @ {} fps",
+                    scene.layers.len(),
+                    if scene.layers.len() == 1 { "" } else { "s" },
+                    format.width,
+                    format.height,
+                    format.fps_num / format.fps_den.max(1)
+                )))
+                .child(
+                    div()
+                        .text_color(tok::text_tertiary())
+                        .child("Select a layer on the canvas or in Layers to edit it."),
+                )
+                .into_any_element(),
+            _ => body.child(div().text_color(tok::text_tertiary()).child("Nothing selected")).into_any_element(),
+        };
+        div().flex().flex_col().flex_1().min_h_0().child(ui::panel_header("Inspector", None)).child(content)
+    }
+
+    fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let studio = self.studio.read(cx);
+        let issue = studio.issue.clone();
+        let stats = studio.stats;
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .h(px(26.))
+            .px_3()
+            .border_t_1()
+            .border_color(tok::border())
+            .text_size(px(11.))
+            .text_color(tok::text_secondary())
+            .children(issue.map(|i| div().child(i)))
+            .child(div().flex_1())
+            .child(format!(
+                "{} frames · {} lagged · preview {}",
+                stats.total_frames,
+                stats.lagged_frames,
+                self.preview.frames()
+            ))
+            .child(div().text_color(tok::text_tertiary()).child(concat!("Lightair ", env!("CARGO_PKG_VERSION"))))
+    }
+}
