@@ -103,7 +103,7 @@ pub fn input_icon(kind: &str) -> &'static str {
     match kind {
         "screen_capture" | "display_capture" => "monitor",
         "window_capture" => "app-window",
-        "av_capture_input_v2" | "av_capture_input" => "camera",
+        "macos-avcapture" | "macos-avcapture-fast" | "av_capture_input_v2" | "av_capture_input" => "camera",
         "image_source" | "slideshow" => "image",
         "text_ft2_source_v2" => "type",
         "color_source_v3" => "square",

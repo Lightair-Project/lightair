@@ -107,6 +107,10 @@ impl Source {
     pub fn update(&self, settings: &Data) {
         unsafe { sys::obs_source_update(self.as_ptr(), settings.as_ptr()) }
     }
+    /// Replaces all settings with `settings` on top of the defaults.
+    pub fn reset(&self, settings: &Data) {
+        unsafe { sys::obs_source_reset_settings(self.as_ptr(), settings.as_ptr()) }
+    }
 }
 
 impl Drop for Source {
@@ -214,4 +218,31 @@ impl Drop for Canvas {
             sys::obs_canvas_release(self.as_ptr());
         }
     }
+}
+
+/// Items of a list property of a source type, as (label, value) — e.g. the camera devices of
+/// `av_capture_input_v2`'s `device` property. Call on the engine thread.
+pub fn property_items(source_type: &str, property: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    unsafe {
+        let props = sys::obs_get_source_properties(cstr(source_type).as_ptr());
+        if props.is_null() {
+            return out;
+        }
+        let p = sys::obs_properties_get(props, cstr(property).as_ptr());
+        if !p.is_null() {
+            for i in 0..sys::obs_property_list_item_count(p) {
+                let text = |ptr: *const std::ffi::c_char| {
+                    if ptr.is_null() { String::new() } else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
+                };
+                let label = text(sys::obs_property_list_item_name(p, i));
+                let value = text(sys::obs_property_list_item_string(p, i));
+                if !value.is_empty() {
+                    out.push((label, value));
+                }
+            }
+        }
+        sys::obs_properties_destroy(props);
+    }
+    out
 }

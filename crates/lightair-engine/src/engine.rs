@@ -40,6 +40,8 @@ pub struct EngineConfig {
     pub locale: String,
     /// Where OBS modules keep their own config (`obs_startup`'s module config path).
     pub module_config_dir: PathBuf,
+    /// Further directories of `<module>.plugin` bundles (Lightair's in-tree modules).
+    pub extra_plugin_dirs: Vec<PathBuf>,
 }
 
 impl Default for EngineConfig {
@@ -55,6 +57,7 @@ impl Default for EngineConfig {
             allowed_modules: crate::DEFAULT_MODULES.iter().map(|s| s.to_string()).collect(),
             locale: "en-US".into(),
             module_config_dir: home.join("Library/Application Support/Lightair/plugin_config"),
+            extra_plugin_dirs: Vec::new(),
         }
     }
 }
@@ -280,28 +283,34 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
                 tracing::warn!("some core modules failed to load");
             }
         }
-        Modules::Directory(dir) => {
-            let bin = c(&format!("{}/%module%.plugin/Contents/MacOS/", dir.display()));
-            let data = c(&format!("{}/%module%.plugin/Contents/Resources/", dir.display()));
-            let mut info = sys::obs_runtime_module_info {
-                path_info: sys::obs_runtime_module_path { binary: bin.as_ptr(), data: data.as_ptr() },
-                type_: sys::OBS_MODULE_TYPE_PLUGIN,
-                name: std::ptr::null(),
-            };
-            let mut failures = sys::obs_module_failure_info { failed_modules: std::ptr::null_mut(), count: 0 };
-            unsafe {
-                sys::obs_load_plugins(&mut info, &mut failures);
-                if failures.count > 0 {
-                    tracing::warn!(count = failures.count, "modules failed to load");
-                }
-                sys::obs_module_failure_info_free(&mut failures);
-            }
-        }
+        Modules::Directory(dir) => unsafe { load_plugin_dir(&dir) },
         Modules::Auto | Modules::None => {}
+    }
+    for dir in &cfg.extra_plugin_dirs {
+        unsafe { load_plugin_dir(dir) };
     }
     unsafe {
         sys::obs_post_load_modules();
         sys::obs_log_loaded_modules();
+    }
+}
+
+/// Loads every `<module>.plugin` in `dir` (subject to the safe-module allowlist).
+unsafe fn load_plugin_dir(dir: &std::path::Path) {
+    let bin = c(&format!("{}/%module%.plugin/Contents/MacOS/", dir.display()));
+    let data = c(&format!("{}/%module%.plugin/Contents/Resources/", dir.display()));
+    let mut info = sys::obs_runtime_module_info {
+        path_info: sys::obs_runtime_module_path { binary: bin.as_ptr(), data: data.as_ptr() },
+        type_: sys::OBS_MODULE_TYPE_PLUGIN,
+        name: std::ptr::null(),
+    };
+    let mut failures = sys::obs_module_failure_info { failed_modules: std::ptr::null_mut(), count: 0 };
+    unsafe {
+        sys::obs_load_plugins(&mut info, &mut failures);
+        if failures.count > 0 {
+            tracing::warn!(count = failures.count, dir = %dir.display(), "modules failed to load");
+        }
+        sys::obs_module_failure_info_free(&mut failures);
     }
 }
 

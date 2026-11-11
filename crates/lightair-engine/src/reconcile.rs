@@ -28,6 +28,8 @@ use std::sync::Arc;
 #[derive(Default)]
 pub struct Reconciler {
     inputs: HashMap<Id, Source>,
+    /// Input effect chains (Camera Studio, colour correction, …).
+    input_effects: HashMap<Id, Chain>,
     /// Canvases for additional formats. The primary format uses libobs's main canvas.
     canvases: HashMap<Id, Canvas>,
     /// (scene, format) → libobs scene.
@@ -89,17 +91,26 @@ impl Reconciler {
                     let settings = data_from_json(&input.settings);
                     match Source::create(&input.kind, &input.id.to_string(), Some(&settings)) {
                         Some(src) => {
+                            let chain = unsafe { chain_build(src.as_ptr(), &input.effects) };
+                            self.input_effects.insert(input.id, chain);
                             self.inputs.insert(input.id, src);
                         }
                         None => tracing::warn!(kind = input.kind, name = input.name, "could not create input"),
                     }
                 }
-                Patch::InputChanged(input) => {
-                    if let Some(src) = self.inputs.get(&input.id) {
-                        src.update(&data_from_json(&input.settings));
+                Patch::InputChanged { before, after } => {
+                    if let Some(src) = self.inputs.get(&after.id) {
+                        if before.settings != after.settings {
+                            src.update(&data_from_json(&after.settings));
+                        }
+                        let chain = self.input_effects.entry(after.id).or_default();
+                        unsafe { chain_update(src.as_ptr(), chain, &before.effects, &after.effects) };
                     }
                 }
                 Patch::InputRemoved(id) => {
+                    if let (Some(src), Some(mut chain)) = (self.inputs.get(id), self.input_effects.remove(id)) {
+                        unsafe { chain_remove(src.as_ptr(), &mut chain) };
+                    }
                     self.inputs.remove(id);
                 }
                 Patch::SceneAdded(scene) => {
@@ -476,7 +487,7 @@ impl Reconciler {
             let mut state =
                 TrackState { input: track.input, channel, volmeter: VolmeterPtr(vm), meter, filters: vec![] };
             apply_track_levels(src, track);
-            build_filters(src, &mut state, &track.effects);
+            state.filters = chain_build(src, &track.effects);
             self.tracks.insert(track.id, state);
         }
     }
@@ -492,23 +503,7 @@ impl Reconciler {
         };
         let src = source.as_ptr();
         unsafe { apply_track_levels(src, after) };
-        let shape = |effects: &[Effect]| effects.iter().map(|e| (e.id, e.kind.clone())).collect::<Vec<_>>();
-        if shape(&before.effects) != shape(&after.effects) {
-            unsafe {
-                remove_filters(src, state);
-                build_filters(src, state, &after.effects);
-            }
-            return;
-        }
-        for (old, new) in before.effects.iter().zip(&after.effects) {
-            let Some((_, filter)) = state.filters.iter().find(|(id, _)| *id == new.id) else { continue };
-            if old.enabled != new.enabled {
-                unsafe { sys::obs_source_set_enabled(filter.as_ptr(), new.enabled) };
-            }
-            if old.settings != new.settings {
-                filter.update(&data_from_json(&new.settings));
-            }
-        }
+        unsafe { chain_update(src, &mut state.filters, &before.effects, &after.effects) };
     }
 
     fn remove_track(&mut self, id: Id) {
@@ -518,7 +513,7 @@ impl Reconciler {
             sys::obs_volmeter_destroy(state.volmeter.0);
             sys::obs_set_output_source(state.channel, std::ptr::null_mut());
             if let Some(source) = self.inputs.get(&state.input) {
-                remove_filters(source.as_ptr(), &mut state);
+                chain_remove(source.as_ptr(), &mut state.filters);
                 sys::obs_source_set_monitoring_type(source.as_ptr(), sys::OBS_MONITORING_TYPE_NONE);
             }
         }
@@ -581,6 +576,11 @@ impl Reconciler {
             unsafe { sys::obs_canvas_set_channel(canvas.as_ptr(), 0, std::ptr::null_mut()) };
         }
         self.transitions.clear();
+        for (id, mut chain) in self.input_effects.drain() {
+            if let Some(src) = self.inputs.get(&id) {
+                unsafe { chain_remove(src.as_ptr(), &mut chain) };
+            }
+        }
         self.items.clear();
         self.scenes.clear();
         self.canvases.clear();
@@ -630,25 +630,53 @@ unsafe fn apply_track_levels(src: *mut sys::obs_source_t, track: &Track) {
     }
 }
 
-unsafe fn build_filters(src: *mut sys::obs_source_t, state: &mut TrackState, effects: &[Effect]) {
+type Chain = Vec<(Id, Source)>;
+
+/// Creates libobs filters for an effect chain and attaches them to `src`, in order.
+unsafe fn chain_build(src: *mut sys::obs_source_t, effects: &[Effect]) -> Chain {
+    let mut chain = Chain::new();
     for effect in effects {
         let Some(filter) =
             Source::create_private(&effect.kind, &effect.id.to_string(), Some(&data_from_json(&effect.settings)))
         else {
-            tracing::warn!(kind = effect.kind, "could not create audio effect");
+            tracing::warn!(kind = effect.kind, "could not create effect");
             continue;
         };
         unsafe {
             sys::obs_source_set_enabled(filter.as_ptr(), effect.enabled);
             sys::obs_source_filter_add(src, filter.as_ptr());
         }
-        state.filters.push((effect.id, filter));
+        chain.push((effect.id, filter));
+    }
+    chain
+}
+
+unsafe fn chain_remove(src: *mut sys::obs_source_t, chain: &mut Chain) {
+    for (_, filter) in chain.drain(..) {
+        unsafe { sys::obs_source_filter_remove(src, filter.as_ptr()) };
     }
 }
 
-unsafe fn remove_filters(src: *mut sys::obs_source_t, state: &mut TrackState) {
-    for (_, filter) in state.filters.drain(..) {
-        unsafe { sys::obs_source_filter_remove(src, filter.as_ptr()) };
+/// Brings a chain from `before` to `after`: rebuilt when effects were added, removed or
+/// reordered; otherwise updated in place. Settings are replaced, not merged: the document holds
+/// the whole intended state (a look resets everything it doesn't set).
+unsafe fn chain_update(src: *mut sys::obs_source_t, chain: &mut Chain, before: &[Effect], after: &[Effect]) {
+    let shape = |effects: &[Effect]| effects.iter().map(|e| (e.id, e.kind.clone())).collect::<Vec<_>>();
+    if shape(before) != shape(after) {
+        unsafe {
+            chain_remove(src, chain);
+            *chain = chain_build(src, after);
+        }
+        return;
+    }
+    for (old, new) in before.iter().zip(after) {
+        let Some((_, filter)) = chain.iter().find(|(id, _)| *id == new.id) else { continue };
+        if old.enabled != new.enabled {
+            unsafe { sys::obs_source_set_enabled(filter.as_ptr(), new.enabled) };
+        }
+        if old.settings != new.settings {
+            filter.reset(&data_from_json(&new.settings));
+        }
     }
 }
 

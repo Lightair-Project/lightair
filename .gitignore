@@ -3,3 +3,6 @@
 *.swp
 # generated font instance used by branding/source/build.py
 /branding/source/fonts/Inter-600.ttf
+/modules/*/.deps
+/modules/*/data/models/*.onnx
+/modules/*/build
