@@ -15,8 +15,11 @@ use lightair_preview::Preview;
 use serde_json::json;
 
 use crate::mixer::MixerPanel;
+use crate::outputs_panel::{OutputsPanel, elapsed};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
+use lightair_engine::outputs::{OutputKey, OutputState, runtime};
+use std::time::Instant;
 
 actions!(lightair, [Undo, Redo, DeleteSelection, NudgeLeft, NudgeRight, NudgeUp, NudgeDown, Deselect]);
 
@@ -57,6 +60,9 @@ type Guides = Vec<(bool, f32)>;
 pub struct StudioWindow {
     studio: Entity<Studio>,
     mixer: Entity<MixerPanel>,
+    outputs: Entity<OutputsPanel>,
+    /// First click on "End stream" arms it; a second click within 3 s ends the stream.
+    confirm_end: Option<Instant>,
     preview: Preview,
     focus: FocusHandle,
     canvas_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -74,8 +80,11 @@ impl StudioWindow {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mixer = cx.new(|cx| MixerPanel::new(studio.clone(), cx));
+        let outputs = cx.new(|cx| OutputsPanel::new(studio.clone(), cx));
         Self {
             mixer,
+            outputs,
+            confirm_end: None,
             studio,
             preview,
             focus,
@@ -365,12 +374,56 @@ impl Render for StudioWindow {
 
 impl StudioWindow {
     fn title_bar(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
-        let stats = self.studio.read(cx).stats;
-        let recent_lagged = self.studio.read(cx).recent_lagged;
+        let studio = self.studio.read(cx);
+        let stats = studio.stats;
+        let recent_lagged = studio.recent_lagged;
         let fps_color = if stats.active_fps > 0.0 && recent_lagged == 0 { tok::ok() } else { tok::warn() };
-        let soon = |id: &'static str, label: &'static str| {
-            Button::new(id).label(label).small().outline().disabled(true).tooltip("Outputs arrive in milestone M6")
+        let has_destination = project.outputs.destinations.iter().any(|d| d.enabled);
+
+        let rec = runtime().get(OutputKey::Recording).state;
+        let record = match rec {
+            OutputState::Active { since } | OutputState::Reconnecting { since } => {
+                Button::new("record").label(format!("● {}", elapsed(since))).small().danger().tooltip("Stop recording")
+            }
+            OutputState::Starting | OutputState::Stopping => {
+                Button::new("record").label("Record").small().outline().loading(true)
+            }
+            _ => Button::new("record").label("Record").small().outline().tooltip("Start recording"),
+        }
+        .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.toggle_recording(cx))));
+
+        let live_since = runtime().stream_since();
+        let streaming = runtime().any_stream_running();
+        let armed = self.confirm_end.is_some_and(|t| t.elapsed().as_secs_f32() < 3.0);
+        let go_live = if streaming {
+            let label = if armed {
+                "Click again to end".to_string()
+            } else {
+                live_since.map(|t| format!("Live {}", elapsed(t))).unwrap_or_else(|| "Going live…".into())
+            };
+            Button::new("go-live").label(label).small().danger().on_click(cx.listener(|this, _, _, cx| {
+                if this.confirm_end.is_some_and(|t| t.elapsed().as_secs_f32() < 3.0) {
+                    this.confirm_end = None;
+                    this.studio.update(cx, |s, cx| s.end_stream(cx));
+                } else {
+                    this.confirm_end = Some(Instant::now());
+                    cx.notify();
+                }
+            }))
+        } else {
+            Button::new("go-live")
+                .label("Go live")
+                .small()
+                .primary()
+                .disabled(!has_destination)
+                .tooltip(if has_destination {
+                    "Start every enabled destination"
+                } else {
+                    "Add a destination in Outputs first"
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.go_live(cx))))
         };
+
         div()
             .flex()
             .items_center()
@@ -382,6 +435,19 @@ impl StudioWindow {
             .border_color(tok::border())
             .bg(tok::bg_app())
             .child(div().font_weight(FontWeight::SEMIBOLD).child(project.name.clone()))
+            .when(streaming, |d| {
+                d.child(
+                    div()
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(4.))
+                        .bg(tok::live())
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xFFFFFF))
+                        .child("LIVE"),
+                )
+            })
             .child(div().flex_1())
             .child(
                 div()
@@ -394,16 +460,16 @@ impl StudioWindow {
                     .child(format!("{:.1} FPS", stats.active_fps))
                     .child(format!("{:.1} ms", stats.average_frame_time_ms)),
             )
+            .child(go_live)
+            .child(record)
             .child(
-                Button::new("go-live")
-                    .label("Go live")
+                Button::new("clip")
+                    .label("Clip")
                     .small()
-                    .primary()
+                    .outline()
                     .disabled(true)
-                    .tooltip("Streaming arrives in milestone M6"),
+                    .tooltip("Clips (replay buffer) arrive later in M6"),
             )
-            .child(soon("record", "Record"))
-            .child(soon("clip", "Clip"))
     }
 
     fn left_column(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
@@ -689,12 +755,14 @@ impl StudioWindow {
             }
         }
 
+        let live = runtime().any_stream_running();
         div()
             .id("canvas")
             .relative()
             .flex_1()
             .min_h_0()
             .bg(tok::bg_canvas_well())
+            .when(live, |d| d.border_2().border_color(tok::live()))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::canvas_down))
             .on_mouse_move(cx.listener(Self::canvas_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::canvas_up))
@@ -711,40 +779,9 @@ impl StudioWindow {
             .border_l_1()
             .border_color(tok::border())
             .bg(tok::bg_panel())
-            .child(self.outputs_panel())
+            .child(self.outputs.clone())
             .child(div().h(px(1.)).bg(tok::border()))
             .child(self.inspector(project, cx))
-    }
-
-    fn outputs_panel(&self) -> impl IntoElement {
-        let row = |icon: &'static str, label: &'static str| {
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .h(px(34.))
-                .mx_2()
-                .px_2()
-                .text_color(tok::text_tertiary())
-                .child(ui::icon(icon).size(px(15.)).text_color(tok::text_tertiary()))
-                .child(div().flex_1().child(label))
-        };
-        div()
-            .flex()
-            .flex_col()
-            .pb_2()
-            .child(ui::panel_header("Outputs", None))
-            .child(row("circle", "Recording"))
-            .child(row("video", "Virtual camera"))
-            .child(row("radio", "Streaming destinations"))
-            .child(
-                div()
-                    .px_4()
-                    .pt_1()
-                    .text_size(px(11.))
-                    .text_color(tok::text_tertiary())
-                    .child("Outputs arrive in milestone M6."),
-            )
     }
 
     fn inspector(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {

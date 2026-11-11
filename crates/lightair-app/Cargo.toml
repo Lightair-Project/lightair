@@ -16,6 +16,8 @@ lightair-preview.workspace = true
 lightair-core.workspace = true
 lightair-store.workspace = true
 serde_json.workspace = true
+keyring = { version = "3", features = ["apple-native"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 gpui-kit.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
