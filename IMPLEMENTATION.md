@@ -15,9 +15,9 @@ Status key: ✅ done · 🔨 in progress · ⬜ not started
 - `lightair-engine`: engine actor thread; `obs_startup`, audio/video reset, core module loading with the safe-module allowlist, capability discovery, clean shutdown.
 - Headless smoke test: start the engine, create a colour source in a scene, render frames, shut down.
 
-## M2 · Native window with live preview ⬜
+## M2 · Native window with live preview ✅
 - `lightair-app` opens a GPUI window (gpui-kit root).
-- `lightair-preview`: libobs renders the program canvas into IOSurface-backed textures; the UI shows it with GPUI's `surface()` element, zero copy.
+- `lightair-preview`: libobs renders the program canvas into its own render target, a GL blit copies it into a BGRA IOSurface, and VideoToolbox converts it on the GPU to full-range NV12 (the format GPUI's `surface()` draws). No CPU copies.
 - A display capture or camera visible live in the window.
 
 ## M3 · Core document ⬜

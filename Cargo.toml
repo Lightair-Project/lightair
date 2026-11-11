@@ -24,7 +24,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 crossbeam-channel = "0.5"
 parking_lot = "0.12"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v7", "serde"] }
 gpui-kit = "0.9.1"
