@@ -1,0 +1,20 @@
+[package]
+name = "lightair-app"
+description = "Lightair: native live-production studio (application binary)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lightair"
+path = "src/main.rs"
+
+[dependencies]
+lightair-engine.workspace = true
+lightair-preview.workspace = true
+gpui-kit.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true

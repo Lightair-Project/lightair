@@ -118,6 +118,26 @@ impl Scene {
     pub fn add(&self, source: &Source) -> *mut sys::obs_sceneitem_t {
         unsafe { sys::obs_scene_add(self.as_ptr(), source.as_ptr()) }
     }
+
+    /// Adds `source` scaled to fit inside the box (x, y, w, h), keeping its aspect ratio.
+    pub fn add_fitted(&self, source: &Source, x: f32, y: f32, w: f32, h: f32) -> *mut sys::obs_sceneitem_t {
+        let item = self.add(source);
+        if !item.is_null() {
+            unsafe {
+                sys::obs_sceneitem_set_bounds_type(item, sys::OBS_BOUNDS_SCALE_INNER);
+                sys::obs_sceneitem_set_bounds_alignment(item, sys::OBS_ALIGN_CENTER);
+                sys::obs_sceneitem_set_bounds(item, &vec2(w, h));
+                sys::obs_sceneitem_set_pos(item, &vec2(x, y));
+            }
+        }
+        item
+    }
+}
+
+pub fn vec2(x: f32, y: f32) -> sys::vec2 {
+    sys::vec2 {
+        __bindgen_anon_1: sys::vec2__bindgen_ty_1 { __bindgen_anon_1: sys::vec2__bindgen_ty_1__bindgen_ty_1 { x, y } },
+    }
 }
 
 /// Dropping a `Scene` deletes it. Since OBS 33 every scene belongs to a canvas that holds its
