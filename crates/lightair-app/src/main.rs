@@ -4,6 +4,7 @@ mod camera_studio;
 mod mixer;
 mod outputs_panel;
 mod reframe;
+mod rows;
 mod secrets;
 mod selftest;
 mod shell;
