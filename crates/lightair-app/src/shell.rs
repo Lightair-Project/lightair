@@ -1676,6 +1676,7 @@ impl StudioWindow {
                 )
                 .children((project.formats.len() > 1).then(|| self.formats_section(project, &layer, sid, cx)))
                 .children(project.inputs.get(&layer.input).and_then(|input| self.content_section(input, cx)))
+                .children(project.inputs.get(&layer.input).map(|input| self.effects_section(input, cx)))
                 .children(camera_studio)
                 .into_any_element()
             }
