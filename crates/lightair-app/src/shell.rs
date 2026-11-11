@@ -19,12 +19,13 @@ use serde_json::json;
 
 use crate::mixer::MixerPanel;
 use crate::outputs_panel::{OutputsPanel, elapsed};
+use crate::rows::{DraggedRow, Renaming, RowTarget};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 use lightair_engine::outputs::{OutputKey, OutputState, runtime};
 use std::time::Instant;
 
-actions!(lightair, [Undo, Redo, DeleteSelection, NudgeLeft, NudgeRight, NudgeUp, NudgeDown, Deselect]);
+actions!(lightair, [Undo, Redo, DeleteSelection, NudgeLeft, NudgeRight, NudgeUp, NudgeDown, Deselect, RenameSelection]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -37,6 +38,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", NudgeUp, Some("Studio")),
         KeyBinding::new("down", NudgeDown, Some("Studio")),
         KeyBinding::new("escape", Deselect, Some("Studio")),
+        KeyBinding::new("enter", RenameSelection, Some("Studio")),
     ]);
 }
 
@@ -79,6 +81,8 @@ pub struct StudioWindow {
     add_menu: bool,
     /// Camera devices (label, id), refreshed when the Add Layer menu opens.
     camera_devices: Vec<(String, String)>,
+    /// The open inline rename field in the Layers or Scenes list.
+    renaming: Option<Renaming>,
 }
 
 const HANDLE: f32 = 10.0;
@@ -106,6 +110,7 @@ impl StudioWindow {
             guides: vec![],
             add_menu: false,
             camera_devices: vec![],
+            renaming: None,
         }
     }
 
@@ -113,6 +118,72 @@ impl StudioWindow {
         self.studio.update(cx, |s, cx| {
             let _ = s.execute(cmd, cx);
         });
+    }
+
+    fn start_rename(&mut self, target: RowTarget, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming = Some(Renaming::open(target, name, window, cx, |this, commit, window, cx| {
+            this.finish_rename(commit, window, cx)
+        }));
+        cx.notify();
+    }
+
+    fn finish_rename(&mut self, commit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(renaming) = self.renaming.take() else { return };
+        if commit && let Some(cmd) = renaming.command(cx) {
+            self.exec(cmd, cx);
+        }
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Enter renames the selected layer (or the selected scene when no layer is selected).
+    fn rename_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let studio = self.studio.read(cx);
+        let project = studio.project().clone();
+        let Some(scene) = studio.selected_scene.and_then(|id| project.scene(id)) else { return };
+        match studio.selected_layer.and_then(|id| scene.layer(id)) {
+            Some(layer) => {
+                let target = RowTarget::Layer { scene: scene.id, layer: layer.id };
+                let name = layer.name.clone();
+                self.start_rename(target, &name, window, cx)
+            }
+            None => {
+                let name = scene.name.clone();
+                self.start_rename(RowTarget::Scene(scene.id), &name, window, cx)
+            }
+        }
+    }
+
+    /// Drops `row` onto the row at model index `to` of the same list.
+    fn drop_row(&mut self, row: &DraggedRow, onto: RowTarget, to: usize, cx: &mut Context<Self>) {
+        let cmd = match (row.target, onto) {
+            (RowTarget::Scene(scene), RowTarget::Scene(other)) if scene != other => Command::MoveScene { scene, to },
+            (RowTarget::Layer { scene, layer }, RowTarget::Layer { scene: s2, layer: other })
+                if scene == s2 && layer != other =>
+            {
+                Command::MoveLayer { scene, layer, to }
+            }
+            _ => return,
+        };
+        self.exec(cmd, cx);
+    }
+
+    /// A row's name, or the rename field when it's being renamed.
+    fn row_label(&self, target: RowTarget, name: &str, color: Hsla) -> AnyElement {
+        match &self.renaming {
+            Some(r) if r.target == target => div()
+                .flex_1()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(gpui_kit::component::input::Input::new(&r.input).small())
+                .into_any_element(),
+            _ => div()
+                .flex_1()
+                .overflow_hidden()
+                .text_ellipsis()
+                .text_color(color)
+                .child(name.to_string())
+                .into_any_element(),
+        }
     }
 
     fn select_layer(&self, layer: Option<Id>, cx: &mut Context<Self>) {
@@ -469,6 +540,7 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &NudgeUp, _, cx| this.nudge(0.0, -1.0, cx)))
             .on_action(cx.listener(|this, _: &NudgeDown, _, cx| this.nudge(0.0, 1.0, cx)))
             .on_action(cx.listener(|this, _: &Deselect, _, cx| this.select_layer(None, cx)))
+            .on_action(cx.listener(|this, _: &RenameSelection, window, cx| this.rename_selection(window, cx)))
             .size_full()
             .flex()
             .flex_col()
@@ -639,12 +711,18 @@ impl StudioWindow {
             );
         }
         let scene_id = scene.id;
+        let count = scene.layers.len();
         let rows = scene.layers.iter().rev().enumerate().map(|(i, layer)| {
             let id = layer.id;
             let kind = project.inputs.get(&layer.input).map(|i| i.kind.clone()).unwrap_or_default();
             let visible = layer.layouts.get(&format).is_some_and(|l| l.visible);
             let locked = layer.locked;
             let is_sel = selected == Some(id);
+            let target = RowTarget::Layer { scene: scene_id, layer: id };
+            let dragged = DraggedRow { target, name: layer.name.clone().into(), icon: ui::input_icon(&kind) };
+            let name = layer.name.clone();
+            // The list shows the top layer first; the model stores the bottom first.
+            let model_index = count - 1 - i;
             div()
                 .id(("layer", i))
                 .flex()
@@ -657,20 +735,21 @@ impl StudioWindow {
                 .cursor_pointer()
                 .when(is_sel, |d| d.bg(tok::bg_selected()))
                 .hover(|d| d.bg(tok::bg_raised()))
-                .on_click(cx.listener(move |this, _, _, cx| this.select_layer(Some(id), cx)))
+                .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                    this.select_layer(Some(id), cx);
+                    if ev.click_count() == 2 {
+                        this.start_rename(target, &name, window, cx);
+                    }
+                }))
+                .on_drag(dragged, |row, _, _, cx| cx.new(|_| row.clone()))
+                .drag_over::<DraggedRow>(|style, _, _, _| style.bg(tok::bg_selected()))
+                .on_drop(cx.listener(move |this, row: &DraggedRow, _, cx| this.drop_row(row, target, model_index, cx)))
                 .child(ui::icon(ui::input_icon(&kind)).size(px(15.)).text_color(if visible {
                     tok::text_secondary()
                 } else {
                     tok::text_tertiary()
                 }))
-                .child(
-                    div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_color(if visible { tok::text() } else { tok::text_tertiary() })
-                        .child(layer.name.clone()),
-                )
+                .child(self.row_label(target, &layer.name, if visible { tok::text() } else { tok::text_tertiary() }))
                 .child(
                     ui::icon_button(
                         ("lock", i),
@@ -848,6 +927,9 @@ impl StudioWindow {
         let rows = project.scenes.iter().enumerate().map(|(i, scene)| {
             let id = scene.id;
             let on_air = program == Some(id);
+            let target = RowTarget::Scene(id);
+            let dragged = DraggedRow { target, name: scene.name.clone().into(), icon: "layout-dashboard" };
+            let name = scene.name.clone();
             div()
                 .id(("scene", i))
                 .relative()
@@ -860,13 +942,20 @@ impl StudioWindow {
                 .cursor_pointer()
                 .when(selected == Some(id), |d| d.bg(tok::bg_selected()))
                 .hover(|d| d.bg(tok::bg_raised()))
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                    if ev.click_count() == 2 {
+                        this.start_rename(target, &name, window, cx);
+                        return;
+                    }
                     this.studio.update(cx, |s, cx| {
                         s.selected_scene = Some(id);
                         s.selected_layer = None;
                         let _ = s.execute(Command::SetProgram { scene: Some(id) }, cx);
                     })
                 }))
+                .on_drag(dragged, |row, _, _, cx| cx.new(|_| row.clone()))
+                .drag_over::<DraggedRow>(|style, _, _, _| style.bg(tok::bg_selected()))
+                .on_drop(cx.listener(move |this, row: &DraggedRow, _, cx| this.drop_row(row, target, i, cx)))
                 .when(on_air, |d| {
                     d.child(
                         div()
@@ -879,7 +968,7 @@ impl StudioWindow {
                             .bg(tok::live()),
                     )
                 })
-                .child(div().flex_1().child(scene.name.clone()))
+                .child(self.row_label(target, &scene.name, tok::text()))
                 .when(on_air, |d| {
                     d.child(
                         div()

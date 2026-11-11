@@ -33,11 +33,12 @@ Done:
 - Every edit is a command: journaled, undoable (⌘Z / ⇧⌘Z), one undo step per drag gesture; scene switching is not undone.
 - Add layer: display, image (file picker), text, colour. Add scene. Layer visibility and lock.
 - Inspector: position, size, rotation steppers; fit mode; fill canvas; delete.
+- Rename layers and scenes inline (double-click, or Enter on the selection; Enter or clicking away commits); drag rows to reorder layers and scenes.
 
 Remaining:
 - `lightair-ui` crate with the studio components (scrubbable fields, `LayerRow`, `SceneCard`, `FormatTabs`).
 - gpui-kit dock layout (resize, collapse, pop-out, workspaces); command palette (⌘K).
-- Rename layers/scenes inline, drag to reorder, groups, multi-select, rotation and crop handles, rulers and guides.
+- Groups, multi-select, rotation and crop handles, rulers and guides.
 - Studio mode, onboarding, settings window.
 
 ## M5 · Audio 🔨
