@@ -76,9 +76,13 @@ fn countdown_and_stopwatch() {
     assert!(engine.call(|s| s.reconciler.take_ended_timers()).is_empty(), "reported once");
 
     // The stopwatch has been counting since it was started.
+    // The text is from the last frame, the status is live: they can differ by a second at a
+    // boundary, never more.
+    let text = engine.call(move |s| s.reconciler.timer_text(sw)).unwrap();
     let s = engine.call(move |s| s.reconciler.timer_status(sw)).unwrap();
     assert!(s.running && s.seconds >= 2, "{s:?}");
-    assert_eq!(engine.call(move |s| s.reconciler.timer_text(sw)).unwrap(), format!("0:{:02}", s.seconds));
+    let shown = [format!("0:{:02}", s.seconds), format!("0:{:02}", s.seconds - 1)];
+    assert!(shown.contains(&text), "stopwatch shows {text}, status {s:?}");
 
     // Reset brings the countdown back.
     engine.call(move |s| s.reconciler.timer_action(cd, TimerAction::Reset));
