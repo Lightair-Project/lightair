@@ -117,9 +117,10 @@ OBS plugin classifier, frontend API shim, custom browser docks, Qt runtime, OBS 
 
 Done:
 - OBS scene collection import (`lightair_store::import_obs_collection`): sources become inputs of the same libobs type and settings, filters become input effects, items become layers (alignment point + scale/bounds → box, crop, visibility, lock), global and in-scene audio sources become mixer tracks (volume in dB, mute, monitoring → cue), transition and program scene carry over, scene names stay unique. Dewy becomes Camera Studio with its settings. One undo step, with a report: converted, replaced by built-in features, kept as plugins, needs attention. "Import OBS scenes…" button in the Scenes header. Dry run: `cargo run -p lightair-store --example obs_import_report -- <collection.json>`.
+- Layers whose source size OBS didn't save are corrected after import: the app holds those inputs showing off air until they report a size (or 8 s pass), then refits every such layer the user hasn't touched, as one undo step ("Size imported layers"). A test reads a real image's size off air and checks the refit box.
 
 Remaining:
-- Import: nested scenes and groups, refine estimated layer sizes from live source dimensions after import, per-scene audio once scene tracks exist, importing OBS profiles (outputs, encoders, stream service).
+- Import: nested scenes and groups, per-scene audio once scene tracks exist, importing OBS profiles (outputs, encoders, stream service).
 - Plugin classifier, frontend API shim, custom browser docks, Qt runtime.
 
 ## M13 · Engine from source & distribution 🔨

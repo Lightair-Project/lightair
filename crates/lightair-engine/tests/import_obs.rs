@@ -18,11 +18,13 @@ const COLLECTION: &str = r#"{
        {"id": "not_installed_filter", "versioned_id": "not_installed_filter", "name": "Ghost", "settings": {}}
      ]},
     {"id": "not_installed_source", "versioned_id": "not_installed_source", "name": "Ghost source", "uuid": "ghost", "settings": {"a": 1}},
+    {"id": "image_source", "versioned_id": "image_source", "name": "Board", "uuid": "board", "settings": {"file": "BOARD"}},
     {"id": "scene", "name": "Main", "uuid": "main", "settings": {"items": [
       {"name": "Red", "source_uuid": "red", "align": 5, "pos": {"x": 0, "y": 0}, "scale": {"x": 1, "y": 1}, "visible": true},
       {"name": "Ghost source", "source_uuid": "ghost", "align": 5, "pos": {"x": 10, "y": 10}, "scale": {"x": 1, "y": 1}, "visible": true}
     ]}},
     {"id": "scene", "name": "Other", "uuid": "other", "settings": {"items": [
+      {"name": "Board", "source_uuid": "board", "align": 5, "pos": {"x": 10, "y": 20}, "scale": {"x": 0.1, "y": 0.1}, "visible": true},
       {"name": "Red", "source_uuid": "red", "align": 0, "bounds_type": 2, "bounds": {"x": 320, "y": 180}, "pos": {"x": 320, "y": 180}, "scale": {"x": 1, "y": 1}, "visible": true}
     ]}}
   ]
@@ -33,7 +35,9 @@ fn imported_collection_reconciles() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
     let mut doc = Document::new(Project::new("Import"));
-    let (cmd, report) = lightair_store::import_obs_collection(COLLECTION, doc.project()).unwrap();
+    let board = concat!(env!("CARGO_MANIFEST_DIR"), "/../../branding/final/board.png");
+    let collection = COLLECTION.replace("BOARD", board);
+    let (cmd, report) = lightair_store::import_obs_collection(&collection, doc.project()).unwrap();
     assert_eq!(report.kept_plugin.len(), 2, "{report:#?}");
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
@@ -43,8 +47,26 @@ fn imported_collection_reconciles() {
     let described = engine.call(|s| s.reconciler.describe());
     eprintln!("{described:#?}");
     let (inputs, scenes, items) = engine.call(|s| s.reconciler.counts());
-    assert_eq!((inputs, scenes), (2, 2), "both inputs and scenes exist in libobs");
-    assert_eq!(items, 3);
+    assert_eq!((inputs, scenes), (3, 2), "inputs and scenes exist in libobs");
+    assert_eq!(items, 4);
+
+    // The board's size was guessed (1920x1080); the image is 1800x1700. Hold it showing off
+    // air, read the real size, and refit.
+    let est = report.estimated.iter().find(|e| e.layout.width == 192.0).expect("board was estimated").clone();
+    let input = est.input;
+    engine.call(move |s| s.reconciler.hold_inputs(&[input]));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let size = loop {
+        if let Some(size) = engine.call(move |s| s.reconciler.input_size(input)) {
+            break size;
+        }
+        assert!(std::time::Instant::now() < deadline, "image reports its size");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    };
+    assert_eq!(size, (1800, 1700));
+    let fixed = est.refit(size);
+    assert_eq!((fixed.x, fixed.y, fixed.width, fixed.height), (10.0, 20.0, 180.0, 170.0));
+    engine.call(|s| s.reconciler.release_inputs());
 
     // Undo removes everything it added.
     let change = doc.undo().unwrap();

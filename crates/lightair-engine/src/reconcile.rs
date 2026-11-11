@@ -5,7 +5,7 @@
 //!
 //! libobs objects are named by their Lightair id, so user-facing names never collide.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 
 use libobs_sys as sys;
@@ -46,6 +46,8 @@ pub struct Reconciler {
     /// The running Move, driven by a libobs tick callback.
     anim: Arc<Mutex<Option<MoveAnim>>>,
     tick_registered: bool,
+    /// Inputs held "showing" off air (e.g. to learn their size), released with `release_inputs`.
+    held: HashSet<Id>,
 }
 
 /// libobs state for one mixer track: its output channel, volume meter and effect filters.
@@ -108,6 +110,11 @@ impl Reconciler {
                     }
                 }
                 Patch::InputRemoved(id) => {
+                    if self.held.remove(id)
+                        && let Some(src) = self.inputs.get(id)
+                    {
+                        unsafe { sys::obs_source_dec_showing(src.as_ptr()) };
+                    }
                     if let (Some(src), Some(mut chain)) = (self.inputs.get(id), self.input_effects.remove(id)) {
                         unsafe { chain_remove(src.as_ptr(), &mut chain) };
                     }
@@ -223,6 +230,33 @@ impl Reconciler {
     /// The libobs source of an input (borrowed; valid while the input exists).
     pub(crate) fn input_ptr(&self, input: Id) -> Option<*mut sys::obs_source_t> {
         self.inputs.get(&input).map(|s| s.as_ptr())
+    }
+
+    /// Starts inputs as if they were on screen (captures open, media loads) without putting
+    /// them on air, until `release_inputs`.
+    pub fn hold_inputs(&mut self, inputs: &[Id]) {
+        for id in inputs {
+            if let Some(src) = self.inputs.get(id)
+                && self.held.insert(*id)
+            {
+                unsafe { sys::obs_source_inc_showing(src.as_ptr()) };
+            }
+        }
+    }
+
+    pub fn release_inputs(&mut self) {
+        for id in std::mem::take(&mut self.held) {
+            if let Some(src) = self.inputs.get(&id) {
+                unsafe { sys::obs_source_dec_showing(src.as_ptr()) };
+            }
+        }
+    }
+
+    /// An input's pixel size, once it has one (async sources report it after their first frame).
+    pub fn input_size(&self, input: Id) -> Option<(u32, u32)> {
+        let src = self.inputs.get(&input)?;
+        let (w, h) = unsafe { (sys::obs_source_get_width(src.as_ptr()), sys::obs_source_get_height(src.as_ptr())) };
+        (w > 0 && h > 0).then_some((w, h))
     }
 
     /// The libobs scene source for a document scene in a format, if it exists.
@@ -605,6 +639,7 @@ impl Reconciler {
 
     /// Releases everything in dependency order (scenes before the inputs they use).
     pub fn clear(&mut self) {
+        self.release_inputs();
         self.finish_move();
         if self.tick_registered {
             unsafe { sys::obs_remove_tick_callback(Some(on_tick), Arc::as_ptr(&self.anim) as *mut _) };

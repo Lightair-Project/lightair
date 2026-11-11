@@ -29,6 +29,8 @@ pub struct Studio {
     clips_seen: u32,
     /// Frames libobs lagged since the previous stats sample (health is about now, not startup).
     pub recent_lagged: u32,
+    /// Imported layers whose size was guessed, waiting for their sources to report a size.
+    refit: Option<(Vec<lightair_store::EstimatedLayer>, std::time::Instant)>,
 }
 
 impl Studio {
@@ -55,6 +57,7 @@ impl Studio {
             stats: Stats::default(),
             clips_seen: 0,
             recent_lagged: 0,
+            refit: None,
         };
         studio.rebuild_engine();
         studio.sync_clips();
@@ -112,11 +115,54 @@ impl Studio {
                 }
                 if self.execute(command, cx).is_ok() {
                     self.issue = Some(format!("Imported OBS scenes: {}", report.summary()).into());
+                    if !report.estimated.is_empty() {
+                        let mut inputs: Vec<Id> = report.estimated.iter().map(|e| e.input).collect();
+                        inputs.dedup();
+                        self.engine.post(move |s| s.reconciler.hold_inputs(&inputs));
+                        self.refit = Some((report.estimated, std::time::Instant::now()));
+                    }
                 }
             }
             Err(e) => self.issue = Some(format!("Couldn't import: {e}").into()),
         }
         cx.notify();
+    }
+
+    /// Corrects imported layers whose source size was guessed, once the sources report their
+    /// real size (or after a few seconds, with whatever is known). Layers changed since the
+    /// import are left alone. One undo step.
+    pub fn refit_imported(&mut self, cx: &mut Context<Self>) {
+        let Some((pending, started)) = &self.refit else { return };
+        let inputs: Vec<Id> = pending.iter().map(|e| e.input).collect();
+        let sizes = self.engine.call(move |s| inputs.iter().map(|id| s.reconciler.input_size(*id)).collect::<Vec<_>>());
+        if sizes.iter().any(Option::is_none) && started.elapsed() < std::time::Duration::from_secs(8) {
+            return;
+        }
+        let (pending, _) = self.refit.take().unwrap();
+        self.engine.post(|s| s.reconciler.release_inputs());
+        let project = self.project().clone();
+        let commands: Vec<Command> = pending
+            .iter()
+            .zip(sizes)
+            .filter_map(|(est, size)| {
+                let current = project.scene(est.scene)?.layer(est.layer)?.layouts.get(&est.format)?;
+                let size = size.filter(|_| *current == est.layout)?;
+                Some(Command::SetLayout {
+                    scene: est.scene,
+                    layer: est.layer,
+                    format: est.format,
+                    layout: est.refit(size),
+                })
+            })
+            .collect();
+        if commands.is_empty() {
+            return;
+        }
+        let n = commands.len();
+        if self.execute(Command::Batch { label: "Size imported layers".into(), commands }, cx).is_ok() {
+            self.issue =
+                Some(format!("Corrected the size of {n} imported layer{}", if n == 1 { "" } else { "s" }).into());
+        }
     }
 
     pub fn begin_gesture(&mut self) {
