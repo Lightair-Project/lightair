@@ -92,6 +92,33 @@ impl Studio {
         }
     }
 
+    /// Merges an OBS scene collection into the project as one undo step; the report goes to
+    /// the status bar (summary) and the log (details).
+    pub fn import_obs(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        let result = std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|json| lightair_store::import_obs_collection(&json, self.project()).map_err(|e| e.to_string()));
+        match result {
+            Ok((command, report)) => {
+                for (group, items) in [
+                    ("converted", &report.converted),
+                    ("replaced", &report.replaced),
+                    ("kept as plugin", &report.kept_plugin),
+                    ("needs attention", &report.attention),
+                ] {
+                    for item in items {
+                        tracing::info!(target: "import", "{group}: {item}");
+                    }
+                }
+                if self.execute(command, cx).is_ok() {
+                    self.issue = Some(format!("Imported OBS scenes: {}", report.summary()).into());
+                }
+            }
+            Err(e) => self.issue = Some(format!("Couldn't import: {e}").into()),
+        }
+        cx.notify();
+    }
+
     pub fn begin_gesture(&mut self) {
         self.doc.begin_gesture();
     }
