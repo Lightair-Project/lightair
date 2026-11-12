@@ -79,6 +79,7 @@ fn main() {
                     s.refresh_stats();
                     s.refit_imported(cx);
                     s.run_timer_ends(cx);
+                    s.end_replays(cx);
                     s.flush();
                     if ticks.is_multiple_of(60) {
                         s.compact();
