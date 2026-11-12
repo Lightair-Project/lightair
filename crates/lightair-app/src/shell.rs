@@ -595,7 +595,8 @@ impl StudioWindow {
         {
             // The frame hugs the picture: handles sit on it, and a drag snaps the box to it.
             let l = &frame;
-            let size = self.sizes.borrow().1.get(&sel.input).map(|(w, h)| (*w as f32, *h as f32));
+            let size =
+                sel.input.and_then(|i| self.sizes.borrow().1.get(&i).copied()).map(|(w, h)| (w as f32, h as f32));
             let handle = self.handle_at(l, (x, y), s, ev.modifiers.alt, size.is_some());
             if handle == Some(Handle::Tilt) && ev.click_count == 2 {
                 // Double-click the 3D knob: flat again.
@@ -733,7 +734,7 @@ impl StudioWindow {
                 let frame = self.frame_of(layer, format)?;
                 let (_, _, s) = self.mapping(&project, format)?;
                 let p = self.pointer.map(|(_, p)| p)?;
-                let has_size = self.sizes.borrow().1.contains_key(&layer.input);
+                let has_size = layer.input.is_some_and(|i| self.sizes.borrow().1.contains_key(&i));
                 self.handle_at(&frame, p, s, ev.modifiers.alt, has_size)
             });
             let gizmo = match hover {
@@ -1435,7 +1436,7 @@ impl StudioWindow {
     /// mode. The frame, handles and dragging use this, so they stick to the source.
     fn frame_of(&self, layer: &Layer, format: Id) -> Option<Layout> {
         let l = layer.layouts.get(&format)?;
-        let size = self.sizes.borrow().1.get(&layer.input).map(|(w, h)| (*w as f32, *h as f32));
+        let size = layer.input.and_then(|i| self.sizes.borrow().1.get(&i).copied()).map(|(w, h)| (w as f32, h as f32));
         Some(geo::content_rect(l, size))
     }
 
@@ -1473,7 +1474,7 @@ impl StudioWindow {
         let count = scene.layers.len();
         let rows = scene.layers.iter().rev().enumerate().map(|(i, layer)| {
             let id = layer.id;
-            let kind = project.inputs.get(&layer.input).map(|i| i.kind.clone()).unwrap_or_default();
+            let kind = layer.input.and_then(|i| project.inputs.get(&i)).map(|i| i.kind.clone()).unwrap_or_default();
             let visible = layer.layouts.get(&format).is_some_and(|l| l.visible);
             let locked = layer.locked;
             let is_sel = selected == Some(id) || also.contains(&id);
@@ -2124,7 +2125,7 @@ impl StudioWindow {
                         .selected_scene
                         .and_then(|id| project.scene(id))
                         .and_then(|sc| sc.layer(lid))
-                        .map(|layer| layer.input);
+                        .and_then(|layer| layer.input);
                     let size = input.and_then(|i| studio.engine().call(move |s| s.reconciler.input_size(i)));
                     let full = size.map(|(w, h)| geo::outline(&l.uncropped((w as f32, h as f32))).map(to_stage));
                     let shape: Vec<(f32, f32)> = geo::shape_outline(&l).into_iter().map(to_stage).collect();

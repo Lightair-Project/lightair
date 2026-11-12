@@ -160,12 +160,16 @@ impl Reconciler {
                     }
                     self.inputs.remove(id);
                 }
+                // libobs draws the flattened hierarchy: pictures only, in world terms (a parent
+                // moving changes its children's world layouts, so they update too).
                 Patch::SceneAdded(scene) => {
+                    let scene = scene.flatten();
                     for format in self.formats.clone() {
-                        self.add_scene_in(scene, format);
+                        self.add_scene_in(&scene, format);
                     }
                 }
                 Patch::SceneChanged { before, after } => {
+                    let (before, after) = (&before.flatten(), &after.flatten());
                     for format in self.formats.clone() {
                         for lp in diff_layers(before, after) {
                             match lp {
@@ -230,7 +234,7 @@ impl Reconciler {
         // the same patch list arrive through SceneAdded.
         for scene in &project.scenes {
             if self.scenes.keys().any(|(s, _)| *s == scene.id) {
-                self.add_scene_in(scene, format.id);
+                self.add_scene_in(&scene.flatten(), format.id);
             }
         }
         if let Some(program) = self.program {
@@ -288,7 +292,7 @@ impl Reconciler {
         let previous = std::mem::replace(&mut self.crop_preview, target);
         self.crop_fading = false;
         for (scene, format, layer) in previous.into_iter().chain(target) {
-            let Some(s) = project.scene(scene) else { continue };
+            let Some(s) = project.scene(scene).map(|s| s.flatten()) else { continue };
             let Some(index) = s.layers.iter().position(|l| l.id == layer) else { continue };
             let l = s.layers[index].clone();
             self.update_layer(scene, format, &l, index);
@@ -300,7 +304,7 @@ impl Reconciler {
     pub fn fade_crop_preview(&mut self, project: &Project) {
         let Some((scene, format, layer)) = self.crop_preview else { return };
         self.crop_fading = true;
-        let Some(s) = project.scene(scene) else { return };
+        let Some(s) = project.scene(scene).map(|s| s.flatten()) else { return };
         let Some(index) = s.layers.iter().position(|l| l.id == layer) else { return };
         let l = s.layers[index].clone();
         self.update_layer(scene, format, &l, index);
@@ -500,7 +504,12 @@ impl Reconciler {
 
     /// Builds the temporary scenes for a Move from `a` to `b` and starts the animation.
     fn start_move(&mut self, a: Id, b: Id, project: &Project) -> bool {
-        let (Some(scene_a), Some(scene_b)) = (project.scene(a), project.scene(b)) else { return false };
+        let (Some(scene_a), Some(scene_b)) =
+            (project.scene(a).map(|s| s.flatten()), project.scene(b).map(|s| s.flatten()))
+        else {
+            return false;
+        };
+        let (scene_a, scene_b) = (&scene_a, &scene_b);
         let ms = self.transition_settings.duration_ms;
         let mut formats = Vec::new();
         for format in self.formats.clone() {
@@ -529,7 +538,10 @@ impl Reconciler {
                 .collect();
             // Layers leaving: at the bottom, fading out.
             for l in scene_a.layers.iter().filter(|l| !used.contains(&l.id)) {
-                let (Some(lo), Some(input)) = (l.layouts.get(&format), self.inputs.get(&l.input)) else { continue };
+                let (Some(lo), Some(input)) = (l.layouts.get(&format), l.input.and_then(|i| self.inputs.get(&i)))
+                else {
+                    continue;
+                };
                 if !lo.visible {
                     continue;
                 }
@@ -547,7 +559,10 @@ impl Reconciler {
             }
             // B's layers: gliding from A's layout when they continue, fading in otherwise.
             for (l, m) in scene_b.layers.iter().zip(&matches) {
-                let (Some(to), Some(input)) = (l.layouts.get(&format), self.inputs.get(&l.input)) else { continue };
+                let (Some(to), Some(input)) = (l.layouts.get(&format), l.input.and_then(|i| self.inputs.get(&i)))
+                else {
+                    continue;
+                };
                 if !to.visible {
                     continue;
                 }
@@ -634,7 +649,9 @@ impl Reconciler {
     }
 
     fn add_layer(&mut self, scene: Id, format: Id, layer: &Layer, index: usize) {
-        let (Some(obs_scene), Some(input)) = (self.scenes.get(&(scene, format)), self.inputs.get(&layer.input)) else {
+        let (Some(obs_scene), Some(input)) =
+            (self.scenes.get(&(scene, format)), layer.input.and_then(|i| self.inputs.get(&i)))
+        else {
             tracing::warn!(%scene, layer = %layer.id, "layer references a missing scene or input");
             return;
         };
@@ -671,7 +688,7 @@ impl Reconciler {
         }
         unsafe {
             sys::obs_sceneitem_set_locked(item.0, layer.locked);
-            let size = previewing.then(|| self.input_size(layer.input)).flatten();
+            let size = previewing.then(|| layer.input.and_then(|i| self.input_size(i))).flatten();
             match layer.layouts.get(&format) {
                 // Being cropped: the whole picture, where it would sit uncropped, with the shape
                 // in the crop window and the rest as a ghost that fades in.

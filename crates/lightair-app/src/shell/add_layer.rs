@@ -200,13 +200,13 @@ impl StudioWindow {
                     body = body.child(heading(group)).child(grid);
                 }
                 // Sources already in the show but not in this scene: reuse them.
-                let in_scene: Vec<Id> = scene.iter().flat_map(|s| s.layers.iter().map(|l| l.input)).collect();
+                let in_scene: Vec<Id> = scene.iter().flat_map(|s| s.layers.iter().filter_map(|l| l.input)).collect();
                 let audio_only = |k: &str| k.contains("audio") || k.contains("input_capture");
                 let existing: Vec<_> = project
                     .inputs
                     .values()
                     .filter(|i| !in_scene.contains(&i.id) && !audio_only(&i.kind))
-                    .filter(|i| project.scenes.iter().any(|s| s.layers.iter().any(|l| l.input == i.id)))
+                    .filter(|i| project.scenes.iter().any(|s| s.layers.iter().any(|l| l.input == Some(i.id))))
                     .filter(|i| matches(&query, &[&i.name, &i.kind]))
                     .cloned()
                     .collect();

@@ -80,7 +80,7 @@ impl StudioWindow {
             .selected_scene
             .and_then(|s| project.scene(s))
             .and_then(|s| studio.selected_layer.and_then(|l| s.layer(l)))
-            .and_then(|l| project.inputs.get(&l.input))
+            .and_then(|l| l.input.and_then(|i| project.inputs.get(&i)))
             .cloned();
         let engine = studio.engine().clone();
 
