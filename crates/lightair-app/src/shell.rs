@@ -20,6 +20,7 @@ use serde_json::json;
 mod layer_props;
 mod palette;
 
+use crate::geometry::{self as geo, CORNERS, Corner};
 use crate::mixer::MixerPanel;
 use crate::outputs_panel::{OutputsPanel, elapsed};
 use crate::rows::{DraggedRow, Renaming, RowTarget};
@@ -66,14 +67,6 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Corner {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-}
-
-#[derive(Clone, Copy, PartialEq)]
 enum DragMode {
     Move,
     Resize(Corner),
@@ -93,42 +86,6 @@ struct Drag {
     mode: DragMode,
     start: (f32, f32),
     layout: Layout,
-}
-
-/// ⌥-dragging `corner` by (dx, dy) canvas pixels crops the source (`size` in source pixels)
-/// instead of scaling it: the box edge moves with the pointer and the picture keeps its scale.
-fn crop_drag(l: &Layout, corner: Corner, size: (f32, f32), dx: f32, dy: f32) -> Layout {
-    let (sw, sh) = size;
-    let c = l.crop;
-    // Source pixels per canvas pixel in the visible (already cropped) region.
-    let sx = (sw - (c.left + c.right) as f32).max(1.0) / l.width.max(1.0);
-    let sy = (sh - (c.top + c.bottom) as f32).max(1.0) / l.height.max(1.0);
-    let min = 8.0;
-    let edge = |orig: u32, other: u32, extent: f32, delta: f32| -> u32 {
-        (orig as f32 + delta).clamp(0.0, (extent - other as f32 - min).max(0.0)).round() as u32
-    };
-    let left_side = matches!(corner, Corner::TopLeft | Corner::BottomLeft);
-    let top_side = matches!(corner, Corner::TopLeft | Corner::TopRight);
-    let left = if left_side { edge(c.left, c.right, sw, dx * sx) } else { c.left };
-    let right = if left_side { c.right } else { edge(c.right, c.left, sw, -dx * sx) };
-    let top = if top_side { edge(c.top, c.bottom, sh, dy * sy) } else { c.top };
-    let bottom = if top_side { c.bottom } else { edge(c.bottom, c.top, sh, -dy * sy) };
-    let (dl, dr) = ((left as f32 - c.left as f32) / sx, (right as f32 - c.right as f32) / sx);
-    let (dt, db) = ((top as f32 - c.top as f32) / sy, (bottom as f32 - c.bottom as f32) / sy);
-    Layout {
-        x: l.x + dl,
-        y: l.y + dt,
-        width: l.width - dl - dr,
-        height: l.height - dt - db,
-        crop: lightair_core::Crop { left, top, right, bottom },
-        ..*l
-    }
-}
-
-/// An angle in (−180, 180].
-fn normalise_degrees(a: f32) -> f32 {
-    let a = a.rem_euclid(360.0);
-    if a > 180.0 { a - 360.0 } else { a }
 }
 
 /// Snap guides shown while dragging: (vertical?, canvas coordinate).
@@ -428,7 +385,7 @@ impl StudioWindow {
         if let Some(sel) = studio.selected_layer.and_then(|id| scene.layer(id))
             && let Some(l) = sel.layouts.get(&format).filter(|_| !sel.locked)
         {
-            let (hx, hy) = (l.x + l.width / 2.0, l.y - ROTATE_OFFSET / s);
+            let (hx, hy) = geo::rotate_handle(l, ROTATE_OFFSET / s);
             if (x - hx).abs() <= tol && (y - hy).abs() <= tol {
                 self.drag = Some(Drag {
                     scene: scene_id,
@@ -441,15 +398,10 @@ impl StudioWindow {
                 self.studio.update(cx, |s, _| s.begin_gesture());
                 return;
             }
-            let corners = [
-                (Corner::TopLeft, l.x, l.y),
-                (Corner::TopRight, l.x + l.width, l.y),
-                (Corner::BottomLeft, l.x, l.y + l.height),
-                (Corner::BottomRight, l.x + l.width, l.y + l.height),
-            ];
-            if let Some((corner, ..)) =
-                corners.iter().find(|(_, cx_, cy_)| (x - cx_).abs() <= tol && (y - cy_).abs() <= tol)
-            {
+            if let Some(corner) = CORNERS.iter().find(|c| {
+                let (px_, py_) = geo::corner(l, **c);
+                (x - px_).abs() <= tol && (y - py_).abs() <= tol
+            }) {
                 let input = sel.input;
                 let size =
                     ev.modifiers.alt.then(|| studio.engine().call(move |s| s.reconciler.input_size(input))).flatten();
@@ -463,11 +415,11 @@ impl StudioWindow {
             }
         }
         // Topmost visible layer under the pointer.
-        let hit = scene.layers.iter().rev().find(|l| {
-            l.layouts
-                .get(&format)
-                .is_some_and(|lo| lo.visible && x >= lo.x && x <= lo.x + lo.width && y >= lo.y && y <= lo.y + lo.height)
-        });
+        let hit = scene
+            .layers
+            .iter()
+            .rev()
+            .find(|l| l.layouts.get(&format).is_some_and(|lo| lo.visible && geo::contains(lo, (x, y))));
         match hit {
             Some(layer) => {
                 let id = layer.id;
@@ -506,9 +458,9 @@ impl StudioWindow {
                 if ev.modifiers.shift {
                     angle = (angle / 15.0).round() * 15.0;
                 }
-                l.rotation = normalise_degrees(angle);
+                l.rotation = geo::normalise_degrees(angle);
             }
-            DragMode::Crop(corner, size) => l = crop_drag(&l, corner, size, dx, dy),
+            DragMode::Crop(corner, size) => l = geo::crop(&l, corner, size, (dx, dy)),
             DragMode::Move => {
                 l.x += dx;
                 l.y += dy;
@@ -531,29 +483,7 @@ impl StudioWindow {
                     l.y = snap(l.y, l.height, ch, &mut guides, false);
                 }
             }
-            DragMode::Resize(corner) => {
-                let min = 8.0;
-                let (mut left, mut top, mut right, mut bottom) = (l.x, l.y, l.x + l.width, l.y + l.height);
-                match corner {
-                    Corner::TopLeft => (left, top) = (left + dx, top + dy),
-                    Corner::TopRight => (right, top) = (right + dx, top + dy),
-                    Corner::BottomLeft => (left, bottom) = (left + dx, bottom + dy),
-                    Corner::BottomRight => (right, bottom) = (right + dx, bottom + dy),
-                }
-                if ev.modifiers.shift {
-                    // Keep aspect ratio, driven by the width.
-                    let aspect = l.height / l.width.max(1.0);
-                    let h = (right - left).abs() * aspect;
-                    match corner {
-                        Corner::TopLeft | Corner::TopRight => top = bottom - h,
-                        _ => bottom = top + h,
-                    }
-                }
-                l.x = left.min(right - min);
-                l.y = top.min(bottom - min);
-                l.width = (right - left).max(min);
-                l.height = (bottom - top).max(min);
-            }
+            DragMode::Resize(corner) => l = geo::resize(&l, corner, (dx, dy), ev.modifiers.shift),
         }
         self.guides = guides;
         let cmd = Command::SetLayout { scene: drag.scene, layer: drag.layer, format: drag.format, layout: l };
@@ -1439,43 +1369,57 @@ impl StudioWindow {
                 .and_then(|scene| studio.selected_layer.and_then(|l| scene.layer(l)))
                 .and_then(|l| l.layouts.get(&fid).map(|lo| (*lo, l.locked)));
             if let Some((l, locked)) = selected {
-                let (x, y, w, h) = (lx + l.x * s, ly + l.y * s, l.width * s, l.height * s);
                 let colour = if editing { tok::canvas_selection() } else { tok::text_secondary() };
+                let to_stage = move |(px_, py_): (f32, f32)| (lx + px_ * s, ly + py_ * s);
+                let outline = geo::outline(&l).map(to_stage);
+                let knob = (!locked && editing).then(|| {
+                    (to_stage(geo::rotate_handle(&l, 0.0)), to_stage(geo::rotate_handle(&l, ROTATE_OFFSET / s)))
+                });
+                let edge = tok::canvas_selection_edge();
+                // The outline turns with the layer, so it's painted as a path.
                 stage = stage.child(
-                    div()
-                        .absolute()
-                        .left(px(x - 1.))
-                        .top(px(y - 1.))
-                        .w(px(w + 2.))
-                        .h(px(h + 2.))
-                        .border_1()
-                        .border_color(tok::canvas_selection_edge())
-                        .child(div().size_full().border_1().border_color(colour)),
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, _| {
+                            let o = bounds.origin;
+                            let at = |(x, y): (f32, f32)| point(o.x + px(x), o.y + px(y));
+                            for (width, c) in [(3.0, edge), (1.0, colour)] {
+                                let mut path = PathBuilder::stroke(px(width));
+                                path.move_to(at(outline[0]));
+                                for p in &outline[1..] {
+                                    path.line_to(at(*p));
+                                }
+                                path.close();
+                                if let Ok(path) = path.build() {
+                                    window.paint_path(path, c);
+                                }
+                            }
+                            if let Some((from, to)) = knob {
+                                let mut path = PathBuilder::stroke(px(1.));
+                                path.move_to(at(from));
+                                path.line_to(at(to));
+                                if let Ok(path) = path.build() {
+                                    window.paint_path(path, colour);
+                                }
+                            }
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
                 );
-                if !locked && editing {
-                    // Rotation handle above the top edge.
-                    stage = stage
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(x + w / 2.0))
-                                .top(px(y - ROTATE_OFFSET))
-                                .w(px(1.))
-                                .h(px(ROTATE_OFFSET))
-                                .bg(tok::canvas_selection()),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(x + w / 2.0 - 5.))
-                                .top(px(y - ROTATE_OFFSET - 5.))
-                                .size(px(10.))
-                                .rounded_full()
-                                .bg(tok::canvas_selection())
-                                .border_1()
-                                .border_color(tok::canvas_selection_edge()),
-                        );
-                    for (cx_, cy_) in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)] {
+                if let Some((_, (kx, ky))) = knob {
+                    stage = stage.child(
+                        div()
+                            .absolute()
+                            .left(px(kx - 5.))
+                            .top(px(ky - 5.))
+                            .size(px(10.))
+                            .rounded_full()
+                            .bg(tok::canvas_selection())
+                            .border_1()
+                            .border_color(tok::canvas_selection_edge()),
+                    );
+                    for (cx_, cy_) in outline {
                         stage = stage.child(
                             div()
                                 .absolute()
@@ -1854,34 +1798,5 @@ impl StudioWindow {
                 self.previews.values().map(|p| p.frames()).max().unwrap_or(0)
             ))
             .child(div().text_color(tok::text_tertiary()).child(concat!("Lightair ", env!("CARGO_PKG_VERSION"))))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Corner, Layout, crop_drag, normalise_degrees};
-
-    #[test]
-    fn crop_keeps_the_picture_scale() {
-        // A 1920x1080 source shown at half size.
-        let l = Layout::boxed(100.0, 100.0, 960.0, 540.0);
-        let c = crop_drag(&l, Corner::TopLeft, (1920.0, 1080.0), 50.0, 25.0);
-        assert_eq!((c.crop.left, c.crop.top, c.crop.right, c.crop.bottom), (100, 50, 0, 0));
-        assert_eq!((c.x, c.y, c.width, c.height), (150.0, 125.0, 910.0, 515.0));
-        // Dragging the opposite corner inwards crops right and bottom.
-        let c2 = crop_drag(&c, Corner::BottomRight, (1920.0, 1080.0), -10.0, -10.0);
-        assert_eq!((c2.crop.right, c2.crop.bottom), (20, 20));
-        assert_eq!((c2.width, c2.height), (900.0, 505.0));
-        // Dragging outwards uncrops, but never past the source edge.
-        let back = crop_drag(&c, Corner::TopLeft, (1920.0, 1080.0), -500.0, -500.0);
-        assert_eq!((back.crop.left, back.crop.top), (0, 0));
-        assert_eq!((back.x, back.y), (100.0, 100.0));
-    }
-
-    #[test]
-    fn angles() {
-        assert_eq!(normalise_degrees(270.0), -90.0);
-        assert_eq!(normalise_degrees(-190.0), 170.0);
-        assert_eq!(normalise_degrees(180.0), 180.0);
     }
 }

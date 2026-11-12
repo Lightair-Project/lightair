@@ -1,6 +1,7 @@
 //! Lightair application entry point.
 
 mod camera_studio;
+mod geometry;
 mod mixer;
 mod outputs_panel;
 mod reframe;
