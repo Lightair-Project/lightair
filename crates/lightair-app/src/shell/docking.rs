@@ -172,5 +172,12 @@ impl StudioWindow {
             area.set_dock_size(DockPlacement::Right, px(320.), window, cx);
         });
         self.dock = Some(dock);
+        // Development: open a dialog on launch for screenshots (no clicking needed).
+        match std::env::var("LIGHTAIR_OPEN").as_deref() {
+            Ok("add-layer") => self.open_add_layer(window, cx),
+            Ok("settings") => self.toggle_settings(cx),
+            Ok("palette") => self.open_palette(window, cx),
+            _ => {}
+        }
     }
 }
