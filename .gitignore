@@ -6,3 +6,4 @@
 /modules/*/.deps
 /modules/*/data/models/*.onnx
 /modules/*/build
+/screenshots
