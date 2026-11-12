@@ -21,6 +21,7 @@ use serde_json::json;
 mod add_layer;
 mod assets;
 mod docking;
+mod effects;
 mod golive;
 mod hierarchy;
 mod inspector;
@@ -262,7 +263,12 @@ pub struct StudioWindow {
     /// dialog is open.
     collapsed: RefCell<std::collections::HashSet<&'static str>>,
     sliders: RefCell<HashMap<String, inspector::BoundSlider>>,
-    looks_for: Option<(Id, Id)>,
+    /// The Effect catalog sheet, when open.
+    effect_sheet: Option<effects::EffectSheet>,
+    /// What each source's face effects see (polled while it's selected).
+    presence: std::collections::HashMap<Id, effects::Presence>,
+    /// Effect control groups toggled from their default (first open, the rest closed).
+    fx_groups: std::collections::HashSet<String>,
     transition_menu: bool,
     /// The layer showing crop handles instead of resize handles.
     crop_mode: Option<Id>,
@@ -362,6 +368,16 @@ impl StudioWindow {
         // Shortcuts that work in any app: registered now, handled as they come.
         let saved = crate::prefs::load_from(&crate::prefs::path());
         crate::hotkeys::register(&saved.global_hotkeys.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+        // Face effects' "no face in view" hints.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
+                if this.update(cx, |this, cx| this.refresh_presence(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(40)).await;
@@ -409,7 +425,9 @@ impl StudioWindow {
             add_layer: None,
             collapsed: RefCell::new(["Formats"].into_iter().collect()),
             sliders: RefCell::default(),
-            looks_for: None,
+            effect_sheet: None,
+            presence: Default::default(),
+            fx_groups: Default::default(),
             transition_menu: false,
             crop_mode: None,
             crop_preview_sent: None,
@@ -1307,32 +1325,17 @@ impl StudioWindow {
         self.select_layer(Some(layer_id), cx);
     }
 
-    /// A camera layer; the input gets Camera Studio (off until a look is chosen).
-    /// A camera layer, set up with the camera defaults (Settings › Camera); the input gets
-    /// Camera Studio, on or off by those defaults.
+    /// A camera layer, set up with the camera defaults (Settings › Camera): with Camera Studio
+    /// on by default, the input starts with the first look's face effects.
     fn add_camera(&mut self, label: &str, uid: &str, cx: &mut Context<Self>) {
         let defaults = self.prefs.camera;
         self.add_input_layer(label, "macos-avcapture", defaults.settings(uid), (1280.0, 720.0), cx);
         let project = self.studio.read(cx).project().clone();
-        if let Some(input) = project.inputs.values().find(|i| i.settings["device"] == uid && i.effects.is_empty())
-            && let Some(cmd) = crate::camera_studio::ensure_effect(input)
+        if defaults.studio_on
+            && let Some(input) = project.inputs.values().find(|i| i.settings["device"] == uid && i.effects.is_empty())
+            && let Some(look) = crate::camera_studio::looks().first().and_then(|(_, l)| l.first())
         {
-            let id = input.id;
-            self.exec(cmd, cx);
-            if defaults.studio_on
-                && let Some(look) = crate::camera_studio::looks().first().and_then(|(_, l)| l.first())
-                && let Some(effect) = self
-                    .studio
-                    .read(cx)
-                    .project()
-                    .inputs
-                    .get(&id)
-                    .and_then(|i| i.effects.iter().find(|e| e.kind == crate::camera_studio::KIND))
-                    .map(|e| e.id)
-            {
-                self.exec(Command::SetInputEffectSettings { input: id, effect, settings: look.settings.clone() }, cx);
-                self.exec(Command::SetInputEffectEnabled { input: id, effect, enabled: true }, cx);
-            }
+            self.exec(crate::camera_studio::apply_look(input, look), cx);
         }
     }
 
@@ -1601,7 +1604,7 @@ impl Render for StudioWindow {
             .child(div().flex().flex_1().min_h_0().children(self.dock.clone()))
             .child(self.status_bar(cx))
             .children(self.add_layer_overlay(cx))
-            .children(self.looks_overlay(cx))
+            .children(self.effect_catalog_overlay(cx))
             .children(self.source_picker_overlay(cx))
             .children(self.outputs.update(cx, |o, cx| o.dialog(cx)))
             .children(self.go_live_overlay(cx))

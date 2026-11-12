@@ -1,5 +1,5 @@
-//! Every shader effect of the lightair_fx filter compiles and changes the picture (with the
-//! settings the catalog sends: uniform names as keys).
+//! Every shader effect (`fx.*`, run on the lightair_fx filter) compiles and changes the picture,
+//! with the settings the catalog sends: uniform names as keys.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -86,9 +86,7 @@ fn every_shader_effect_renders() {
     ];
     let mut failed = Vec::new();
     for (name, settings) in cases {
-        let mut s = settings.clone();
-        s["fx"] = json!(name);
-        let effect = Effect::new(*name, "lightair_fx", s);
+        let effect = Effect::new(*name, format!("fx.{name}"), settings.clone());
         let eid = effect.id;
         apply(&engine, &mut doc, Command::AddInputEffect { input: iid, effect, index: None });
         let n = changed(&plain, &grid(&preview));

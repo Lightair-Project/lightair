@@ -122,7 +122,7 @@ fn the_background_is_replaced_around_the_person() {
     let f = doc.project().primary_format().id;
     let mut input = Input::new("Person", "image_source", json!({"file": image.to_string_lossy()}));
     // Pure red behind the person (OBS colours are 0xAABBGGRR).
-    let studio = Effect::new("Background", "lightair_camera_studio", json!({"bg_mode": 3, "bg_color": 0xFF0000FFu32}));
+    let studio = Effect::new("Background", "studio.bg_replace", json!({"bg_mode": 3, "bg_color": 0xFF0000FFu32}));
     let eid = studio.id;
     input.effects.push(studio);
     let iid = input.id;
@@ -152,8 +152,10 @@ fn the_background_is_replaced_around_the_person() {
     }
 
     // Blur keeps the background's own colours: nothing red.
-    let blur = json!({"bg_mode": 1, "bg_blur": 80});
-    apply(&engine, &mut doc, Command::SetInputEffectSettings { input: iid, effect: eid, settings: blur });
+    // (one face effect for another: the same Camera Studio filter, updated in place)
+    let blur = Effect::new("Blur", "studio.bg_blur", json!({"bg_blur": 80}));
+    apply(&engine, &mut doc, Command::AddInputEffect { input: iid, effect: blur, index: None });
+    apply(&engine, &mut doc, Command::RemoveInputEffect { input: iid, effect: eid });
     std::thread::sleep(Duration::from_millis(400));
     assert!(red(&chroma(&preview)) < 5, "blur shows the real background");
     drop(preview);

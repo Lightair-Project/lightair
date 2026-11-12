@@ -376,6 +376,41 @@ impl StudioWindow {
                 self.select_layer(top, cx);
                 self.rotate_tool = true;
             }
+            Ok(hook @ ("fx-stack" | "fx-sheet" | "fx-looks" | "fx-shape" | "fx-none")) => {
+                // A picture with a few effects, its stack open (or the catalog over it).
+                let board = concat!(env!("CARGO_MANIFEST_DIR"), "/../../branding/final/board.png");
+                self.add_input_layer("Board", "image_source", serde_json::json!({"file": board}), (1920.0, 1080.0), cx);
+                let (input, layer) = {
+                    let s = self.studio.read(cx);
+                    let layer = s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().cloned());
+                    (layer.as_ref().and_then(|l| l.input), layer.map(|l| l.id))
+                };
+                self.select_layer(layer, cx);
+                self.collapsed.borrow_mut().extend(["Source", "Transform"]);
+                if let Some(iid) = input {
+                    let kinds: &[&str] = if hook == "fx-none" {
+                        &[]
+                    } else if hook == "fx-shape" {
+                        &["studio.light", "studio.beauty"]
+                    } else {
+                        &["studio.beauty", "studio.bg_blur", "studio.light", "fx.vignette", "color_filter_v2"]
+                    };
+                    let mut first = None;
+                    for kind in kinds {
+                        if let Some(d) = lightair_core::catalog::def(kind) {
+                            let effect = d.create();
+                            first.get_or_insert(effect.id);
+                            self.exec(lightair_core::Command::AddInputEffect { input: iid, effect, index: None }, cx);
+                        }
+                    }
+                    self.props.open_effect = first;
+                    match hook {
+                        "fx-sheet" => self.open_effect_catalog(iid, super::effects::Page::All, window, cx),
+                        "fx-looks" => self.open_effect_catalog(iid, super::effects::Page::Looks, window, cx),
+                        _ => {}
+                    }
+                }
+            }
             Ok("select") => {
                 let top = {
                     let s = self.studio.read(cx);

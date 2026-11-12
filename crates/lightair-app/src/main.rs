@@ -19,7 +19,6 @@ mod shell;
 mod starter;
 mod studio;
 mod ui;
-mod video_effects;
 
 use std::path::PathBuf;
 use std::sync::Arc;

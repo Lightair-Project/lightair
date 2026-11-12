@@ -1,6 +1,6 @@
 # Effects revamp: everything is an effect
 
-Status: in progress (started 2026-11-12). Supersedes the Camera Studio panel in
+Status: built (2026-11-12). Face effects follow Dewy's tabs: Beauty (Enhance), Face stickers, Relight, Colour grade, Ambience and Camera motion (Atmosphere), plus the new background effects. Supersedes the Camera Studio panel in
 [09](../09-camera-studio.md) and extends the catalog in [08](../08-video-effects.md).
 
 ## Why
@@ -42,9 +42,7 @@ reset and presets.
 
 | Effect | Kind | Controls |
 |---|---|---|
-| **Skin** | `studio.skin` | Smooth, Foundation, Skin tone (±), Redness, Dark circles, Brighten teeth, Bright eyes, Clarity; Whole body skin (switch) |
-| **Face shape** | `studio.shape` | Face: Natural, Slim, V-shape, Narrow, Small, Cheekbones, Jawbone, Chin (±), Forehead (±), Head size · Eyes: Enlarge, Distance (±), Position (±), Tilt (±), Inner corner, Outer corner (±), Lower lid, Iris size · Nose: Narrow, Lift (±), Bridge, Tip · Mouth: Size (±), Position (±), Smile · Brows: Thickness (±), Position (±) |
-| **Makeup** | `studio.makeup` | Look (15 tiles) · Intensity · Lips colour + amount, Gloss · Blush colour + amount + placement (Apples, Lifted, Sun-kissed) · Eyeshadow colour + amount · Eyeliner style (None, Classic, Winged, Cat eye, Smoky) · Contour · Highlight · Brow tint |
+| **Beauty** | `studio.beauty` | Dewy's Enhance tab as one effect, in groups: **Skin** (Smooth, Foundation, Skin tone ±, Redness, Dark circles, Brighten teeth, Bright eyes, Clarity, Whole body skin) · **Face** (Natural, Slim, V-shape, Narrow, Small, Cheekbones, Jawbone, Chin ±, Forehead ±, Head size) · **Eyes** (Enlarge, Distance ±, Position ±, Tilt ±, Inner corner, Outer corner ±, Lower lid, Iris size) · **Nose** (Narrow, Lift ±, Bridge, Tip) · **Mouth** (Size ±, Position ±, Smile) · **Brows** (Thickness ±, Position ±) · **Makeup** (Look: None + 15 tiles, Intensity, lip colour + amount, gloss, blush colour + amount + placement, eyeshadow colour + amount, eyeliner style, contour, highlight, brow tint, look colour) |
 | **Face stickers** | `studio.stickers` | Sticker set (23 tiles: Cute, Cool, Glam, Funny) |
 | **Relight** | `studio.light` | Light (9 tiles: Soft Box, Butterfly, Rembrandt, Split, Golden Hour, Moonlight, Spotlight, Neon, Rim Glow) · Intensity |
 

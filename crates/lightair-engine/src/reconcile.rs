@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 
 use libobs_sys as sys;
+use lightair_core::catalog::lower;
 use lightair_core::{
     Effect, Fit, Format, Id, Layer, LayerPatch, Layout, Patch, Project, Track, TransitionKind, TransitionSettings,
     diff_layers,
@@ -129,7 +130,7 @@ impl Reconciler {
                                 self.timers.add(input.id, src.as_ptr(), &input.settings);
                                 self.ensure_timers_tick();
                             }
-                            let chain = unsafe { chain_build(src.as_ptr(), &input.effects) };
+                            let chain = unsafe { chain_build(src.as_ptr(), &lower(&input.effects)) };
                             self.input_effects.insert(input.id, chain);
                             self.inputs.insert(input.id, src);
                         }
@@ -145,7 +146,7 @@ impl Reconciler {
                             }
                         }
                         let chain = self.input_effects.entry(after.id).or_default();
-                        unsafe { chain_update(src.as_ptr(), chain, &before.effects, &after.effects) };
+                        unsafe { chain_update(src.as_ptr(), chain, &lower(&before.effects), &lower(&after.effects)) };
                     }
                 }
                 Patch::InputRemoved(id) => {
