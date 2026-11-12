@@ -1328,17 +1328,18 @@ impl StudioWindow {
         self.select_layer(Some(layer_id), cx);
     }
 
-    /// A camera layer, set up with the camera defaults (Settings › Camera): with Camera Studio
-    /// on by default, the input starts with the first look's face effects.
+    /// A camera layer, set up with the camera defaults (Settings › Camera): with Beauty on by
+    /// default, the input starts with the Beauty effect.
     fn add_camera(&mut self, label: &str, uid: &str, cx: &mut Context<Self>) {
         let defaults = self.prefs.camera;
         self.add_input_layer(label, "macos-avcapture", defaults.settings(uid), (1280.0, 720.0), cx);
         let project = self.studio.read(cx).project().clone();
         if defaults.studio_on
             && let Some(input) = project.inputs.values().find(|i| i.settings["device"] == uid && i.effects.is_empty())
-            && let Some(look) = crate::camera_studio::looks().first().and_then(|(_, l)| l.first())
+            && let Some(beauty) = lightair_core::catalog::def("studio.beauty")
         {
-            self.exec(crate::camera_studio::apply_look(input, look), cx);
+            let cmd = Command::AddInputEffect { input: input.id, effect: beauty.create(), index: None };
+            self.exec(cmd, cx);
         }
     }
 

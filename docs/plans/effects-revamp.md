@@ -23,7 +23,7 @@ reset and presets.
   helps, grouped detail behind disclosure, bipolar sliders centred at "unchanged", double-click
   to reset, values shown in human units.
 - **Presets are first-class.** Effects with styles (grades, lights, makeup looks, stickers,
-  ambience, motion) show them as tiles. Looks (whole stacks) are in the catalog too.
+  ambience, motion) show them as tiles.
 - **GPU only, real-time.** Every effect runs on the GPU in libobs, in every format, recording
   and stream.
 
@@ -112,21 +112,13 @@ reset and presets.
 | **Luma key** | `luma_key_filter_v2` | Remove darks, Keep up to |
 | **Delay** | `gpu_delay` | Milliseconds |
 
-### Looks (whole stacks)
-
-The 28 Camera Studio looks (Everyday: Dewy, Natural, Fresh Face, No-Makeup, Soft Focus, Bright ·
-Glam: Soft Glam, K-Beauty, Doll, Berry, Bronze, Smoky Night · Studio: Soft Box, Beauty Dish,
-Rembrandt, Golden Hour, Rim Light · Mood: Neon Night, Film, Dreamy, Cozy, Blue Hour, Noir · Men:
-Clean, Sharp, Warm Tan) appear in the catalog's **Looks** category. Choosing one sets the
-source's face effects to that look (adding what's missing, replacing the face effects it covers).
-
 ## UI
 
 - **Inspector › Effects**: the stack. Each effect is a card: icon, name, a one-line summary of
   what it's doing ("Smooth 50 · Foundation 20"), an on/off switch, a chevron. Expanded: its
   controls, grouped, with Reset and a ⋯ menu (duplicate, copy, move up/down, remove). Drag to
   reorder. A master switch bypasses the whole stack to compare.
-- **Add effect** opens the **Effect catalog** sheet: categories down the side (All, Looks, Face,
+- **Add effect** opens the **Effect catalog** sheet: categories down the side (All, Face,
   Background, Colour, Stylize, Blur, Distort & motion, Keying & utility), a search field, and a
   grid of tiles (icon, name, one-line description; "Needs a face" / "Needs a person" badges).
   Choosing a tile adds it and opens its controls.
@@ -141,5 +133,5 @@ source's face effects to that look (adding what's missing, replacing the face ef
 3. **`lightair_fx`** filter (C) with the shader effects above; a render test per family.
 4. **Catalog and model** (Rust): typed catalog, `studio.*` merging in the reconciler, `fx.*`
    mapping, migration of the old single Camera Studio effect; unit tests.
-5. **UI**: effect stack and controls in the Inspector; the Effect catalog sheet; looks.
+5. **UI**: effect stack and controls in the Inspector; the Effect catalog sheet. (Whole-stack looks were built, then removed: not wanted.)
 6. Screenshots, the full suite, commit after each step.
