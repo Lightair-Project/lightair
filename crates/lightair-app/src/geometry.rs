@@ -424,6 +424,80 @@ pub fn gizmo_hit(l: &Layout, r: f32, p: (f32, f32), tol: f32) -> Option<Axis> {
         .map(|(axis, _)| axis)
 }
 
+/// Snaps the edges a corner drag moves to the canvas's edges and centre lines (within `thr`
+/// canvas px): returns the box and the guides to show ((vertical, position), as for moving).
+/// Keeping the aspect, only the nearer edge snaps and the other follows the shape, from the
+/// opposite corner. Turned or tilted boxes don't snap (their edges aren't along the canvas).
+pub fn snap_resize(
+    l: &Layout,
+    c: Corner,
+    extent: (f32, f32),
+    thr: f32,
+    keep_aspect: bool,
+) -> (Layout, Vec<(bool, f32)>) {
+    if l.rotation.abs() > 0.01 || l.tilt_x.abs() > 0.01 || l.tilt_y.abs() > 0.01 {
+        return (*l, vec![]);
+    }
+    let min = 8.0;
+    let left_side = matches!(c, Corner::TopLeft | Corner::BottomLeft);
+    let top_side = matches!(c, Corner::TopLeft | Corner::TopRight);
+    let (mut left, mut top, mut right, mut bottom) = (l.x, l.y, l.x + l.width, l.y + l.height);
+    let nearest = |pos: f32, extent: f32| -> Option<f32> {
+        [0.0, extent / 2.0, extent]
+            .into_iter()
+            .filter(|t| (pos - t).abs() < thr)
+            .min_by(|a, b| (pos - a).abs().total_cmp(&(pos - b).abs()))
+    };
+    let mx = if left_side { left } else { right };
+    let my = if top_side { top } else { bottom };
+    let mut sx = nearest(mx, extent.0);
+    let mut sy = nearest(my, extent.1);
+    if keep_aspect && sx.is_some() && sy.is_some() {
+        // one edge leads; the nearer one
+        if (sx.unwrap() - mx).abs() <= (sy.unwrap() - my).abs() {
+            sy = None;
+        } else {
+            sx = None;
+        }
+    }
+    let ratio = l.height / l.width.max(1.0);
+    if let Some(t) = sx {
+        if left_side { left = t } else { right = t }
+        if keep_aspect {
+            let h = (right - left).abs() * ratio;
+            if top_side { top = bottom - h } else { bottom = top + h }
+        }
+    }
+    if let Some(t) = sy {
+        if top_side { top = t } else { bottom = t }
+        if keep_aspect {
+            let w = (bottom - top).abs() / ratio.max(1e-6);
+            if left_side { left = right - w } else { right = left + w }
+        }
+    }
+    if right - left < min || bottom - top < min {
+        return (*l, vec![]);
+    }
+    let mut guides = Vec::new();
+    if let Some(t) = sx {
+        guides.push((true, t));
+    }
+    if let Some(t) = sy {
+        guides.push((false, t));
+    }
+    (Layout { x: left, y: top, width: right - left, height: bottom - top, ..*l }, guides)
+}
+
+/// How far the canvas may be panned on one axis: `stage` is the view's length, `canvas` the
+/// canvas's length on screen. Zoomed out, the canvas's centre stays in the view; zoomed in, a
+/// canvas edge can come at most to the middle of the view - never out into empty space.
+pub fn clamp_pan(pan: f32, stage: f32, canvas: f32) -> f32 {
+    let keep = stage.min(canvas) / 2.0;
+    let base = (stage - canvas) / 2.0; // where the canvas starts when centred
+    let (lo, hi) = (keep - canvas - base, stage - keep - base);
+    pan.clamp(lo.min(hi), hi.max(lo))
+}
+
 /// An angle in (−180, 180].
 pub fn normalise_degrees(a: f32) -> f32 {
     let a = a.rem_euclid(360.0);
@@ -433,6 +507,44 @@ pub fn normalise_degrees(a: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resize_snaps_the_dragged_corner_to_the_canvas() {
+        let l = Layout::boxed(100.0, 100.0, 1815.0, 600.0);
+        // The right edge 5 px from the canvas's: snaps; the bottom (700) isn't near a line.
+        let (s, guides) = snap_resize(&l, Corner::BottomRight, (1920.0, 1080.0), 8.0, false);
+        assert_eq!((s.x, s.width, s.height), (100.0, 1820.0, 600.0));
+        assert_eq!(guides, vec![(true, 1920.0)]);
+        // The top-left corner to the centre lines.
+        let l = Layout::boxed(957.0, 543.0, 400.0, 300.0);
+        let (s, guides) = snap_resize(&l, Corner::TopLeft, (1920.0, 1080.0), 8.0, false);
+        assert_eq!((s.x, s.y, s.x + s.width, s.y + s.height), (960.0, 540.0, 1357.0, 843.0));
+        assert_eq!(guides.len(), 2);
+        // Keeping the aspect: the nearer edge leads, the other follows the shape.
+        let l = Layout::boxed(0.0, 0.0, 1914.0, 957.0);
+        let (s, guides) = snap_resize(&l, Corner::BottomRight, (1920.0, 1080.0), 8.0, true);
+        assert_eq!((s.width, s.height), (1920.0, 960.0));
+        assert_eq!(guides, vec![(true, 1920.0)]);
+        // Far from every line, or turned: unchanged.
+        let far = Layout::boxed(300.0, 300.0, 500.0, 300.0);
+        assert_eq!(snap_resize(&far, Corner::BottomRight, (1920.0, 1080.0), 8.0, false).0, far);
+        let turned = Layout { rotation: 10.0, ..Layout::boxed(0.0, 0.0, 1915.0, 1075.0) };
+        assert!(snap_resize(&turned, Corner::BottomRight, (1920.0, 1080.0), 8.0, false).1.is_empty());
+    }
+
+    #[test]
+    fn panning_stops_before_the_canvas_leaves_the_view() {
+        // Zoomed out (canvas 400 in an 800 view): its centre stays in the view.
+        assert_eq!(clamp_pan(10_000.0, 800.0, 400.0), 400.0);
+        let (lo, hi) = (clamp_pan(-1e6, 800.0, 400.0), clamp_pan(1e6, 800.0, 400.0));
+        let centre = |pan: f32| (800.0 - 400.0) / 2.0 + pan + 200.0;
+        assert_eq!((centre(lo), centre(hi)), (0.0, 800.0));
+        // Zoomed in (canvas 3000 in an 800 view): an edge reaches the middle at most.
+        let (lo, hi) = (clamp_pan(-1e6, 800.0, 3000.0), clamp_pan(1e6, 800.0, 3000.0));
+        let start = |pan: f32| (800.0 - 3000.0) / 2.0 + pan;
+        assert_eq!((start(hi), start(lo) + 3000.0), (400.0, 400.0));
+        assert_eq!(clamp_pan(25.0, 800.0, 3000.0), 25.0, "inside the range: untouched");
+    }
 
     fn close(a: (f32, f32), b: (f32, f32)) -> bool {
         (a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01
