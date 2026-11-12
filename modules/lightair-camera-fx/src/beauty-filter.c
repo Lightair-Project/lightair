@@ -133,6 +133,7 @@ struct beauty_filter {
 	gs_image_file_ex_t bg_image;
 	gs_effect_t *bg_effect;
 	gs_texrender_t *tr_bg_q, *tr_bg_t1, *tr_bg_t2, *tr_bg_out;
+	gs_texrender_t *tr_gf_half, *tr_gf_small, *tr_gf_prep, *tr_gf_t, *tr_gf_mean, *tr_gf_coef; /* guided filter */
 	/* Apple Vision's person mask (A), finer than the multiclass one: the background uses it */
 	gs_texture_t *vp_tex;
 	gs_texrender_t *tr_vp_ref, *tr_vp_ref2;
@@ -339,6 +340,12 @@ static void *beauty_create(obs_data_t *settings, obs_source_t *source)
 	f->tr_bg_t1 = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
 	f->tr_bg_t2 = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
 	f->tr_bg_out = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	f->tr_gf_half = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	f->tr_gf_small = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	f->tr_gf_prep = gs_texrender_create(GS_RGBA32F, GS_ZS_NONE);
+	f->tr_gf_t = gs_texrender_create(GS_RGBA32F, GS_ZS_NONE);
+	f->tr_gf_mean = gs_texrender_create(GS_RGBA32F, GS_ZS_NONE);
+	f->tr_gf_coef = gs_texrender_create(GS_RGBA32F, GS_ZS_NONE);
 	f->tr_vp_ref = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	f->tr_vp_ref2 = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	for (int i = 0; i < RING_N; i++)
@@ -382,6 +389,9 @@ static void beauty_destroy(void *data)
 	gs_texrender_destroy(f->tr_bg_t1);
 	gs_texrender_destroy(f->tr_bg_t2);
 	gs_texrender_destroy(f->tr_bg_out);
+	gs_texrender_t *gfs[] = {f->tr_gf_half, f->tr_gf_small, f->tr_gf_prep, f->tr_gf_t, f->tr_gf_mean, f->tr_gf_coef};
+	for (size_t i = 0; i < sizeof(gfs) / sizeof(gfs[0]); i++)
+		gs_texrender_destroy(gfs[i]);
 	gs_texrender_destroy(f->tr_vp_ref);
 	gs_texrender_destroy(f->tr_vp_ref2);
 	gs_texture_destroy(f->vp_tex);
@@ -719,6 +729,49 @@ static void update_tracking(struct beauty_filter *f, gs_texture_t *src, uint32_t
 
 /* ---------------- background ---------------- */
 
+#define GF_EPS 0.01f   /* guided filter regularisation: luma variance below this counts as noise */
+#define GF_RADIUS 6.0f  /* guided filter window, quarter-size px */
+
+/* One pass of the background effect into tr (out_w x out_h), image = in. */
+static gs_texture_t *bg_pass(struct beauty_filter *f, gs_texrender_t *tr, const char *tech, gs_texture_t *in,
+			     gs_texture_t *mask, uint32_t out_w, uint32_t out_h)
+{
+	gs_effect_t *e = f->bg_effect;
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), in);
+	if (mask)
+		gs_effect_set_texture(gs_effect_get_param_by_name(e, "mask_tex"), mask);
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "gf_eps"), GF_EPS);
+	gs_texrender_reset(tr);
+	if (!gs_texrender_begin(tr, out_w, out_h))
+		return NULL;
+	gs_ortho(0.0f, (float)out_w, 0.0f, (float)out_h, -100.0f, 100.0f);
+	while (gs_effect_loop(e, tech))
+		gs_draw_sprite(in, 0, out_w, out_h);
+	gs_texrender_end(tr);
+	return gs_texrender_get_texture(tr);
+}
+
+/* Fast guided filter: the person's edge from the frame's own detail. The coarse mask says
+ * where the person is; a local linear model of the frame's luma (fitted at quarter size, over a
+ * window of ~GF_RADIUS px) puts the edge exactly on their outline at full size, follows it as
+ * they move, and - being a fit over a window, regularised by GF_EPS - doesn't chase noise. */
+static gs_texture_t *guided_coefficients(struct beauty_filter *f, gs_texture_t *in, gs_texture_t *mask, uint32_t w,
+					 uint32_t h, gs_texture_t **guide)
+{
+	uint32_t hw = w / 2 > 0 ? w / 2 : 1, hh = h / 2 > 0 ? h / 2 : 1;
+	uint32_t qw = w / 4 > 0 ? w / 4 : 1, qh = h / 4 > 0 ? h / 4 : 1;
+	gs_texture_t *half = blur_pass(f, f->tr_gf_half, "Draw", in, w, h, hw, hh, 0, 0, 0, 0);
+	*guide = half;
+	gs_texture_t *small = half ? blur_pass(f, f->tr_gf_small, "Draw", half, hw, hh, qw, qh, 0, 0, 0, 0) : NULL;
+	gs_texture_t *prep = small ? bg_pass(f, f->tr_gf_prep, "GFPrep", small, mask, qw, qh) : NULL;
+	float step = GF_RADIUS / 3.2307692f;
+	gs_texture_t *t = prep ? blur_pass(f, f->tr_gf_t, "Gauss", prep, qw, qh, qw, qh, 1, 0, step, 0) : NULL;
+	gs_texture_t *mean = t ? blur_pass(f, f->tr_gf_mean, "Gauss", t, qw, qh, qw, qh, 0, 1, step, 0) : NULL;
+	gs_texture_t *coef = mean ? bg_pass(f, f->tr_gf_coef, "GFCoef", mean, NULL, qw, qh) : NULL;
+	t = coef ? blur_pass(f, f->tr_gf_t, "Gauss", coef, qw, qh, qw, qh, 1, 0, step, 0) : NULL;
+	return t ? blur_pass(f, f->tr_gf_mean, "Gauss", t, qw, qh, qw, qh, 0, 1, step, 0) : NULL;
+}
+
 /* Blur, remove or replace what isn't the person, using the segmentation's person mask (seg.a,
  * snapped to this frame's edges). Blur is a normalised convolution of the background alone, so
  * no halo of skin or hair spreads around the person. */
@@ -764,8 +817,15 @@ static gs_texture_t *render_background(struct beauty_filter *f, gs_texture_t *in
 		}
 	}
 
+	gs_texture_t *guide = NULL;
+	gs_texture_t *gf = guided_coefficients(f, in, seg, w, h, &guide);
+
 	gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), in);
 	gs_effect_set_texture(gs_effect_get_param_by_name(e, "mask_tex"), seg);
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "gf_tex"), gf ? gf : seg);
+	gs_effect_set_int(gs_effect_get_param_by_name(e, "use_gf"), gf && guide ? 1 : 0);
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "gf_guide"), guide ? guide : in);
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "gf_eps"), GF_EPS);
 	gs_effect_set_texture(gs_effect_get_param_by_name(e, "bg_tex"), bgt ? bgt : in);
 	gs_effect_set_int(gs_effect_get_param_by_name(e, "mode"), mode);
 	gs_effect_set_vec4(gs_effect_get_param_by_name(e, "bg_color"), &f->bg_color);
@@ -1173,6 +1233,7 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 	/* --- learned segmentation: R skin, G face skin, B hair, A person --- */
 	face_tracker_set_segmentation(f->tracker, true);
 	face_tracker_set_segmentation_fast(f->tracker, fx_layers_light_active(f->fx) || background_active(f));
+	face_tracker_set_segmentation_every_frame(f->tracker, background_active(f));
 	uint32_t mw = 0, mh = 0;
 	uint8_t *segbuf = face_tracker_take_mask(f->tracker, &f->pm_serial, &mw, &mh);
 	if (segbuf) {

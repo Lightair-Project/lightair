@@ -274,3 +274,95 @@ fn background_edges_hold_still() {
     drop(preview);
     drop(engine);
 }
+
+/// Edges don't jitter while the person sways (a slow wave plus camera-like grain before the
+/// effect): an edge point crossing once as the person moves is right; flipping back and forth
+/// is jitter. Counts reversals of each point's mask value over 1.5 s, per edge point.
+#[test]
+fn background_edges_steady_in_motion() {
+    let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+    let Some(image) = std::env::var_os("LIGHTAIR_FACE_IMAGE").map(PathBuf::from) else {
+        eprintln!("LIGHTAIR_FACE_IMAGE not set; skipping");
+        return;
+    };
+    if std::env::var("LIGHTAIR_FACE_EXPECTED").is_ok_and(|v| v == "0") {
+        return;
+    }
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/modules/lightair-camera-fx");
+    if !dir.join("lightair-camera-fx.plugin").exists() {
+        eprintln!("module not built; skipping");
+        return;
+    }
+    let engine = Engine::start(EngineConfig {
+        canvas: (1280, 720),
+        output: (1280, 720),
+        extra_plugin_dirs: vec![dir],
+        ..Default::default()
+    })
+    .unwrap();
+    let mut doc = Document::new(Project::new("Sway"));
+    let f = doc.project().primary_format().id;
+    let mut input = Input::new("Person", "image_source", json!({"file": image.to_string_lossy()}));
+    input.effects.push(Effect::new("Sway", "fx.wave", json!({"amount": 0.35, "frequency": 0.1, "speed": 0.15})));
+    input.effects.push(Effect::new("Grain", "fx.grain", json!({"amount": std::env::var("LIGHTAIR_GRAIN").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.2), "grain_size": 1.0, "colored": true})));
+    let studio = Effect::new("Background", "studio.bg_replace", json!({"bg_mode": 3}));
+    let eid = studio.id;
+    input.effects.push(studio);
+    let iid = input.id;
+    let mut scene = Scene::new("Main");
+    scene.layers =
+        vec![Layer::new("Person", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
+    apply(&engine, &mut doc, Command::AddInput { input });
+    apply(&engine, &mut doc, Command::AddScene { scene, index: None });
+    let preview = engine.call(|_| Preview::attach());
+    let max: f64 = std::env::var("LIGHTAIR_JITTER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(0.7);
+
+    const N: usize = 96;
+    let mask_at = |preview: &Preview| -> Vec<i32> {
+        let n = preview.frames();
+        while preview.frames() < n + 1 {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let fr = preview.latest_frame().unwrap();
+        (0..N * N)
+            .map(|i| sample_ycbcr(&fr, (i % N) as f32 / N as f32 + 0.003, (i / N) as f32 / N as f32 + 0.003).unwrap().0 as i32)
+            .collect()
+    };
+    // Warm up first: right after the models load, Vision and Core ML run slower for a few
+    // seconds, so masks come less often and jump further. A live session is always warm.
+    std::thread::sleep(Duration::from_millis(8000));
+    for (model, quality, name) in [(0, 1, "Vision balanced"), (0, 2, "Vision accurate"), (1, 1, "MediaPipe")] {
+        let settings = json!({"bg_mode": 3, "bg_model": model, "bg_quality": quality, "bg_show_mask": true});
+        apply(&engine, &mut doc, Command::SetInputEffectSettings { input: iid, effect: eid, settings });
+        std::thread::sleep(Duration::from_millis(3000));
+        let frames: Vec<Vec<i32>> = (0..90).map(|_| mask_at(&preview)).collect();
+        let (mut reversals, mut edge) = (0usize, 0usize);
+        let mut travel = 0i64;
+        for i in 0..N * N {
+            let series: Vec<i32> = frames.iter().map(|f| f[i]).collect();
+            let (lo, hi) = (*series.iter().min().unwrap(), *series.iter().max().unwrap());
+            if hi - lo < 48 {
+                continue; // not on the edge
+            }
+            edge += 1;
+            let mut last = 0;
+            for w in series.windows(2) {
+                let d = w[1] - w[0];
+                travel += d.abs() as i64;
+                if d.abs() < 12 {
+                    continue;
+                }
+                if last != 0 && d.signum() != last {
+                    reversals += 1;
+                }
+                last = d.signum();
+            }
+        }
+        let per_point = reversals as f64 / edge.max(1) as f64;
+        let wobble = travel as f64 / edge.max(1) as f64 / 255.0;
+        eprintln!("{name:>16}: {edge} edge points, {per_point:.2} reversals each in 1.5 s, travel {wobble:.2} full swings each");
+        assert!(per_point <= max, "{name}: edges jitter ({per_point:.2} reversals per edge point)");
+    }
+    drop(preview);
+    drop(engine);
+}
