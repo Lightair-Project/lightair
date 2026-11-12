@@ -158,8 +158,9 @@ pub fn panel_title(icon_name: &str, label: &'static str) -> impl IntoElement {
         .flex()
         .items_center()
         .gap_1p5()
-        .child(icon(icon_name).size(px(13.)).text_color(tok::text_secondary()))
-        .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text()).child(label))
+        // Colours come from the tab (active or not).
+        .child(icon(icon_name).size(px(13.)))
+        .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(label))
 }
 
 /// The band behind a dock panel's header.

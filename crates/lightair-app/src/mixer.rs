@@ -498,8 +498,9 @@ impl gpui_kit::component::dock::BasePanel for MixerPanel {
 }
 
 impl gpui_kit::component::dock::Panel for MixerPanel {
+    /// None: the tab shows `title` (icon and name).
     fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some("Audio Mixer".into())
+        None
     }
 
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

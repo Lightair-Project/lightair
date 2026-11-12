@@ -365,8 +365,9 @@ impl gpui_kit::component::dock::BasePanel for OutputsPanel {
 }
 
 impl gpui_kit::component::dock::Panel for OutputsPanel {
+    /// None: the tab shows `title` (icon and name).
     fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some("Outputs".into())
+        None
     }
 
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
