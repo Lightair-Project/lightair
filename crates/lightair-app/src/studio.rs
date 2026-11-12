@@ -22,6 +22,8 @@ pub struct Studio {
     /// The scene selected for editing (the program scene unless studio mode stages another).
     pub selected_scene: Option<Id>,
     pub selected_layer: Option<Id>,
+    /// Further selected layers (⇧-click); `selected_layer` is the one the Inspector edits.
+    pub also_selected: Vec<Id>,
     /// Last user-visible problem, shown in the status bar.
     pub issue: Option<SharedString>,
     pub stats: Stats,
@@ -53,6 +55,7 @@ impl Studio {
             engine,
             selected_scene,
             selected_layer: None,
+            also_selected: Vec::new(),
             issue,
             stats: Stats::default(),
             clips_seen: 0,
@@ -439,6 +442,24 @@ impl Studio {
         self.push(empty, project);
     }
 
+    /// Every selected layer, the Inspector's first.
+    pub fn selection(&self) -> Vec<Id> {
+        self.selected_layer.into_iter().chain(self.also_selected.iter().copied()).collect()
+    }
+
+    /// ⇧-click: add a layer to the selection, or take it out.
+    pub fn toggle_selected(&mut self, layer: Id) {
+        if self.selected_layer == Some(layer) {
+            self.selected_layer = (!self.also_selected.is_empty()).then(|| self.also_selected.remove(0));
+        } else if let Some(i) = self.also_selected.iter().position(|l| *l == layer) {
+            self.also_selected.remove(i);
+        } else if self.selected_layer.is_none() {
+            self.selected_layer = Some(layer);
+        } else {
+            self.also_selected.push(layer);
+        }
+    }
+
     fn fix_selection(&mut self) {
         let p = self.doc.project();
         if self.selected_scene.is_none_or(|s| p.scene(s).is_none()) {
@@ -447,7 +468,13 @@ impl Studio {
         if let (Some(scene), Some(layer)) = (self.selected_scene, self.selected_layer)
             && p.scene(scene).is_none_or(|s| s.layer(layer).is_none())
         {
-            self.selected_layer = None;
+            self.selected_layer = self.also_selected.first().copied();
+        }
+        let scene = self.selected_scene.and_then(|s| p.scene(s));
+        let primary = self.selected_layer;
+        self.also_selected.retain(|l| Some(*l) != primary && scene.is_some_and(|s| s.layer(*l).is_some()));
+        if self.selected_layer.is_none() {
+            self.also_selected.clear();
         }
     }
 }

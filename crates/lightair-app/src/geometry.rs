@@ -138,6 +138,50 @@ pub fn crop(l: &Layout, c: Corner, size: (f32, f32), delta: (f32, f32)) -> Layou
     reanchor(l, edited)
 }
 
+/// The axis-aligned bounds of a (possibly rotated) box: (left, top, right, bottom).
+pub fn bounds(l: &Layout) -> (f32, f32, f32, f32) {
+    let o = outline(l);
+    let xs = o.map(|p| p.0);
+    let ys = o.map(|p| p.1);
+    let min = |v: [f32; 4]| v.into_iter().fold(f32::INFINITY, f32::min);
+    let max = |v: [f32; 4]| v.into_iter().fold(f32::NEG_INFINITY, f32::max);
+    (min(xs), min(ys), max(xs), max(ys))
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Align {
+    Left,
+    Centre,
+    Right,
+    Top,
+    Middle,
+    Bottom,
+}
+
+/// Lines layers up by their visible bounds, against the bounds of them all.
+pub fn align(layouts: &[Layout], how: Align) -> Vec<Layout> {
+    let all: Vec<_> = layouts.iter().map(bounds).collect();
+    let left = all.iter().map(|b| b.0).fold(f32::INFINITY, f32::min);
+    let top = all.iter().map(|b| b.1).fold(f32::INFINITY, f32::min);
+    let right = all.iter().map(|b| b.2).fold(f32::NEG_INFINITY, f32::max);
+    let bottom = all.iter().map(|b| b.3).fold(f32::NEG_INFINITY, f32::max);
+    layouts
+        .iter()
+        .zip(all)
+        .map(|(l, b)| {
+            let (dx, dy) = match how {
+                Align::Left => (left - b.0, 0.0),
+                Align::Right => (right - b.2, 0.0),
+                Align::Centre => ((left + right) / 2.0 - (b.0 + b.2) / 2.0, 0.0),
+                Align::Top => (0.0, top - b.1),
+                Align::Bottom => (0.0, bottom - b.3),
+                Align::Middle => (0.0, (top + bottom) / 2.0 - (b.1 + b.3) / 2.0),
+            };
+            Layout { x: l.x + dx, y: l.y + dy, ..*l }
+        })
+        .collect()
+}
+
 /// An angle in (−180, 180].
 pub fn normalise_degrees(a: f32) -> f32 {
     let a = a.rem_euclid(360.0);
@@ -191,6 +235,22 @@ mod tests {
         let rc = crop(&r, Corner::TopLeft, (1920.0, 1080.0), rotate((50.0, 25.0), 45.0));
         assert_eq!((rc.crop.left, rc.crop.top), (100, 50));
         assert!(close(corner(&rc, Corner::BottomRight), anchor));
+    }
+
+    #[test]
+    fn alignment_uses_visible_bounds() {
+        let a = Layout::boxed(10.0, 10.0, 100.0, 50.0);
+        let b = Layout::boxed(200.0, 100.0, 50.0, 50.0);
+        let left = align(&[a, b], Align::Left);
+        assert_eq!((left[0].x, left[1].x), (10.0, 10.0));
+        let bottom = align(&[a, b], Align::Bottom);
+        assert_eq!((bottom[0].y, bottom[1].y), (100.0, 100.0));
+        let centre = align(&[a, b], Align::Centre);
+        assert_eq!((centre[0].x + 50.0, centre[1].x + 25.0), (130.0, 130.0));
+        // A layer turned a quarter shows 50 wide: it aligns by that.
+        let turned = Layout { rotation: 90.0, ..Layout::boxed(300.0, 0.0, 100.0, 50.0) };
+        let r = align(&[a, turned], Align::Left);
+        assert!((bounds(&r[1]).0 - 10.0).abs() < 0.01);
     }
 
     #[test]
