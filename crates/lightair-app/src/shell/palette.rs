@@ -91,7 +91,7 @@ fn entries(project: &Project, studio_mode: bool) -> Vec<Entry> {
         .collect();
     let fixed: &[(&str, &'static str, &'static str, PaletteAction)] = &[
         ("Take", "⌘↩", "play", Take),
-        (if studio_mode { "Cue scenes: turn off" } else { "Cue scenes" }, "", "columns-2", StudioMode),
+        (if studio_mode { "Cue scenes: turn off" } else { "Cue scenes" }, "", "lightair-cue", StudioMode),
         ("Start or stop recording", "", "circle", Record),
         ("Pause or resume recording", "", "pause", PauseRecording),
         ("Add marker", "⌘M", "bookmark", Marker),
