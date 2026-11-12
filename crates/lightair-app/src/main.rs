@@ -5,6 +5,7 @@ mod camera_studio;
 mod geometry;
 mod mixer;
 mod outputs_panel;
+mod platforms;
 mod preflight;
 mod prefs;
 mod reframe;
