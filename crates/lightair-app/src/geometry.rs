@@ -254,6 +254,27 @@ pub fn crop_edge(l: &Layout, e: Edge, size: (f32, f32), delta: (f32, f32)) -> La
     crop(l, corner, size, rotate(local, l.rotation))
 }
 
+/// The rectangle the picture actually fills inside a layer's box: in Fit mode the (cropped)
+/// source keeps its shape, so it's letterboxed; Original shows it at its own size. The frame and
+/// handles sit on this, so they always hug the picture. `source` is the source's pixel size.
+pub fn content_rect(l: &Layout, source: Option<(f32, f32)>) -> Layout {
+    let Some((sw, sh)) = source.filter(|(w, h)| *w > 0.0 && *h > 0.0) else { return *l };
+    let k = l.crop;
+    let vw = (sw - (k.left + k.right) as f32).max(1.0);
+    let vh = (sh - (k.top + k.bottom) as f32).max(1.0);
+    let (w, h) = match l.fit {
+        lightair_core::Fit::Fit => {
+            let s = (l.width / vw).min(l.height / vh);
+            (vw * s, vh * s)
+        }
+        lightair_core::Fit::Original => (vw, vh),
+        lightair_core::Fit::Fill | lightair_core::Fit::Stretch => return *l,
+    };
+    // Same centre, same rotation.
+    let (cx, cy) = centre(l);
+    Layout { x: cx - w / 2.0, y: cy - h / 2.0, width: w, height: h, ..*l }
+}
+
 /// Crop mode: dragging inside the crop slides the picture under it (the box stays; the crop
 /// window moves the other way), within the source's edges.
 pub fn crop_pan(l: &Layout, size: (f32, f32), delta: (f32, f32)) -> Layout {
@@ -430,6 +451,22 @@ mod tests {
         let b = crop_edge(&r, Edge::Bottom, (1920.0, 1080.0), (20.0, 0.0));
         assert_eq!((b.crop.bottom, b.crop.left, b.crop.right), (40, 0, 0));
         assert!(close(edge_middle(&b, Edge::Top), edge_middle(&r, Edge::Top)), "the opposite edge stays");
+    }
+
+    #[test]
+    fn the_frame_hugs_the_picture() {
+        // A 16:9 box holding a 4:3 source in Fit: pillarboxed.
+        let l = Layout::boxed(0.0, 0.0, 1600.0, 900.0);
+        let c = content_rect(&l, Some((1440.0, 1080.0)));
+        assert_eq!((c.x, c.y, c.width, c.height), (200.0, 0.0, 1200.0, 900.0));
+        // Cropping changes the picture's shape: a square crop of it is a square.
+        let sq = Layout { crop: Crop { left: 180, right: 180, top: 0, bottom: 0 }, ..l };
+        let c = content_rect(&sq, Some((1440.0, 1080.0)));
+        assert_eq!((c.x, c.width, c.height), (350.0, 900.0, 900.0));
+        // Fill and Stretch fill the box; an unknown size leaves it alone.
+        let fill = Layout { fit: lightair_core::Fit::Fill, ..l };
+        assert_eq!(content_rect(&fill, Some((1440.0, 1080.0))), fill);
+        assert_eq!(content_rect(&l, None), l);
     }
 
     #[test]

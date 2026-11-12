@@ -124,6 +124,9 @@ struct Drag {
     others: Vec<(Id, Layout)>,
 }
 
+/// Inputs' pixel sizes and when they were last read.
+type SizeCache = (Option<Instant>, HashMap<Id, (u32, u32)>);
+
 /// A source's list choices: (label, setting value).
 type SourceOptions = Vec<(String, serde_json::Value)>;
 
@@ -159,6 +162,8 @@ pub struct StudioWindow {
     /// The layer showing crop handles instead of resize handles.
     crop_mode: Option<Id>,
     crop_preview_sent: Option<(Id, Id, Id)>,
+    /// Inputs' pixel sizes, refreshed a few times a second: frames and handles hug the picture.
+    sizes: RefCell<SizeCache>,
     /// The source picker, and fetched source lists per (input, setting).
     source_picker: Option<source::SourcePicker>,
     source_cache: RefCell<HashMap<(Id, &'static str), SourceOptions>>,
@@ -228,6 +233,7 @@ impl StudioWindow {
             transition_menu: false,
             crop_mode: None,
             crop_preview_sent: None,
+            sizes: RefCell::default(),
             source_picker: None,
             source_cache: RefCell::default(),
             camera_devices: vec![],
@@ -498,8 +504,10 @@ impl StudioWindow {
 
         // A handle of the selected layer?
         if let Some(sel) = studio.selected_layer.and_then(|id| scene.layer(id))
-            && let Some(l) = sel.layouts.get(&format).filter(|_| !sel.locked)
+            && let Some(frame) = self.frame_of(sel, format).filter(|_| !sel.locked)
         {
+            // The frame hugs the picture: handles sit on it, and a drag snaps the box to it.
+            let l = &frame;
             // Crop mode: corners and edges crop.
             if self.crop_mode == Some(sel.id) {
                 let input = sel.input;
@@ -576,7 +584,7 @@ impl StudioWindow {
             .layers
             .iter()
             .rev()
-            .find(|l| l.layouts.get(&format).is_some_and(|lo| lo.visible && geo::contains(lo, (x, y))));
+            .find(|l| self.frame_of(l, format).is_some_and(|lo| lo.visible && geo::contains(&lo, (x, y))));
         let selection = studio.selection();
         match hit {
             Some(layer) if ev.modifiers.shift => self.toggle_selected(layer.id, cx),
@@ -593,13 +601,13 @@ impl StudioWindow {
                 // Dragging one of several selected layers moves them all; otherwise select it.
                 let in_selection = selection.contains(&id);
                 if !layer.locked {
-                    let layout = layer.layouts[&format];
+                    let Some(layout) = self.frame_of(layer, format) else { return };
                     let others: Vec<(Id, Layout)> = if in_selection {
                         selection
                             .iter()
                             .filter(|o| **o != id)
                             .filter_map(|o| scene.layer(*o).filter(|l| !l.locked))
-                            .filter_map(|l| l.layouts.get(&format).map(|lo| (l.id, *lo)))
+                            .filter_map(|l| self.frame_of(l, format).map(|lo| (l.id, lo)))
                             .collect()
                     } else {
                         vec![]
@@ -693,7 +701,10 @@ impl StudioWindow {
                     l.y = snap(l.y, l.height, ch, &mut guides, false);
                 }
             }
-            DragMode::Resize(corner) => l = geo::resize(&l, corner, (dx, dy), ev.modifiers.shift),
+            // In Fit the picture keeps its shape, so the frame does too (Stretch to distort).
+            DragMode::Resize(corner) => {
+                l = geo::resize(&l, corner, (dx, dy), ev.modifiers.shift || l.fit == lightair_core::Fit::Fit)
+            }
         }
         self.guides = guides;
         // The group follows the grabbed layer (after snapping).
@@ -940,6 +951,7 @@ impl Render for StudioWindow {
         window.request_animation_frame();
         self.ensure_dock(window, cx);
         self.sync_crop_preview(cx);
+        self.refresh_sizes(cx);
         self.sync_previews(cx);
         self.sync_layer_props(window, cx);
         let studio = self.studio.read(cx);
@@ -1168,6 +1180,22 @@ impl StudioWindow {
                     .tooltip(|w, cx| Tooltip::new("Settings (⌘,)").build(w, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
             )
+    }
+
+    fn refresh_sizes(&self, cx: &mut Context<Self>) {
+        let stale = self.sizes.borrow().0.is_none_or(|t| t.elapsed().as_millis() > 250);
+        if stale {
+            let sizes = self.studio.read(cx).engine().call(|s| s.reconciler.input_sizes());
+            *self.sizes.borrow_mut() = (Some(Instant::now()), sizes);
+        }
+    }
+
+    /// Where a layer's picture actually is in a format: its box, narrowed to the picture in Fit
+    /// mode. The frame, handles and dragging use this, so they stick to the source.
+    fn frame_of(&self, layer: &Layer, format: Id) -> Option<Layout> {
+        let l = layer.layouts.get(&format)?;
+        let size = self.sizes.borrow().1.get(&layer.input).map(|(w, h)| (*w as f32, *h as f32));
+        Some(geo::content_rect(l, size))
     }
 
     /// Keeps libobs showing the layer being cropped whole (crop mode), or not.
@@ -1752,7 +1780,7 @@ impl StudioWindow {
                 .selected_scene
                 .and_then(|id| project.scene(id))
                 .and_then(|scene| studio.selected_layer.and_then(|l| scene.layer(l)))
-                .and_then(|l| l.layouts.get(&fid).map(|lo| (*lo, l.locked, l.id)));
+                .and_then(|l| self.frame_of(l, fid).map(|lo| (lo, l.locked, l.id)));
             if let Some((mf, a, b, _)) = self.marquee
                 && mf == fid
             {
@@ -1779,8 +1807,8 @@ impl StudioWindow {
                         .also_selected
                         .iter()
                         .filter_map(|id| scene.layer(*id))
-                        .filter_map(|l| l.layouts.get(&fid))
-                        .map(|lo| geo::outline(lo).map(|(px_, py_)| (lx + px_ * s, ly + py_ * s)))
+                        .filter_map(|l| self.frame_of(l, fid))
+                        .map(|lo| geo::outline(&lo).map(|(px_, py_)| (lx + px_ * s, ly + py_ * s)))
                         .collect()
                 })
                 .unwrap_or_default();
