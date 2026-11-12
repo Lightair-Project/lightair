@@ -26,7 +26,7 @@ mod palette;
 mod settings;
 mod source;
 
-use crate::geometry::{self as geo, CORNERS, Corner};
+use crate::geometry::{self as geo, CORNERS, Corner, EDGES};
 use crate::mixer::MixerPanel;
 use crate::outputs_panel::{OutputsPanel, elapsed};
 use crate::rows::{DraggedRow, Renaming, RowTarget};
@@ -104,6 +104,8 @@ enum DragMode {
     Rotate,
     /// ⌥ + corner: crop the source; `size` is the source's pixel size.
     Crop(Corner, (f32, f32)),
+    /// Crop mode: an edge handle crops one side.
+    CropEdge(geo::Edge, (f32, f32)),
 }
 
 /// Distance of the rotation handle above the selection, in screen pixels.
@@ -152,6 +154,8 @@ pub struct StudioWindow {
     sliders: RefCell<HashMap<String, inspector::BoundSlider>>,
     looks_for: Option<(Id, Id)>,
     transition_menu: bool,
+    /// The layer showing crop handles instead of resize handles.
+    crop_mode: Option<Id>,
     /// The source picker, and fetched source lists per (input, setting).
     source_picker: Option<source::SourcePicker>,
     source_cache: RefCell<HashMap<(Id, &'static str), SourceOptions>>,
@@ -219,6 +223,7 @@ impl StudioWindow {
             sliders: RefCell::default(),
             looks_for: None,
             transition_menu: false,
+            crop_mode: None,
             source_picker: None,
             source_cache: RefCell::default(),
             camera_devices: vec![],
@@ -311,7 +316,10 @@ impl StudioWindow {
     }
 
     /// Selects just this layer (or nothing).
-    fn select_layer(&self, layer: Option<Id>, cx: &mut Context<Self>) {
+    fn select_layer(&mut self, layer: Option<Id>, cx: &mut Context<Self>) {
+        if self.crop_mode.is_some() && self.crop_mode != layer {
+            self.crop_mode = None;
+        }
         self.studio.update(cx, |s, cx| {
             s.selected_layer = layer;
             s.also_selected.clear();
@@ -488,8 +496,41 @@ impl StudioWindow {
         if let Some(sel) = studio.selected_layer.and_then(|id| scene.layer(id))
             && let Some(l) = sel.layouts.get(&format).filter(|_| !sel.locked)
         {
+            // Crop mode: corners and edges crop.
+            if self.crop_mode == Some(sel.id) {
+                let input = sel.input;
+                let size = studio.engine().call(move |s| s.reconciler.input_size(input));
+                let near = |(px_, py_): (f32, f32)| (x - px_).abs() <= tol && (y - py_).abs() <= tol;
+                let mode = match size {
+                    Some((w, h)) => {
+                        let size = (w as f32, h as f32);
+                        CORNERS.iter().find(|c| near(geo::corner(l, **c))).map(|c| DragMode::Crop(*c, size)).or_else(
+                            || {
+                                EDGES
+                                    .iter()
+                                    .find(|e| near(geo::edge_middle(l, **e)))
+                                    .map(|e| DragMode::CropEdge(*e, size))
+                            },
+                        )
+                    }
+                    None => None,
+                };
+                if let Some(mode) = mode {
+                    self.drag = Some(Drag {
+                        scene: scene_id,
+                        layer: sel.id,
+                        format,
+                        mode,
+                        start: (x, y),
+                        layout: *l,
+                        others: vec![],
+                    });
+                    self.studio.update(cx, |s, _| s.begin_gesture());
+                    return;
+                }
+            }
             let (hx, hy) = geo::rotate_handle(l, ROTATE_OFFSET / s);
-            if (x - hx).abs() <= tol && (y - hy).abs() <= tol {
+            if self.crop_mode != Some(sel.id) && (x - hx).abs() <= tol && (y - hy).abs() <= tol {
                 self.drag = Some(Drag {
                     scene: scene_id,
                     layer: sel.id,
@@ -504,7 +545,7 @@ impl StudioWindow {
             }
             if let Some(corner) = CORNERS.iter().find(|c| {
                 let (px_, py_) = geo::corner(l, **c);
-                (x - px_).abs() <= tol && (y - py_).abs() <= tol
+                self.crop_mode != Some(sel.id) && (x - px_).abs() <= tol && (y - py_).abs() <= tol
             }) {
                 let input = sel.input;
                 let size =
@@ -535,6 +576,14 @@ impl StudioWindow {
         let selection = studio.selection();
         match hit {
             Some(layer) if ev.modifiers.shift => self.toggle_selected(layer.id, cx),
+            // Double-click: crop handles on, or off again.
+            Some(layer) if ev.click_count == 2 && !layer.locked => {
+                let id = layer.id;
+                let crop = if self.crop_mode == Some(id) { None } else { Some(id) };
+                self.select_layer(Some(id), cx);
+                self.crop_mode = crop;
+                cx.notify();
+            }
             Some(layer) => {
                 let id = layer.id;
                 // Dragging one of several selected layers moves them all; otherwise select it.
@@ -616,6 +665,7 @@ impl StudioWindow {
                 l.rotation = geo::normalise_degrees(angle);
             }
             DragMode::Crop(corner, size) => l = geo::crop(&l, corner, size, (dx, dy)),
+            DragMode::CropEdge(edge, size) => l = geo::crop_edge(&l, edge, size, (dx, dy)),
             DragMode::Move => {
                 l.x += dx;
                 l.y += dy;
@@ -900,8 +950,21 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &NudgeRight, _, cx| this.nudge(1.0, 0.0, cx)))
             .on_action(cx.listener(|this, _: &NudgeUp, _, cx| this.nudge(0.0, -1.0, cx)))
             .on_action(cx.listener(|this, _: &NudgeDown, _, cx| this.nudge(0.0, 1.0, cx)))
-            .on_action(cx.listener(|this, _: &Deselect, _, cx| this.select_layer(None, cx)))
-            .on_action(cx.listener(|this, _: &RenameSelection, window, cx| this.rename_selection(window, cx)))
+            .on_action(cx.listener(|this, _: &Deselect, _, cx| {
+                // Esc leaves crop mode first.
+                if this.crop_mode.take().is_some() {
+                    cx.notify();
+                } else {
+                    this.select_layer(None, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &RenameSelection, window, cx| {
+                if this.crop_mode.take().is_some() {
+                    cx.notify();
+                } else {
+                    this.rename_selection(window, cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
             .on_action(cx.listener(|this, _: &ToggleMics, _, cx| this.studio.update(cx, |s, cx| s.toggle_mics(cx))))
@@ -1670,7 +1733,7 @@ impl StudioWindow {
                 .selected_scene
                 .and_then(|id| project.scene(id))
                 .and_then(|scene| studio.selected_layer.and_then(|l| scene.layer(l)))
-                .and_then(|l| l.layouts.get(&fid).map(|lo| (*lo, l.locked)));
+                .and_then(|l| l.layouts.get(&fid).map(|lo| (*lo, l.locked, l.id)));
             if let Some((mf, a, b, _)) = self.marquee
                 && mf == fid
             {
@@ -1726,11 +1789,35 @@ impl StudioWindow {
                     .size_full(),
                 );
             }
-            if let Some((l, locked)) = selected {
+            if let Some((l, locked, lid)) = selected {
                 let colour = if editing { tok::canvas_selection() } else { tok::text_secondary() };
                 let to_stage = move |(px_, py_): (f32, f32)| (lx + px_ * s, ly + py_ * s);
                 let outline = geo::outline(&l).map(to_stage);
-                let knob = (!locked && editing).then(|| {
+                let cropping = editing && !locked && self.crop_mode == Some(lid);
+                // Crop handles: an L at each corner and a bar at each edge's middle, following
+                // the layer's rotation (screen pixels).
+                let crop_marks: Vec<((f32, f32), (f32, f32))> = if cropping {
+                    let unit = |a: (f32, f32), b: (f32, f32)| {
+                        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                        let n = (dx * dx + dy * dy).sqrt().max(1.0);
+                        (dx / n, dy / n)
+                    };
+                    let mut marks = Vec::new();
+                    for i in 0..4 {
+                        let (c, next, prev) = (outline[i], outline[(i + 1) % 4], outline[(i + 3) % 4]);
+                        for other in [next, prev] {
+                            let (ux, uy) = unit(c, other);
+                            marks.push((c, (c.0 + ux * 16.0, c.1 + uy * 16.0)));
+                        }
+                        let m = ((c.0 + next.0) / 2.0, (c.1 + next.1) / 2.0);
+                        let (ux, uy) = unit(c, next);
+                        marks.push(((m.0 - ux * 12.0, m.1 - uy * 12.0), (m.0 + ux * 12.0, m.1 + uy * 12.0)));
+                    }
+                    marks
+                } else {
+                    Vec::new()
+                };
+                let knob = (!locked && editing && !cropping).then(|| {
                     (to_stage(geo::rotate_handle(&l, 0.0)), to_stage(geo::rotate_handle(&l, ROTATE_OFFSET / s)))
                 });
                 let edge = tok::canvas_selection_edge();
@@ -1758,6 +1845,16 @@ impl StudioWindow {
                                 path.line_to(at(to));
                                 if let Ok(path) = path.build() {
                                     window.paint_path(path, colour);
+                                }
+                            }
+                            for (width, c) in [(6.0, edge), (4.0, colour)] {
+                                for (a, b) in &crop_marks {
+                                    let mut path = PathBuilder::stroke(px(width));
+                                    path.move_to(at(*a));
+                                    path.line_to(at(*b));
+                                    if let Ok(path) = path.build() {
+                                        window.paint_path(path, c);
+                                    }
                                 }
                             }
                         },

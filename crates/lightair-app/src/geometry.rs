@@ -221,6 +221,40 @@ pub fn touches(l: &Layout, a: (f32, f32), b: (f32, f32)) -> bool {
     l0 <= x1 && r0 >= x0 && t0 <= y1 && b0 >= y0
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+pub const EDGES: [Edge; 4] = [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom];
+
+/// The middle of an edge, in canvas coordinates.
+pub fn edge_middle(l: &Layout, e: Edge) -> (f32, f32) {
+    let (hw, hh) = (l.width / 2.0, l.height / 2.0);
+    let local = match e {
+        Edge::Left => (-hw, 0.0),
+        Edge::Right => (hw, 0.0),
+        Edge::Top => (0.0, -hh),
+        Edge::Bottom => (0.0, hh),
+    };
+    to_canvas(l, local)
+}
+
+/// Dragging one edge crops that side only (the pointer's movement along the edge is ignored).
+pub fn crop_edge(l: &Layout, e: Edge, size: (f32, f32), delta: (f32, f32)) -> Layout {
+    let (dx, dy) = rotate(delta, -l.rotation);
+    let (corner, local) = match e {
+        Edge::Left => (Corner::TopLeft, (dx, 0.0)),
+        Edge::Right => (Corner::TopRight, (dx, 0.0)),
+        Edge::Top => (Corner::TopLeft, (0.0, dy)),
+        Edge::Bottom => (Corner::BottomLeft, (0.0, dy)),
+    };
+    crop(l, corner, size, rotate(local, l.rotation))
+}
+
 /// An angle in (−180, 180].
 pub fn normalise_degrees(a: f32) -> f32 {
     let a = a.rem_euclid(360.0);
@@ -311,6 +345,22 @@ mod tests {
         assert!(touches(&l, (0.0, 0.0), (120.0, 120.0)));
         assert!(touches(&l, (200.0, 200.0), (140.0, 140.0)), "either drag direction");
         assert!(!touches(&l, (0.0, 0.0), (90.0, 300.0)));
+    }
+
+    #[test]
+    fn edges_crop_one_side() {
+        let l = Layout::boxed(100.0, 100.0, 960.0, 540.0);
+        let c = crop_edge(&l, Edge::Right, (1920.0, 1080.0), (-50.0, 30.0));
+        assert_eq!((c.crop.left, c.crop.top, c.crop.right, c.crop.bottom), (0, 0, 100, 0));
+        assert_eq!((c.x, c.y, c.width, c.height), (100.0, 100.0, 910.0, 540.0));
+        let t = crop_edge(&l, Edge::Top, (1920.0, 1080.0), (80.0, 20.0));
+        assert_eq!((t.crop.top, t.y, t.height), (40, 120.0, 520.0));
+        // Turned a quarter clockwise, the bottom edge is on the left of the screen: dragging it
+        // right (inwards) crops the bottom.
+        let r = Layout { rotation: 90.0, ..l };
+        let b = crop_edge(&r, Edge::Bottom, (1920.0, 1080.0), (20.0, 0.0));
+        assert_eq!((b.crop.bottom, b.crop.left, b.crop.right), (40, 0, 0));
+        assert!(close(edge_middle(&b, Edge::Top), edge_middle(&r, Edge::Top)), "the opposite edge stays");
     }
 
     #[test]

@@ -1,0 +1,67 @@
+// Lightair shape mask: keeps the inside of a rounded box (a circle or pill when the radius is
+// half the short side), with a soft edge and an optional border. Distances are in pixels.
+uniform float4x4 ViewProj;
+uniform texture2d image;
+
+uniform float2 size;          // source size, px
+uniform float2 half_box;      // half extents of the shape, px
+uniform float radius;         // corner radius, px
+uniform float feather;        // soft edge, px
+uniform float border;         // border width, px (0 = none)
+uniform float4 border_color;  // straight RGBA
+
+sampler_state textureSampler {
+	Filter    = Linear;
+	AddressU  = Clamp;
+	AddressV  = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = v_in.uv;
+	return vert_out;
+}
+
+// Signed distance to a rounded box: negative inside.
+float rounded_box(float2 p, float2 b, float r)
+{
+	float2 q = abs(p) - b + r;
+	return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+float4 PSShapeMask(VertData v_in) : TARGET
+{
+	float4 rgba = image.Sample(textureSampler, v_in.uv);
+	rgba.rgb *= (rgba.a > 0.) ? (1. / rgba.a) : 0.;
+
+	float2 p = (v_in.uv - 0.5) * size;
+	float d = rounded_box(p, half_box, radius);
+	float edge = max(feather, 0.75);
+	float inside = 1.0 - smoothstep(-edge, 0.0, d);
+
+	if (border > 0.) {
+		// The border is the outermost `border` pixels of the shape.
+		float ring = smoothstep(-border - edge, -border, d);
+		rgba = lerp(rgba, float4(border_color.rgb, border_color.a), ring * border_color.a);
+		rgba.a = max(rgba.a, ring * border_color.a);
+	}
+	rgba.a *= inside;
+	rgba.rgb *= rgba.a;
+	return rgba;
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSShapeMask(v_in);
+	}
+}
