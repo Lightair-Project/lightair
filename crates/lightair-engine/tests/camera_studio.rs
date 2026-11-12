@@ -51,13 +51,17 @@ fn camera_studio_module_loads_and_renders() {
     std::thread::sleep(Duration::from_millis(2000));
     let stats = engine.call(|s| s.stats());
     eprintln!("with Camera Studio, steady state: {stats:?} (lagged during warm-up: {})", warm.lagged_frames);
-    assert!(stats.total_frames - warm.total_frames > 100, "kept rendering");
-    // The filter must not starve the renderer once warm.
-    assert!(
-        stats.lagged_frames - warm.lagged_frames <= 2,
-        "lagged {} after warm-up",
-        stats.lagged_frames - warm.lagged_frames
-    );
+    // The filter must not starve the renderer once warm. Timing means nothing while other
+    // tests share the GPU (`cargo xtask test` says so); `cargo test` checks it.
+    let shared = std::env::var_os("LIGHTAIR_TESTS_SHARE_GPU").is_some();
+    assert!(stats.total_frames - warm.total_frames > if shared { 30 } else { 100 }, "kept rendering");
+    if !shared {
+        assert!(
+            stats.lagged_frames - warm.lagged_frames <= 2,
+            "lagged {} after warm-up",
+            stats.lagged_frames - warm.lagged_frames
+        );
+    }
     engine.call(|s| {
         let filter = s.sources.remove("filter").unwrap();
         unsafe { lightair_engine::sys::obs_source_filter_remove(s.sources["src"].as_ptr(), filter.as_ptr()) };

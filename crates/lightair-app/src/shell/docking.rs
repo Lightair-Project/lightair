@@ -48,7 +48,7 @@ impl Panel for ShellPanel {
     fn tab_name(&self, _: &App) -> Option<SharedString> {
         Some(
             match self.region {
-                Region::Layers => "Layers",
+                Region::Layers => "Hierarchy",
                 Region::Scenes => "Scenes",
                 Region::Canvas => "Canvas",
                 Region::Inspector => "Inspector",
@@ -67,11 +67,21 @@ impl Panel for ShellPanel {
             Button::new(id).icon(ui::icon(icon)).ghost().xsmall().tooltip(tip)
         };
         match self.region {
-            Region::Layers => Some(vec![button("add-layer", "plus", "Add layer").on_click(move |_, window, cx| {
-                if let Some(s) = shell.upgrade() {
-                    s.update(cx, |w, cx| w.toggle_add_menu(window, cx));
-                }
-            })]),
+            Region::Layers => {
+                let empty = shell.clone();
+                Some(vec![
+                    button("create-empty", "box", "Create empty (⇧⌘N)").on_click(move |_, window, cx| {
+                        if let Some(s) = empty.upgrade() {
+                            s.update(cx, |w, cx| w.create_empty(None, window, cx));
+                        }
+                    }),
+                    button("add-layer", "plus", "Add layer").on_click(move |_, window, cx| {
+                        if let Some(s) = shell.upgrade() {
+                            s.update(cx, |w, cx| w.toggle_add_menu(window, cx));
+                        }
+                    }),
+                ])
+            }
             Region::Scenes => {
                 let import = shell.clone();
                 Some(vec![
@@ -123,7 +133,7 @@ impl Render for ShellPanel {
         shell.update(cx, |w, cx| {
             let project = w.studio.read(cx).project().clone();
             match region {
-                Region::Layers => w.layers_panel(&project, cx).into_any_element(),
+                Region::Layers => w.hierarchy_panel(&project, cx).into_any_element(),
                 Region::Scenes => w.scenes_panel(&project, cx).into_any_element(),
                 Region::Canvas => w.canvas(&project, cx).into_any_element(),
                 Region::Inspector => w.inspector(&project, cx).into_any_element(),
@@ -193,6 +203,22 @@ impl StudioWindow {
                 };
                 self.select_layer(top, cx);
                 self.crop_mode = top;
+            }
+            Ok("group") => {
+                // The top two layers into a group, then an empty inside it.
+                let top: Vec<lightair_core::Id> = {
+                    let s = self.studio.read(cx);
+                    s.selected_scene
+                        .and_then(|id| s.project().scene(id))
+                        .map(|sc| sc.layers.iter().rev().take(2).map(|l| l.id).collect())
+                        .unwrap_or_default()
+                };
+                self.studio.update(cx, |s, _| {
+                    s.selected_layer = top.first().copied();
+                    s.also_selected = top.iter().skip(1).copied().collect();
+                });
+                self.group_selection(window, cx);
+                self.renaming = None;
             }
             Ok("gizmo") => {
                 let top = {

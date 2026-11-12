@@ -129,7 +129,12 @@ fn record_and_stream() {
     let state = wait_for(OutputKey::Recording, Duration::from_secs(3), |s| matches!(s, OutputState::Active { .. }));
     assert!(matches!(state, OutputState::Active { .. }), "recording active: {state:?}");
     std::thread::sleep(Duration::from_millis(1200));
-    engine.call(|s| s.outputs.sample());
+    // The first write can land a little later on a busy machine.
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while runtime().get(OutputKey::Recording).bytes == 0 && Instant::now() < deadline {
+        engine.call(|s| s.outputs.sample());
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert!(runtime().get(OutputKey::Recording).bytes > 0, "bytes written while recording");
     engine.call(|s| s.outputs.stop_recording());
     let state = wait_for(OutputKey::Recording, Duration::from_secs(5), |s| !s.is_running());

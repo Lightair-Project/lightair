@@ -891,6 +891,18 @@ impl Reconciler {
         self.formats.clear();
         self.inputs.clear();
         self.program = None;
+        // libobs destroys sources on its own thread. Wait until it has, so whatever is built
+        // next gets the same names (a name still in use gets " 2" added). The render thread
+        // can hold a scene one frame longer, so wait for a few quiet rounds.
+        let mut quiet = 0;
+        while quiet < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if unsafe { sys::obs_wait_for_destroy_queue() } {
+                quiet = 0;
+            } else {
+                quiet += 1;
+            }
+        }
     }
 }
 
