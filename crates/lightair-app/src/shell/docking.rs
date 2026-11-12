@@ -177,6 +177,15 @@ impl StudioWindow {
             Ok("add-layer") => self.open_add_layer(window, cx),
             Ok("settings") => self.toggle_settings(cx),
             Ok("palette") => self.open_palette(window, cx),
+            Ok("source") => {
+                let input = {
+                    let s = self.studio.read(cx);
+                    s.project().inputs.values().find(|i| i.kind == "screen_capture").map(|i| i.id)
+                };
+                if let Some(id) = input {
+                    self.open_source_picker(id, window, cx);
+                }
+            }
             Ok("select") => {
                 let top = {
                     let s = self.studio.read(cx);

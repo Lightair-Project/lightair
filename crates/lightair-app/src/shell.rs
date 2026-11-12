@@ -152,8 +152,8 @@ pub struct StudioWindow {
     sliders: RefCell<HashMap<String, inspector::BoundSlider>>,
     looks_for: Option<(Id, Id)>,
     transition_menu: bool,
-    /// The Source section: whose list is open, and fetched lists per (input, setting).
-    source_menu: Option<Id>,
+    /// The source picker, and fetched source lists per (input, setting).
+    source_picker: Option<source::SourcePicker>,
     source_cache: RefCell<HashMap<(Id, &'static str), SourceOptions>>,
     /// The Add Layer picker, while open.
     add_layer: Option<add_layer::AddLayer>,
@@ -219,7 +219,7 @@ impl StudioWindow {
             sliders: RefCell::default(),
             looks_for: None,
             transition_menu: false,
-            source_menu: None,
+            source_picker: None,
             source_cache: RefCell::default(),
             camera_devices: vec![],
             renaming: None,
@@ -948,6 +948,7 @@ impl Render for StudioWindow {
             .child(self.status_bar(cx))
             .children(self.add_layer_overlay(cx))
             .children(self.looks_overlay(cx))
+            .children(self.source_picker_overlay(cx))
             .children(self.go_live_overlay(cx))
             .children(self.settings_overlay(cx))
             .children(self.palette_overlay(cx))
