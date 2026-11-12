@@ -8,7 +8,7 @@ use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Id, Layer, Layout, Project, Scene};
+use lightair_core::{Clip, Command, Id, Layer, Layout, Project, Scene};
 
 use super::StudioWindow;
 use crate::rows::{DraggedRow, RowTarget};
@@ -377,6 +377,67 @@ impl StudioWindow {
                 )
             });
         body.child(header).child(transform).child(actions).into_any_element()
+    }
+
+    // ------------------------------------------------------------ copy, paste, duplicate
+
+    /// The selected layers (with what's under them) as a clip, also put on the clipboard.
+    pub(super) fn copy_selection(&mut self, cx: &mut Context<Self>) -> Option<Clip> {
+        let studio = self.studio.read(cx);
+        let clip = Clip::copy(studio.project(), studio.selected_scene?, &studio.selection())?;
+        cx.write_to_clipboard(ClipboardItem::new_string(clip.to_text()));
+        Some(clip)
+    }
+
+    pub(super) fn cut_selection(&mut self, cx: &mut Context<Self>) {
+        if self.copy_selection(cx).is_some() {
+            self.delete_selection(cx);
+        }
+    }
+
+    /// Pastes the clipboard's layers next to the selection (in front of it, beside it), or at
+    /// the front of the scene.
+    pub(super) fn paste_layers(&mut self, cx: &mut Context<Self>) {
+        let Some(clip) = cx.read_from_clipboard().and_then(|c| c.text()).and_then(|t| Clip::from_text(&t)) else {
+            return;
+        };
+        self.place_clip(&clip, "Paste", cx);
+    }
+
+    /// Copies the selection in place, in front of it (⌘D), leaving the clipboard alone.
+    pub(super) fn duplicate_selection(&mut self, cx: &mut Context<Self>) {
+        let studio = self.studio.read(cx);
+        let Some(scene) = studio.selected_scene else { return };
+        let Some(clip) = Clip::copy(studio.project(), scene, &studio.selection()) else { return };
+        self.place_clip(&clip, "Duplicate", cx);
+    }
+
+    fn place_clip(&mut self, clip: &Clip, label: &str, cx: &mut Context<Self>) {
+        let studio = self.studio.read(cx);
+        let project = studio.project().clone();
+        let Some(scene) = studio.selected_scene.and_then(|id| project.scene(id)) else { return };
+        // Beside the frontmost selected layer, in front of it.
+        let selection = studio.selection();
+        let anchor = scene.layers.iter().rev().find(|l| selection.contains(&l.id));
+        let (parent, index) = match anchor {
+            Some(a) => {
+                let siblings: Vec<Id> = scene.children(a.parent).map(|l| l.id).collect();
+                (a.parent, siblings.iter().position(|s| *s == a.id).map(|i| i + 1))
+            }
+            None => (None, None),
+        };
+        let (commands, roots) = clip.paste(&project, scene.id, parent, index);
+        if commands.is_empty() {
+            return;
+        }
+        let n = roots.len();
+        let label = if n == 1 { label.to_string() } else { format!("{label} {n} layers") };
+        self.exec(Command::Batch { label, commands }, cx);
+        self.studio.update(cx, |s, cx| {
+            s.selected_layer = roots.first().copied();
+            s.also_selected = roots.iter().skip(1).copied().collect();
+            cx.notify();
+        });
     }
 
     /// A new empty, inside `parent` (or at the top level, at the canvas centre), selected and
