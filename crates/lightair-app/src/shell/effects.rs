@@ -20,6 +20,50 @@ use super::StudioWindow;
 use crate::camera_studio::{self, with};
 use crate::ui::{self, tok};
 
+/// Whose effects these are: a source's (video) or a mixer track's (audio).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Owner {
+    Input(Id),
+    Track(Id),
+}
+
+impl Owner {
+    fn add(self, effect: Effect, index: Option<usize>) -> Command {
+        match self {
+            Owner::Input(input) => Command::AddInputEffect { input, effect, index },
+            Owner::Track(track) => Command::AddEffect { track, effect, index },
+        }
+    }
+    fn remove(self, effect: Id) -> Command {
+        match self {
+            Owner::Input(input) => Command::RemoveInputEffect { input, effect },
+            Owner::Track(track) => Command::RemoveEffect { track, effect },
+        }
+    }
+    fn enable(self, effect: Id, enabled: bool) -> Command {
+        match self {
+            Owner::Input(input) => Command::SetInputEffectEnabled { input, effect, enabled },
+            Owner::Track(track) => Command::SetEffectEnabled { track, effect, enabled },
+        }
+    }
+    fn settings(self, effect: Id, settings: Value) -> Command {
+        match self {
+            Owner::Input(input) => Command::SetInputEffectSettings { input, effect, settings },
+            Owner::Track(track) => Command::SetEffectSettings { track, effect, settings },
+        }
+    }
+    /// Its effects and name.
+    fn find(self, project: &lightair_core::Project) -> Option<(String, Vec<Effect>)> {
+        match self {
+            Owner::Input(id) => project.inputs.get(&id).map(|i| (i.name.clone(), i.effects.clone())),
+            Owner::Track(id) => project.track(id).map(|t| (t.name.clone(), t.effects.clone())),
+        }
+    }
+    fn audio(self) -> bool {
+        matches!(self, Owner::Track(_))
+    }
+}
+
 /// A page of the catalog sheet.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
@@ -28,7 +72,7 @@ pub(super) enum Page {
 }
 
 pub(super) struct EffectSheet {
-    input: Id,
+    owner: Owner,
     page: Page,
     search: Entity<InputState>,
     _events: Subscription,
@@ -69,7 +113,15 @@ impl StudioWindow {
     // ------------------------------------------------------------ the stack
 
     pub(super) fn effects_section(&self, input: &Input, cx: &mut Context<Self>) -> AnyElement {
-        let iid = input.id;
+        self.effect_stack(Owner::Input(input.id), &input.effects, cx)
+    }
+
+    /// A mixer track's effects: the same cards, from the audio catalog.
+    pub(super) fn track_effects_section(&self, track: &lightair_core::Track, cx: &mut Context<Self>) -> AnyElement {
+        self.effect_stack(Owner::Track(track.id), &track.effects, cx)
+    }
+
+    fn effect_stack(&self, iid: Owner, effects: &[Effect], cx: &mut Context<Self>) -> AnyElement {
         let add = Button::new("add-effect")
             .icon(ui::icon("plus"))
             .label("Add")
@@ -78,7 +130,7 @@ impl StudioWindow {
             .on_click(cx.listener(move |this, _, window, cx| this.open_effect_catalog(iid, Page::All, window, cx)));
         let mut col = self.section("Effects", Some(add.into_any_element()), cx);
 
-        if input.effects.is_empty() {
+        if effects.is_empty() {
             col = col.child(
                 div()
                     .id("fx-empty")
@@ -95,27 +147,37 @@ impl StudioWindow {
                     .hover(|d| d.bg(tok::bg_raised()))
                     .child(ui::icon("sparkles").size(px(16.)).text_color(tok::text_tertiary()))
                     .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child("Add effect"))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(tok::text_tertiary())
-                            .child("Face, background, colour, stylize and more"),
-                    )
+                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(if iid.audio() {
+                        "Voice, dynamics, EQ, space and more"
+                    } else {
+                        "Face, background, colour, stylize and more"
+                    }))
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.open_effect_catalog(iid, Page::All, window, cx)),
                     ),
             );
         }
-        let presence = self.presence.get(&iid).copied().unwrap_or_default();
-        for (i, e) in input.effects.iter().enumerate() {
-            col = col.child(self.effect_card(input, i, e, presence, cx));
+        let presence = match iid {
+            Owner::Input(id) => self.presence.get(&id).copied().unwrap_or_default(),
+            Owner::Track(_) => Presence::default(),
+        };
+        for (i, e) in effects.iter().enumerate() {
+            col = col.child(self.effect_card(iid, effects.len(), i, e, presence, cx));
         }
         col.into_any_element()
     }
 
-    fn effect_card(&self, input: &Input, i: usize, e: &Effect, presence: Presence, cx: &mut Context<Self>) -> AnyElement {
+    fn effect_card(
+        &self,
+        iid: Owner,
+        count: usize,
+        i: usize,
+        e: &Effect,
+        presence: Presence,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let def = catalog::def(&e.kind);
-        let (iid, eid, on) = (input.id, e.id, e.enabled);
+        let (eid, on) = (e.id, e.enabled);
         let open = self.props.open_effect == Some(eid);
         let system = e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM);
         let summary = match def {
@@ -175,12 +237,11 @@ impl StudioWindow {
             )
             .child(super::settings::switch(("fx-on", i), on).on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                this.exec(Command::SetInputEffectEnabled { input: iid, effect: eid, enabled: !on }, cx)
+                this.exec(iid.enable(eid, !on), cx)
             })))
             .child(ui::icon(if open { "chevron-down" } else { "chevron-right" }).size(px(12.)).text_color(tok::text_tertiary()));
 
         let shell = cx.entity().downgrade();
-        let count = input.effects.len();
         let mut card = div()
             .id(("fx-card", i))
             .flex()
@@ -227,7 +288,7 @@ impl StudioWindow {
 
     fn effect_footer(
         &self,
-        iid: Id,
+        iid: Owner,
         e: &Effect,
         def: Option<&'static EffectDef>,
         i: usize,
@@ -243,7 +304,7 @@ impl StudioWindow {
                 Button::new(("fx-reset", i)).label("Reset").xsmall().ghost().disabled(is_default).on_click(cx.listener(
                     move |this, _, _, cx| {
                         let settings = defaults.clone();
-                        this.exec(Command::SetInputEffectSettings { input: iid, effect: eid, settings }, cx)
+                        this.exec(iid.settings(eid, settings), cx)
                     },
                 )),
             );
@@ -267,14 +328,14 @@ impl StudioWindow {
             )
             .child(
                 ui::icon_button(("fx-remove", i), "trash", tok::text_secondary()).on_click(cx.listener(
-                    move |this, _, _, cx| this.exec(Command::RemoveInputEffect { input: iid, effect: eid }, cx),
+                    move |this, _, _, cx| this.exec(iid.remove(eid), cx),
                 )),
             )
     }
 
-    fn effect_controls(&self, iid: Id, e: &Effect, d: &'static EffectDef, cx: &mut Context<Self>) -> Div {
+    fn effect_controls(&self, iid: Owner, e: &Effect, d: &'static EffectDef, cx: &mut Context<Self>) -> Div {
         let eid = e.id;
-        let set = move |settings: Value| Command::SetInputEffectSettings { input: iid, effect: eid, settings };
+        let set = move |settings: Value| iid.settings(eid, settings);
         let mut col = div().flex().flex_col().gap_1p5().px_2().pb_2().pt_0p5();
         let mut group_open = true;
         let mut first_heading = true;
@@ -288,6 +349,26 @@ impl StudioWindow {
             if d.kind == "studio.bg_replace" {
                 let image = e.settings["bg_mode"].as_i64() == Some(4);
                 if (key == Some("bg_color") && image) || (key == Some("bg_image") && !image) {
+                    continue;
+                }
+            }
+            // An EQ band's slope is for its passes; its gain and Q for the rest (no gain on a notch).
+            if d.kind == "audio.eq"
+                && let Some(k) = key
+                && let Some((band, field)) = k.split_once('_')
+                && matches!(field, "slope" | "gain" | "q")
+            {
+                let kind_key = format!("{band}_type");
+                let kind = e.settings.get(&kind_key).and_then(Value::as_str).map(String::from).or_else(|| {
+                    d.controls.iter().find(|c| c.key() == Some(kind_key.as_str())).and_then(|c| c.default_json()).and_then(|v| v.as_str().map(String::from))
+                });
+                let pass = matches!(kind.as_deref(), Some("hp" | "lp"));
+                let hide = match field {
+                    "slope" => !pass,
+                    "q" => pass, // a pass's shape comes from its slope (Butterworth)
+                    _ => pass || kind.as_deref() == Some("notch"),
+                };
+                if hide {
                     continue;
                 }
             }
@@ -341,12 +422,36 @@ impl StudioWindow {
                         .iter()
                         .position(|(_, p)| current.is_some_and(|v| p.matches(v)))
                         .or_else(|| options.iter().position(|(_, p)| *p == default));
-                    let opts = options
+                    let opts: Vec<(&'static str, Command, bool)> = options
                         .iter()
                         .enumerate()
                         .map(|(n, (l, p))| (*l, set(with(&e.settings, key, p.json())), chosen == Some(n)))
                         .collect();
-                    col = col.child(control_row(label, self.segmented(key, opts, cx).flex_1()));
+                    // many options wrap as chips; a few sit in one segmented row
+                    let control = if options.len() > 4 {
+                        let mut row = div().flex().flex_wrap().gap_1().flex_1();
+                        for (n, (l, cmd, on)) in opts.into_iter().enumerate() {
+                            row = row.child(
+                                div()
+                                    .id(SharedString::from(format!("fx-chip-{key}-{n}")))
+                                    .px_2()
+                                    .h(px(24.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(5.))
+                                    .text_size(px(11.))
+                                    .cursor_pointer()
+                                    .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                                    .when(!on, |d| d.text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
+                                    .child(l)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
+                            );
+                        }
+                        row
+                    } else {
+                        self.segmented(key, opts, cx).flex_1()
+                    };
+                    col = col.child(control_row(label, control));
                     if let Some(hint) = chosen.and_then(|n| choice_hint(key, n)) {
                         col = col.child(
                             div().pl(px(96.)).text_size(px(11.)).text_color(tok::text_tertiary()).child(hint),
@@ -439,18 +544,25 @@ impl StudioWindow {
         col
     }
 
-    fn fx_slider(&self, iid: Id, e: &Effect, s: SliderDef, cx: &mut Context<Self>) -> Div {
+    fn fx_slider(&self, iid: Owner, e: &Effect, s: SliderDef, cx: &mut Context<Self>) -> Div {
         let eid = e.id;
         let value = s.value(&e.settings);
         let settings = e.settings.clone();
+        // frequencies and times move on a log scale: the slider works in log10 of the value
+        let log = s.log && s.min > 0.0;
+        let (lo, hi, pos) = if log {
+            (s.min.log10() as f32, s.max.log10() as f32, value.max(s.min).log10() as f32)
+        } else {
+            (s.min as f32, s.max as f32, value as f32)
+        };
+        let step = if log { (hi - lo) / 400.0 } else { s.step as f32 };
         let slider = self.slider(
             format!("fx:{eid}:{}", s.key),
-            (s.min as f32, s.max as f32, s.step as f32),
-            value as f32,
-            move |v| Command::SetInputEffectSettings {
-                input: iid,
-                effect: eid,
-                settings: with(&settings, s.key, s.json(v as f64)),
+            (lo, hi, step),
+            pos,
+            move |v| {
+                let v = if log { 10f64.powf(v as f64) } else { v as f64 };
+                iid.settings(eid, with(&settings, s.key, s.json(v)))
             },
             cx,
         );
@@ -475,7 +587,7 @@ impl StudioWindow {
                     })
                     .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                         if ev.click_count() == 2 {
-                            this.exec(Command::SetInputEffectSettings { input: iid, effect: eid, settings: reset.clone() }, cx)
+                            this.exec(iid.settings(eid, reset.clone()), cx)
                         }
                     })),
             )
@@ -495,7 +607,7 @@ impl StudioWindow {
     /// A preset grid: tiles by group (makeup looks fill in their values to tweak).
     fn fx_presets(
         &self,
-        iid: Id,
+        iid: Owner,
         e: &Effect,
         key: &'static str,
         which: Presets,
@@ -549,7 +661,7 @@ impl StudioWindow {
                         .child(div().truncate().child(name.clone()))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let settings = settings.clone();
-                            this.exec(Command::SetInputEffectSettings { input: iid, effect: eid, settings }, cx)
+                            this.exec(iid.settings(eid, settings), cx)
                         })),
                 );
             }
@@ -561,7 +673,7 @@ impl StudioWindow {
     #[allow(clippy::too_many_arguments)]
     fn choose_effect_file(
         &mut self,
-        iid: Id,
+        iid: Owner,
         eid: Id,
         key: &'static str,
         extensions: &'static [&'static str],
@@ -580,7 +692,7 @@ impl StudioWindow {
             }
             let settings = with(&settings, key, json!(path.to_string_lossy()));
             let _ = this.update(cx, |this, cx| {
-                this.exec(Command::SetInputEffectSettings { input: iid, effect: eid, settings }, cx)
+                this.exec(iid.settings(eid, settings), cx)
             });
         })
         .detach();
@@ -588,7 +700,7 @@ impl StudioWindow {
 
     /// A colour: the swatch opens the picker (palette, HSLA, hex); the dropper picks from the
     /// screen; the hex says what it is.
-    fn colour_control(&self, iid: Id, eid: Id, key: &'static str, current: u32, cx: &mut Context<Self>) -> Div {
+    fn colour_control(&self, iid: Owner, eid: Id, key: &'static str, current: u32, cx: &mut Context<Self>) -> Div {
         let hex = format!("#{:06X}", super::layer_props::rgb_of(current));
         let picker = match self.colour_pickers.get(&format!("{eid}:{key}")) {
             Some(p) => ColorPicker::new(&p.state)
@@ -653,7 +765,7 @@ impl StudioWindow {
                     }
                     let events = cx.subscribe_in(&state, window, move |this, _, ev: &ColorPickerEvent, _, cx| {
                         if let ColorPickerEvent::Change(Some(c)) = ev {
-                            this.set_effect_colour(iid, eid, key, abgr_of_hsla(*c), cx);
+                            this.set_effect_colour(Owner::Input(iid), eid, key, abgr_of_hsla(*c), cx);
                         }
                     });
                     self.colour_pickers.insert(k, ColourPicker { state, shown: v, _events: events });
@@ -662,9 +774,10 @@ impl StudioWindow {
         }
     }
 
-    fn set_effect_colour(&mut self, iid: Id, eid: Id, key: &'static str, abgr: u32, cx: &mut Context<Self>) {
+    fn set_effect_colour(&mut self, iid: Owner, eid: Id, key: &'static str, abgr: u32, cx: &mut Context<Self>) {
         let project = self.studio.read(cx).project().clone();
-        let Some(e) = project.inputs.get(&iid).and_then(|i| i.effects.iter().find(|e| e.id == eid)) else { return };
+        let Some((_, effects)) = iid.find(&project) else { return };
+        let Some(e) = effects.iter().find(|e| e.id == eid) else { return };
         if e.settings.get(key).and_then(Value::as_u64) == Some(abgr as u64) {
             return;
         }
@@ -672,23 +785,25 @@ impl StudioWindow {
             p.shown = abgr;
         }
         let settings = with(&e.settings, key, json!(abgr));
-        self.exec(Command::SetInputEffectSettings { input: iid, effect: eid, settings }, cx);
+        self.exec(iid.settings(eid, settings), cx);
     }
 
     /// The eyedropper: macOS's loupe picks a colour from anywhere on screen. Off air, the effect
     /// being picked for is switched off meanwhile, so a key colour is picked from the picture
     /// before the key (on air, the picture stays as viewers see it).
-    fn pick_colour(&mut self, iid: Id, eid: Id, key: &'static str, cx: &mut Context<Self>) {
+    fn pick_colour(&mut self, iid: Owner, eid: Id, key: &'static str, cx: &mut Context<Self>) {
         use lightair_engine::outputs::runtime;
         let project = self.studio.read(cx).project().clone();
-        let Some(input) = project.inputs.get(&iid) else { return };
-        let Some(effect) = input.effects.iter().find(|e| e.id == eid) else { return };
+        let Some((_, effects)) = iid.find(&project) else { return };
+        let Some(effect) = effects.iter().find(|e| e.id == eid) else { return };
         let filter = if effect.kind.starts_with("studio.") { catalog::STUDIO_ID } else { eid };
-        let restore = catalog::lower(&input.effects).iter().find(|f| f.id == filter).is_some_and(|f| f.enabled);
+        let restore = catalog::lower(&effects).iter().find(|f| f.id == filter).is_some_and(|f| f.enabled);
+        // only a source's effect can be switched off live (a track's colour has no picture)
+        let Owner::Input(input) = iid else { return };
         let on_air = runtime().any_stream_running() || runtime().any_recording_running();
         let engine = self.studio.read(cx).engine().clone();
         if !on_air {
-            engine.call(move |s| s.reconciler.set_filter_live(iid, filter, false));
+            engine.call(move |s| s.reconciler.set_filter_live(input, filter, false));
         }
         let picked = crate::eyedropper::pick();
         cx.spawn(async move |this, cx| {
@@ -702,7 +817,7 @@ impl StudioWindow {
                 }
             };
             if !on_air {
-                engine.call(move |s| s.reconciler.set_filter_live(iid, filter, restore));
+                engine.call(move |s| s.reconciler.set_filter_live(input, filter, restore));
             }
             if let Some(rgb) = result {
                 let _ = this.update(cx, |this, cx| {
@@ -713,31 +828,31 @@ impl StudioWindow {
         .detach();
     }
 
-    pub(super) fn move_effect(&mut self, iid: Id, eid: Id, by: i32, cx: &mut Context<Self>) {
+    pub(super) fn move_effect(&mut self, iid: Owner, eid: Id, by: i32, cx: &mut Context<Self>) {
         let project = self.studio.read(cx).project().clone();
-        let Some(input) = project.inputs.get(&iid) else { return };
-        let Some(at) = input.effects.iter().position(|e| e.id == eid) else { return };
+        let Some((_, effects)) = iid.find(&project) else { return };
+        let Some(at) = effects.iter().position(|e| e.id == eid) else { return };
         let to = at as i32 + by;
-        if to < 0 || to as usize >= input.effects.len() {
+        if to < 0 || to as usize >= effects.len() {
             return;
         }
-        let effect = input.effects[at].clone();
+        let effect = effects[at].clone();
         let label = format!("Move {}", effect.name);
         let commands = vec![
-            Command::RemoveInputEffect { input: iid, effect: eid },
-            Command::AddInputEffect { input: iid, effect, index: Some(to as usize) },
+            iid.remove(eid),
+            iid.add(effect, Some(to as usize)),
         ];
         self.exec(Command::Batch { label, commands }, cx);
     }
 
-    pub(super) fn duplicate_effect(&mut self, iid: Id, eid: Id, cx: &mut Context<Self>) {
+    pub(super) fn duplicate_effect(&mut self, iid: Owner, eid: Id, cx: &mut Context<Self>) {
         let project = self.studio.read(cx).project().clone();
-        let Some(input) = project.inputs.get(&iid) else { return };
-        let Some(at) = input.effects.iter().position(|e| e.id == eid) else { return };
-        let mut copy = input.effects[at].clone();
+        let Some((_, effects)) = iid.find(&project) else { return };
+        let Some(at) = effects.iter().position(|e| e.id == eid) else { return };
+        let mut copy = effects[at].clone();
         copy.id = Id::new();
         self.props.open_effect = Some(copy.id);
-        self.exec(Command::AddInputEffect { input: iid, effect: copy, index: Some(at + 1) }, cx);
+        self.exec(iid.add(copy, Some(at + 1)), cx);
     }
 
     // ------------------------------------------------------------ presence
@@ -773,7 +888,7 @@ impl StudioWindow {
 
     // ------------------------------------------------------------ the catalog sheet
 
-    pub(super) fn open_effect_catalog(&mut self, input: Id, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_effect_catalog(&mut self, owner: Owner, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search effects"));
         search.update(cx, |s, cx| s.focus(window, cx));
         let events = cx.subscribe_in(&search, window, |_, _, ev: &InputEvent, _, cx| {
@@ -781,7 +896,7 @@ impl StudioWindow {
                 cx.notify();
             }
         });
-        self.effect_sheet = Some(EffectSheet { input, page, search, _events: events });
+        self.effect_sheet = Some(EffectSheet { owner, page, search, _events: events });
         cx.notify();
     }
 
@@ -792,36 +907,39 @@ impl StudioWindow {
     }
 
     /// Adds an effect from the catalog (a face effect already in the stack opens instead).
-    fn add_from_catalog(&mut self, input: Id, def: &'static EffectDef, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_from_catalog(&mut self, input: Owner, def: &'static EffectDef, window: &mut Window, cx: &mut Context<Self>) {
         let project = self.studio.read(cx).project().clone();
-        let Some(i) = project.inputs.get(&input) else { return };
+        let Some((_, effects)) = input.find(&project) else { return };
         if def.is_studio()
-            && let Some(e) = i.effects.iter().find(|e| e.kind == def.kind)
+            && let Some(e) = effects.iter().find(|e| e.kind == def.kind)
         {
             self.props.open_effect = Some(e.id);
             if !e.enabled {
-                self.exec(Command::SetInputEffectEnabled { input, effect: e.id, enabled: true }, cx);
+                self.exec(input.enable(e.id, true), cx);
             }
         } else {
             let effect = def.create();
             self.props.open_effect = Some(effect.id);
-            self.exec(Command::AddInputEffect { input, effect, index: None }, cx);
+            self.exec(input.add(effect, None), cx);
         }
         self.close_effect_catalog(window, cx);
     }
 
     pub(super) fn effect_catalog_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let sheet = self.effect_sheet.as_ref()?;
-        let (iid, page) = (sheet.input, sheet.page);
+        let (iid, page) = (sheet.owner, sheet.page);
         let query = sheet.search.read(cx).value().to_string();
         let project = self.studio.read(cx).project().clone();
-        let input = project.inputs.get(&iid)?.clone();
+        let (owner_name, owner_effects) = iid.find(&project)?;
         let searching = !query.trim().is_empty();
+        // a track's sheet is the audio catalog; a source's, the video one
+        let (list, categories): (&'static [EffectDef], &[Category]) =
+            if iid.audio() { (catalog::AUDIO, &Category::AUDIO) } else { (catalog::CATALOG, &Category::ALL) };
 
         // Categories down the side.
         let mut side = div().flex().flex_col().gap_0p5().w(px(168.)).flex_none().pr_2();
         let mut pages = vec![(Page::All, "All effects", "layout-grid")];
-        for c in Category::ALL {
+        for &c in categories {
             pages.push((Page::Of(c), c.name(), category_icon(c)));
         }
         for (n, (p, label, icon)) in pages.into_iter().enumerate() {
@@ -852,33 +970,38 @@ impl StudioWindow {
         }
 
         // Tiles.
-        let in_stack: HashMap<&str, bool> = input.effects.iter().map(|e| (e.kind.as_str(), e.enabled)).collect();
+        let in_stack: HashMap<&str, bool> = owner_effects.iter().map(|e| (e.kind.as_str(), e.enabled)).collect();
         let mut body = div().id("fx-sheet-body").flex().flex_col().gap_3().flex_1().min_h_0().overflow_y_scroll().pr_1();
-        let defs: Vec<&'static EffectDef> = if searching {
-            catalog::search(&query).collect()
-        } else {
-            match page {
-                Page::Of(c) => catalog::in_category(c).collect(),
-                _ => catalog::CATALOG.iter().collect(),
-            }
-        };
+        let q = query.trim().to_lowercase();
+        let defs: Vec<&'static EffectDef> = list
+            .iter()
+            .filter(|d| match page {
+                _ if searching => {
+                    d.name.to_lowercase().contains(&q)
+                        || d.description.to_lowercase().contains(&q)
+                        || d.category.name().to_lowercase().contains(&q)
+                }
+                Page::Of(c) => d.category == c,
+                Page::All => true,
+            })
+            .collect();
         if defs.is_empty() {
             body = body.child(div().p_4().text_color(tok::text_tertiary()).child("No effects match"));
         }
-        for c in Category::ALL {
-            let list: Vec<_> = defs.iter().copied().filter(|d| d.category == c).collect();
-            if list.is_empty() {
+        for &c in categories {
+            let in_cat: Vec<_> = defs.iter().copied().filter(|d| d.category == c).collect();
+            if in_cat.is_empty() {
                 continue;
             }
             let mut grid = div().grid().grid_cols(3).gap_2();
-            for d in list {
+            for d in in_cat {
                 let badge = match d.needs {
                     Needs::Face => Some("Needs a face"),
                     Needs::Person => Some("Needs a person"),
                     Needs::Nothing => None,
                 };
                 let added = in_stack.contains_key(d.kind);
-                let n = catalog::CATALOG.iter().position(|x| x.kind == d.kind).unwrap_or(0);
+                let n = list.iter().position(|x| x.kind == d.kind).unwrap_or(0);
                 grid = grid.child(
                     tile(("fx-tile", n).into(), d.icon, d.name, d.description, badge, added)
                         .on_click(cx.listener(move |this, _, window, cx| this.add_from_catalog(iid, d, window, cx))),
@@ -938,7 +1061,7 @@ impl StudioWindow {
                                                 .text_size(px(11.))
                                                 .text_color(tok::text_tertiary())
                                                 .truncate()
-                                                .child(format!("for {}", input.name)),
+                                                .child(format!("for {owner_name}")),
                                         ),
                                 )
                                 .child(div().flex_1().child(TextInput::new(&sheet.search)))
@@ -1047,7 +1170,7 @@ fn category_icon(c: Category) -> &'static str {
         Category::Voice => "mic-vocal",
         Category::Dynamics => "chevrons-down-up",
         Category::Tone => "sliders-vertical",
-        Category::Space => "waves",
+        Category::Space => "waves-horizontal",
         Category::Utility => "wrench",
     }
 }
@@ -1134,7 +1257,7 @@ fn tile(
 fn effect_menu(
     menu: PopupMenu,
     shell: &WeakEntity<StudioWindow>,
-    iid: Id,
+    iid: Owner,
     eid: Id,
     at: usize,
     count: usize,
@@ -1163,7 +1286,7 @@ fn effect_menu(
     .separator()
     .item(PopupMenuItem::new("Remove").icon(ui::icon("trash")).on_click(move |_, _, cx| {
         if let Some(s) = s4.upgrade() {
-            s.update(cx, |w, cx| w.exec(Command::RemoveInputEffect { input: iid, effect: eid }, cx));
+            s.update(cx, |w, cx| w.exec(iid.remove(eid), cx));
         }
     }))
 }

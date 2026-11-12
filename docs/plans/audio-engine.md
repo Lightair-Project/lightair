@@ -1,6 +1,8 @@
 # Audio engine: a real mixer
 
-Status: started 2026-11-13. Builds [10 · Audio](../10-audio.md) properly; replaces the
+Status: in progress. Done: engine core, built-in effects, model, real-time engine playing the
+mixer through libobs, track effects in the Inspector. Next: multitrack recording, direct device
+channels and low-latency monitoring, mixer UI for buses/mixes/sends, plugins, templates. Builds [10 · Audio](../10-audio.md) properly; replaces the
 "each track is a libobs source with libobs filters, everything in one mix" first cut.
 
 ## Why our own engine
