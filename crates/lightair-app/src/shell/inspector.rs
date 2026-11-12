@@ -249,7 +249,7 @@ impl StudioWindow {
             )
             .child(
                 ui::icon_button("delete-layer", "trash", tok::text_secondary())
-                    .tooltip(|w, cx| Tooltip::new("Delete layer").build(w, cx))
+                    .tooltip(|w, cx| Tooltip::new("Delete object").build(w, cx))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.exec(Command::RemoveLayer { scene: sid, layer: lid }, cx)
                     })),

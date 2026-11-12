@@ -56,7 +56,7 @@ impl StudioWindow {
             cx.notify();
             return;
         }
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search layer types and sources"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search object types and sources"));
         search.update(cx, |s, cx| s.focus(window, cx));
         let events = cx.subscribe_in(&search, window, |_, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) {
@@ -240,7 +240,7 @@ impl StudioWindow {
                         .text_color(tok::text_secondary())
                         .hover(|d| d.text_color(tok::text()))
                         .child(ui::icon("chevron-left").size(px(14.)))
-                        .child("Layer types")
+                        .child("Object types")
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(a) = &mut this.add_layer {
                                 a.step = Step::Types;
@@ -307,7 +307,7 @@ impl StudioWindow {
                                 .justify_between()
                                 .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(
                                     match state.step {
-                                        Step::Types => "Add layer",
+                                        Step::Types => "Add object",
                                         Step::Cameras => "Choose a camera",
                                     },
                                 ))

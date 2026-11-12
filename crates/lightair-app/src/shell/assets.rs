@@ -252,7 +252,7 @@ impl StudioWindow {
                         .py_2()
                         .text_size(px(12.))
                         .text_color(tok::text_tertiary())
-                        .child("Drop images, video or sound here. Drag a layer from the Hierarchy to make a prefab."),
+                        .child("Drop images, video or sound here. Drag an object from the Hierarchy to make a prefab."),
                 )
             })
     }
@@ -486,7 +486,7 @@ impl StudioWindow {
                                 .on_click(cx.listener(move |this, _, _, cx| this.revert_prefab(scene, id, cx))),
                         )
                         .child(
-                            button("prefab-unpack", "Unpack", "Ordinary layers, no longer linked")
+                            button("prefab-unpack", "Unpack", "Ordinary objects, no longer linked")
                                 .xsmall()
                                 .ghost()
                                 .on_click(cx.listener(move |this, _, _, cx| {
