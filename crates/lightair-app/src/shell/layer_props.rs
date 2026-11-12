@@ -542,7 +542,6 @@ impl StudioWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let tid = track.id;
-        let input = project.inputs.get(&track.input).map(|i| i.name.clone()).unwrap_or_default();
         let mut effects = div().flex().flex_col().gap_0p5();
         for (j, e) in track.effects.iter().enumerate() {
             let (eid, enabled) = (e.id, e.enabled);
@@ -604,7 +603,7 @@ impl StudioWindow {
                 .child(crate::ui::icon("audio-lines").size(px(16.)).text_color(tok::text_secondary()))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(track.name.clone())),
         )
-        .child(div().text_color(tok::text_tertiary()).child(input))
+        .children(project.inputs.get(&track.input).and_then(|i| self.source_section(&i.clone(), cx)))
         .child(self.section("Effects", None, cx).child(if track.effects.is_empty() {
             div().text_color(tok::text_tertiary()).child("None yet").into_any_element()
         } else {

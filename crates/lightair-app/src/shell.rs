@@ -24,6 +24,7 @@ mod inspector;
 mod layer_props;
 mod palette;
 mod settings;
+mod source;
 
 use crate::geometry::{self as geo, CORNERS, Corner};
 use crate::mixer::MixerPanel;
@@ -119,6 +120,9 @@ struct Drag {
     others: Vec<(Id, Layout)>,
 }
 
+/// A source's list choices: (label, setting value).
+type SourceOptions = Vec<(String, serde_json::Value)>;
+
 /// A selection box being dragged: format, start, current point (canvas units), adding (⇧).
 type Marquee = (Id, (f32, f32), (f32, f32), bool);
 
@@ -148,6 +152,9 @@ pub struct StudioWindow {
     sliders: RefCell<HashMap<String, inspector::BoundSlider>>,
     looks_for: Option<(Id, Id)>,
     transition_menu: bool,
+    /// The Source section: whose list is open, and fetched lists per (input, setting).
+    source_menu: Option<Id>,
+    source_cache: RefCell<HashMap<(Id, &'static str), SourceOptions>>,
     /// The Add Layer picker, while open.
     add_layer: Option<add_layer::AddLayer>,
     /// Camera devices (label, id), refreshed when the Add Layer menu opens.
@@ -212,6 +219,8 @@ impl StudioWindow {
             sliders: RefCell::default(),
             looks_for: None,
             transition_menu: false,
+            source_menu: None,
+            source_cache: RefCell::default(),
             camera_devices: vec![],
             renaming: None,
             studio_mode: false,

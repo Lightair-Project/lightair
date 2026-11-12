@@ -107,7 +107,9 @@ fn bundle() -> anyhow::Result<()> {
         .unwrap_or_else(|| "-".into());
     run(Command::new("codesign").args(["--force", "--sign", &identity]).arg(app.parent().unwrap()))?;
     if identity == "-" {
-        eprintln!("signed ad hoc: macOS will ask for permissions again after rebuilds (set LIGHTAIR_SIGN_IDENTITY to keep them)");
+        eprintln!(
+            "signed ad hoc: macOS will ask for permissions again after rebuilds (set LIGHTAIR_SIGN_IDENTITY to keep them)"
+        );
     } else {
         eprintln!("signed with {identity}");
     }

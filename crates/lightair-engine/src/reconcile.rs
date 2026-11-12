@@ -276,6 +276,50 @@ impl Reconciler {
         }
     }
 
+    /// The choices an input offers for a list setting (a camera's devices, a display capture's
+    /// displays or windows, a microphone's devices): (label, value). Read from the input itself,
+    /// with its current settings applied, since some sources fill their lists only then.
+    pub fn input_options(&self, input: Id, property: &str) -> Vec<(String, serde_json::Value)> {
+        let mut out = Vec::new();
+        let Some(src) = self.inputs.get(&input) else { return out };
+        let name = std::ffi::CString::new(property).unwrap_or_default();
+        unsafe {
+            let props = sys::obs_source_properties(src.as_ptr());
+            if props.is_null() {
+                return out;
+            }
+            let settings = sys::obs_source_get_settings(src.as_ptr());
+            sys::obs_properties_apply_settings(props, settings);
+            sys::obs_data_release(settings);
+            let p = sys::obs_properties_get(props, name.as_ptr());
+            if !p.is_null() {
+                let int = sys::obs_property_list_format(p) == sys::OBS_COMBO_FORMAT_INT;
+                for i in 0..sys::obs_property_list_item_count(p) {
+                    let label = sys::obs_property_list_item_name(p, i);
+                    let label = if label.is_null() {
+                        String::new()
+                    } else {
+                        std::ffi::CStr::from_ptr(label).to_string_lossy().into_owned()
+                    };
+                    let value = if int {
+                        serde_json::Value::from(sys::obs_property_list_item_int(p, i))
+                    } else {
+                        let v = sys::obs_property_list_item_string(p, i);
+                        if v.is_null() {
+                            continue;
+                        }
+                        serde_json::Value::from(std::ffi::CStr::from_ptr(v).to_string_lossy().into_owned())
+                    };
+                    if !label.is_empty() {
+                        out.push((label, value));
+                    }
+                }
+            }
+            sys::obs_properties_destroy(props);
+        }
+        out
+    }
+
     /// An input's pixel size, once it has one (async sources report it after their first frame).
     pub fn input_size(&self, input: Id) -> Option<(u32, u32)> {
         let src = self.inputs.get(&input)?;

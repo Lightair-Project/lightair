@@ -37,6 +37,7 @@ Done:
 - Rotation handle above the selection (⇧ snaps to 15°) and crop by ⌥-dragging a corner (the picture keeps its scale; Reset crop in the Inspector). Rotated layers are outlined, hit-tested, resized and cropped in their own frame (the opposite corner stays put); the geometry is unit-tested.
 - Multi-select: ⇧/⌘-click in Layers, ⇧-click on the canvas, ⌘A; dragging any selected layer moves them all (one undo step), arrow keys nudge them, Delete removes them, and the Inspector aligns and evenly spaces them by their visible bounds. Dragging on empty canvas draws a selection box (⇧ adds).
 - Settings sheet (⌘, or the gear): recording folder, container and bitrate, stream bitrate (project), and "review before going live" (this Mac, in `preferences.json`, tested round trip).
+- Inspector Source section: change a layer's camera, display/window/app (screen capture), microphone or audio device, or replace its image/video file. Lists are read from the input itself with its settings applied (`Reconciler::input_options`, tested). Mixer tracks show the same section.
 - Command palette (⌘K): fuzzy search over scenes and actions (Take, Studio mode, record, go live, clip, add layers and scenes, add vertical, import, transitions, undo/redo); ↑↓ ↩ Esc.
 
 Remaining:
