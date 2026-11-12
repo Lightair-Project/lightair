@@ -130,6 +130,12 @@ struct beauty_filter {
 	gs_image_file_ex_t bg_image;
 	gs_effect_t *bg_effect;
 	gs_texrender_t *tr_bg_q, *tr_bg_t1, *tr_bg_t2, *tr_bg_out;
+	/* Apple Vision's person mask (A), finer than the multiclass one: the background uses it */
+	gs_texture_t *vp_tex;
+	gs_texrender_t *tr_vp_ref;
+	uint32_t vp_w, vp_h;
+	uint64_t vp_serial;
+	uint8_t *vp_cpu; /* latest copy, 8-bit (snap_mutex) */
 };
 
 enum { BG_OFF, BG_BLUR, BG_REMOVE, BG_COLOR, BG_IMAGE };
@@ -296,7 +302,11 @@ static void proc_person_present(void *data, calldata_t *cd)
 	struct beauty_filter *f = data;
 	size_t hits = 0, n = 0;
 	pthread_mutex_lock(&f->snap_mutex);
-	if (f->pm_cpu && f->pm_w && f->pm_h)
+	if (f->vp_cpu && f->vp_w && f->vp_h)
+		for (uint32_t y = 0; y < f->vp_h; y += 4)
+			for (uint32_t x = 0; x < f->vp_w; x += 4, n++)
+				hits += f->vp_cpu[(size_t)y * f->vp_w + x] > 127;
+	else if (f->pm_cpu && f->pm_w && f->pm_h)
 		for (uint32_t y = 0; y < f->pm_h; y += 4)
 			for (uint32_t x = 0; x < f->pm_w; x += 4, n++)
 				hits += f->pm_cpu[((size_t)y * f->pm_w + x) * 4 + 3] > 127;
@@ -323,6 +333,7 @@ static void *beauty_create(obs_data_t *settings, obs_source_t *source)
 	f->tr_bg_t1 = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
 	f->tr_bg_t2 = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
 	f->tr_bg_out = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	f->tr_vp_ref = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	for (int i = 0; i < RING_N; i++)
 		f->tr_ring[i] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	gs_texrender_t **trs[] = {&f->tr_half, &f->tr_tmp,   &f->tr_smooth, &f->tr_q,
@@ -364,6 +375,8 @@ static void beauty_destroy(void *data)
 	gs_texrender_destroy(f->tr_bg_t1);
 	gs_texrender_destroy(f->tr_bg_t2);
 	gs_texrender_destroy(f->tr_bg_out);
+	gs_texrender_destroy(f->tr_vp_ref);
+	gs_texture_destroy(f->vp_tex);
 	gs_image_file_ex_free(&f->bg_image);
 	for (int i = 0; i < RING_N; i++)
 		gs_texrender_destroy(f->tr_ring[i]);
@@ -399,6 +412,7 @@ static void beauty_destroy(void *data)
 	pthread_mutex_destroy(&f->snap_mutex);
 	bfree(f->snap);
 	free(f->pm_cpu);
+	free(f->vp_cpu);
 	bfree(f);
 }
 
@@ -1180,6 +1194,47 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 			person_blur = NULL;
 	}
 
+	/* --- Apple Vision's person mask, for the background --- */
+	gs_texture_t *vseg = NULL;
+	bool want_person = f->bg_mode != BG_OFF;
+	face_tracker_set_person(f->tracker, want_person);
+	if (want_person) {
+		uint32_t vw = 0, vh = 0;
+		uint8_t *vb = face_tracker_take_person(f->tracker, &f->vp_serial, &vw, &vh);
+		if (vb) {
+			uint8_t *rgba = bmalloc((size_t)vw * vh * 4);
+			for (size_t i = 0; i < (size_t)vw * vh; i++) {
+				rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = 0;
+				rgba[i * 4 + 3] = vb[i];
+			}
+			if (!f->vp_tex || f->vp_w != vw || f->vp_h != vh) {
+				gs_texture_destroy(f->vp_tex);
+				f->vp_tex = gs_texture_create(vw, vh, GS_RGBA, 1, NULL, GS_DYNAMIC);
+				blog(LOG_INFO, "[camera-studio] person mask from Apple Vision, %ux%u", vw, vh);
+			}
+			gs_texture_set_image(f->vp_tex, rgba, vw * 4, false);
+			bfree(rgba);
+			pthread_mutex_lock(&f->snap_mutex);
+			free(f->vp_cpu);
+			f->vp_cpu = vb;
+			f->vp_w = vw;
+			f->vp_h = vh;
+			pthread_mutex_unlock(&f->snap_mutex);
+		}
+		/* snapped to this frame's edges like the multiclass mask */
+		if (f->vp_tex)
+			vseg = guided_pass(f, f->tr_vp_ref, "Refine", f->vp_tex, half, 1.0f / (float)f->vp_w,
+					   1.0f / (float)f->vp_h, hw, hh, 0.07f);
+	} else if (f->vp_tex) {
+		gs_texture_destroy(f->vp_tex);
+		f->vp_tex = NULL;
+		pthread_mutex_lock(&f->snap_mutex);
+		free(f->vp_cpu);
+		f->vp_cpu = NULL;
+		f->vp_w = f->vp_h = 0;
+		pthread_mutex_unlock(&f->snap_mutex);
+	}
+
 	/* --- makeup masks (lips / eyeliner / eye interior), soft-edged --- */
 	gs_texture_t *mask = render_mask(f, w, h, hw, hh);
 	f->mesh_ok = mesh_update(f, w, h);
@@ -1330,8 +1385,10 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 	}
 
 	/* background: behind the person, under stickers and atmosphere */
-	if (out && seg && f->bg_mode != BG_OFF && !f->debug_view)
-		out = render_background(f, out, seg, w, h);
+	/* Apple Vision's mask once it has one; the multiclass one until then */
+	gs_texture_t *person_mask = vseg ? vseg : seg;
+	if (out && person_mask && f->bg_mode != BG_OFF && !f->debug_view)
+		out = render_background(f, out, person_mask, w, h);
 
 	/* stickers, motion and atmosphere */
 	float t = (float)fmod((double)(os_gettime_ns() - f->start_ns) / 1e9, 3600.0);

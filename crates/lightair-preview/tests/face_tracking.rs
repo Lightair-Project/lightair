@@ -149,6 +149,8 @@ fn the_background_is_replaced_around_the_person() {
     if expect {
         assert!(replaced > 40, "the background turned red");
         assert!(replaced < 540, "the person kept their colours");
+    } else {
+        assert!(replaced > 540, "no one in the picture: all of it is background");
     }
 
     // Blur keeps the background's own colours: nothing red.

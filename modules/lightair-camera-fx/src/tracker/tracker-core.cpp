@@ -22,6 +22,9 @@
 
 #include "backend.hpp"
 #include "segmenter.hpp"
+#if defined(__APPLE__)
+#include "person-vision.hpp"
+#endif
 #include "pigment-calib.hpp"
 #include "tracker-util.hpp"
 #include "face-tracker.h"
@@ -194,6 +197,10 @@ struct face_tracker {
 	Worker lm, seg;
 	std::atomic<bool> seg_enabled{false};
 	std::atomic<bool> seg_fast{false};
+#if defined(__APPLE__)
+	std::unique_ptr<PersonVision> person_vision;
+#endif
+	std::atomic<bool> person_enabled{false};
 
 	/* results */
 	std::mutex res_m;
@@ -217,6 +224,10 @@ struct face_tracker {
 	std::vector<uint8_t> mask;
 	uint32_t mask_w = 0, mask_h = 0;
 	uint64_t mask_serial = 0;
+	/* person mask from Apple Vision (8-bit, finer than the multiclass one), for the background */
+	std::vector<uint8_t> person;
+	uint32_t person_w = 0, person_h = 0;
+	uint64_t person_serial = 0;
 
 	/* skin pigment basis (melanin / hemoglobin), recalibrated every ~2 s */
 	PigmentBasis pigment = pigment_prior_basis();
@@ -401,6 +412,21 @@ void face_tracker::run_segmentation()
 			}
 			mask_serial++;
 		}
+#if defined(__APPLE__)
+		if (person_enabled.load()) {
+			if (!person_vision)
+				person_vision = std::make_unique<PersonVision>();
+			std::vector<uint8_t> p;
+			int pw = 0, ph = 0;
+			if (person_vision->run(seg.buf.data(), seg.w, seg.h, seg.w * 4, p, pw, ph)) {
+				std::lock_guard<std::mutex> g(mask_m);
+				person.swap(p);
+				person_w = pw;
+				person_h = ph;
+				person_serial++;
+			}
+		}
+#endif
 		/* pigment calibration from confident skin pixels of this frame */
 		if (ok && (int)m.size() == mw * mh * 4 && now_ns() >= pigment_next_ns) {
 			PigmentBasis b;
@@ -581,6 +607,29 @@ extern "C" uint8_t *face_tracker_take_mask(face_tracker_t *t, uint64_t *serial, 
 	*w = t->mask_w;
 	*h = t->mask_h;
 	*serial = t->mask_serial;
+	return copy;
+}
+
+extern "C" void face_tracker_set_person(face_tracker_t *t, bool enabled)
+{
+#if defined(__APPLE__)
+	t->person_enabled = enabled;
+#else
+	(void)t;
+	(void)enabled;
+#endif
+}
+
+extern "C" uint8_t *face_tracker_take_person(face_tracker_t *t, uint64_t *serial, uint32_t *w, uint32_t *h)
+{
+	std::lock_guard<std::mutex> g(t->mask_m);
+	if (t->person.empty() || t->person_serial == *serial)
+		return nullptr;
+	auto *copy = (uint8_t *)malloc(t->person.size());
+	memcpy(copy, t->person.data(), t->person.size());
+	*w = t->person_w;
+	*h = t->person_h;
+	*serial = t->person_serial;
 	return copy;
 }
 
