@@ -17,6 +17,7 @@ use lightair_core::{
 use lightair_preview::Preview;
 use serde_json::json;
 
+mod add_layer;
 mod docking;
 mod golive;
 mod layer_props;
@@ -140,6 +141,8 @@ pub struct StudioWindow {
     drag: Option<Drag>,
     guides: Guides,
     add_menu: bool,
+    /// The Add Layer picker, while open.
+    add_layer: Option<add_layer::AddLayer>,
     /// Camera devices (label, id), refreshed when the Add Layer menu opens.
     camera_devices: Vec<(String, String)>,
     /// The open inline rename field in the Layers or Scenes list.
@@ -197,6 +200,7 @@ impl StudioWindow {
             drag: None,
             guides: vec![],
             add_menu: false,
+            add_layer: None,
             camera_devices: vec![],
             renaming: None,
             studio_mode: false,
@@ -922,6 +926,7 @@ impl Render for StudioWindow {
             .child(self.title_bar(&project, cx))
             .child(div().flex().flex_1().min_h_0().children(self.dock.clone()))
             .child(self.status_bar(cx))
+            .children(self.add_layer_overlay(cx))
             .children(self.go_live_overlay(cx))
             .children(self.settings_overlay(cx))
             .children(self.palette_overlay(cx))
@@ -1074,18 +1079,8 @@ impl StudioWindow {
             )
     }
 
-    fn toggle_add_menu(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.add_menu = !self.add_menu;
-        // OBS 33's camera source can't list devices without an instance; the legacy source lists
-        // the same AVFoundation device ids.
-        if self.add_menu {
-            self.camera_devices = self
-                .studio
-                .read(cx)
-                .engine()
-                .call(|_| lightair_engine::obs::property_items("av_capture_input_v2", "device"));
-        }
-        cx.notify();
+    fn toggle_add_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_add_layer(window, cx);
     }
 
     fn layers_panel(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1095,9 +1090,6 @@ impl StudioWindow {
         let selected = studio.selected_layer;
         let also = studio.also_selected.clone();
         let mut col = div().flex().flex_col().size_full().pt_1();
-        if self.add_menu {
-            col = col.child(self.add_menu(cx));
-        }
         let Some(scene) = scene else {
             return col.child(div().px_3().text_color(tok::text_tertiary()).child("No scene selected"));
         };
@@ -1176,74 +1168,6 @@ impl StudioWindow {
                 )
         });
         col.child(div().id("layers-scroll").flex().flex_col().gap_0p5().overflow_y_scroll().children(rows))
-    }
-
-    fn add_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let item = |id: &'static str, icon: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap_2()
-                .h(px(30.))
-                .px_2()
-                .rounded(px(6.))
-                .cursor_pointer()
-                .hover(|d| d.bg(tok::bg_selected()))
-                .child(ui::icon(icon).size(px(14.)).text_color(tok::text_secondary()))
-                .child(label)
-        };
-        let mut cameras = Vec::new();
-        for (i, (label, uid)) in self.camera_devices.iter().enumerate() {
-            let (label, uid) = (label.clone(), uid.clone());
-            cameras.push(
-                div()
-                    .id(("add-camera", i))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .h(px(30.))
-                    .px_2()
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(tok::bg_selected()))
-                    .child(ui::icon("camera").size(px(14.)).text_color(tok::text_secondary()))
-                    .child(label.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.add_camera(&label, &uid, cx);
-                    })),
-            );
-        }
-        let display_settings = {
-            let mut v = json!({"type": 0, "show_cursor": true, "hide_obs": true});
-            if let Some(uuid) = lightair_engine::displays::main_display_uuid() {
-                v["display_uuid"] = uuid.into();
-            }
-            v
-        };
-        div()
-            .mx_2()
-            .mb_2()
-            .p_1()
-            .rounded(px(10.))
-            .bg(tok::bg_raised())
-            .border_1()
-            .border_color(tok::border())
-            .child(item("add-display", "monitor", "Display").on_click(cx.listener(move |this, _, _, cx| {
-                this.add_input_layer("Display", "screen_capture", display_settings.clone(), (1280.0, 720.0), cx)
-            })))
-            .children(cameras)
-            .child(
-                item("add-image", "image", "Image…")
-                    .on_click(cx.listener(|this, _, window, cx| this.add_image(window, cx))),
-            )
-            .child(
-                item("add-video", "clapperboard", "Video…")
-                    .on_click(cx.listener(|this, _, window, cx| this.add_video(window, cx))),
-            )
-            .child(item("add-text", "type", "Text").on_click(cx.listener(|this, _, _, cx| this.add_text(cx))))
-            .child(item("add-colour", "square", "Colour").on_click(cx.listener(|this, _, _, cx| this.add_colour(cx))))
-            .child(item("add-timer", "timer", "Timer").on_click(cx.listener(|this, _, _, cx| this.add_timer(cx))))
     }
 
     fn transition_picker(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
