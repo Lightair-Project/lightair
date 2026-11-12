@@ -491,6 +491,96 @@ impl StudioWindow {
         col
     }
 
+    /// A mixer track: level, mute, and its effect chain (the mixer strip stays compact).
+    pub(super) fn track_inspector(
+        &self,
+        project: &lightair_core::Project,
+        track: &lightair_core::Track,
+        body: Div,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tid = track.id;
+        let input = project.inputs.get(&track.input).map(|i| i.name.clone()).unwrap_or_default();
+        let mut effects = div().flex().flex_col().gap_0p5();
+        for (j, e) in track.effects.iter().enumerate() {
+            let (eid, enabled) = (e.id, e.enabled);
+            effects = effects.child(
+                div()
+                    .id(("track-fx", j))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(30.))
+                    .px_2()
+                    .rounded(px(5.))
+                    .hover(|d| d.bg(tok::bg_raised()))
+                    .child(
+                        crate::ui::icon_button(
+                            ("track-fx-on", j),
+                            if enabled { "circle-check" } else { "circle" },
+                            if enabled { tok::ok() } else { tok::text_tertiary() },
+                        )
+                        .tooltip(move |w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(if enabled { "Bypass" } else { "Turn on" })
+                                .build(w, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.exec(Command::SetEffectEnabled { track: tid, effect: eid, enabled: !enabled }, cx)
+                        })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(if enabled { tok::text() } else { tok::text_tertiary() })
+                            .child(e.name.clone()),
+                    )
+                    .child(crate::ui::icon_button(("track-fx-del", j), "trash", tok::text_tertiary()).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.exec(Command::RemoveEffect { track: tid, effect: eid }, cx)
+                        }),
+                    )),
+            );
+        }
+        let mut presets = div().flex().flex_wrap().gap_1();
+        for (k, (label, list)) in crate::mixer::effect_presets().into_iter().enumerate() {
+            presets = presets.child(Button::new(("track-preset", k)).label(label).xsmall().outline().on_click(
+                cx.listener(move |this, _, _, cx| {
+                    let commands = list
+                        .iter()
+                        .cloned()
+                        .map(|effect| Command::AddEffect { track: tid, effect, index: None })
+                        .collect();
+                    this.exec(Command::Batch { label: format!("Add {label}"), commands }, cx);
+                }),
+            ));
+        }
+        body.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(crate::ui::icon("audio-lines").size(px(16.)).text_color(tok::text_secondary()))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(track.name.clone())),
+        )
+        .child(div().text_color(tok::text_tertiary()).child(input))
+        .child(section("Effects").child(if track.effects.is_empty() {
+            div().text_color(tok::text_tertiary()).child("None yet").into_any_element()
+        } else {
+            effects.into_any_element()
+        }))
+        .child(section("Add").child(presets))
+        .child(
+            div().pt_2().child(
+                Button::new("remove-track")
+                    .label("Remove track")
+                    .small()
+                    .danger()
+                    .on_click(cx.listener(move |this, _, _, cx| this.exec(Command::RemoveTrack { track: tid }, cx))),
+            ),
+        )
+        .into_any_element()
+    }
+
     /// Font, bold/italic, outline and shadow for a FreeType text layer.
     fn text_style_rows(&self, input: &Input, cx: &mut Context<Self>) -> impl IntoElement {
         const FONTS: &[&str] = &[

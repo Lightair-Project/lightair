@@ -291,6 +291,9 @@ impl StudioWindow {
         self.studio.update(cx, |s, cx| {
             s.selected_layer = layer;
             s.also_selected.clear();
+            if layer.is_some() {
+                s.selected_track = None;
+            }
             cx.notify();
         });
     }
@@ -2046,8 +2049,10 @@ impl StudioWindow {
         let scene = studio.selected_scene.and_then(|id| project.scene(id)).cloned();
         let layer = scene.as_ref().and_then(|s| studio.selected_layer.and_then(|l| s.layer(l))).cloned();
         let selection = studio.selection();
+        let track = studio.selected_track.and_then(|t| project.track(t)).cloned();
         let body = div().flex().flex_col().gap_3().px_3();
         let content = match (scene, layer) {
+            (_, None) if track.is_some() => self.track_inspector(project, track.as_deref().unwrap(), body, cx),
             (Some(scene), Some(_)) if selection.len() > 1 => {
                 self.multi_inspector(&scene, &format, &selection, body, cx)
             }
