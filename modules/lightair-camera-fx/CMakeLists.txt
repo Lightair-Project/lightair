@@ -40,8 +40,10 @@ add_library(lightair-camera-fx MODULE
   src/tracker/backend-coreml.mm
   src/tracker/coreml-common.mm
   src/tracker/segmenter-coreml.mm
+  src/tracker/person-vision.mm
 )
 set_source_files_properties(src/tracker/backend-coreml.mm src/tracker/coreml-common.mm src/tracker/segmenter-coreml.mm
+  src/tracker/person-vision.mm
   PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 target_compile_definitions(lightair-camera-fx PRIVATE BEAUTY_TRACKER_COREML BEAUTY_HAVE_LIBOBS PLUGIN_VERSION="${PROJECT_VERSION}")
 target_include_directories(lightair-camera-fx PRIVATE "${OBS_SRC}/libobs" "${GEN}" "${SIMDE_DIR}" src src/tracker)

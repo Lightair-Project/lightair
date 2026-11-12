@@ -111,6 +111,13 @@ void face_tracker_set_segmentation_fast(face_tracker_t *ft, bool fast);
  * NULL if nothing new. */
 uint8_t *face_tracker_take_mask(face_tracker_t *ft, uint64_t *serial, uint32_t *w, uint32_t *h);
 
+/* Person segmentation with Apple Vision (macOS; a no-op elsewhere): a finer mask for the
+ * background effects, on the segmentation thread while enabled. */
+void face_tracker_set_person(face_tracker_t *ft, bool enabled);
+/* Newer person mask than *serial? Returns a malloc'd 8-bit copy (free() it), w x h, covering the
+ * whole frame. NULL if nothing new. */
+uint8_t *face_tracker_take_person(face_tracker_t *ft, uint64_t *serial, uint32_t *w, uint32_t *h);
+
 /* Skin pigment basis in optical density: melanin / hemoglobin unit directions and the inverse
  * of [mel hem (1,1,1)/sqrt3] (row-major; row 0 gives melanin, row 1 hemoglobin). Physical
  * priors until the first calibration from the user's own skin. */
