@@ -53,6 +53,7 @@ actions!(
         AddMarker,
         SelectAll,
         OpenSettings,
+        ToggleRotateTool,
         ToggleMics,
         Scene1,
         Scene2,
@@ -83,6 +84,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-m", AddMarker, Some("Studio")),
         KeyBinding::new("cmd-a", SelectAll, Some("Studio")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Studio")),
+        KeyBinding::new("e", ToggleRotateTool, Some("Studio")),
         KeyBinding::new("cmd-shift-m", ToggleMics, Some("Studio")),
         KeyBinding::new("cmd-1", Scene1, Some("Studio")),
         KeyBinding::new("cmd-2", Scene2, Some("Studio")),
@@ -108,8 +110,10 @@ enum DragMode {
     CropEdge(geo::Edge, (f32, f32)),
     /// ⌥-drag inside: slides the picture under its crop.
     CropPan((f32, f32)),
-    /// The bottom knob: tilt in 3D.
+    /// The bottom knob: tilt in 3D, both axes.
     Tilt,
+    /// A rotate-gizmo ring: tilt around one axis.
+    TiltAxis(geo::Axis),
 }
 
 /// Distance of the rotation handle above the selection, in screen pixels.
@@ -124,6 +128,8 @@ struct Drag {
     layout: Layout,
     /// Other selected layers moving with it (Move only), with their starting layouts.
     others: Vec<(Id, Layout)>,
+    /// Whether the pointer moved (a still click on the 3D knob toggles the rotate gizmo).
+    moved: bool,
 }
 
 /// Inputs' pixel sizes and when they were last read.
@@ -134,6 +140,9 @@ type SourceOptions = Vec<(String, serde_json::Value)>;
 
 /// A selection box being dragged: format, start, current point (canvas units), adding (⇧).
 type Marquee = (Id, (f32, f32), (f32, f32), bool);
+
+/// A rotate-gizmo ring to paint: colour, stroke width, points on the stage.
+type Ring = (Hsla, f32, Vec<(f32, f32)>);
 
 /// Snap guides shown while dragging: (vertical?, canvas coordinate).
 type Guides = Vec<(bool, f32)>;
@@ -164,6 +173,9 @@ pub struct StudioWindow {
     /// The layer showing crop handles instead of resize handles.
     crop_mode: Option<Id>,
     crop_preview_sent: Option<(Id, Id, Id)>,
+    /// The rotate gizmo (Unity-style rings) is showing, and which ring is under the pointer.
+    rotate_tool: bool,
+    gizmo_hover: Option<geo::Axis>,
     /// Inputs' pixel sizes, refreshed a few times a second: frames and handles hug the picture.
     sizes: RefCell<SizeCache>,
     /// The source picker, and fetched source lists per (input, setting).
@@ -201,6 +213,13 @@ pub struct StudioWindow {
 }
 
 const HANDLE: f32 = 10.0;
+/// How close (screen px) the pointer must be to a gizmo ring.
+const GIZMO_TOL: f32 = 6.0;
+
+/// The rotate gizmo's radius in canvas units: most of the picture, but never tiny on screen.
+fn gizmo_radius(l: &Layout, scale: f32) -> f32 {
+    (l.width.min(l.height) * 0.42).max(56.0 / scale)
+}
 const SNAP_PX: f32 = 8.0;
 
 impl StudioWindow {
@@ -235,6 +254,8 @@ impl StudioWindow {
             transition_menu: false,
             crop_mode: None,
             crop_preview_sent: None,
+            rotate_tool: false,
+            gizmo_hover: None,
             sizes: RefCell::default(),
             source_picker: None,
             source_cache: RefCell::default(),
@@ -516,7 +537,17 @@ impl StudioWindow {
             let size = self.sizes.borrow().1.get(&sel.input).map(|(w, h)| (*w as f32, *h as f32));
             let (_, crop_edges) = geo::crop_handles(l);
             let cropped = l.crop != lightair_core::Crop::default();
-            let mode = if near(geo::rotate_handle(l, ROTATE_OFFSET / s)) {
+            let gizmo =
+                self.rotate_tool.then(|| geo::gizmo_hit(l, gizmo_radius(l, s), (x, y), GIZMO_TOL / s)).flatten();
+            let mode = if let Some(axis) = gizmo {
+                Some(match axis {
+                    geo::Axis::Z => DragMode::Rotate,
+                    a => DragMode::TiltAxis(a),
+                })
+            } else if self.rotate_tool && !near(geo::tilt_handle(l, ROTATE_OFFSET / s)) {
+                // With the gizmo on, the other handles are hidden; inside still moves.
+                None
+            } else if near(geo::rotate_handle(l, ROTATE_OFFSET / s)) {
                 Some(DragMode::Rotate)
             } else if near(geo::tilt_handle(l, ROTATE_OFFSET / s)) {
                 if ev.click_count == 2 {
@@ -552,6 +583,7 @@ impl StudioWindow {
                     start: (x, y),
                     layout: *l,
                     others: vec![],
+                    moved: false,
                 });
                 self.studio.update(cx, |s, _| s.begin_gesture());
                 return;
@@ -583,7 +615,16 @@ impl StudioWindow {
                         vec![]
                     };
                     let mode = DragMode::Move;
-                    self.drag = Some(Drag { scene: scene_id, layer: id, format, mode, start: (x, y), layout, others });
+                    self.drag = Some(Drag {
+                        scene: scene_id,
+                        layer: id,
+                        format,
+                        mode,
+                        start: (x, y),
+                        layout,
+                        others,
+                        moved: false,
+                    });
                     self.studio.update(cx, |s, _| s.begin_gesture());
                 }
                 if in_selection {
@@ -622,6 +663,28 @@ impl StudioWindow {
             }
             return;
         }
+        // Gizmo hover (for the yellow highlight) when nothing is being dragged.
+        if self.drag.is_none() {
+            if self.rotate_tool {
+                let project = self.studio.read(cx).project().clone();
+                let format = self.format_id(&project);
+                let hover = self.studio.read(cx).selected_scene.and_then(|sid| project.scene(sid)).and_then(|scene| {
+                    let layer = self.studio.read(cx).selected_layer.and_then(|id| scene.layer(id))?;
+                    let frame = self.frame_of(layer, format)?;
+                    let (_, _, s) = self.mapping(&project, format)?;
+                    let p = self.to_canvas(&project, format, ev.position)?;
+                    geo::gizmo_hit(&frame, gizmo_radius(&frame, s), p, GIZMO_TOL / s)
+                });
+                if hover != self.gizmo_hover {
+                    self.gizmo_hover = hover;
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        if let Some(d) = &mut self.drag {
+            d.moved = true;
+        }
         let Some(drag) = &self.drag else { return };
         if ev.pressed_button != Some(MouseButton::Left) {
             return;
@@ -649,6 +712,14 @@ impl StudioWindow {
             DragMode::Crop(corner, size) => l = geo::crop(&l, corner, size, (dx, dy)),
             DragMode::CropEdge(edge, size) => l = geo::crop_edge(&l, edge, size, (dx, dy)),
             DragMode::CropPan(size) => l = geo::crop_pan(&l, size, (dx, dy)),
+            DragMode::TiltAxis(axis) => {
+                let k = 0.35 * s;
+                let snap = |a: f32| if ev.modifiers.shift { (a / 15.0).round() * 15.0 } else { a };
+                match axis {
+                    geo::Axis::X => l.tilt_x = snap((drag.layout.tilt_x + dy * k).clamp(-75.0, 75.0)),
+                    _ => l.tilt_y = snap((drag.layout.tilt_y - dx * k).clamp(-75.0, 75.0)),
+                }
+            }
             DragMode::Tilt => {
                 // Drag right: the right side turns away; drag down: the bottom does. Screen
                 // degrees per pixel; ⇧ snaps to 15°.
@@ -724,6 +795,10 @@ impl StudioWindow {
         }
         if let Some(drag) = self.drag.take() {
             self.guides.clear();
+            if matches!(drag.mode, DragMode::Tilt) && !drag.moved {
+                self.rotate_tool = !self.rotate_tool;
+                self.gizmo_hover = None;
+            }
             // A crop drag showed the whole picture; back to the result.
             if matches!(drag.mode, DragMode::Crop(..) | DragMode::CropEdge(..) | DragMode::CropPan(..)) {
                 self.crop_mode = None;
@@ -951,8 +1026,11 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &NudgeUp, _, cx| this.nudge(0.0, -1.0, cx)))
             .on_action(cx.listener(|this, _: &NudgeDown, _, cx| this.nudge(0.0, 1.0, cx)))
             .on_action(cx.listener(|this, _: &Deselect, _, cx| {
-                // Esc leaves crop mode first.
+                // Esc leaves crop mode or the rotate gizmo first.
                 if this.crop_mode.take().is_some() {
+                    cx.notify();
+                } else if this.rotate_tool {
+                    this.rotate_tool = false;
                     cx.notify();
                 } else {
                     this.select_layer(None, cx)
@@ -967,6 +1045,11 @@ impl Render for StudioWindow {
             }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
+            .on_action(cx.listener(|this, _: &ToggleRotateTool, _, cx| {
+                this.rotate_tool = !this.rotate_tool;
+                this.gizmo_hover = None;
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ToggleMics, _, cx| this.studio.update(cx, |s, cx| s.toggle_mics(cx))))
             .on_action(cx.listener(|this, _: &Scene1, w, cx| this.scene_shortcut(0, w, cx)))
             .on_action(cx.listener(|this, _: &Scene2, w, cx| this.scene_shortcut(1, w, cx)))
@@ -1846,12 +1929,44 @@ impl StudioWindow {
                 let crop_paths = crop_view.as_ref().map(|(full, shape, _)| (*full, shape.clone()));
                 let round_handles =
                     l.shape.is_some_and(|sh| sh.kind != lightair_core::ShapeKind::Rounded || sh.radius > 0.3);
-                let knob = (!locked && editing && !cropping).then(|| {
+                // The rotate gizmo (rings per axis) replaces the other handles while it's on.
+                let gizmo_on = self.rotate_tool && !locked && editing && !cropping;
+                let knob = (!locked && editing && !cropping && !gizmo_on).then(|| {
                     (to_stage(geo::rotate_handle(&l, 0.0)), to_stage(geo::rotate_handle(&l, ROTATE_OFFSET / s)))
                 });
-                // The 3D knob below, mirroring the rotate knob above.
-                let tilt_knob = knob
-                    .map(|_| (to_stage(geo::tilt_handle(&l, 0.0)), to_stage(geo::tilt_handle(&l, ROTATE_OFFSET / s))));
+                // The 3D knob below, mirroring the rotate knob above (a click toggles the gizmo).
+                let tilt_knob = (!locked && editing && !cropping)
+                    .then(|| (to_stage(geo::tilt_handle(&l, 0.0)), to_stage(geo::tilt_handle(&l, ROTATE_OFFSET / s))));
+                let active_axis = self
+                    .drag
+                    .as_ref()
+                    .filter(|d| d.layer == lid)
+                    .and_then(|d| match d.mode {
+                        DragMode::TiltAxis(a) => Some(a),
+                        DragMode::Rotate if gizmo_on => Some(geo::Axis::Z),
+                        _ => None,
+                    })
+                    .or(self.gizmo_hover);
+                let rings: Vec<Ring> = if gizmo_on {
+                    geo::gizmo_rings(&l, gizmo_radius(&l, s))
+                        .into_iter()
+                        .map(|(axis, pts)| {
+                            let hot = active_axis == Some(axis);
+                            let colour = if hot {
+                                tok::gizmo_active()
+                            } else {
+                                match axis {
+                                    geo::Axis::X => tok::gizmo_x(),
+                                    geo::Axis::Y => tok::gizmo_y(),
+                                    geo::Axis::Z => tok::gizmo_z(),
+                                }
+                            };
+                            (colour, if hot { 3.5 } else { 2.5 }, pts.into_iter().map(to_stage).collect())
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 // Crop bars at the middle of each side (on the shape), along the side.
                 let crop_bars: Vec<((f32, f32), (f32, f32))> = if knob.is_some() {
                     let (_, edges) = geo::crop_handles(&l);
@@ -1893,6 +2008,17 @@ impl StudioWindow {
                                 path.close();
                                 if let Ok(path) = path.build() {
                                     window.paint_path(path, c);
+                                }
+                            }
+                            for (colour, width, pts) in &rings {
+                                let mut path = PathBuilder::stroke(px(*width));
+                                path.move_to(at(pts[0]));
+                                for p in &pts[1..] {
+                                    path.line_to(at(*p));
+                                }
+                                path.close();
+                                if let Ok(path) = path.build() {
+                                    window.paint_path(path, *colour);
                                 }
                             }
                             for (from, to) in knob.into_iter().chain(tilt_knob) {
@@ -1974,6 +2100,31 @@ impl StudioWindow {
                         );
                     }
                 }
+                if gizmo_on {
+                    // The angles under the gizmo, in the rings' colours.
+                    // Above the frame, clear of the 3D knob below it.
+                    let (gx, _) = to_stage(geo::centre(&l));
+                    let top = outline.iter().map(|p| p.1).fold(f32::MAX, f32::min);
+                    stage = stage.child(
+                        div()
+                            .absolute()
+                            .left(px(gx - 75.))
+                            .top(px(top - 30.))
+                            .w(px(150.))
+                            .flex()
+                            .justify_center()
+                            .gap_2()
+                            .px_2()
+                            .py_0p5()
+                            .rounded(px(5.))
+                            .bg(tok::scrim())
+                            .text_size(px(11.))
+                            .font_family("Menlo")
+                            .child(div().text_color(tok::gizmo_x()).child(format!("X {:.0}°", l.tilt_x)))
+                            .child(div().text_color(tok::gizmo_y()).child(format!("Y {:.0}°", l.tilt_y)))
+                            .child(div().text_color(tok::gizmo_z()).child(format!("Z {:.0}°", l.rotation))),
+                    );
+                }
                 if let Some((_, (tx, ty))) = tilt_knob {
                     // A ring with a dot: "turn in space".
                     stage = stage.child(
@@ -1983,7 +2134,7 @@ impl StudioWindow {
                             .top(px(ty - 7.))
                             .size(px(14.))
                             .rounded_full()
-                            .bg(tok::canvas_selection_edge())
+                            .bg(if gizmo_on { tok::accent_primary() } else { tok::canvas_selection_edge() })
                             .border_2()
                             .border_color(tok::accent_primary())
                             .flex()

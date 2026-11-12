@@ -370,6 +370,60 @@ pub fn tilt_handle(l: &Layout, offset: f32) -> (f32, f32) {
     to_canvas(l, (0.0, l.height / 2.0 + offset))
 }
 
+/// A rotate-gizmo ring: which axis it turns around.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Axis {
+    /// Tilt around the horizontal axis (red).
+    X,
+    /// Tilt around the vertical axis (green).
+    Y,
+    /// Spin in the picture's plane: the 2D rotation (blue).
+    Z,
+}
+
+/// The rotate gizmo's rings, centred on the layer, radius `r` canvas units, as closed
+/// polylines in canvas coordinates. X and Y are the 3D circles they turn around, seen from the
+/// front: edge-on rings would be lines, so each keeps at least 30 % of its width to stay
+/// grabbable, and widens as the layer tilts.
+pub fn gizmo_rings(l: &Layout, r: f32) -> [(Axis, Vec<(f32, f32)>); 3] {
+    let (cx, cy) = centre(l);
+    let ring = |rx: f32, ry: f32| -> Vec<(f32, f32)> {
+        (0..48)
+            .map(|k| {
+                let a = (k as f32 / 48.0) * std::f32::consts::TAU;
+                let (x, y) = rotate((rx * a.cos(), ry * a.sin()), l.rotation);
+                (cx + x, cy + y)
+            })
+            .collect()
+    };
+    let open_x = l.tilt_y.to_radians().sin().abs().max(0.3);
+    let open_y = l.tilt_x.to_radians().sin().abs().max(0.3);
+    [(Axis::Z, ring(r, r)), (Axis::X, ring(r * open_x, r)), (Axis::Y, ring(r, r * open_y))]
+}
+
+/// Distance from `p` to the segment `a`–`b`.
+fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = dx * dx + dy * dy;
+    let t = if len > 0.0 { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len).clamp(0.0, 1.0) } else { 0.0 };
+    let (qx, qy) = (a.0 + t * dx, a.1 + t * dy);
+    ((p.0 - qx).powi(2) + (p.1 - qy).powi(2)).sqrt()
+}
+
+/// The ring under `p`, if any (within `tol`), nearest first.
+pub fn gizmo_hit(l: &Layout, r: f32, p: (f32, f32), tol: f32) -> Option<Axis> {
+    gizmo_rings(l, r)
+        .into_iter()
+        .filter_map(|(axis, pts)| {
+            let d = (0..pts.len())
+                .map(|i| segment_distance(p, pts[i], pts[(i + 1) % pts.len()]))
+                .fold(f32::INFINITY, f32::min);
+            (d <= tol).then_some((axis, d))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(axis, _)| axis)
+}
+
 /// An angle in (−180, 180].
 pub fn normalise_degrees(a: f32) -> f32 {
     let a = a.rem_euclid(360.0);
@@ -539,6 +593,22 @@ mod tests {
         let x = Layout { tilt_x: 60.0, ..flat };
         let o = projected_outline(&x);
         assert!((o[2].0 - o[3].0).abs() < (o[1].0 - o[0].0).abs());
+    }
+
+    #[test]
+    fn gizmo_rings_and_hits() {
+        // A flat 400×400 layer centred at (200, 200), rings of radius 100.
+        let l = Layout::boxed(0.0, 0.0, 400.0, 400.0);
+        assert_eq!(gizmo_hit(&l, 100.0, (300.0, 200.0), 4.0), Some(Axis::Z), "the blue ring's right side");
+        // Flat, the X ring is a tall narrow ellipse (30 % wide), the Y ring a wide flat one.
+        assert_eq!(gizmo_hit(&l, 100.0, (230.0, 200.0), 4.0), Some(Axis::X));
+        assert_eq!(gizmo_hit(&l, 100.0, (200.0, 230.0), 4.0), Some(Axis::Y));
+        assert_eq!(gizmo_hit(&l, 100.0, (200.0, 200.0), 4.0), None, "the middle is for moving");
+        // Tilting around Y opens the X ring.
+        let t = Layout { tilt_y: 90.0, ..l };
+        assert_eq!(gizmo_hit(&t, 100.0, (230.0, 200.0), 4.0), None);
+        let z_or_x = gizmo_hit(&t, 100.0, (300.0, 200.0), 4.0);
+        assert!(matches!(z_or_x, Some(Axis::X | Axis::Z)), "fully open, it lies on the blue ring");
     }
 
     #[test]
