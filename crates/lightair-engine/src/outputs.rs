@@ -160,7 +160,7 @@ impl Container {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EncoderConfig {
     /// libobs video encoder id (e.g. `com.apple.videotoolbox.videoencoder.ave.avc`, `obs_x264`).
     pub video_encoder: String,
@@ -202,6 +202,8 @@ struct Running {
     /// Heap-pinned key passed to signal callbacks; freed after disconnecting.
     signal_param: *mut OutputKey,
     signals: &'static [(&'static str, SignalCb)],
+    /// What its encoders were made for; outputs with the same key share them.
+    share: (usize, EncoderConfig),
 }
 
 unsafe impl Send for Running {}
@@ -425,6 +427,7 @@ unsafe fn start(
     encoders: &EncoderConfig,
     service: *mut sys::obs_service_t,
     video_output: *mut sys::video_t,
+    shared: Option<(*mut sys::obs_encoder_t, *mut sys::obs_encoder_t)>,
 ) -> Result<Running, String> {
     let name = match key {
         OutputKey::Recording => "Recording".to_string(),
@@ -437,7 +440,12 @@ unsafe fn start(
                 sys::obs_service_release(service);
             }
         };
-        let (video, audio) = match create_encoders(&name, encoders, video_output) {
+        // `shared` carries strong references to another output's encoders.
+        let made = match shared {
+            Some(pair) => Ok(pair),
+            None => create_encoders(&name, encoders, video_output),
+        };
+        let (video, audio) = match made {
             Ok(v) => v,
             Err(e) => {
                 release_service();
@@ -467,7 +475,8 @@ unsafe fn start(
         for (sig, cb) in signals {
             sys::signal_handler_connect(handler, c(sig).as_ptr(), Some(*cb), signal_param as *mut c_void);
         }
-        let running = Running { output, video, audio, service, signal_param, signals };
+        let share = (video_output as usize, encoders.clone());
+        let running = Running { output, video, audio, service, signal_param, signals, share };
         runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
         if !sys::obs_output_start(output) {
             let err = last_error(output).unwrap_or_else(|| "The output couldn't start.".into());
@@ -511,7 +520,15 @@ impl Outputs {
         settings.set_str("extension", cfg.container.extension());
         settings.set_bool("allow_spaces", true);
         let running = unsafe {
-            start(OutputKey::Recording, output_type, &settings, &cfg.encoders, std::ptr::null_mut(), video_output)?
+            start(
+                OutputKey::Recording,
+                output_type,
+                &settings,
+                &cfg.encoders,
+                std::ptr::null_mut(),
+                video_output,
+                None,
+            )?
         };
         runtime().update(OutputKey::Recording, |s| {
             s.path = Some(cfg.path.clone());
@@ -625,9 +642,31 @@ impl Outputs {
         let mut output_settings = Data::new();
         output_settings.set_bool("low_latency_mode_enabled", false);
         // On failure `start` releases everything it was given, the service included.
-        let running = unsafe { start(key, "rtmp_output", &output_settings, &cfg.encoders, service, video_output)? };
+        // Destinations with identical encoder settings on the same canvas share one encoder pair.
+        let share_key = (video_output as usize, cfg.encoders.clone());
+        let shared = self
+            .streams
+            .values()
+            .find(|r| r.share == share_key)
+            .map(|r| unsafe { (sys::obs_encoder_get_ref(r.video), sys::obs_encoder_get_ref(r.audio)) });
+        let shared = shared.filter(|(v, a)| !v.is_null() && !a.is_null());
+        let running =
+            unsafe { start(key, "rtmp_output", &output_settings, &cfg.encoders, service, video_output, shared)? };
         self.streams.insert(cfg.id, running);
         Ok(())
+    }
+
+    /// How many distinct video encoders the streams use (for the UI's "N encoders" note).
+    pub fn stream_encoder_count(&self) -> usize {
+        let mut seen: Vec<usize> = self.streams.values().map(|r| r.video as usize).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        seen.len()
+    }
+
+    /// The video encoder a stream uses (diagnostics and tests).
+    pub fn stream_video_encoder(&self, id: Id) -> Option<usize> {
+        self.streams.get(&id).map(|r| r.video as usize)
     }
 
     pub fn stop_stream(&mut self, id: Id) {
@@ -664,7 +703,15 @@ impl Outputs {
             .set_int("max_time_sec", cfg.seconds as i64)
             .set_int("max_size_mb", 0);
         let running = unsafe {
-            start(OutputKey::Clips, "replay_buffer", &settings, &cfg.encoders, std::ptr::null_mut(), video_output)?
+            start(
+                OutputKey::Clips,
+                "replay_buffer",
+                &settings,
+                &cfg.encoders,
+                std::ptr::null_mut(),
+                video_output,
+                None,
+            )?
         };
         *CLIPS_OUTPUT.lock() = Some(OutputPtr(running.output));
         self.clips = Some(running);

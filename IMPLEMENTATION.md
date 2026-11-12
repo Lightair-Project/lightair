@@ -62,12 +62,13 @@ Done:
 - End-to-end test, verified with ffprobe: a recording has H.264 + AAC of the right length, and a stream reaches a local ffmpeg RTMP server.
 - Output settings and destinations in the document (`outputs.json`); stream keys only in the Keychain.
 - Clips: a libobs replay buffer kept running while Clips is on (length and format per project); the Clip button saves the last seconds; a test saves a 3 s clip and probes it. libobs writes clips through OBS's `obs-ffmpeg-mux` helper, which `cargo xtask dev` / `bundle` link next to the executable.
+- Encoder sharing: destinations with identical encoder settings on the same canvas share one video and audio encoder (the Outputs panel shows "N destinations · M encoders" while live). A test streams to three local servers: two identical ones share, a different bitrate gets its own, and stopping one shared stream leaves the other running.
 - Recording pause/resume (the timer shows recorded time), markers as MP4/MOV chapters (⌘M), and split into a new file without a gap, from the title bar and the palette. A test checks with ffprobe that paused time is left out, the chapter is there, and the split produced a second file.
 - A headless self-test inside the app bundle (`LIGHTAIR_SELFTEST=camera`) confirms camera frames with Camera Studio attached.
 - UI: Record with live timer, Go live for every enabled destination, LIVE badge and live canvas border, two-click End stream, Outputs panel with recording status, destination rows (toggle, status, remove) and an add-destination form.
 
 Remaining:
-- Encoder sharing between destinations with identical settings; per-destination formats and bitrates.
+- Per-destination bitrates and encoder settings (sharing then splits automatically).
 - Go Live review sheet, stream manager (titles, categories), platform sign-in (with M11).
 - Clip library (browse, trim, share); virtual camera, NDI, SRT/WHIP, ISO and multitrack recording, markers for MKV (sidecar file), test recording.
 
