@@ -212,6 +212,25 @@ impl StudioWindow {
             Ok("settings") => self.toggle_settings(cx),
             Ok("palette") => self.open_palette(window, cx),
             Ok("perf") => self.perf_open = true,
+            Ok("rename") => {
+                // Rename the top object to "Renamed" and press Enter, as a person would.
+                let top = {
+                    let s = self.studio.read(cx);
+                    s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                };
+                self.select_layer(top, cx);
+                self.rename_selection(window, cx);
+                if let Some(r) = &self.renaming {
+                    r.input.update(cx, |i, cx| i.set_value("Renamed", window, cx));
+                }
+                cx.spawn_in(window, async move |_, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                    let _ = cx.update(|window, cx| {
+                        window.dispatch_keystroke(gpui_kit::Keystroke::parse("enter").unwrap(), cx);
+                    });
+                })
+                .detach();
+            }
             Ok("source") => {
                 let input = {
                     let s = self.studio.read(cx);
