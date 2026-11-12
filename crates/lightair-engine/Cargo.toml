@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 libobs-sys.workspace = true
 lightair-core.workspace = true
+lightair-audio.workspace = true
+uuid.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

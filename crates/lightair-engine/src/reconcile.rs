@@ -203,6 +203,8 @@ impl Reconciler {
                 Patch::TrackChanged { before, after } => self.update_track(before, after),
                 Patch::TrackRemoved(id) => self.remove_track(*id),
                 Patch::TrackOrder(_) => {}
+                // The audio engine takes the mixer from the project (docs/plans/audio-engine.md).
+                Patch::AudioSetup => {}
             }
         }
     }

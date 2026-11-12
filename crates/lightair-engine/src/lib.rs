@@ -4,6 +4,7 @@
 //! thread: every mutating libobs call happens there, in order (docs/03-architecture.md,
 //! "Threading model"). Other threads send jobs with [`Engine::call`] / [`Engine::post`].
 
+pub mod audio;
 pub mod displays;
 mod engine;
 mod log;

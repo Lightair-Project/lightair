@@ -391,6 +391,38 @@ impl StudioWindow {
                             )),
                     ));
                 }
+                Control::Track { key, label } => {
+                    let current = e.settings.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+                    let tracks: Vec<(String, String)> = self
+                        .studio
+                        .read(cx)
+                        .project()
+                        .tracks
+                        .iter()
+                        .map(|t| (t.id.0.to_string(), t.name.clone()))
+                        .collect();
+                    let mut row = div().flex().flex_wrap().gap_1().flex_1();
+                    for (n, (id, name)) in tracks.into_iter().enumerate() {
+                        let on = id == current;
+                        let cmd = set(with(&e.settings, key, json!(id)));
+                        row = row.child(
+                            div()
+                                .id(SharedString::from(format!("fx-track-{key}-{n}")))
+                                .px_2()
+                                .h(px(24.))
+                                .flex()
+                                .items_center()
+                                .rounded(px(5.))
+                                .text_size(px(11.))
+                                .cursor_pointer()
+                                .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                                .when(!on, |d| d.text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
+                                .child(name)
+                                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
+                        );
+                    }
+                    col = col.child(control_row(label, row));
+                }
                 Control::Switch { key, label, default } => {
                     let on = e.settings.get(key).and_then(Value::as_bool).unwrap_or(default);
                     let settings = with(&e.settings, key, json!(!on));
@@ -1012,6 +1044,11 @@ fn category_icon(c: Category) -> &'static str {
         Category::Blur => "droplet",
         Category::Distort => "waves-horizontal",
         Category::Keying => "square-dashed",
+        Category::Voice => "mic-vocal",
+        Category::Dynamics => "chevrons-down-up",
+        Category::Tone => "sliders-vertical",
+        Category::Space => "waves",
+        Category::Utility => "wrench",
     }
 }
 
