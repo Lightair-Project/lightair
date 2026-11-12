@@ -230,12 +230,56 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
         bin.exe = linked;
     }
 
+    // Tests that sample frames mid-animation need the machine to themselves: they run after
+    // the rest, one at a time. (Tests that count dropped frames skip that check while sharing.)
+    const ALONE: &[&str] = &["lightair-preview/transitions"];
+    let (alone, together): (Vec<TestBin>, Vec<TestBin>) =
+        bins.into_iter().partition(|b| ALONE.contains(&b.name.as_str()));
+
     let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
-    let queue = Arc::new(Mutex::new(bins.into_iter().collect::<std::collections::VecDeque<_>>()));
     let results = Arc::new(Mutex::new(Vec::new()));
+    run_tests(together, jobs, &args, &results);
+    run_tests(alone, 1, &args, &results);
+
+    let results = std::mem::take(&mut *results.lock().unwrap());
+    for (name, _, took, _, _) in &results {
+        times.insert(name.clone(), serde_json::json!(took.as_secs_f64()));
+    }
+    let _ = std::fs::write(&times_path, serde_json::to_string_pretty(&times)?);
+    let failed: Vec<_> = results.iter().filter(|r| !r.1).collect();
+    for (name, _, _, _, log) in &failed {
+        eprintln!("\n──── {name} ────\n{log}");
+    }
+    let passed: usize = results.iter().map(|r| r.3).sum();
+    let serial: Duration = results.iter().map(|r| r.2).sum();
+    eprintln!(
+        "\n{} programs, {passed} tests, {} failed · build {:.1}s, run {:.1}s (one after another: {:.1}s)",
+        results.len(),
+        failed.len(),
+        built.as_secs_f64(),
+        (started.elapsed() - built).as_secs_f64(),
+        serial.as_secs_f64(),
+    );
+    anyhow::ensure!(failed.is_empty(), "{} test program(s) failed", failed.len());
+    Ok(())
+}
+
+/// A test program's result: name, passed, time, tests passed, output.
+type TestResult = (String, bool, std::time::Duration, usize, String);
+
+/// Runs `bins` on `jobs` threads, adding to `results`.
+fn run_tests(
+    bins: Vec<TestBin>,
+    jobs: usize,
+    args: &[String],
+    results: &std::sync::Arc<std::sync::Mutex<Vec<TestResult>>>,
+) {
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+    let queue = Arc::new(Mutex::new(bins.into_iter().collect::<std::collections::VecDeque<_>>()));
     let workers: Vec<_> = (0..jobs)
         .map(|_| {
-            let (queue, results, args) = (queue.clone(), results.clone(), args.clone());
+            let (queue, results, args) = (queue.clone(), results.clone(), args.to_vec());
             std::thread::spawn(move || {
                 loop {
                     // Take the next one and let go of the lock before running it.
@@ -246,6 +290,8 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
                         .args(&args)
                         .current_dir(&bin.dir)
                         .env("CARGO_MANIFEST_DIR", &bin.dir)
+                        // Tests that measure frame timing skip that when sharing the GPU.
+                        .envs((jobs > 1).then_some(("LIGHTAIR_TESTS_SHARE_GPU", "1")))
                         // Camera and capture-card modules wait seconds on system services as
                         // they load; tests don't use them (the smoke test asks for every module).
                         .env(
@@ -282,26 +328,4 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
     for w in workers {
         let _ = w.join();
     }
-
-    let results = std::mem::take(&mut *results.lock().unwrap());
-    for (name, _, took, _, _) in &results {
-        times.insert(name.clone(), serde_json::json!(took.as_secs_f64()));
-    }
-    let _ = std::fs::write(&times_path, serde_json::to_string_pretty(&times)?);
-    let failed: Vec<_> = results.iter().filter(|r| !r.1).collect();
-    for (name, _, _, _, log) in &failed {
-        eprintln!("\n──── {name} ────\n{log}");
-    }
-    let passed: usize = results.iter().map(|r| r.3).sum();
-    let serial: Duration = results.iter().map(|r| r.2).sum();
-    eprintln!(
-        "\n{} programs, {passed} tests, {} failed · build {:.1}s, run {:.1}s (one after another: {:.1}s)",
-        results.len(),
-        failed.len(),
-        built.as_secs_f64(),
-        (started.elapsed() - built).as_secs_f64(),
-        serial.as_secs_f64(),
-    );
-    anyhow::ensure!(failed.is_empty(), "{} test program(s) failed", failed.len());
-    Ok(())
 }
