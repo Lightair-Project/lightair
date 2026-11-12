@@ -1741,7 +1741,6 @@ impl StudioWindow {
     }
 
     fn scenes_panel(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
-        let picker = self.transition_picker(project, cx).into_any_element();
         let studio = self.studio.read(cx);
         let selected = studio.selected_scene;
         let program = project.program;
@@ -1829,33 +1828,42 @@ impl StudioWindow {
                     move |m, _, cx| menus::scene_menu(id, m, &shell, cx)
                 })
         });
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .pt_1()
-            .child(
-                div()
-                    .id("scenes-scroll")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .gap_0p5()
-                    .overflow_y_scroll()
-                    .children(rows)
-                    // Empty space below: its own menu.
-                    .child(div().id("scenes-end").flex_1().min_h(px(24.)).context_menu({
-                        let shell = cx.entity().downgrade();
-                        move |m, _, _| menus::scenes_blank_menu(m, &shell)
-                    })),
-            )
-            .child(div().border_t_1().border_color(tok::border()).pt_2().child(picker))
+        div().flex().flex_col().size_full().pt_1().child(
+            div()
+                .id("scenes-scroll")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .gap_0p5()
+                .overflow_y_scroll()
+                .children(rows)
+                // Empty space below: its own menu.
+                .child(
+                    div()
+                        .id("scenes-end")
+                        .flex_1()
+                        .min_h(px(24.))
+                        .on_click(cx.listener(|this, _, _, cx| this.select_layer(None, cx)))
+                        .context_menu({
+                            let shell = cx.entity().downgrade();
+                            move |m, _, _| menus::scenes_blank_menu(m, &shell)
+                        }),
+                ),
+        )
     }
 
     fn format_tabs(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.format_id(project);
-        let mut bar = div().flex().items_center().gap_1().h(px(36.)).px_3().border_b_1().border_color(tok::border());
+        let mut bar = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(36.))
+            .px_3()
+            .bg(tok::bg_header())
+            .border_b_1()
+            .border_color(tok::border_header());
         for (i, f) in project.formats.iter().enumerate() {
             let id = f.id;
             let is_active = !self.side_by_side && id == active;
@@ -2742,17 +2750,59 @@ impl StudioWindow {
             }
             (Some(scene), Some(layer)) if layer.is_empty() => self.empty_inspector(&scene, &layer, &format, body, cx),
             (Some(scene), Some(layer)) => self.layer_inspector(project, &scene, &layer, &format, body, cx),
-            (Some(scene), None) => body
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(scene.name.clone()))
-                .child(div().text_color(tok::text_secondary()).child(format!(
+            (Some(scene), None) => {
+                let (sid, on_air) = (scene.id, project.program == Some(scene.id));
+                let header = div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .py_2()
+                    .child(ui::icon("layout-dashboard").size(px(16.)).text_color(tok::text_secondary()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(scene.name.clone()),
+                    )
+                    .when(on_air, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(tok::live())
+                                .child("ON AIR"),
+                        )
+                    })
+                    .child(
+                        ui::icon_button("delete-scene", "trash", tok::text_secondary())
+                            .tooltip(|w, cx| Tooltip::new("Delete scene").build(w, cx))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.exec(Command::RemoveScene { scene: sid }, cx)),
+                            ),
+                    );
+                let info = div().text_size(px(12.)).text_color(tok::text_secondary()).child(format!(
                     "{} layer{} · {}×{} @ {} fps",
                     scene.layers.len(),
                     if scene.layers.len() == 1 { "" } else { "s" },
                     format.width,
                     format.height,
                     format.fps_num / format.fps_den.max(1)
-                )))
-                .into_any_element(),
+                ));
+                // How scenes change on air (the same for every scene).
+                let transition = self
+                    .section("Transition", None, cx)
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(tok::text_tertiary())
+                            .child("How every scene change looks on air."),
+                    )
+                    .child(self.transition_picker(project, cx));
+                body.child(header).child(info).child(transition).into_any_element()
+            }
             _ => body.child(div().text_color(tok::text_tertiary()).child("Nothing selected")).into_any_element(),
         };
         div()

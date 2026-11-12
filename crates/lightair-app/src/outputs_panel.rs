@@ -370,7 +370,11 @@ impl gpui_kit::component::dock::Panel for OutputsPanel {
     }
 
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        "Outputs"
+        ui::panel_title("radio", "Outputs")
+    }
+
+    fn title_style(&self, _: &App) -> Option<gpui_kit::component::dock::TitleStyle> {
+        Some(ui::panel_header_style())
     }
 
     fn toolbar_buttons(
