@@ -74,9 +74,31 @@ impl Studio {
             last_clip: None,
             replays: Vec::new(),
         };
+        studio.migrate();
         studio.rebuild_engine();
         studio.sync_clips();
         studio
+    }
+
+    /// Brings an older project's effects up to date (saved, but not an undo step).
+    fn migrate(&mut self) {
+        let commands = lightair_core::catalog::migrate(self.doc.project());
+        if commands.is_empty() {
+            return;
+        }
+        for cmd in &commands {
+            if let Err(e) = self.doc.apply(cmd) {
+                tracing::warn!(%e, "couldn't update an effect");
+                continue;
+            }
+            if let Some(pkg) = &mut self.package
+                && let Err(e) = pkg.record(cmd)
+            {
+                tracing::warn!(%e, "couldn't save the updated effects");
+            }
+        }
+        self.doc = Document::new(self.doc.project().as_ref().clone());
+        tracing::info!(count = commands.len(), "effects updated to the effect stack");
     }
 
     /// Where the project lives on disk (`None` for an unsaved project).

@@ -10,10 +10,9 @@ use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Fit, Format, Input, Layer, Layout, Project, Scene, Shape, ShapeKind};
+use lightair_core::{Command, Fit, Format, Layer, Layout, Project, Scene, Shape, ShapeKind};
 
 use super::StudioWindow;
-use crate::camera_studio::{KIND as CAMERA_STUDIO, looks};
 use crate::ui::{self, tok};
 
 const HEADER_H: f32 = 34.0;
@@ -26,16 +25,6 @@ pub(super) struct BoundSlider {
     on_change: Rc<dyn Fn(f32) -> Command>,
     _events: Subscription,
 }
-
-/// Skin controls: (setting key, label, default, signed).
-const SKIN: &[(&str, &str, f32, bool)] = &[
-    ("smooth", "Smooth", 50.0, false),
-    ("foundation", "Foundation", 20.0, false),
-    ("skin_tone", "Skin tone", 0.0, true),
-    ("redness", "Redness", 0.0, false),
-    ("shadows", "Dark circles", 0.0, false),
-    ("eyelight", "Bright eyes", 30.0, false),
-];
 
 impl StudioWindow {
     /// A section with a header that collapses it (remembered per title). `action` sits at the
@@ -500,212 +489,10 @@ impl StudioWindow {
                 col = col.child(content);
             }
             col = col.child(self.effects_section(input, cx));
-            if let Some(cs) = self.camera_studio_compact(input, cx) {
-                col = col.child(cs);
-            }
         }
         if project.formats.len() > 1 {
             col = col.child(self.formats_section(project, layer, sid, cx));
         }
         col.into_any_element()
-    }
-
-    /// Camera Studio for a camera input: on/off and the look in one row, skin sliders below,
-    /// every look one click away in a grid.
-    fn camera_studio_compact(&self, input: &Input, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let Some(effect) = input.effects.iter().find(|e| e.kind == CAMERA_STUDIO).cloned() else {
-            let cmd = crate::camera_studio::is_camera(&input.kind)
-                .then(|| crate::camera_studio::ensure_effect(input))
-                .flatten()?;
-            return Some(
-                self.section("Camera Studio", None, cx)
-                    .child(
-                        Button::new("add-camera-studio")
-                            .label("Turn on Camera Studio")
-                            .icon(ui::icon("sparkles"))
-                            .small()
-                            .outline()
-                            .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
-                    )
-                    .into_any_element(),
-            );
-        };
-        let (iid, eid, on) = (input.id, effect.id, effect.enabled);
-        let look = effect.settings.get("lightair_look").and_then(|v| v.as_str()).map(str::to_string);
-        let switch = div()
-            .id("cs-toggle")
-            .w(px(30.))
-            .h(px(18.))
-            .rounded_full()
-            .cursor_pointer()
-            .bg(if on { tok::interactive() } else { tok::border_strong() })
-            .child(div().size(px(14.)).m(px(2.)).rounded_full().bg(tok::bg_app()).when(on, |d| d.ml(px(14.))))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                this.exec(Command::SetInputEffectEnabled { input: iid, effect: eid, enabled: !on }, cx)
-            }));
-        let mut col = self.section("Camera Studio", Some(switch.into_any_element()), cx).child(
-            div()
-                .id("cs-look")
-                .flex()
-                .items_center()
-                .gap_2()
-                .h(px(34.))
-                .px_2()
-                .rounded(px(6.))
-                .bg(tok::bg_raised())
-                .cursor_pointer()
-                .hover(|d| d.bg(tok::bg_selected()))
-                .child(ui::icon("sparkles").size(px(14.)).text_color(tok::text_secondary()))
-                .child(div().flex_1().child(look.unwrap_or_else(|| "Custom".into())))
-                .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("Change look"))
-                .child(ui::icon("chevron-right").size(px(12.)).text_color(tok::text_tertiary()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.looks_for = Some((iid, eid));
-                    cx.notify();
-                })),
-        );
-        for (key, label, default, signed) in SKIN {
-            let value = effect.settings.get(*key).and_then(|v| v.as_f64()).map_or(*default, |v| v as f32);
-            let settings = effect.settings.clone();
-            let key_s = *key;
-            let slider = self.slider(
-                format!("cs:{eid}:{key}"),
-                (if *signed { -100.0 } else { 0.0 }, 100.0, 1.0),
-                value,
-                move |v| {
-                    let mut s = settings.clone();
-                    s[key_s] = (v.round() as i64).into();
-                    if let Some(obj) = s.as_object_mut() {
-                        obj.remove("lightair_look");
-                    }
-                    Command::SetInputEffectSettings { input: iid, effect: eid, settings: s }
-                },
-                cx,
-            );
-            col = col.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().w(px(84.)).text_size(px(12.)).text_color(tok::text_secondary()).child(*label))
-                    .child(div().flex_1().child(slider))
-                    .child(
-                        div()
-                            .w(px(28.))
-                            .text_right()
-                            .text_size(px(11.))
-                            .font_family("Menlo")
-                            .text_color(tok::text_tertiary())
-                            .child(format!("{value:.0}")),
-                    ),
-            );
-        }
-        Some(col.into_any_element())
-    }
-
-    /// The look picker: every look, grouped, as a grid.
-    pub(super) fn looks_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (iid, eid) = self.looks_for?;
-        let project = self.studio.read(cx).project().clone();
-        let current = project
-            .inputs
-            .get(&iid)
-            .and_then(|i| i.effects.iter().find(|e| e.id == eid))
-            .and_then(|e| e.settings.get("lightair_look").and_then(|v| v.as_str()).map(str::to_string));
-        let mut body = div().id("looks-body").flex().flex_col().gap_3().overflow_y_scroll().flex_1().min_h_0();
-        for (ci, (category, list)) in looks().iter().enumerate() {
-            let mut grid = div().grid().grid_cols(3).gap_1p5();
-            for (li, look) in list.iter().enumerate() {
-                let mut settings = look.settings.clone();
-                settings["lightair_look"] = look.name.clone().into();
-                let label = look.name.clone();
-                let selected = current.as_deref() == Some(look.name.as_str());
-                grid = grid.child(
-                    div()
-                        .id(("look", ci * 100 + li))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px(40.))
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(if selected { tok::accent_primary() } else { tok::border() })
-                        .bg(if selected { tok::bg_selected() } else { tok::bg_raised() })
-                        .cursor_pointer()
-                        .hover(|d| d.bg(tok::bg_selected()))
-                        .text_size(px(12.))
-                        .child(label.clone())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let commands = vec![
-                                Command::SetInputEffectSettings { input: iid, effect: eid, settings: settings.clone() },
-                                Command::SetInputEffectEnabled { input: iid, effect: eid, enabled: true },
-                            ];
-                            this.exec(Command::Batch { label: format!("Apply look {label}"), commands }, cx);
-                        })),
-                );
-            }
-            body = body.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1p5()
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(tok::text_tertiary())
-                            .child(category.to_uppercase()),
-                    )
-                    .child(grid),
-            );
-        }
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .justify_center()
-                .items_center()
-                .bg(tok::scrim())
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.looks_for = None;
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    div()
-                        .id("looks")
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .w(px(520.))
-                        .h(px(600.))
-                        .p_4()
-                        .rounded(px(14.))
-                        .bg(tok::bg_panel())
-                        .border_1()
-                        .border_color(tok::border_strong())
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("Looks"))
-                                .child(Button::new("looks-done").label("Done").small().primary().on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.looks_for = None;
-                                        cx.notify();
-                                    }),
-                                )),
-                        )
-                        .child(body),
-                )
-                .into_any_element(),
-        )
     }
 }
