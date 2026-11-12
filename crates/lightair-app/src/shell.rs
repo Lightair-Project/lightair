@@ -20,6 +20,7 @@ use serde_json::json;
 mod golive;
 mod layer_props;
 mod palette;
+mod settings;
 
 use crate::geometry::{self as geo, CORNERS, Corner};
 use crate::mixer::MixerPanel;
@@ -46,7 +47,8 @@ actions!(
         OpenPalette,
         Take,
         AddMarker,
-        SelectAll
+        SelectAll,
+        OpenSettings
     ]
 );
 
@@ -66,6 +68,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-enter", Take, Some("Studio")),
         KeyBinding::new("cmd-m", AddMarker, Some("Studio")),
         KeyBinding::new("cmd-a", SelectAll, Some("Studio")),
+        KeyBinding::new("cmd-,", OpenSettings, Some("Studio")),
     ]);
 }
 
@@ -137,6 +140,8 @@ pub struct StudioWindow {
     /// whether it adds to the selection (⇧).
     marquee: Option<Marquee>,
     /// The Add format row, with its custom width and height fields.
+    settings_open: bool,
+    prefs: crate::prefs::Preferences,
     format_menu:
         Option<(Entity<gpui_kit::component::input::InputState>, Entity<gpui_kit::component::input::InputState>)>,
 }
@@ -180,6 +185,8 @@ impl StudioWindow {
             go_live_sheet: None,
             marquee: None,
             format_menu: None,
+            settings_open: false,
+            prefs: crate::prefs::load_from(&crate::prefs::path()),
         }
     }
 
@@ -836,6 +843,7 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &Deselect, _, cx| this.select_layer(None, cx)))
             .on_action(cx.listener(|this, _: &RenameSelection, window, cx| this.rename_selection(window, cx)))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
                 this.studio.update(cx, |s, cx| {
                     let p = s.project().clone();
@@ -877,6 +885,7 @@ impl Render for StudioWindow {
             )
             .child(self.status_bar(cx))
             .children(self.go_live_overlay(cx))
+            .children(self.settings_overlay(cx))
             .children(self.palette_overlay(cx))
     }
 }
@@ -1020,6 +1029,11 @@ impl StudioWindow {
                         .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.replay_last_clip(cx)))),
                 )
             })
+            .child(
+                ui::icon_button("open-settings", "settings", tok::text_secondary())
+                    .tooltip(|w, cx| Tooltip::new("Settings (⌘,)").build(w, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
+            )
     }
 
     fn left_column(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
