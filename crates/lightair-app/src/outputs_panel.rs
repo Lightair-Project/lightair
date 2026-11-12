@@ -22,6 +22,7 @@ struct NewDestination {
 pub struct OutputsPanel {
     studio: Entity<Studio>,
     form: Option<NewDestination>,
+    focus: FocusHandle,
 }
 
 pub fn elapsed(since: Instant) -> String {
@@ -82,7 +83,7 @@ fn format_badge(id: impl Into<ElementId>, project: &lightair_core::Project, form
 impl OutputsPanel {
     pub fn new(studio: Entity<Studio>, cx: &mut Context<Self>) -> Self {
         cx.observe(&studio, |_, _, cx| cx.notify()).detach();
-        Self { studio, form: None }
+        Self { studio, form: None, focus: cx.focus_handle() }
     }
 
     fn open_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -307,13 +308,11 @@ impl Render for OutputsPanel {
                 )
         });
 
-        let add = ui::icon_button("add-destination", "plus", tok::text_secondary())
-            .on_click(cx.listener(|this, _, window, cx| this.open_form(window, cx)));
         div()
             .flex()
             .flex_col()
             .pb_2()
-            .child(ui::panel_header("Outputs", Some(add.into_any_element())))
+            .pt_1()
             .child(list)
             .children(form)
             .when(project.outputs.destinations.is_empty() && self.form.is_none(), |d| {
@@ -332,5 +331,55 @@ impl Render for OutputsPanel {
                     cx.open_url(&format!("file://{}", folder.to_string_lossy()))
                 }),
             ))
+    }
+}
+
+// ---------------------------------------------------------------- dock panel
+impl gpui_kit::component::dock::BasePanel for OutputsPanel {
+    fn panel_name(&self) -> &'static str {
+        "outputs"
+    }
+}
+
+impl gpui_kit::component::dock::Panel for OutputsPanel {
+    fn tab_name(&self, _: &App) -> Option<SharedString> {
+        Some("Outputs".into())
+    }
+
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        "Outputs"
+    }
+
+    fn toolbar_buttons(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<gpui_kit::component::button::Button>> {
+        use gpui_kit::component::Sizable;
+        use gpui_kit::component::button::ButtonVariants;
+        Some(vec![
+            gpui_kit::component::button::Button::new("outputs-add")
+                .icon(ui::icon("plus"))
+                .ghost()
+                .xsmall()
+                .tooltip("Add destination")
+                .on_click(cx.listener(|this, _, window, cx| this.open_form(window, cx))),
+        ])
+    }
+
+    fn zoom_control(&self, _: &App) -> Option<gpui_kit::component::dock::PanelControl> {
+        None
+    }
+
+    fn inner_padding(&self, _: &App) -> bool {
+        false
+    }
+}
+
+impl EventEmitter<gpui_kit::component::dock::PanelEvent> for OutputsPanel {}
+
+impl Focusable for OutputsPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
     }
 }

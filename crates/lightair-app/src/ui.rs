@@ -121,21 +121,6 @@ pub fn input_icon(kind: &str) -> &'static str {
     }
 }
 
-/// Panel header: title on the left, optional action on the right.
-pub fn panel_header(title: &'static str, action: Option<AnyElement>) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .h(px(40.))
-        .px_3()
-        .text_size(px(13.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(tok::text())
-        .child(title)
-        .children(action)
-}
-
 /// Small square icon button (24×24 hit target).
 pub fn icon_button(id: impl Into<ElementId>, name: &str, color: Hsla) -> Stateful<Div> {
     div()

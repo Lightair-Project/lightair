@@ -93,9 +93,20 @@ fn bundle() -> anyhow::Result<()> {
             std::os::unix::fs::symlink(entry.path(), to.join(&name))?;
         }
     }
-    // Sign the bundle itself (ad hoc) so macOS privacy settings identify Lightair. Nested OBS
-    // code keeps OBS's own signatures; nothing outside target/ is modified.
-    run(Command::new("codesign").args(["--force", "--sign", "-"]).arg(app.parent().unwrap()))?;
+    // Sign the bundle itself so macOS privacy settings identify Lightair. Nested OBS code keeps
+    // OBS's own signatures; nothing outside target/ is modified.
+    //
+    // Ad hoc signatures change with every build, so macOS asks for camera, microphone and screen
+    // permission again after each rebuild. Set LIGHTAIR_SIGN_IDENTITY to a code signing identity
+    // (e.g. "Apple Development") to keep one stable identity and keep the permissions.
+    let identity = std::env::var("LIGHTAIR_SIGN_IDENTITY").ok().filter(|s| !s.is_empty());
+    let identity = identity.as_deref().unwrap_or("-");
+    run(Command::new("codesign").args(["--force", "--sign", identity]).arg(app.parent().unwrap()))?;
+    if identity == "-" {
+        eprintln!(
+            "signed ad hoc: macOS will ask for permissions again after rebuilds (set LIGHTAIR_SIGN_IDENTITY to keep them)"
+        );
+    }
     eprintln!("built {}", app.parent().unwrap().display());
     Ok(())
 }

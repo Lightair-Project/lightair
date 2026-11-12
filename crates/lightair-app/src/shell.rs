@@ -17,6 +17,7 @@ use lightair_core::{
 use lightair_preview::Preview;
 use serde_json::json;
 
+mod docking;
 mod golive;
 mod layer_props;
 mod palette;
@@ -162,6 +163,8 @@ pub struct StudioWindow {
     /// The Add format row, with its custom width and height fields.
     settings_open: bool,
     prefs: crate::prefs::Preferences,
+    /// Resizable, collapsible, rearrangeable panels (built on first render).
+    dock: Option<Entity<gpui_kit::component::dock::DockArea>>,
     format_menu:
         Option<(Entity<gpui_kit::component::input::InputState>, Entity<gpui_kit::component::input::InputState>)>,
 }
@@ -206,6 +209,7 @@ impl StudioWindow {
             marquee: None,
             format_menu: None,
             settings_open: false,
+            dock: None,
             prefs: crate::prefs::load_from(&crate::prefs::path()),
         }
     }
@@ -852,6 +856,7 @@ impl StudioWindow {
 impl Render for StudioWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.request_animation_frame();
+        self.ensure_dock(window, cx);
         self.sync_previews(cx);
         self.sync_layer_props(window, cx);
         let studio = self.studio.read(cx);
@@ -912,15 +917,7 @@ impl Render for StudioWindow {
             .text_color(tok::text())
             .text_size(px(13.))
             .child(self.title_bar(&project, cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.left_column(&project, cx))
-                    .child(self.centre(&project, cx))
-                    .child(self.right_column(&project, cx)),
-            )
+            .child(div().flex().flex_1().min_h_0().children(self.dock.clone()))
             .child(self.status_bar(cx))
             .children(self.go_live_overlay(cx))
             .children(self.settings_overlay(cx))
@@ -1074,18 +1071,18 @@ impl StudioWindow {
             )
     }
 
-    fn left_column(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .w(px(264.))
-            .h_full()
-            .border_r_1()
-            .border_color(tok::border())
-            .bg(tok::bg_panel())
-            .child(self.layers_panel(project, cx))
-            .child(div().h(px(1.)).bg(tok::border()))
-            .child(self.scenes_panel(project, cx))
+    fn toggle_add_menu(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.add_menu = !self.add_menu;
+        // OBS 33's camera source can't list devices without an instance; the legacy source lists
+        // the same AVFoundation device ids.
+        if self.add_menu {
+            self.camera_devices = self
+                .studio
+                .read(cx)
+                .engine()
+                .call(|_| lightair_engine::obs::property_items("av_capture_input_v2", "device"));
+        }
+        cx.notify();
     }
 
     fn layers_panel(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1094,23 +1091,7 @@ impl StudioWindow {
         let scene = studio.selected_scene.and_then(|id| project.scene(id)).cloned();
         let selected = studio.selected_layer;
         let also = studio.also_selected.clone();
-        let add = ui::icon_button("add-layer", "plus", tok::text_secondary())
-            .tooltip(|w, cx| Tooltip::new("Add layer").build(w, cx))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.add_menu = !this.add_menu;
-                // OBS 33's camera source can't list devices without an instance; the legacy source
-                // lists the same AVFoundation device ids.
-                if this.add_menu {
-                    this.camera_devices = this
-                        .studio
-                        .read(cx)
-                        .engine()
-                        .call(|_| lightair_engine::obs::property_items("av_capture_input_v2", "device"));
-                }
-                cx.notify();
-            }));
-        let mut col =
-            div().flex().flex_col().flex_1().min_h_0().child(ui::panel_header("Layers", Some(add.into_any_element())));
+        let mut col = div().flex().flex_col().size_full().pt_1();
         if self.add_menu {
             col = col.child(self.add_menu(cx));
         }
@@ -1389,13 +1370,6 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let selected = studio.selected_scene;
         let program = project.program;
-        let add = ui::icon_button("add-scene", "plus", tok::text_secondary())
-            .tooltip(|w, cx| Tooltip::new("Add scene").build(w, cx))
-            .on_click(cx.listener(|this, _, _, cx| this.add_scene(cx)));
-        let import = ui::icon_button("import-obs", "import", tok::text_secondary())
-            .tooltip(|w, cx| Tooltip::new("Import OBS scenes…").build(w, cx))
-            .on_click(cx.listener(|this, _, window, cx| this.import_obs(window, cx)));
-        let actions = div().flex().gap_1().child(import).child(add);
         let rows = project.scenes.iter().enumerate().map(|(i, scene)| {
             let id = scene.id;
             let on_air = program == Some(id);
@@ -1469,14 +1443,20 @@ impl StudioWindow {
         div()
             .flex()
             .flex_col()
-            .h(px(280.))
-            .child(ui::panel_header("Scenes", Some(actions.into_any_element())))
-            .child(picker)
-            .child(div().id("scenes-scroll").flex().flex_col().gap_0p5().overflow_y_scroll().children(rows))
-    }
-
-    fn centre(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
-        div().flex().flex_col().flex_1().min_w_0().child(self.canvas(project, cx)).child(self.mixer.clone())
+            .size_full()
+            .pt_1()
+            .child(
+                div()
+                    .id("scenes-scroll")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_0p5()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+            .child(div().border_t_1().border_color(tok::border()).pt_2().child(picker))
     }
 
     fn format_tabs(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1612,7 +1592,7 @@ impl StudioWindow {
                     cx.notify();
                 })),
         );
-        let Some((w_in, h_in)) = &self.format_menu else { return div().child(bar) };
+        let Some((w_in, h_in)) = &self.format_menu else { return div().w_full().child(bar) };
         let has = |w: u32, h: u32| project.formats.iter().any(|f| f.width == w && f.height == h);
         let mut row =
             div().flex().flex_wrap().items_center().gap_1().px_3().py_2().border_b_1().border_color(tok::border());
@@ -1652,7 +1632,7 @@ impl StudioWindow {
                     }
                 },
             )));
-        div().child(bar).child(row)
+        div().w_full().child(bar).child(row)
     }
 
     /// One format's stage: live preview plus selection overlay and guides.
@@ -1876,7 +1856,7 @@ impl StudioWindow {
             Some(column) => well.child(column),
             None => well,
         };
-        div().flex().flex_col().flex_1().min_h_0().child(self.format_tabs(project, cx)).child(well)
+        div().flex().flex_col().size_full().child(self.format_tabs(project, cx)).child(well)
     }
 
     /// Per-format visibility, and copying this layer's layout from another format.
@@ -1990,20 +1970,6 @@ impl StudioWindow {
                     .text_color(tok::text_tertiary())
                     .child("Clicking a scene selects it for editing; Take puts it on air with the current transition."),
             )
-    }
-
-    fn right_column(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .w(px(300.))
-            .h_full()
-            .border_l_1()
-            .border_color(tok::border())
-            .bg(tok::bg_panel())
-            .child(self.outputs.clone())
-            .child(div().h(px(1.)).bg(tok::border()))
-            .child(self.inspector(project, cx))
     }
 
     /// Several layers selected: align them, or delete them.
@@ -2249,7 +2215,7 @@ impl StudioWindow {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .child(ui::panel_header("Inspector", None))
+            .pt_2()
             .child(div().id("inspector-scroll").flex_1().min_h_0().pb_3().overflow_y_scroll().child(content))
     }
 
