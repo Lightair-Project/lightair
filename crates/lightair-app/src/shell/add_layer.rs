@@ -179,7 +179,8 @@ impl StudioWindow {
                 .child(text.to_uppercase())
         };
 
-        let mut body = div().id("add-layer-body").flex().flex_col().flex_1().min_h_0().overflow_y_scroll().px_2();
+        let mut body =
+            div().id("add-layer-body").flex().flex_col().flex_shrink(1.).min_h_0().overflow_y_scroll().px_2();
         match state.step {
             Step::Types => {
                 for group in ["Capture", "Media", "Graphics"] {
@@ -274,6 +275,7 @@ impl StudioWindow {
                 .inset_0()
                 .flex()
                 .justify_center()
+                .items_start()
                 .pt(px(80.))
                 .bg(tok::scrim())
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_add_layer(window, cx)))
