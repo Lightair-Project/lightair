@@ -197,7 +197,7 @@ impl StudioWindow {
             area.set_dock(
                 DockPlacement::Right,
                 DockLayout::v_split()
-                    .child(DockLayout::tabs().panel_view(panel_handle(outputs), cx), Some(px(220.)))
+                    .child(DockLayout::tabs().panel_view(panel_handle(outputs), cx), Some(px(320.)))
                     .child(DockLayout::tabs().panel_view(panel_handle(inspector), cx), None),
                 window,
                 cx,
@@ -212,6 +212,36 @@ impl StudioWindow {
             Ok("settings") => self.toggle_settings(cx),
             Ok("palette") => self.open_palette(window, cx),
             Ok("perf") => self.perf_open = true,
+            Ok("dests") => {
+                // Sample destinations (no keys) to see the list.
+                for (name, server, platform, on) in [
+                    ("YouTube", "rtmps://a.rtmps.youtube.com:443/live2", "youtube", true),
+                    ("Twitch", "rtmp://aps10.contribute.live-video.net/app/", "twitch", true),
+                    ("Kick", "rtmps://example.global-contribute.live-video.net/app/", "kick", false),
+                ] {
+                    let destination = lightair_core::Destination {
+                        id: lightair_core::Id::new(),
+                        name: name.into(),
+                        server: server.into(),
+                        enabled: on,
+                        format: None,
+                        platform: Some(platform.into()),
+                    };
+                    self.exec(lightair_core::Command::AddDestination { destination }, cx);
+                }
+            }
+            Ok("dest-tiktok-vertical") => {
+                if let Some(p) = crate::platforms::by_id("tiktok") {
+                    self.outputs.update(cx, |o, cx| {
+                        o.choose(p, window, cx);
+                        o.request_vertical(cx);
+                    });
+                }
+            }
+            Ok(hook) if hook.starts_with("dest-") => match crate::platforms::by_id(&hook[5..]) {
+                Some(p) => self.outputs.update(cx, |o, cx| o.choose(p, window, cx)),
+                None => self.outputs.update(cx, |o, cx| o.open_picker(cx)),
+            },
             Ok("rename") => {
                 // Rename the top object to "Renamed" and press Enter, as a person would.
                 let top = {

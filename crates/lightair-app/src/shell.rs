@@ -353,6 +353,12 @@ impl StudioWindow {
         window.focus(&focus, cx);
         let mixer = cx.new(|cx| MixerPanel::new(studio.clone(), cx));
         let outputs = cx.new(|cx| OutputsPanel::new(studio.clone(), cx));
+        // Its Add destination dialog is drawn over the whole window.
+        cx.observe(&outputs, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&outputs, |this, _, _: &crate::outputs_panel::AddVerticalFormat, cx| {
+            this.add_format(Format::vertical(), cx)
+        })
+        .detach();
         let primary = studio.read(cx).project().primary_format().id;
         Self {
             previews: HashMap::from([(primary, preview)]),
@@ -1521,6 +1527,7 @@ impl Render for StudioWindow {
             .children(self.add_layer_overlay(cx))
             .children(self.looks_overlay(cx))
             .children(self.source_picker_overlay(cx))
+            .children(self.outputs.update(cx, |o, cx| o.dialog(cx)))
             .children(self.go_live_overlay(cx))
             .children(self.settings_overlay(cx))
             .children(self.palette_overlay(cx))
