@@ -1010,6 +1010,16 @@ impl StudioWindow {
                     .tooltip(if ready { "Save the last seconds as a clip" } else { "Turn on Clips in Outputs" })
                     .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.save_clip(cx))))
             })
+            .when(self.studio.read(cx).last_clip.is_some(), |d| {
+                d.child(
+                    Button::new("replay")
+                        .label("Replay")
+                        .small()
+                        .ghost()
+                        .tooltip("Play the last clip on the live scene")
+                        .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.replay_last_clip(cx)))),
+                )
+            })
     }
 
     fn left_column(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {

@@ -68,13 +68,14 @@ Done:
 - Go Live review sheet: choose destinations, then plain-language checks (stream keys, encoder, rendering keeping up, upload estimate with shared encoders, each mic's level over the last 10 s for silence or clipping, disk space when also recording); blocking problems disable Go live. The checks are a pure, tested function; mic windows come from a lock-free loudest-peak value on each meter.
 - Encoder sharing: destinations with identical encoder settings on the same canvas share one video and audio encoder (the Outputs panel shows "N destinations · M encoders" while live). A test streams to three local servers: two identical ones share, a different bitrate gets its own, and stopping one shared stream leaves the other running.
 - Recording pause/resume (the timer shows recorded time), markers as MP4/MOV chapters (⌘M), and split into a new file without a gap, from the title bar and the palette. A test checks with ffprobe that paused time is left out, the chapter is there, and the split produced a second file.
+- Replay: after a clip is saved, Replay (title bar or palette) plays it full-frame on top of the live scene; the replay layer removes itself when the clip ends.
 - A headless self-test inside the app bundle (`LIGHTAIR_SELFTEST=camera`) confirms camera frames with Camera Studio attached.
 - UI: Record with live timer, Go live for every enabled destination, LIVE badge and live canvas border, two-click End stream, Outputs panel with recording status, destination rows (toggle, status, remove) and an add-destination form.
 
 Remaining:
 - Per-destination bitrates and encoder settings (sharing then splits automatically).
 - Stream manager (titles, categories) and platform sign-in (with M11); camera-frozen and bandwidth checks in the Go Live sheet; a setting to skip the sheet.
-- Clip library (browse, trim, share); virtual camera, NDI, SRT listener mode and latency settings, a WHIP test against a real server, ISO and multitrack recording, markers for MKV (sidecar file), test recording.
+- Clip library (browse, trim, share), replay speed and scrubbing; virtual camera, NDI, SRT listener mode and latency settings, a WHIP test against a real server, ISO and multitrack recording, markers for MKV (sidecar file), test recording.
 
 ## M7 · Formats 🔨
 Done:

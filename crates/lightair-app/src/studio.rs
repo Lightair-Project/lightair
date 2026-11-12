@@ -32,6 +32,9 @@ pub struct Studio {
     clips_seen: u32,
     /// Frames libobs lagged since the previous stats sample (health is about now, not startup).
     pub recent_lagged: u32,
+    /// The newest saved clip, and replays playing on the canvas (scene, layer, input).
+    pub last_clip: Option<PathBuf>,
+    replays: Vec<(Id, Id, Id)>,
     /// Microphone tracks' loudest peak (dBFS) for each of the last ten seconds.
     mic_history: std::collections::HashMap<Id, std::collections::VecDeque<f32>>,
     /// Imported layers whose size was guessed, waiting for their sources to report a size.
@@ -65,6 +68,8 @@ impl Studio {
             recent_lagged: 0,
             refit: None,
             mic_history: Default::default(),
+            last_clip: None,
+            replays: Vec::new(),
         };
         studio.rebuild_engine();
         studio.sync_clips();
@@ -133,6 +138,69 @@ impl Studio {
             Err(e) => self.issue = Some(format!("Couldn't import: {e}").into()),
         }
         cx.notify();
+    }
+
+    /// Plays the newest clip full-frame on top of the live scene; it removes itself when done.
+    pub fn replay_last_clip(&mut self, cx: &mut Context<Self>) {
+        let (Some(path), Some(scene)) = (self.last_clip.clone(), self.project().program) else {
+            self.issue = Some("Save a clip first, then replay it.".into());
+            cx.notify();
+            return;
+        };
+        let p = self.project().clone();
+        let input = lightair_core::Input::new(
+            "Replay",
+            "ffmpeg_source",
+            serde_json::json!({
+                "local_file": path.to_string_lossy(),
+                "is_local_file": true,
+                "looping": false,
+                "restart_on_activate": true,
+                "clear_on_media_end": true,
+            }),
+        );
+        let layouts: Vec<(Id, lightair_core::Layout)> = p
+            .formats
+            .iter()
+            .map(|f| (f.id, lightair_core::Layout::boxed(0.0, 0.0, f.width as f32, f.height as f32)))
+            .collect();
+        let layer = lightair_core::Layer::new("Replay", input.id, layouts);
+        let (layer_id, input_id) = (layer.id, input.id);
+        let command = Command::Batch {
+            label: "Replay clip".into(),
+            commands: vec![Command::AddInput { input }, Command::AddLayer { scene, layer, index: None }],
+        };
+        if self.execute(command, cx).is_ok() {
+            self.replays.push((scene, layer_id, input_id));
+        }
+    }
+
+    /// Removes replays whose clip has finished (called on the stats tick).
+    pub fn end_replays(&mut self, cx: &mut Context<Self>) {
+        let mut finished = Vec::new();
+        for (scene, layer, input) in &self.replays {
+            let id = *input;
+            let state = self.engine.call(move |s| s.reconciler.media_status(id)).map(|s| s.state);
+            if matches!(
+                state,
+                None | Some(lightair_engine::media::MediaState::Ended | lightair_engine::media::MediaState::Error)
+            ) {
+                finished.push((*scene, *layer, *input));
+            }
+        }
+        if finished.is_empty() {
+            return;
+        }
+        self.replays.retain(|r| !finished.contains(r));
+        let p = self.project().clone();
+        let commands: Vec<Command> = finished
+            .into_iter()
+            .filter(|(scene, layer, _)| p.scene(*scene).is_some_and(|s| s.layer(*layer).is_some()))
+            .flat_map(|(scene, layer, input)| [Command::RemoveLayer { scene, layer }, Command::RemoveInput { input }])
+            .collect();
+        if !commands.is_empty() {
+            let _ = self.execute(Command::Batch { label: "End replay".into(), commands }, cx);
+        }
     }
 
     /// Runs the end action of countdowns that just ended ("Then go to" a scene).
@@ -291,6 +359,7 @@ impl Studio {
             self.clips_seen = status.saved_clips;
             let name = status.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
             self.issue = Some(format!("Clip saved: {}", name.unwrap_or_default()).into());
+            self.last_clip = status.path.clone();
         }
     }
 
