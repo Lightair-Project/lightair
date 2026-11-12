@@ -5,7 +5,7 @@ use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
 use lightair_core::{Command, Document, Input, Layer, Layout, Project, Scene, diff};
-use lightair_engine::outputs::{Container, OutputKey, OutputState, RecordingConfig, default_encoders, runtime};
+use lightair_engine::outputs::{Container, OutputState, RecordingConfig, default_encoders, runtime};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -63,33 +63,32 @@ fn pause_marker_split() {
 
     let first = dir.join("take.mp4");
     let cfg = RecordingConfig {
+        canvas: lightair_core::Id::new(),
+        label: None,
         path: first.clone(),
         container: Container::HybridMp4,
         encoders: default_encoders(&engine.capabilities.encoders, 2500, false),
     };
     engine.call(move |s| s.outputs.start_recording(&cfg, None)).expect("recording starts");
-    assert!(wait(Duration::from_secs(3), || matches!(
-        runtime().get(OutputKey::Recording).state,
-        OutputState::Active { .. }
-    )));
+    assert!(wait(Duration::from_secs(3), || matches!(runtime().recording().state, OutputState::Active { .. })));
 
     std::thread::sleep(Duration::from_millis(1500));
     assert!(engine.call(|s| s.outputs.add_marker("Intro")), "marker added");
     assert!(engine.call(|s| s.outputs.pause_recording(true)), "paused");
-    assert!(runtime().get(OutputKey::Recording).paused);
+    assert!(runtime().recording().paused);
     std::thread::sleep(Duration::from_millis(2000));
     assert!(engine.call(|s| s.outputs.pause_recording(false)), "resumed");
-    assert!(!runtime().get(OutputKey::Recording).paused);
+    assert!(!runtime().recording().paused);
     std::thread::sleep(Duration::from_millis(1500));
 
     assert!(engine.call(|s| s.outputs.split_recording()), "split accepted");
-    assert!(wait(Duration::from_secs(5), || runtime().get(OutputKey::Recording).files == 2), "file changed");
-    let second = runtime().get(OutputKey::Recording).path.expect("new path");
+    assert!(wait(Duration::from_secs(5), || runtime().recording().files == 2), "file changed");
+    let second = runtime().recording().path.expect("new path");
     assert_ne!(second, first);
     std::thread::sleep(Duration::from_millis(1500));
     engine.call(|s| s.outputs.stop_recording());
-    assert!(wait(Duration::from_secs(5), || !runtime().get(OutputKey::Recording).state.is_running()));
-    assert_eq!(runtime().get(OutputKey::Recording).markers, 1);
+    assert!(wait(Duration::from_secs(5), || !runtime().recording().state.is_running()));
+    assert_eq!(runtime().recording().markers, 1);
 
     let (d1, d2) = (duration(&first), duration(&second));
     let chapters = probe(&first, "chapter=start_time:chapter_tags=title");

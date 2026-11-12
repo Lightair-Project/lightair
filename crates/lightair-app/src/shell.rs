@@ -37,7 +37,7 @@ use crate::rows::{DraggedRow, Renaming, RowTarget};
 use crate::safe_areas::{self, Profile};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
-use lightair_engine::outputs::{OutputKey, OutputState, runtime};
+use lightair_engine::outputs::{OutputState, runtime};
 use std::time::Instant;
 
 actions!(
@@ -1542,7 +1542,7 @@ impl StudioWindow {
         let fps_color = if stats.active_fps > 0.0 && recent_lagged == 0 { tok::ok() } else { tok::warn() };
         let has_destination = project.outputs.destinations.iter().any(|d| d.enabled);
 
-        let rec_status = runtime().get(OutputKey::Recording);
+        let rec_status = runtime().recording();
         let rec = rec_status.state.clone();
         let recording = matches!(rec, OutputState::Active { .. });
         let record = match rec {

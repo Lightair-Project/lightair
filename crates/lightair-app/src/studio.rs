@@ -375,7 +375,7 @@ impl Studio {
     }
 
     pub fn is_recording(&self) -> bool {
-        runtime().get(OutputKey::Recording).state.is_running()
+        runtime().any_recording_running()
     }
 
     pub fn toggle_recording(&mut self, cx: &mut Context<Self>) {
@@ -383,32 +383,45 @@ impl Studio {
             self.engine.post(|s| s.outputs.stop_recording());
             return;
         }
-        let settings = self.project().outputs.recording.clone();
+        let project = self.project().clone();
+        let settings = project.outputs.recording.clone();
         let container = match settings.container.as_str() {
             "mkv" => Container::Mkv,
             "mov" => Container::Mov,
             _ => Container::HybridMp4,
         };
-        let name = format!("Lightair {}.{}", chrono::Local::now().format("%Y-%m-%d %H-%M-%S"), container.extension());
-        let cfg = RecordingConfig {
-            path: self.recording_folder().join(name),
-            container,
-            encoders: default_encoders(&self.engine.capabilities.encoders, settings.bitrate_kbps, false),
-        };
+        // Every chosen canvas, each to its own file; with several, the format's name tells
+        // them apart ("Lightair 2026-11-12 10-00-00 Vertical.mp4").
+        let targets = settings.targets(&project);
+        let several = targets.len() > 1;
+        let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string();
         // Make the journal durable before outputs start (docs/14, "Saving, autosave & recovery").
         self.flush();
-        let format = settings.format;
-        self.engine.post(move |s| {
-            let video = format.and_then(|f| s.reconciler.format_video(f));
-            if let Err(e) = s.outputs.start_recording(&cfg, video) {
-                tracing::error!(%e, "recording failed to start");
-            }
-        });
+        for canvas in targets {
+            let label = several.then(|| project.format(canvas).map(|f| f.name.clone()).unwrap_or_default());
+            let name = match &label {
+                Some(l) => format!("Lightair {stamp} {l}.{}", container.extension()),
+                None => format!("Lightair {stamp}.{}", container.extension()),
+            };
+            let cfg = RecordingConfig {
+                canvas,
+                path: self.recording_folder().join(name),
+                label,
+                container,
+                encoders: default_encoders(&self.engine.capabilities.encoders, settings.bitrate_kbps, false),
+            };
+            self.engine.post(move |s| {
+                let video = s.reconciler.format_video(canvas);
+                if let Err(e) = s.outputs.start_recording(&cfg, video) {
+                    tracing::error!(%e, "recording failed to start");
+                }
+            });
+        }
         cx.notify();
     }
 
     pub fn pause_recording(&mut self, cx: &mut Context<Self>) {
-        let pause = !runtime().get(OutputKey::Recording).paused;
+        let pause = !runtime().recording().paused;
         self.engine.post(move |s| {
             s.outputs.pause_recording(pause);
         });
@@ -416,7 +429,7 @@ impl Studio {
     }
 
     pub fn add_marker(&mut self, cx: &mut Context<Self>) {
-        let n = runtime().get(OutputKey::Recording).markers + 1;
+        let n = runtime().recording().markers + 1;
         let ok = self.engine.call(move |s| s.outputs.add_marker(&format!("Marker {n}")));
         self.issue = Some(if ok {
             format!("Marker {n} added").into()
@@ -478,12 +491,16 @@ impl Studio {
 
     /// Surfaces output failures as issues (called on the stats tick).
     fn check_outputs(&mut self) {
-        let mut keys = vec![OutputKey::Recording, OutputKey::Clips];
+        let mut keys = vec![OutputKey::Clips];
+        keys.extend(self.project().formats.iter().map(|f| OutputKey::Recording(f.id)));
         keys.extend(self.project().outputs.destinations.iter().map(|d| OutputKey::Stream(d.id)));
         for key in keys {
             if let OutputState::Failed(msg) = runtime().get(key).state {
                 let label = match key {
-                    OutputKey::Recording => "Recording".to_string(),
+                    OutputKey::Recording(canvas) => match self.project().format(canvas) {
+                        Some(f) if self.project().formats.len() > 1 => format!("Recording ({})", f.name),
+                        _ => "Recording".to_string(),
+                    },
                     OutputKey::Clips => "Clips".to_string(),
                     OutputKey::Stream(id) => self
                         .project()

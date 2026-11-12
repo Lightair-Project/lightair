@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use libobs_sys as sys;
 use lightair_core::Id;
@@ -93,7 +93,8 @@ impl Default for OutputStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputKey {
-    Recording,
+    /// A recording of one canvas (by its format id); several can run at once.
+    Recording(Id),
     Stream(Id),
     /// The replay buffer behind the Clip button.
     Clips,
@@ -107,6 +108,33 @@ pub struct OutputsRuntime {
 impl OutputsRuntime {
     pub fn get(&self, key: OutputKey) -> OutputStatus {
         self.status.lock().get(&key).cloned().unwrap_or_default()
+    }
+
+    pub fn any_recording_running(&self) -> bool {
+        self.status.lock().iter().any(|(k, s)| matches!(k, OutputKey::Recording(_)) && s.state.is_running())
+    }
+
+    /// The recordings as one: the longest-running one while any run (its time, pause and
+    /// markers stand for all), else one starting, stopping or failed, else idle.
+    pub fn recording(&self) -> OutputStatus {
+        let status = self.status.lock();
+        let rank = |s: &OutputStatus| match s.state {
+            OutputState::Active { .. } | OutputState::Reconnecting { .. } => 0,
+            OutputState::Starting | OutputState::Stopping => 1,
+            OutputState::Failed(_) => 2,
+            OutputState::Idle => 3,
+        };
+        let since = |s: &OutputStatus| match s.state {
+            OutputState::Active { since } | OutputState::Reconnecting { since } => Some(since),
+            _ => None,
+        };
+        status
+            .iter()
+            .filter(|(k, _)| matches!(k, OutputKey::Recording(_)))
+            .map(|(_, s)| s)
+            .min_by_key(|s| (rank(s), since(s)))
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn any_stream_running(&self) -> bool {
@@ -175,7 +203,11 @@ pub struct EncoderConfig {
 
 #[derive(Debug, Clone)]
 pub struct RecordingConfig {
+    /// The canvas (format id) recorded; it keys the output.
+    pub canvas: Id,
     pub path: PathBuf,
+    /// Added to split files' names so canvases recorded together don't collide ("Vertical").
+    pub label: Option<String>,
     pub container: Container,
     pub encoders: EncoderConfig,
 }
@@ -276,7 +308,7 @@ type SignalCb = unsafe extern "C" fn(*mut c_void, *mut sys::calldata_t);
 /// Signals each kind of output declares (libobs warns about connecting to undeclared ones).
 fn signals_for(key: OutputKey) -> &'static [(&'static str, SignalCb)] {
     match key {
-        OutputKey::Recording => &[("start", on_start), ("stop", on_stop), ("file_changed", on_file_changed)],
+        OutputKey::Recording(_) => &[("start", on_start), ("stop", on_stop), ("file_changed", on_file_changed)],
         OutputKey::Stream(_) => {
             &[("start", on_start), ("stop", on_stop), ("reconnect", on_reconnect), ("reconnect_success", on_start)]
         }
@@ -410,7 +442,7 @@ fn describe_stop(code: i32, detail: Option<String>) -> String {
 /// Running outputs, owned by the engine thread.
 #[derive(Default)]
 pub struct Outputs {
-    recording: Option<Running>,
+    recordings: HashMap<Id, Running>,
     streams: HashMap<Id, Running>,
     clips: Option<Running>,
 }
@@ -477,7 +509,7 @@ unsafe fn start(
     shared: Option<(*mut sys::obs_encoder_t, *mut sys::obs_encoder_t)>,
 ) -> Result<Running, String> {
     let name = match key {
-        OutputKey::Recording => "Recording".to_string(),
+        OutputKey::Recording(canvas) => format!("Recording {canvas}"),
         OutputKey::Stream(id) => format!("Stream {id}"),
         OutputKey::Clips => "Clips".to_string(),
     };
@@ -536,14 +568,16 @@ unsafe fn start(
 }
 
 impl Outputs {
-    /// `video` is the format's canvas video (`Reconciler::format_video`); `None` means the
-    /// primary format.
+    /// Starts recording one canvas. `video` is that format's canvas video
+    /// (`Reconciler::format_video`); `None` means the primary format. Several canvases can
+    /// record at once, each its own output and file.
     pub fn start_recording(&mut self, cfg: &RecordingConfig, video: Option<VideoOutput>) -> Result<(), String> {
         let video_output = video.map_or(std::ptr::null_mut(), |v| v.0);
-        if self.recording.as_ref().is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
+        let key = OutputKey::Recording(cfg.canvas);
+        if self.recordings.get(&cfg.canvas).is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
             return Ok(());
         }
-        if let Some(old) = self.recording.take() {
+        if let Some(old) = self.recordings.remove(&cfg.canvas) {
             unsafe { old.release() };
         }
         if let Some(dir) = cfg.path.parent() {
@@ -563,31 +597,27 @@ impl Outputs {
         if let Some(dir) = cfg.path.parent() {
             settings.set_str("directory", &dir.to_string_lossy());
         }
-        settings.set_str("format", "Lightair %CCYY-%MM-%DD %hh-%mm-%ss");
+        let pattern = match &cfg.label {
+            Some(label) => format!("Lightair %CCYY-%MM-%DD %hh-%mm-%ss {label}"),
+            None => "Lightair %CCYY-%MM-%DD %hh-%mm-%ss".to_string(),
+        };
+        settings.set_str("format", &pattern);
         settings.set_str("extension", cfg.container.extension());
         settings.set_bool("allow_spaces", true);
-        let running = unsafe {
-            start(
-                OutputKey::Recording,
-                output_type,
-                &settings,
-                &cfg.encoders,
-                std::ptr::null_mut(),
-                video_output,
-                None,
-            )?
-        };
-        runtime().update(OutputKey::Recording, |s| {
+        let running =
+            unsafe { start(key, output_type, &settings, &cfg.encoders, std::ptr::null_mut(), video_output, None)? };
+        runtime().update(key, |s| {
             s.path = Some(cfg.path.clone());
             s.files = 1;
         });
-        self.recording = Some(running);
+        self.recordings.insert(cfg.canvas, running);
         Ok(())
     }
 
+    /// Stops every recording.
     pub fn stop_recording(&mut self) {
-        if let Some(r) = &self.recording {
-            runtime().update(OutputKey::Recording, |s| {
+        for (canvas, r) in &self.recordings {
+            runtime().update(OutputKey::Recording(*canvas), |s| {
                 if s.state.is_running() {
                     s.state = OutputState::Stopping
                 }
@@ -596,72 +626,67 @@ impl Outputs {
         }
     }
 
-    fn active_recording(&self) -> Option<*mut sys::obs_output_t> {
-        self.recording.as_ref().map(|r| r.output).filter(|o| unsafe { sys::obs_output_active(*o) })
+    /// The running recordings: canvas and output.
+    fn active_recordings(&self) -> Vec<(Id, *mut sys::obs_output_t)> {
+        self.recordings
+            .iter()
+            .map(|(c, r)| (*c, r.output))
+            .filter(|(_, o)| unsafe { sys::obs_output_active(*o) })
+            .collect()
     }
 
-    /// Pauses or resumes the recording. Returns whether the recording is now in that state.
+    /// Pauses or resumes every recording. Returns whether they are all now in that state.
     pub fn pause_recording(&mut self, pause: bool) -> bool {
-        let Some(output) = self.active_recording() else { return false };
-        let ok = unsafe { sys::obs_output_pause(output, pause) };
-        let paused = unsafe { sys::obs_output_paused(output) };
-        runtime().update(OutputKey::Recording, |s| {
-            match (s.paused, paused) {
-                (false, true) => s.paused_since = Some(Instant::now()),
-                (true, false) => s.paused_for += s.paused_since.take().map_or_default(|t| t.elapsed()),
-                _ => {}
+        let active = self.active_recordings();
+        let mut all = !active.is_empty();
+        // libobs applies a pause at the next video frame; resuming before it has leaves the
+        // encoder waiting forever (and the recording can't stop). Give a fresh pause time.
+        if !pause {
+            let newest = active
+                .iter()
+                .filter_map(|(c, _)| runtime().get(OutputKey::Recording(*c)).paused_since)
+                .map(|t| t.elapsed())
+                .min();
+            if let Some(age) = newest.filter(|a| *a < Duration::from_millis(150)) {
+                std::thread::sleep(Duration::from_millis(150) - age);
             }
-            s.paused = paused;
-        });
-        ok && paused == pause
+        }
+        for (canvas, output) in active {
+            let ok = unsafe { sys::obs_output_pause(output, pause) };
+            let paused = unsafe { sys::obs_output_paused(output) };
+            runtime().update(OutputKey::Recording(canvas), |s| {
+                match (s.paused, paused) {
+                    (false, true) => s.paused_since = Some(Instant::now()),
+                    (true, false) => s.paused_for += s.paused_since.take().map_or_default(|t| t.elapsed()),
+                    _ => {}
+                }
+                s.paused = paused;
+            });
+            all &= ok && paused == pause;
+        }
+        all
     }
 
-    /// Ends the current file and continues in a new one, without a gap.
+    /// Ends every recording's current file and continues in a new one, without a gap.
     pub fn split_recording(&mut self) -> bool {
-        let Some(output) = self.active_recording() else { return false };
-        let mut cd = sys::calldata_t::default();
-        let mut enabled = false;
-        unsafe {
-            if proc_call(output, "split_file", &mut cd) {
-                // calldata_get_bool is a header inline over calldata_get_data.
-                sys::calldata_get_data(
-                    &cd,
-                    c"split_file_enabled".as_ptr(),
-                    &mut enabled as *mut bool as *mut c_void,
-                    std::mem::size_of::<bool>(),
-                );
-            }
-            if !cd.fixed && !cd.stack.is_null() {
-                sys::bfree(cd.stack as *mut c_void);
-            }
+        let mut any = false;
+        for (_, output) in self.active_recordings() {
+            any |= unsafe { split_file(output) };
         }
-        enabled
+        any
     }
 
-    /// Adds a marker (an MP4/MOV chapter) at the current time. Returns false when the recording
-    /// can't hold markers (MKV) or isn't running.
+    /// Adds a marker (an MP4/MOV chapter) at the current time to every recording that can hold
+    /// one. Returns false when none can (MKV) or none is running.
     pub fn add_marker(&mut self, name: &str) -> bool {
-        let Some(output) = self.active_recording() else { return false };
-        let id = unsafe { CStr::from_ptr(sys::obs_output_get_id(output)) };
-        if !matches!(id.to_bytes(), b"mp4_output" | b"mov_output") {
-            return false;
-        }
-        let mut cd = sys::calldata_t::default();
-        let name = c(name);
-        let ok = unsafe {
-            // calldata_set_string is a header inline: the string with its terminator.
-            let bytes = name.as_bytes_with_nul();
-            sys::calldata_set_data(&mut cd, c"chapter_name".as_ptr(), bytes.as_ptr() as *const c_void, bytes.len());
-            let ok = proc_call(output, "add_chapter", &mut cd);
-            if !cd.fixed && !cd.stack.is_null() {
-                sys::bfree(cd.stack as *mut c_void);
+        let mut any = false;
+        for (canvas, output) in self.active_recordings() {
+            if unsafe { add_chapter(output, name) } {
+                runtime().update(OutputKey::Recording(canvas), |s| s.markers += 1);
+                any = true;
             }
-            ok
-        };
-        if ok {
-            runtime().update(OutputKey::Recording, |s| s.markers += 1);
         }
-        ok
+        any
     }
 
     pub fn start_stream(&mut self, cfg: &StreamConfig, video: Option<VideoOutput>) -> Result<(), String> {
@@ -827,8 +852,8 @@ impl Outputs {
                 s.total_frames = total;
             });
         };
-        if let Some(r) = &self.recording {
-            sample(OutputKey::Recording, r);
+        for (canvas, r) in &self.recordings {
+            sample(OutputKey::Recording(*canvas), r);
         }
         for (id, r) in &self.streams {
             sample(OutputKey::Stream(*id), r);
@@ -841,7 +866,7 @@ impl Outputs {
             unsafe { sys::obs_output_stop(r.output) };
         }
         self.drop_clips();
-        if let Some(r) = self.recording.take() {
+        for (_, r) in self.recordings.drain() {
             unsafe {
                 sys::obs_output_stop(r.output);
                 r.release();
@@ -871,5 +896,46 @@ pub fn default_encoders(available: &[String], video_bitrate_kbps: u32, constant_
         audio_bitrate_kbps: 160,
         constant_bitrate,
         bframes: true,
+    }
+}
+
+/// Asks a recording to continue in a new file; whether it will.
+unsafe fn split_file(output: *mut sys::obs_output_t) -> bool {
+    let mut cd = sys::calldata_t::default();
+    let mut enabled = false;
+    unsafe {
+        if proc_call(output, "split_file", &mut cd) {
+            // calldata_get_bool is a header inline over calldata_get_data.
+            sys::calldata_get_data(
+                &cd,
+                c"split_file_enabled".as_ptr(),
+                &mut enabled as *mut bool as *mut c_void,
+                std::mem::size_of::<bool>(),
+            );
+        }
+        if !cd.fixed && !cd.stack.is_null() {
+            sys::bfree(cd.stack as *mut c_void);
+        }
+    }
+    enabled
+}
+
+/// Adds a chapter to an MP4/MOV recording; false for other containers.
+unsafe fn add_chapter(output: *mut sys::obs_output_t, name: &str) -> bool {
+    let id = unsafe { CStr::from_ptr(sys::obs_output_get_id(output)) };
+    if !matches!(id.to_bytes(), b"mp4_output" | b"mov_output") {
+        return false;
+    }
+    let mut cd = sys::calldata_t::default();
+    let name = c(name);
+    unsafe {
+        // calldata_set_string is a header inline: the string with its terminator.
+        let bytes = name.as_bytes_with_nul();
+        sys::calldata_set_data(&mut cd, c"chapter_name".as_ptr(), bytes.as_ptr() as *const c_void, bytes.len());
+        let ok = proc_call(output, "add_chapter", &mut cd);
+        if !cd.fixed && !cd.stack.is_null() {
+            sys::bfree(cd.stack as *mut c_void);
+        }
+        ok
     }
 }

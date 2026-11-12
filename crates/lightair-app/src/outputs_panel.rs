@@ -540,8 +540,6 @@ impl Render for OutputsPanel {
         let studio = self.studio.read(cx);
         let project = studio.project().clone();
         let folder = studio.recording_folder();
-        let rec = runtime().get(OutputKey::Recording);
-        let (rec_text, rec_color) = status_text(&rec.state);
         let card = |id: ElementId| {
             div()
                 .id(id)
@@ -575,56 +573,73 @@ impl Render for OutputsPanel {
             div().flex_none().text_size(px(11.)).font_family("Menlo").text_color(color).child(text)
         };
 
-        // ---- Recording
-        let rec_settings = project.outputs.recording.clone();
-        let rec_badge = format_badge("rec-format", &project, rec_settings.format).on_click(cx.listener({
-            let project = project.clone();
-            move |this, _, _, cx| {
-                let settings = lightair_core::RecordingSettings {
-                    format: next_format(&project, rec_settings.format),
-                    ..rec_settings.clone()
-                };
-                this.studio.update(cx, |s, cx| {
-                    let _ = s.execute(Command::SetRecordingSettings { settings }, cx);
-                })
-            }
-        }));
-        let recording = rec.state.is_running();
-        let open_folder = folder.clone();
-        let recording_card = card("out-rec".into())
-            .child(
-                div()
-                    .size(px(28.))
-                    .flex_none()
-                    .rounded(px(7.))
-                    .bg(tok::bg_selected())
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(div().size(px(10.)).rounded_full().bg(if recording {
-                        tok::live()
-                    } else {
-                        tok::text_tertiary()
-                    })),
-            )
-            .child(two_lines(
-                "Recording".into(),
-                format!(
-                    "{} · {}",
-                    project.outputs.recording.container.to_uppercase(),
-                    folder.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
-                ),
-            ))
-            .child(rec_badge)
-            .child(status((rec_text, rec_color)))
-            .child(
-                ui::icon_button("open-recordings", "folder-open", tok::text_secondary())
-                    .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Show recordings").build(w, cx))
-                    .on_click(move |_, _, cx| {
-                        let _ = std::fs::create_dir_all(&open_folder);
-                        cx.open_url(&format!("file://{}", open_folder.to_string_lossy()))
+        // ---- Recording: each canvas, recorded or not (Record records all that are on).
+        let settings = project.outputs.recording.clone();
+        let targets = settings.targets(&project);
+        let several = project.formats.len() > 1;
+        let container = settings.container.to_uppercase();
+        let folder_name = folder.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut recordings = div().flex().flex_col().gap_0p5();
+        for (i, f) in project.formats.iter().enumerate() {
+            let fid = f.id;
+            let on = targets.contains(&fid);
+            let st = runtime().get(OutputKey::Recording(fid));
+            let running = st.state.is_running();
+            let state =
+                if on || running { status_text(&st.state) } else { ("Not recorded".into(), tok::text_tertiary()) };
+            recordings = recordings.child(
+                card(("out-rec", i).into())
+                    .when(!on && !running, |d| d.opacity(0.6))
+                    .child(
+                        div()
+                            .size(px(28.))
+                            .flex_none()
+                            .rounded(px(7.))
+                            .bg(tok::bg_selected())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(div().size(px(10.)).rounded_full().bg(if running {
+                                tok::live()
+                            } else {
+                                tok::text_tertiary()
+                            })),
+                    )
+                    .child(two_lines(
+                        if several { format!("{} {}", f.name, aspect_label(f)) } else { "Recording".into() },
+                        format!("{container} · {folder_name}"),
+                    ))
+                    .child(status(state))
+                    .when(several, |d| {
+                        let s2 = settings.clone();
+                        let p2 = project.clone();
+                        d.child(
+                            toggle(("rec-toggle", i), on)
+                                .tooltip(move |w, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(if on {
+                                        "Record records this canvas (click to leave it out)"
+                                    } else {
+                                        "Left out of recording (click to record it too)"
+                                    })
+                                    .build(w, cx)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let settings = s2.with_format(&p2, fid, !on);
+                                    this.studio.update(cx, |s, cx| {
+                                        let _ = s.execute(Command::SetRecordingSettings { settings }, cx);
+                                    })
+                                })),
+                        )
                     }),
             );
+        }
+        let open_folder = folder.clone();
+        let show_recordings = ui::icon_button("open-recordings", "folder-open", tok::text_secondary())
+            .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Show recordings").build(w, cx))
+            .on_click(move |_, _, cx| {
+                let _ = std::fs::create_dir_all(&open_folder);
+                cx.open_url(&format!("file://{}", open_folder.to_string_lossy()))
+            });
 
         // ---- Streaming
         let mut streams = div().flex().flex_col().gap_0p5();
@@ -739,48 +754,6 @@ impl Render for OutputsPanel {
                     }),
             );
         }
-        let empty = project.outputs.destinations.is_empty();
-        // Nothing yet: the main platforms, one click from their setup.
-        let quick = empty.then(|| {
-            let mut row = div().flex().flex_wrap().gap_1p5();
-            for (i, p) in PLATFORMS.iter().take(6).enumerate() {
-                row = row.child(
-                    div()
-                        .id(("quick-platform", i))
-                        .cursor_pointer()
-                        .rounded(px(8.))
-                        .hover(|d| d.opacity(0.85))
-                        .child(badge(p, 30.))
-                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(p.name).build(w, cx))
-                        .on_click(cx.listener(move |this, _, window, cx| this.choose(p, window, cx))),
-                );
-            }
-            row = row.child(
-                div()
-                    .id("quick-more")
-                    .size(px(30.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(7.))
-                    .cursor_pointer()
-                    .border_1()
-                    .border_color(tok::border_strong())
-                    .text_color(tok::text_secondary())
-                    .hover(|d| d.bg(tok::bg_raised()))
-                    .child(ui::icon("plus").size(px(14.)))
-                    .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("More platforms").build(w, cx))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_picker(cx))),
-            );
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .mx_4()
-                .mt_1()
-                .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child("Go live on"))
-                .child(row)
-        });
 
         div()
             .id("outputs")
@@ -789,23 +762,27 @@ impl Render for OutputsPanel {
             .size_full()
             .overflow_y_scroll()
             .pb_3()
-            .child(section_label("RECORDING"))
-            .child(recording_card)
-            .child(div().flex().items_center().justify_between().pr_3().child(section_label("STREAMING")).when(
-                !empty,
-                |d| {
-                    d.child(
-                        Button::new("add-destination")
-                            .label("Add")
-                            .icon(ui::icon("plus"))
-                            .xsmall()
-                            .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| this.open_picker(cx))),
-                    )
-                },
-            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .pr_3()
+                    .child(section_label("RECORDING"))
+                    .child(div().pt_2().child(show_recordings)),
+            )
+            .child(recordings)
+            .child(
+                div().flex().items_center().justify_between().pr_3().child(section_label("STREAMING")).child(
+                    Button::new("add-destination")
+                        .label("Add")
+                        .icon(ui::icon("plus"))
+                        .xsmall()
+                        .ghost()
+                        .on_click(cx.listener(|this, _, _, cx| this.open_picker(cx))),
+                ),
+            )
             .child(streams)
-            .children(quick)
     }
 }
 

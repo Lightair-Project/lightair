@@ -124,20 +124,28 @@ fn record_and_stream() {
 
     // ---- recording
     let file = dir.join("take.mp4");
-    let cfg = RecordingConfig { path: file.clone(), container: Container::HybridMp4, encoders: encoders.clone() };
+    let canvas = lightair_core::Id::new();
+    let cfg = RecordingConfig {
+        canvas,
+        path: file.clone(),
+        label: None,
+        container: Container::HybridMp4,
+        encoders: encoders.clone(),
+    };
     engine.call(move |s| s.outputs.start_recording(&cfg, None)).expect("recording starts");
-    let state = wait_for(OutputKey::Recording, Duration::from_secs(3), |s| matches!(s, OutputState::Active { .. }));
+    let state =
+        wait_for(OutputKey::Recording(canvas), Duration::from_secs(3), |s| matches!(s, OutputState::Active { .. }));
     assert!(matches!(state, OutputState::Active { .. }), "recording active: {state:?}");
     std::thread::sleep(Duration::from_millis(1200));
     // The first write can land a little later on a busy machine.
     let deadline = Instant::now() + Duration::from_secs(4);
-    while runtime().get(OutputKey::Recording).bytes == 0 && Instant::now() < deadline {
+    while runtime().get(OutputKey::Recording(canvas)).bytes == 0 && Instant::now() < deadline {
         engine.call(|s| s.outputs.sample());
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(runtime().get(OutputKey::Recording).bytes > 0, "bytes written while recording");
+    assert!(runtime().get(OutputKey::Recording(canvas)).bytes > 0, "bytes written while recording");
     engine.call(|s| s.outputs.stop_recording());
-    let state = wait_for(OutputKey::Recording, Duration::from_secs(5), |s| !s.is_running());
+    let state = wait_for(OutputKey::Recording(canvas), Duration::from_secs(5), |s| !s.is_running());
     assert_eq!(state, OutputState::Idle, "recording stopped cleanly");
     let (streams, duration) = probe(&file);
     eprintln!("recording: {streams:?}, {duration:.2} s");

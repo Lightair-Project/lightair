@@ -212,6 +212,7 @@ impl StudioWindow {
             Ok("settings") => self.toggle_settings(cx),
             Ok("palette") => self.open_palette(window, cx),
             Ok("perf") => self.perf_open = true,
+            Ok("two-canvases") => self.add_format(lightair_core::Format::vertical(), cx),
             Ok("dests") => {
                 // Sample destinations (no keys) to see the list.
                 for (name, server, platform, on) in [
