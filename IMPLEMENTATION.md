@@ -38,12 +38,14 @@ Done:
 - Multi-select: ⇧/⌘-click in Layers, ⇧-click on the canvas, ⌘A; dragging any selected layer moves them all (one undo step), arrow keys nudge them, Delete removes them, and the Inspector aligns and evenly spaces them by their visible bounds. Dragging on empty canvas draws a selection box (⇧ adds).
 - Settings sheet (⌘, or the gear): recording folder, container and bitrate, stream bitrate (project), and "review before going live" (this Mac, in `preferences.json`, tested round trip).
 - Inspector Source section: change a layer's camera, display/window/app (screen capture), microphone or audio device, or replace its image/video file. Lists are read from the input itself with its settings applied (`Reconciler::input_options`, tested). Mixer tracks show the same section.
+- Shapes: a Shape section cuts any visual layer into a rounded box, circle or pill with softness and an optional coloured border, via a GPU shape-mask filter in Lightair's libobs module (`lightair_shape_mask`; a render test checks circle, square corners and border). The mask belongs to the input, so it shows wherever the input appears.
+- Crop mode: Crop in Transform (or double-click a layer) shows crop handles on the canvas; edges crop one side, corners two; Esc, Enter or Done ends it; Reset uncrops. The edge maths is unit-tested, rotation included.
 - Command palette (⌘K): fuzzy search over scenes and actions (Take, Studio mode, record, go live, clip, add layers and scenes, add vertical, import, transitions, undo/redo); ↑↓ ↩ Esc.
 
 Remaining:
 - `lightair-ui` crate with the studio components (scrubbable fields, `LayerRow`, `SceneCard`, `FormatTabs`).
 - gpui-kit dock layout (resize, collapse, pop-out, workspaces).
-- Groups, rulers and guides.
+- Groups, rulers and guides; per-layer (rather than per-input) shapes.
 - Onboarding; the full settings window (appearance, audio devices, hotkeys, advanced encoding).
 
 ## M5 · Audio 🔨

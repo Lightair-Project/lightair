@@ -143,14 +143,18 @@ impl StudioWindow {
                     .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
                     .when(!on, |d| d.text_color(tok::text_tertiary()).hover(|d| d.text_color(tok::text_secondary())))
                     .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !on {
+                            this.exec(cmd.clone(), cx)
+                        }
+                    })),
             );
         }
         row
     }
 
     /// A slider whose changes are one undo step per drag.
-    fn slider(
+    pub(super) fn slider(
         &self,
         key: String,
         range: (f32, f32, f32),
@@ -310,16 +314,36 @@ impl StudioWindow {
                     .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
             );
         }
-        let reset_crop = (lo.crop != lightair_core::Crop::default()).then(|| {
-            let cmd = set(&|l| l.crop = lightair_core::Crop::default());
-            Button::new("reset-crop")
-                .label("Reset crop")
-                .xsmall()
-                .ghost()
-                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)))
-                .into_any_element()
-        });
-        let transform = self.section("Transform", reset_crop, cx).child(grid).child(fits);
+        // Crop: handles on the canvas (also a double-click on the layer), and a reset.
+        let cropping = self.crop_mode == Some(lid);
+        let cropped = lo.crop != lightair_core::Crop::default();
+        let reset = set(&|l| l.crop = lightair_core::Crop::default());
+        let crop_actions = div()
+            .flex()
+            .gap_1()
+            .when(cropped, |d| {
+                d.child(
+                    Button::new("reset-crop")
+                        .label("Reset")
+                        .xsmall()
+                        .ghost()
+                        .tooltip("Uncrop")
+                        .on_click(cx.listener(move |this, _, _, cx| this.exec(reset.clone(), cx))),
+                )
+            })
+            .child({
+                let b = Button::new("crop-mode")
+                    .label(if cropping { "Done" } else { "Crop" })
+                    .icon(ui::icon("crop"))
+                    .xsmall()
+                    .tooltip("Drag the edges and corners on the canvas (or double-click the layer)")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.crop_mode = if this.crop_mode == Some(lid) { None } else { Some(lid) };
+                        cx.notify();
+                    }));
+                if cropping { b.primary() } else { b.ghost() }
+            });
+        let transform = self.section("Transform", Some(crop_actions.into_any_element()), cx).child(grid).child(fits);
 
         let mut col = body.gap_0().child(header);
         if let Some(source) = input.as_ref().and_then(|i| self.source_section(i, cx)) {
@@ -329,6 +353,9 @@ impl StudioWindow {
         if let Some(input) = &input {
             if let Some(content) = self.content_section(input, cx) {
                 col = col.child(content);
+            }
+            if let Some(shape) = self.shape_section(input, cx) {
+                col = col.child(shape);
             }
             col = col.child(self.effects_section(input, cx));
             if let Some(cs) = self.camera_studio_compact(input, cx) {

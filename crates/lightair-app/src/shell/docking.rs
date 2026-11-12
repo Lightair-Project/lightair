@@ -186,6 +186,14 @@ impl StudioWindow {
                     self.open_source_picker(id, window, cx);
                 }
             }
+            Ok("crop") => {
+                let top = {
+                    let s = self.studio.read(cx);
+                    s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                };
+                self.select_layer(top, cx);
+                self.crop_mode = top;
+            }
             Ok("select") => {
                 let top = {
                     let s = self.studio.read(cx);
