@@ -93,6 +93,7 @@ pub struct MixerPanel {
     last_frame: Instant,
     add_track_menu: bool,
     effect_menu: Option<Id>,
+    focus: FocusHandle,
 }
 
 impl MixerPanel {
@@ -106,7 +107,13 @@ impl MixerPanel {
             last_frame: Instant::now(),
             add_track_menu: false,
             effect_menu: None,
+            focus: cx.focus_handle(),
         }
+    }
+
+    fn toggle_add_track(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_track_menu = !self.add_track_menu;
+        cx.notify();
     }
 
     fn exec(&self, cmd: Command, cx: &mut Context<Self>) {
@@ -168,19 +175,11 @@ impl Render for MixerPanel {
         }
         self.display.retain(|id, _| project.track(*id).is_some());
 
-        let add =
-            ui::icon_button("add-track", "plus", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| {
-                this.add_track_menu = !this.add_track_menu;
-                cx.notify();
-            }));
         div()
             .id("mixer")
             .flex()
             .flex_col()
-            .h(px(300.))
-            .border_t_1()
-            .border_color(tok::border())
-            .bg(tok::bg_panel())
+            .size_full()
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 if let (Some(track), Some(MouseButton::Left)) = (this.dragging, ev.pressed_button) {
                     this.fader_to(track, ev.position.y, cx);
@@ -188,19 +187,7 @@ impl Render for MixerPanel {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .h(px(40.))
-                    .px_3()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Audio Mixer"))
-                    .child(add)
-                    .when(self.add_track_menu, |d| d.child(self.add_track_menu(cx)))
-                    .child(div().flex_1())
-                    .children(loudness_readout(cx)),
-            )
+            .when(self.add_track_menu, |d| d.child(div().px_3().py_2().child(self.add_track_menu(cx))))
             .child(div().id("strips").flex().flex_1().gap_2().px_3().pb_3().overflow_x_scroll().children(strips).when(
                 project.tracks.is_empty(),
                 |d| {
@@ -528,4 +515,58 @@ fn loudness_readout(cx: &mut Context<MixerPanel>) -> Option<impl IntoElement> {
                 cx.notify();
             })),
     )
+}
+
+// ---------------------------------------------------------------- dock panel
+impl gpui_kit::component::dock::BasePanel for MixerPanel {
+    fn panel_name(&self) -> &'static str {
+        "mixer"
+    }
+}
+
+impl gpui_kit::component::dock::Panel for MixerPanel {
+    fn tab_name(&self, _: &App) -> Option<SharedString> {
+        Some("Audio Mixer".into())
+    }
+
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        "Audio Mixer"
+    }
+
+    fn toolbar_buttons(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<gpui_kit::component::button::Button>> {
+        use gpui_kit::component::Sizable;
+        use gpui_kit::component::button::ButtonVariants;
+        Some(vec![
+            gpui_kit::component::button::Button::new("mixer-add")
+                .icon(ui::icon("plus"))
+                .ghost()
+                .xsmall()
+                .tooltip("Add track")
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_add_track(window, cx))),
+        ])
+    }
+
+    fn title_suffix(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        loudness_readout(cx)
+    }
+
+    fn zoom_control(&self, _: &App) -> Option<gpui_kit::component::dock::PanelControl> {
+        None
+    }
+
+    fn inner_padding(&self, _: &App) -> bool {
+        false
+    }
+}
+
+impl EventEmitter<gpui_kit::component::dock::PanelEvent> for MixerPanel {}
+
+impl Focusable for MixerPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
 }

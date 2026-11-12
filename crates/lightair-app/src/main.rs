@@ -67,7 +67,11 @@ fn main() {
         ui::apply_theme(cx);
         shell::bind_keys(cx);
 
-        let studio = cx.new(|_| Studio::open(engine.clone(), project_dir.clone(), starter::starter_project));
+        let starter: fn() -> lightair_core::Project = match std::env::var("LIGHTAIR_STARTER").as_deref() {
+            Ok("plain") => starter::plain_project,
+            _ => starter::starter_project,
+        };
+        let studio = cx.new(|_| Studio::open(engine.clone(), project_dir.clone(), starter));
 
         // Stats at 1 Hz; journal flush and periodic compaction.
         let ticker = studio.downgrade();

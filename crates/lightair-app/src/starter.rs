@@ -65,3 +65,50 @@ pub fn starter_project() -> Project {
     }
     p
 }
+
+/// A starter with no capture sources (colour, text, a timer and silent tracks), so it never
+/// triggers a camera, screen or microphone permission prompt. Used for screenshots and demos
+/// with `LIGHTAIR_STARTER=plain`.
+pub fn plain_project() -> Project {
+    let mut p = Project::new("Demo");
+    let format = p.primary_format().clone();
+    let (w, h) = (format.width as f32, format.height as f32);
+    let bg = Input::new("Background", "color_source_v3", json!({"color": 0xFF2A1A12u32, "width": w, "height": h}));
+    let card = Input::new("Card", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 960, "height": 540}));
+    let title = Input::new(
+        "Title",
+        "text_ft2_source_v2",
+        json!({"text": "Lightair", "font": {"face": "Helvetica Neue", "size": 144, "flags": 1}, "color1": 0xFFFFFFFFu32, "color2": 0xFFFFFFFFu32}),
+    );
+    let timer = Input::new(
+        "Countdown",
+        lightair_engine::timers::TIMER_KIND,
+        json!({"mode": "countdown", "seconds": 300, "font": {"face": "Helvetica Neue", "size": 96, "flags": 0}, "color1": 0xFFFFFFFFu32, "color2": 0xFFFFFFFFu32}),
+    );
+    let f = format.id;
+    let mut main = Scene::new("Main");
+    main.layers.push(Layer::new("Background", bg.id, [(f, Layout::boxed(0.0, 0.0, w, h))]));
+    main.layers.push(Layer::new("Card", card.id, [(f, Layout::boxed(480.0, 270.0, 960.0, 540.0))]));
+    main.layers.push(Layer::new("Title", title.id, [(f, Layout::boxed(660.0, 440.0, 600.0, 200.0))]));
+    let mut soon = Scene::new("Starting Soon");
+    soon.layers.push(Layer::new("Background", bg.id, [(f, Layout::boxed(0.0, 0.0, w, h))]));
+    soon.layers.push(Layer::new("Countdown", timer.id, [(f, Layout::boxed(760.0, 470.0, 400.0, 140.0))]));
+    let tone = |name: &str| Input::new(name, "color_source_v3", json!({}));
+    let (a, b) = (tone("Mic (demo)"), tone("Music (demo)"));
+    let tracks = [Track::new("Mic", a.id), Track::new("Music", b.id)];
+    let mut commands = vec![
+        Command::AddInput { input: bg },
+        Command::AddInput { input: card },
+        Command::AddInput { input: title },
+        Command::AddInput { input: timer },
+        Command::AddInput { input: a },
+        Command::AddInput { input: b },
+        Command::AddScene { scene: soon, index: None },
+        Command::AddScene { scene: main, index: None },
+    ];
+    commands.extend(tracks.into_iter().map(|track| Command::AddTrack { track, index: None }));
+    for c in commands {
+        c.apply(&mut p).expect("plain starter is valid");
+    }
+    p
+}
