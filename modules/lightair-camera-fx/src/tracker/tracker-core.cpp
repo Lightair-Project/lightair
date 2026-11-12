@@ -230,6 +230,8 @@ struct face_tracker {
 	uint32_t person_w = 0, person_h = 0;
 	uint64_t person_serial = 0;
 	std::vector<float> person_luma;   /* the last frame's mean luma per mask tile */
+	std::vector<float> mask_luma, mask_motion; /* the same for the multiclass mask */
+	std::atomic<bool> seg_every{false};  /* segment every new frame (a background effect is on) */
 	std::vector<float> person_motion; /* how much each tile of the picture moved, 0..1 */
 
 	/* skin pigment basis (melanin / hemoglobin), recalibrated every ~2 s */
@@ -374,8 +376,8 @@ void face_tracker::run_landmarks()
 
 static const int PERSON_TILE = 16; /* mask pixels per motion tile */
 
-/* How much the picture moved in each mask tile since the last frame (0 still .. 1 moving): the
- * change of each tile's mean luma. Averaging a tile cancels sensor noise; someone moving changes
+/* How much the picture moved in each mask tile since the last frame: the change of each tile's
+ * mean luma, in levels. Averaging a tile cancels sensor noise; someone moving changes
  * the mean. The motion of the most-changed neighbour counts, so motion at a tile border is seen
  * on both sides. */
 static std::vector<float> tile_motion(const uint8_t *bgra, int fw, int fh, int mw, int mh, std::vector<float> &prev)
@@ -395,7 +397,7 @@ static std::vector<float> tile_motion(const uint8_t *bgra, int fw, int fh, int m
 				}
 			luma[(size_t)ty * tw + tx] = n ? (float)sum / (float)(n * 256) : 0.0f;
 		}
-	std::vector<float> motion((size_t)tw * th, 1.0f);
+	std::vector<float> motion((size_t)tw * th, 255.0f);
 	if (prev.size() == luma.size()) {
 		for (int ty = 0; ty < th; ty++)
 			for (int tx = 0; tx < tw; tx++) {
@@ -408,28 +410,32 @@ static std::vector<float> tile_motion(const uint8_t *bgra, int fw, int fh, int m
 							m = std::max(m, std::fabs(luma[i] - prev[i]));
 						}
 					}
-				/* under ~1.5 levels of mean change: still; ~6 or more: moving */
-				motion[(size_t)ty * tw + tx] = std::clamp((m - 1.5f) / 4.5f, 0.0f, 1.0f);
+				motion[(size_t)ty * tw + tx] = m; /* levels of mean luma change */
 			}
 	}
 	prev.swap(luma);
 	return motion;
 }
 
-/* Temporal smoothing of the person mask, gated by the picture's motion: where the picture holds
- * still, the mask blends slowly, so the edge doesn't shimmer with sensor noise or the model's own
- * frame-to-frame wobble; where it moves, the new mask is taken at once, so the edge never trails. */
+/* Temporal smoothing of the person mask, graded by the picture's motion. Still areas blend
+ * slowly, so the edge doesn't shimmer with sensor noise or the model's own wobble. Small, steady
+ * motion (swaying, talking) is still smoothed: the guided filter puts the final edge on the
+ * current frame's outline, so a mask that is a frame or two behind doesn't make the edge trail.
+ * Large changes (a fast arm, stepping aside) take the new mask at once. */
 static void smooth_person(std::vector<uint8_t> &mask, const std::vector<uint8_t> &next, int w, int h,
-			  const std::vector<float> &motion)
+			  const std::vector<float> &motion, int stride = 1, int channel = 0)
 {
 	const int T = PERSON_TILE;
 	int tw = (w + T - 1) / T;
 	bool have = motion.size() == (size_t)tw * ((h + T - 1) / T);
 	for (int y = 0; y < h; y++)
 		for (int x = 0; x < w; x++) {
-			size_t i = (size_t)y * w + x;
-			float k = have ? motion[(size_t)(y / T) * tw + x / T] : 1.0f;
-			int wgt = (int)(28.0f + k * 228.0f); /* still: ~1/9 of the new mask per frame */
+			size_t i = ((size_t)y * w + x) * stride + channel;
+			float m = have ? motion[(size_t)(y / T) * tw + x / T] : 255.0f;
+			float small = std::clamp((m - 1.5f) / 4.5f, 0.0f, 1.0f); /* noise .. steady motion */
+			float large = std::clamp((m - 8.0f) / 16.0f, 0.0f, 1.0f); /* a big change */
+			/* of 256: still ~1/9 of the new mask per frame, steady motion ~1/3, a big change all */
+			int wgt = (int)(28.0f + small * 52.0f + large * 176.0f);
 			int d = (int)next[i] - (int)mask[i];
 			mask[i] = (uint8_t)std::clamp((int)mask[i] + ((d * wgt) >> 8), 0, 255);
 		}
@@ -463,7 +469,9 @@ void face_tracker::run_segmentation()
 			}
 		}
 		if (ok && mw > 0 && mh > 0) {
+			std::vector<float> mmotion = tile_motion(seg.buf.data(), seg.w, seg.h, mw, mh, mask_luma);
 			std::lock_guard<std::mutex> g(mask_m);
+			mask_motion.swap(mmotion);
 			bool blend = mask_w == (uint32_t)mw && mask_h == (uint32_t)mh && mask.size() == m.size();
 			if (!blend) {
 				mask = m;
@@ -472,9 +480,12 @@ void face_tracker::run_segmentation()
 			} else { /* against flicker, without trailing: small changes (noise) are averaged, real
 				    * movement (a big change) is taken at once */
 				for (size_t i = 0; i < mask.size(); i++) {
+					if (i % 4 == 3)
+						continue; /* the person: graded by the picture's motion, below */
 					int d = (int)m[i] - (int)mask[i];
 					mask[i] = (d > 40 || d < -40) ? m[i] : (uint8_t)((mask[i] + m[i] + 1) / 2);
 				}
+				smooth_person(mask, m, mw, mh, mask_motion, 4, 3);
 			}
 			mask_serial++;
 		}
@@ -586,7 +597,7 @@ extern "C" bool face_tracker_submit_bgra(face_tracker_t *t, const uint8_t *data,
 	 * body with it, ~15 Hz otherwise; edges are snapped to every frame on the GPU */
 	/* every new frame while the background needs the person (Vision is fast on the Neural
 	 * Engine; the worker drops frames while busy) */
-	const uint64_t SEG_INTERVAL_NS = t->person_enabled.load() ? 0ULL : t->seg_fast.load() ? 33000000ULL : 66000000ULL;
+	const uint64_t SEG_INTERVAL_NS = t->seg_every.load() ? 0ULL : t->seg_fast.load() ? 33000000ULL : 66000000ULL;
 	if (t->seg_enabled.load() && timestamp_ns - t->seg_last_ns >= SEG_INTERVAL_NS &&
 	    queue_frame(t->seg, data, linesize, width, height, frame_id, timestamp_ns))
 		t->seg_last_ns = timestamp_ns;
@@ -694,6 +705,11 @@ extern "C" void face_tracker_set_person(face_tracker_t *t, bool enabled, int qua
 	(void)enabled;
 	(void)quality;
 #endif
+}
+
+extern "C" void face_tracker_set_segmentation_every_frame(face_tracker_t *t, bool every)
+{
+	t->seg_every = every;
 }
 
 extern "C" uint8_t *face_tracker_take_person(face_tracker_t *t, uint64_t *serial, uint32_t *w, uint32_t *h)
