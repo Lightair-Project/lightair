@@ -214,7 +214,7 @@ impl StudioWindow {
     ) -> AnyElement {
         let lo = layer.layouts.get(&format.id).copied().unwrap_or(Layout::boxed(0., 0., 100., 100.));
         let (sid, lid, fid) = (scene.id, layer.id, format.id);
-        let input = project.inputs.get(&layer.input).cloned();
+        let input = layer.input.and_then(|i| project.inputs.get(&i)).cloned();
         let kind = input.as_ref().map(|i| i.kind.clone()).unwrap_or_default();
         let set = move |f: &dyn Fn(&mut Layout)| {
             let mut l = lo;
