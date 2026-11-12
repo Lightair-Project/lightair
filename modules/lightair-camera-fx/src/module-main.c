@@ -30,6 +30,7 @@ const char *obs_module_description(void)
 
 extern struct obs_source_info shape_mask_info;
 extern struct obs_source_info transform3d_info;
+extern struct obs_source_info fx_filter_info;
 
 bool obs_module_load(void)
 {
@@ -38,6 +39,7 @@ bool obs_module_load(void)
 	obs_register_source(&beauty_filter_info);
 	obs_register_source(&shape_mask_info);
 	obs_register_source(&transform3d_info);
+	obs_register_source(&fx_filter_info);
 	blog(LOG_INFO, "[camera-studio] loaded");
 	return true;
 }

@@ -32,6 +32,7 @@ add_library(lightair-camera-fx MODULE
   src/fx-layers.c
   src/shape-mask.c
   src/transform3d.c
+  src/fx-filter.c
   src/tracker/tracker-core.cpp
   src/tracker/tracker-util.cpp
   src/tracker/pigment-calib.cpp
