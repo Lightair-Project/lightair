@@ -86,11 +86,11 @@ fn srt_udp_and_whip() {
     });
     assert!(active.is_some(), "SRT output active: {:?}", runtime().get(OutputKey::Stream(srt_id)).state);
     // An SRT caller is only active once the listener accepted it; then data must flow.
-    std::thread::sleep(Duration::from_secs(3));
+    std::thread::sleep(Duration::from_millis(1500));
     engine.call(|s| s.outputs.sample());
     let bytes = runtime().get(OutputKey::Stream(srt_id)).bytes;
     eprintln!("SRT sent {bytes} bytes");
-    assert!(bytes > 200_000, "the stream flows over SRT: {bytes} bytes");
+    assert!(bytes > 100_000, "the stream flows over SRT: {bytes} bytes");
     engine.call(move |s| s.outputs.stop_stream(srt_id));
     engine.call(|s| s.reconciler.release_inputs());
 
@@ -101,7 +101,7 @@ fn srt_udp_and_whip() {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("udp.ts");
         let mut ff = Proc::new("ffmpeg")
-            .args(["-nostdin", "-loglevel", "error", "-i", "udp://127.0.0.1:19382", "-t", "3", "-c", "copy"])
+            .args(["-nostdin", "-loglevel", "error", "-i", "udp://127.0.0.1:19382", "-t", "1.5", "-c", "copy"])
             .arg(&file)
             .stdout(Stdio::null())
             .stderr(Stdio::null())

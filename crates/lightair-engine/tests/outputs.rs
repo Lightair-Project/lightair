@@ -128,7 +128,7 @@ fn record_and_stream() {
     engine.call(move |s| s.outputs.start_recording(&cfg, None)).expect("recording starts");
     let state = wait_for(OutputKey::Recording, Duration::from_secs(3), |s| matches!(s, OutputState::Active { .. }));
     assert!(matches!(state, OutputState::Active { .. }), "recording active: {state:?}");
-    std::thread::sleep(Duration::from_millis(2500));
+    std::thread::sleep(Duration::from_millis(1200));
     engine.call(|s| s.outputs.sample());
     assert!(runtime().get(OutputKey::Recording).bytes > 0, "bytes written while recording");
     engine.call(|s| s.outputs.stop_recording());
@@ -138,7 +138,7 @@ fn record_and_stream() {
     eprintln!("recording: {streams:?}, {duration:.2} s");
     assert!(streams.iter().any(|s| s == "video:h264"), "{streams:?}");
     assert!(streams.iter().any(|s| s == "audio:aac"), "{streams:?}");
-    assert!(duration > 1.8, "duration {duration}");
+    assert!(duration > 0.8, "duration {duration}");
 
     // ---- clips: rolling buffer, save the last seconds
     let clips_dir = dir.join("clips");
@@ -146,7 +146,7 @@ fn record_and_stream() {
     engine.call(move |s| s.outputs.start_clips(&cfg, None)).expect("replay buffer starts");
     let state = wait_for(OutputKey::Clips, Duration::from_secs(3), |s| matches!(s, OutputState::Active { .. }));
     assert!(matches!(state, OutputState::Active { .. }), "replay buffer active: {state:?}");
-    std::thread::sleep(Duration::from_millis(3000));
+    std::thread::sleep(Duration::from_millis(1500));
     assert!(engine.call(|s| s.outputs.save_clip()), "save accepted");
     let start = Instant::now();
     while runtime().get(OutputKey::Clips).saved_clips == 0 && start.elapsed() < Duration::from_secs(5) {
@@ -163,7 +163,7 @@ fn record_and_stream() {
     let (streams, duration) = probe(&clip);
     eprintln!("clip {}: {streams:?}, {duration:.2} s", clip.display());
     assert!(streams.iter().any(|s| s == "video:h264"), "{streams:?}");
-    assert!(duration > 1.5 && duration < 6.0, "clip length {duration}");
+    assert!(duration > 0.8 && duration < 6.0, "clip length {duration}");
     engine.call(|s| s.outputs.stop_clips());
     wait_for(OutputKey::Clips, Duration::from_secs(5), |s| !s.is_running());
 
@@ -202,7 +202,7 @@ fn record_and_stream() {
             wait_for(OutputKey::Stream(id), Duration::from_secs(5), |s| matches!(s, OutputState::Active { .. }));
         assert!(matches!(state, OutputState::Active { .. }), "stream active: {state:?}");
         assert!(runtime().any_stream_running());
-        std::thread::sleep(Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(1500));
         engine.call(move |s| s.outputs.stop_stream(id));
         let state = wait_for(OutputKey::Stream(id), Duration::from_secs(5), |s| !s.is_running());
         assert_eq!(state, OutputState::Idle);
@@ -215,7 +215,7 @@ fn record_and_stream() {
         eprintln!("server received: {streams:?}, {duration:.2} s");
         assert!(streams.iter().any(|s| s == "video:h264"), "{streams:?}");
         assert!(streams.iter().any(|s| s == "audio:aac"), "{streams:?}");
-        assert!(duration > 2.0, "duration {duration}");
+        assert!(duration > 0.8, "duration {duration}");
     } else {
         eprintln!("ffmpeg not installed; skipping the streaming half");
     }

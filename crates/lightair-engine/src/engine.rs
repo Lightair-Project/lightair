@@ -54,12 +54,29 @@ impl Default for EngineConfig {
             sample_rate: 48_000,
             graphics: Graphics::OpenGl,
             modules: Modules::Auto,
-            allowed_modules: crate::DEFAULT_MODULES.iter().map(|s| s.to_string()).collect(),
+            allowed_modules: crate::DEFAULT_MODULES
+                .iter()
+                .filter(|m| !skipped_modules().any(|skip| skip == **m))
+                .map(|s| s.to_string())
+                .collect(),
             locale: "en-US".into(),
             module_config_dir: home.join("Library/Application Support/Lightair/plugin_config"),
             extra_plugin_dirs: Vec::new(),
         }
     }
+}
+
+/// Modules left out of the default set, from `LIGHTAIR_SKIP_MODULES` (comma-separated). The
+/// test runner (`cargo xtask test`) uses it to skip camera and capture-card modules, whose
+/// start-up waits seconds on system services, in tests that don't use them.
+fn skipped_modules() -> impl Iterator<Item = String> {
+    std::env::var("LIGHTAIR_SKIP_MODULES")
+        .unwrap_or_default()
+        .split(',')
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 #[derive(Debug, thiserror::Error)]
