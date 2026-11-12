@@ -12,6 +12,7 @@ uniform float shift;         // -1..1, positive grows the person
 uniform float2 bg_scale;     // Image: cover-fit mapping of the frame's uv into the picture's
 uniform float2 bg_offset;
 uniform float wrap;          // light wrap: how much background light spills over the edge
+uniform int show_mask;       // diagnostics: the person mask as grey
 
 sampler_state linearClamp {
 	Filter    = Linear;
@@ -59,6 +60,8 @@ float4 PSComposite(VertData v_in) : TARGET
 {
 	float4 c = image.Sample(linearClamp, v_in.uv);
 	float p = person(v_in.uv);
+	if (show_mask == 1)
+		return float4(p, p, p, 1.0);
 	if (mode == 2)
 		return c * p; // premultiplied: the layers below show through
 

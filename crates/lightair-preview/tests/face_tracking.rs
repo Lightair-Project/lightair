@@ -175,3 +175,102 @@ fn the_background_is_replaced_around_the_person() {
     drop(preview);
     drop(engine);
 }
+
+/// Background edges hold still on a still picture with camera-like noise (moving grain before
+/// the effect), and still follow a sudden move. Measures the person mask itself (shown as grey):
+/// how far it moves per frame, and how many frames it takes to catch up with a move.
+/// LIGHTAIR_FLICKER_MAX bounds the share of points jumping visibly per frame (default 0.1%).
+#[test]
+fn background_edges_hold_still() {
+    let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+    let Some(image) = std::env::var_os("LIGHTAIR_FACE_IMAGE").map(PathBuf::from) else {
+        eprintln!("LIGHTAIR_FACE_IMAGE not set; skipping");
+        return;
+    };
+    if std::env::var("LIGHTAIR_FACE_EXPECTED").is_ok_and(|v| v == "0") {
+        return;
+    }
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/modules/lightair-camera-fx");
+    if !dir.join("lightair-camera-fx.plugin").exists() {
+        eprintln!("module not built; skipping");
+        return;
+    }
+    let engine = Engine::start(EngineConfig {
+        canvas: (1280, 720),
+        output: (1280, 720),
+        extra_plugin_dirs: vec![dir],
+        ..Default::default()
+    })
+    .unwrap();
+    let mut doc = Document::new(Project::new("Flicker"));
+    let f = doc.project().primary_format().id;
+    let mut input = Input::new("Person", "image_source", json!({"file": image.to_string_lossy()}));
+    // Moving grain first, so the segmenter sees a new, noisy frame every time (like a camera).
+    input.effects.push(Effect::new("Grain", "fx.grain", json!({"amount": std::env::var("LIGHTAIR_GRAIN").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.35), "grain_size": 1.0, "colored": true})));
+    // A mirror, off for now: switching it on moves the person at once (the motion test).
+    let mut mirror = Effect::new("Mirror", "fx.mirror", json!({"axis": 1}));
+    mirror.enabled = false;
+    let mid = mirror.id;
+    input.effects.push(mirror);
+    let studio = Effect::new("Background", "studio.bg_replace", json!({"bg_mode": 3, "bg_color": 0xFF0000FFu32}));
+    let eid = studio.id;
+    input.effects.push(studio);
+    let iid = input.id;
+    let mut scene = Scene::new("Main");
+    scene.layers =
+        vec![Layer::new("Person", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
+    apply(&engine, &mut doc, Command::AddInput { input });
+    apply(&engine, &mut doc, Command::AddScene { scene, index: None });
+    let preview = engine.call(|_| Preview::attach());
+    let max: f64 = std::env::var("LIGHTAIR_FLICKER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1);
+
+    // The mask itself, as grey: how far it moves from frame to frame.
+    const N: usize = 64;
+    let mask_at = |preview: &Preview| -> Vec<i32> {
+        let n = preview.frames();
+        while preview.frames() < n + 1 {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let fr = preview.latest_frame().unwrap();
+        (0..N * N)
+            .map(|i| sample_ycbcr(&fr, (i % N) as f32 / N as f32 + 0.005, (i / N) as f32 / N as f32 + 0.005).unwrap().0 as i32)
+            .collect()
+    };
+    for (model, quality, name) in [(0, 1, "Vision balanced"), (0, 2, "Vision accurate"), (1, 1, "MediaPipe")] {
+        let settings = json!({"bg_mode": 3, "bg_model": model, "bg_quality": quality, "bg_show_mask": true});
+        apply(&engine, &mut doc, Command::SetInputEffectSettings { input: iid, effect: eid, settings });
+        std::thread::sleep(Duration::from_millis(3000));
+        let frames: Vec<Vec<i32>> = (0..60).map(|_| mask_at(&preview)).collect();
+        let pairs = frames.windows(2);
+        let (mut sum, mut visible) = (0i64, 0usize);
+        for w in pairs {
+            for (a, b) in w[0].iter().zip(&w[1]) {
+                let d = (a - b).abs();
+                sum += d as i64;
+                visible += (d > 24) as usize;
+            }
+        }
+        let mean = sum as f64 / (59.0 * (N * N) as f64);
+        let rate = visible as f64 / (59.0 * (N * N) as f64) * 100.0;
+        eprintln!("{name:>16}: mask moves {mean:.3}/255 per point per frame; {rate:.3}% of points jump visibly");
+        assert!(rate <= max, "{name}: edges flicker ({rate:.3}% per frame)");
+    }
+
+    // Someone moves: the mask follows within a few frames instead of trailing.
+    // (Accurate is Vision's slow, large model: it lags by itself, as its hint says.)
+    for (model, quality, name, bound) in [(0, 1, "Vision balanced", 6), (0, 2, "Vision accurate", 16)] {
+        let settings = json!({"bg_mode": 3, "bg_model": model, "bg_quality": quality, "bg_show_mask": true});
+        apply(&engine, &mut doc, Command::SetInputEffectSettings { input: iid, effect: eid, settings });
+        apply(&engine, &mut doc, Command::SetInputEffectEnabled { input: iid, effect: mid, enabled: false });
+        std::thread::sleep(Duration::from_millis(2500));
+        apply(&engine, &mut doc, Command::SetInputEffectEnabled { input: iid, effect: mid, enabled: true });
+        let frames: Vec<Vec<i32>> = (0..40).map(|_| mask_at(&preview)).collect();
+        let settled = frames.last().unwrap();
+        let off = |f: &Vec<i32>| f.iter().zip(settled).filter(|(a, b)| (**a - **b).abs() > 64).count();
+        let caught = frames.iter().position(|f| off(f) * 100 < N * N).unwrap_or(frames.len());
+        eprintln!("{name:>16}: caught up with a sudden move in {caught} frames");
+        assert!(caught <= bound, "{name}: the edge trails a move ({caught} frames)");
+    }
+    drop(preview);
+    drop(engine);
+}

@@ -129,11 +129,13 @@ impl StudioWindow {
         let def = catalog::def(&e.kind);
         let (iid, eid, on) = (input.id, e.id, e.enabled);
         let open = self.props.open_effect == Some(eid);
+        let system = e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM);
         let summary = match def {
+            Some(_) if system => "macOS camera effect".into(),
             Some(d) => d.summary(&e.settings),
             None => "Plugin effect".into(),
         };
-        let warning = def.filter(|_| on).and_then(|d| match d.needs {
+        let warning = def.filter(|_| on && !system).and_then(|d| match d.needs {
             Needs::Face if presence.face == Some(false) => Some("No face in view"),
             Needs::Person if presence.person == Some(false) => Some("No person in view"),
             _ => None,
@@ -288,6 +290,10 @@ impl StudioWindow {
         let mut col = div().flex().flex_col().gap_1p5().px_2().pb_2().pt_0p5();
         let mut group_open = true;
         let mut first_heading = true;
+        let system = e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM);
+        if system {
+            col = col.child(system_effect_panel(d.kind, cx));
+        }
         for (j, c) in d.controls.iter().enumerate() {
             let key = c.key();
             // Background replace shows the colour or the image it uses, not both.
@@ -297,8 +303,12 @@ impl StudioWindow {
                     continue;
                 }
             }
-            // Quality levels are Apple Vision's.
-            if key == Some("bg_quality") && e.settings["bg_model"].as_i64() == Some(1) {
+            // Quality levels are Apple Vision's; macOS's own effect has its settings in Control Center.
+            let model = e.settings.get("bg_model").and_then(Value::as_i64).unwrap_or(0);
+            if key == Some("bg_quality") && model != 0 {
+                continue;
+            }
+            if model == catalog::BG_MODEL_SYSTEM && key.is_some_and(|k| k != "bg_model") {
                 continue;
             }
             match *c {
@@ -835,7 +845,11 @@ impl StudioWindow {
 /// What a choice means, for the ones whose trade-off isn't obvious.
 fn choice_hint(key: &str, chosen: usize) -> Option<&'static str> {
     let hints: &[&str] = match key {
-        "bg_model" => &["Apple's person segmentation: finer, steadier edges", "Lighter on the GPU; rougher edges and hair"],
+        "bg_model" => &[
+            "Apple's person segmentation: finer, steadier edges",
+            "Lighter on the GPU; rougher edges and hair",
+            "macOS's own camera effect: the best edges, no cost to Lightair. Cameras only",
+        ],
         "bg_quality" => &[
             "Lowest cost; coarse edges",
             "Made for video: fine edges that stay steady",
@@ -844,6 +858,53 @@ fn choice_hint(key: &str, chosen: usize) -> Option<&'static str> {
         _ => return None,
     };
     hints.get(chosen).copied()
+}
+
+/// macOS's own effect: whether it's on for Lightair, and the way to turn it on.
+fn system_effect_panel(kind: &str, cx: &mut Context<StudioWindow>) -> Div {
+    use crate::system_effects as sys;
+    let (name, state) = if kind == "studio.bg_blur" {
+        ("Portrait", sys::portrait_on())
+    } else {
+        ("Backgrounds", sys::backgrounds_on())
+    };
+    let (dot, text) = match state {
+        Some(true) => (tok::ok(), format!("{name} is on in macOS")),
+        Some(false) => (tok::warn(), format!("{name} is off: turn it on in Video Effects")),
+        None => (tok::warn(), format!("{name} needs a newer macOS")),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_1p5()
+        .p_2()
+        .rounded(px(8.))
+        .bg(tok::bg_app())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().flex_none().size(px(8.)).rounded_full().bg(dot))
+                .child(div().flex_1().text_size(px(12.)).child(text)),
+        )
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(tok::text_tertiary())
+                .child("macOS does this inside the camera, before Lightair gets the picture. Turn it on for Lightair and choose the blur or picture in Video Effects."),
+        )
+        .child(
+            Button::new("open-video-effects")
+                .label("Open Video Effects…")
+                .icon(ui::icon("camera"))
+                .xsmall()
+                .outline()
+                .on_click(cx.listener(|_, _, _, cx| {
+                    sys::open_video_effects();
+                    cx.notify();
+                })),
+        )
 }
 
 fn control_row(label: &'static str, control: impl IntoElement) -> Div {
