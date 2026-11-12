@@ -10,6 +10,7 @@ mod log;
 pub mod loudness;
 pub mod media;
 pub mod meters;
+pub mod monitoring;
 pub mod obs;
 pub mod outputs;
 mod reconcile;

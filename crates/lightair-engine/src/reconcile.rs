@@ -244,7 +244,25 @@ impl Reconciler {
 
     fn resize_format(&mut self, format: &Format) {
         if Some(format.id) == self.primary_format {
-            tracing::warn!("changing the primary canvas size needs an engine restart");
+            // The main video can be reset while nothing records or streams from it.
+            unsafe {
+                let mut ovi = std::mem::zeroed::<sys::obs_video_info>();
+                if !sys::obs_get_video_info(&mut ovi) {
+                    return;
+                }
+                // Not read once graphics are up, but must point at something.
+                ovi.graphics_module = c"libobs-opengl".as_ptr();
+                ovi.base_width = format.width;
+                ovi.base_height = format.height;
+                ovi.output_width = format.width;
+                ovi.output_height = format.height;
+                ovi.fps_num = format.fps_num;
+                ovi.fps_den = format.fps_den.max(1);
+                let code = sys::obs_reset_video(&mut ovi);
+                if code != 0 {
+                    tracing::warn!(code, "couldn't resize the main canvas (is something recording or live?)");
+                }
+            }
         } else if let Some(canvas) = self.canvases.get(&format.id) {
             canvas.reset(format.width, format.height, format.fps_num, format.fps_den);
         }
