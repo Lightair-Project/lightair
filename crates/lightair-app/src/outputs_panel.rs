@@ -9,7 +9,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{Command, Destination, Id};
-use lightair_engine::outputs::{OutputKey, OutputState, runtime};
+use lightair_engine::outputs::{OutputKey, OutputState, StreamProtocol, runtime};
 
 use crate::studio::Studio;
 use crate::ui::{self, tok};
@@ -86,8 +86,9 @@ impl OutputsPanel {
     }
 
     fn open_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let server = cx.new(|cx| InputState::new(window, cx).placeholder("rtmp://server/app"));
-        let key = cx.new(|cx| InputState::new(window, cx).placeholder("Stream key").masked(true));
+        let server = cx.new(|cx| InputState::new(window, cx).placeholder("rtmp://…, srt://… or https://… (WHIP)"));
+        let key =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Stream key, token or SRT stream ID").masked(true));
         self.form = Some(NewDestination { server, key });
         cx.notify();
     }
@@ -96,9 +97,15 @@ impl OutputsPanel {
         let Some(form) = &self.form else { return };
         let server = form.server.read(cx).value().trim().to_string();
         let key = form.key.read(cx).value().trim().to_string();
-        if !(server.starts_with("rtmp://") || server.starts_with("rtmps://")) || key.is_empty() {
+        // RTMP and WHIP need a key (stream key, bearer token); for SRT it's an optional stream ID.
+        let protocol = StreamProtocol::of(&server);
+        let needs_key = matches!(protocol, Some(StreamProtocol::Rtmp | StreamProtocol::Whip));
+        if protocol.is_none() || (needs_key && key.is_empty()) {
             self.studio.update(cx, |s, cx| {
-                s.issue = Some("Enter an rtmp:// or rtmps:// server and a stream key.".into());
+                s.issue = Some(
+                    "Enter an rtmp(s)://, srt://, rist:// or https:// (WHIP) address, and its stream key or token."
+                        .into(),
+                );
                 cx.notify();
             });
             return;
@@ -211,50 +218,54 @@ impl Render for OutputsPanel {
                 ("Skipped".into(), tok::text_tertiary())
             };
             list = list.child(
-                row(("out-dest", i).into(), "radio", d.name.clone(), d.server.clone(), (text, color))
-                    .child(format_badge(("dest-format", i), &project, d.format).on_click(cx.listener({
-                        let project = project.clone();
-                        let current = d.format;
-                        move |this, _, _, cx| {
-                            let format = next_format(&project, current);
+                row(
+                    ("out-dest", i).into(),
+                    "radio",
+                    d.name.clone(),
+                    format!("{} · {}", StreamProtocol::label(&d.server), d.server),
+                    (text, color),
+                )
+                .child(format_badge(("dest-format", i), &project, d.format).on_click(cx.listener({
+                    let project = project.clone();
+                    let current = d.format;
+                    move |this, _, _, cx| {
+                        let format = next_format(&project, current);
+                        this.studio.update(cx, |s, cx| {
+                            let _ = s.execute(Command::SetDestinationFormat { destination: id, format }, cx);
+                        })
+                    }
+                })))
+                .child(
+                    div()
+                        .id(("dest-toggle", i))
+                        .w(px(30.))
+                        .h(px(18.))
+                        .rounded_full()
+                        .cursor_pointer()
+                        .bg(if enabled { tok::interactive() } else { tok::border_strong() })
+                        .child(
+                            div()
+                                .size(px(14.))
+                                .m(px(2.))
+                                .rounded_full()
+                                .bg(tok::bg_app())
+                                .when(enabled, |d| d.ml(px(14.))),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
                             this.studio.update(cx, |s, cx| {
-                                let _ = s.execute(Command::SetDestinationFormat { destination: id, format }, cx);
+                                let _ = s
+                                    .execute(Command::SetDestinationEnabled { destination: id, enabled: !enabled }, cx);
                             })
-                        }
-                    })))
-                    .child(
-                        div()
-                            .id(("dest-toggle", i))
-                            .w(px(30.))
-                            .h(px(18.))
-                            .rounded_full()
-                            .cursor_pointer()
-                            .bg(if enabled { tok::interactive() } else { tok::border_strong() })
-                            .child(
-                                div()
-                                    .size(px(14.))
-                                    .m(px(2.))
-                                    .rounded_full()
-                                    .bg(tok::bg_app())
-                                    .when(enabled, |d| d.ml(px(14.))),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.studio.update(cx, |s, cx| {
-                                    let _ = s.execute(
-                                        Command::SetDestinationEnabled { destination: id, enabled: !enabled },
-                                        cx,
-                                    );
-                                })
-                            })),
-                    )
-                    .child(ui::icon_button(("dest-remove", i), "trash", tok::text_tertiary()).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            crate::secrets::delete_stream_key(id);
-                            this.studio.update(cx, |s, cx| {
-                                let _ = s.execute(Command::RemoveDestination { destination: id }, cx);
-                            })
-                        },
-                    ))),
+                        })),
+                )
+                .child(ui::icon_button(("dest-remove", i), "trash", tok::text_tertiary()).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        crate::secrets::delete_stream_key(id);
+                        this.studio.update(cx, |s, cx| {
+                            let _ = s.execute(Command::RemoveDestination { destination: id }, cx);
+                        })
+                    }),
+                )),
             );
         }
 

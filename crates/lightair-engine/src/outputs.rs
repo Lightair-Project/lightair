@@ -169,6 +169,8 @@ pub struct EncoderConfig {
     pub audio_bitrate_kbps: u32,
     /// CBR for streaming; quality-oriented VBR for recording.
     pub constant_bitrate: bool,
+    /// B-frames (WebRTC/WHIP can't carry them).
+    pub bframes: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +185,46 @@ pub struct ClipsConfig {
     pub folder: PathBuf,
     pub seconds: u32,
     pub encoders: EncoderConfig,
+}
+
+/// How a destination is reached, from its URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamProtocol {
+    /// rtmp:// and rtmps://
+    Rtmp,
+    /// srt://, rist://, udp://, tcp:// (MPEG-TS). The key is the SRT stream ID.
+    MpegTs,
+    /// http(s):// WHIP (WebRTC). The key is the bearer token; audio is Opus.
+    Whip,
+}
+
+impl StreamProtocol {
+    pub fn of(server: &str) -> Option<Self> {
+        let s = server.trim().to_ascii_lowercase();
+        let has = |p: &str| s.starts_with(p);
+        if has("rtmp://") || has("rtmps://") {
+            Some(Self::Rtmp)
+        } else if has("srt://") || has("rist://") || has("udp://") || has("tcp://") {
+            Some(Self::MpegTs)
+        } else if has("http://") || has("https://") {
+            Some(Self::Whip)
+        } else {
+            None
+        }
+    }
+
+    pub fn label(server: &str) -> &'static str {
+        let s = server.trim().to_ascii_lowercase();
+        match Self::of(&s) {
+            Some(Self::Rtmp) if s.starts_with("rtmps") => "RTMPS",
+            Some(Self::Rtmp) => "RTMP",
+            Some(Self::MpegTs) if s.starts_with("srt") => "SRT",
+            Some(Self::MpegTs) if s.starts_with("rist") => "RIST",
+            Some(Self::MpegTs) => "MPEG-TS",
+            Some(Self::Whip) => "WHIP",
+            None => "?",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -389,6 +431,11 @@ unsafe fn create_encoders(
         .set_str("profile", "high");
     if cfg.video_encoder == "obs_x264" {
         v.set_str("preset", "veryfast");
+        if !cfg.bframes {
+            v.set_str("x264opts", "bframes=0");
+        }
+    } else {
+        v.set_bool("bframes", cfg.bframes);
     }
     let mut a = Data::new();
     a.set_int("bitrate", cfg.audio_bitrate_kbps as i64);
@@ -626,11 +673,28 @@ impl Outputs {
         if let Some(old) = self.streams.remove(&cfg.id) {
             unsafe { old.release() };
         }
+        let protocol = StreamProtocol::of(&cfg.server)
+            .ok_or_else(|| "Use an rtmp://, rtmps://, srt://, rist:// or https:// (WHIP) address.".to_string())?;
+        let (service_type, output_type) = match protocol {
+            StreamProtocol::Rtmp => ("rtmp_custom", "rtmp_output"),
+            StreamProtocol::MpegTs => ("rtmp_custom", "ffmpeg_mpegts_muxer"),
+            StreamProtocol::Whip => ("whip_custom", "whip_output"),
+        };
+        let mut encoders = cfg.encoders.clone();
+        if protocol == StreamProtocol::Whip {
+            // WebRTC carries Opus audio, and B-frames aren't allowed.
+            encoders.audio_encoder = "ffmpeg_opus".into();
+            encoders.bframes = false;
+        }
         let mut service_settings = Data::new();
-        service_settings.set_str("server", &cfg.server).set_str("key", &cfg.key);
+        service_settings.set_str("server", &cfg.server);
+        match protocol {
+            StreamProtocol::Whip => service_settings.set_str("bearer_token", &cfg.key),
+            _ => service_settings.set_str("key", &cfg.key),
+        };
         let service = unsafe {
             sys::obs_service_create(
-                c("rtmp_custom").as_ptr(),
+                c(service_type).as_ptr(),
                 c(&format!("Service {}", cfg.id)).as_ptr(),
                 service_settings.as_ptr(),
                 std::ptr::null_mut(),
@@ -643,15 +707,14 @@ impl Outputs {
         output_settings.set_bool("low_latency_mode_enabled", false);
         // On failure `start` releases everything it was given, the service included.
         // Destinations with identical encoder settings on the same canvas share one encoder pair.
-        let share_key = (video_output as usize, cfg.encoders.clone());
+        let share_key = (video_output as usize, encoders.clone());
         let shared = self
             .streams
             .values()
             .find(|r| r.share == share_key)
             .map(|r| unsafe { (sys::obs_encoder_get_ref(r.video), sys::obs_encoder_get_ref(r.audio)) });
         let shared = shared.filter(|(v, a)| !v.is_null() && !a.is_null());
-        let running =
-            unsafe { start(key, "rtmp_output", &output_settings, &cfg.encoders, service, video_output, shared)? };
+        let running = unsafe { start(key, output_type, &output_settings, &encoders, service, video_output, shared)? };
         self.streams.insert(cfg.id, running);
         Ok(())
     }
@@ -807,5 +870,6 @@ pub fn default_encoders(available: &[String], video_bitrate_kbps: u32, constant_
         audio_encoder: audio.into(),
         audio_bitrate_kbps: 160,
         constant_bitrate,
+        bframes: true,
     }
 }
