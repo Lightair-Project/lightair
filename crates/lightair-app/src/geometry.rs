@@ -2,7 +2,7 @@
 //! hit-testing, and resize/crop computed in the layer's own frame. libobs turns a layer around
 //! its box centre, clockwise for positive degrees (y points down).
 
-use lightair_core::{Crop, Layout};
+use lightair_core::{Crop, Layout, ShapeKind};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Corner {
@@ -229,9 +229,8 @@ pub enum Edge {
     Bottom,
 }
 
-pub const EDGES: [Edge; 4] = [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom];
-
 /// The middle of an edge, in canvas coordinates.
+#[cfg(test)]
 pub fn edge_middle(l: &Layout, e: Edge) -> (f32, f32) {
     let (hw, hh) = (l.width / 2.0, l.height / 2.0);
     let local = match e {
@@ -253,6 +252,76 @@ pub fn crop_edge(l: &Layout, e: Edge, size: (f32, f32), delta: (f32, f32)) -> La
         Edge::Bottom => (Corner::BottomLeft, (0.0, dy)),
     };
     crop(l, corner, size, rotate(local, l.rotation))
+}
+
+/// Crop mode: dragging inside the crop slides the picture under it (the box stays; the crop
+/// window moves the other way), within the source's edges.
+pub fn crop_pan(l: &Layout, size: (f32, f32), delta: (f32, f32)) -> Layout {
+    let (dx, dy) = rotate(delta, -l.rotation);
+    let k = l.crop;
+    let sx = (size.0 - (k.left + k.right) as f32).max(1.0) / l.width.max(1.0);
+    let sy = (size.1 - (k.top + k.bottom) as f32).max(1.0) / l.height.max(1.0);
+    let (span_x, span_y) = ((k.left + k.right) as f32, (k.top + k.bottom) as f32);
+    let left = (k.left as f32 - dx * sx).clamp(0.0, span_x).round();
+    let top = (k.top as f32 - dy * sy).clamp(0.0, span_y).round();
+    Layout {
+        crop: Crop { left: left as u32, right: (span_x - left) as u32, top: top as u32, bottom: (span_y - top) as u32 },
+        ..*l
+    }
+}
+
+/// The corner radius and half extents of a layer's shape, in its own frame (canvas units).
+fn shape_extent(l: &Layout) -> ((f32, f32), f32) {
+    let (hw, hh) = (l.width / 2.0, l.height / 2.0);
+    let short = hw.min(hh);
+    match l.shape.map(|s| (s.kind, s.radius)) {
+        Some((ShapeKind::Circle, _)) => ((short, short), short),
+        Some((ShapeKind::Pill, _)) => ((hw, hh), short),
+        Some((ShapeKind::Rounded, r)) => ((hw, hh), r.clamp(0.0, 1.0) * short),
+        None => ((hw, hh), 0.0),
+    }
+}
+
+/// The layer's shape as a closed polyline in canvas coordinates (its box when it has none).
+pub fn shape_outline(l: &Layout) -> Vec<(f32, f32)> {
+    let ((bx, by), r) = shape_extent(l);
+    if r <= 0.5 {
+        return outline(l).to_vec();
+    }
+    let mut pts = Vec::new();
+    // Four arcs, clockwise from the top-right corner (y points down).
+    for (cx, cy, start) in
+        [(bx - r, -by + r, -90.0f32), (bx - r, by - r, 0.0), (-bx + r, by - r, 90.0), (-bx + r, -by + r, 180.0)]
+    {
+        for k in 0..=12 {
+            let a = (start + 90.0 * k as f32 / 12.0).to_radians();
+            pts.push(to_canvas(l, (cx + r * a.cos(), cy + r * a.sin())));
+        }
+    }
+    pts
+}
+
+/// Crop handle positions: corners and edges, each with where it sits on the canvas.
+pub type CropHandles = (Vec<(Corner, (f32, f32))>, Vec<(Edge, (f32, f32))>);
+
+/// Where crop handles sit for a layer's shape: on the shape itself (a circle's handles are on
+/// the circle), corners at its 45° points, edges at its sides' middles.
+pub fn crop_handles(l: &Layout) -> CropHandles {
+    let ((bx, by), r) = shape_extent(l);
+    let d = r * (1.0 - std::f32::consts::FRAC_1_SQRT_2);
+    let corners = [
+        (Corner::TopLeft, (-bx + d, -by + d)),
+        (Corner::TopRight, (bx - d, -by + d)),
+        (Corner::BottomLeft, (-bx + d, by - d)),
+        (Corner::BottomRight, (bx - d, by - d)),
+    ]
+    .map(|(c, p)| (c, to_canvas(l, p)))
+    .to_vec();
+    let edges =
+        [(Edge::Left, (-bx, 0.0)), (Edge::Right, (bx, 0.0)), (Edge::Top, (0.0, -by)), (Edge::Bottom, (0.0, by))]
+            .map(|(e, p)| (e, to_canvas(l, p)))
+            .to_vec();
+    (corners, edges)
 }
 
 /// An angle in (−180, 180].
@@ -361,6 +430,38 @@ mod tests {
         let b = crop_edge(&r, Edge::Bottom, (1920.0, 1080.0), (20.0, 0.0));
         assert_eq!((b.crop.bottom, b.crop.left, b.crop.right), (40, 0, 0));
         assert!(close(edge_middle(&b, Edge::Top), edge_middle(&r, Edge::Top)), "the opposite edge stays");
+    }
+
+    #[test]
+    fn panning_moves_the_crop_window() {
+        let l =
+            Layout { crop: Crop { left: 100, top: 0, right: 100, bottom: 0 }, ..Layout::boxed(0.0, 0.0, 860.0, 540.0) };
+        // 1920 wide, 1720 visible in 860 px: 2 source px per canvas px. Dragging right 20 px
+        // shows more of the left.
+        let p = crop_pan(&l, (1920.0, 1080.0), (20.0, 0.0));
+        assert_eq!((p.crop.left, p.crop.right), (60, 140));
+        assert_eq!((p.x, p.width), (0.0, 860.0), "the box stays");
+        let far = crop_pan(&l, (1920.0, 1080.0), (500.0, 0.0));
+        assert_eq!((far.crop.left, far.crop.right), (0, 200), "stops at the source's edge");
+    }
+
+    #[test]
+    fn handles_sit_on_the_shape() {
+        use lightair_core::Shape;
+        // A 200×100 box with a circle: radius 50, centred at (100, 50).
+        let l = Layout { shape: Some(Shape::new(ShapeKind::Circle)), ..Layout::boxed(0.0, 0.0, 200.0, 100.0) };
+        let (corners, edges) = crop_handles(&l);
+        let left = edges.iter().find(|(e, _)| *e == Edge::Left).unwrap().1;
+        assert!(close(left, (50.0, 50.0)), "on the circle, not the box: {left:?}");
+        let tl = corners.iter().find(|(c, _)| *c == Corner::TopLeft).unwrap().1;
+        let r = ((tl.0 - 100.0).powi(2) + (tl.1 - 50.0).powi(2)).sqrt();
+        assert!((r - 50.0).abs() < 0.01, "corner handles on the circle too");
+        let ring = shape_outline(&l);
+        assert!(ring.iter().all(|p| (((p.0 - 100.0).powi(2) + (p.1 - 50.0).powi(2)).sqrt() - 50.0).abs() < 0.01));
+        // No shape: the box's own corners.
+        let plain = Layout::boxed(0.0, 0.0, 200.0, 100.0);
+        assert!(close(crop_handles(&plain).0[0].1, (0.0, 0.0)));
+        assert_eq!(shape_outline(&plain).len(), 4);
     }
 
     #[test]

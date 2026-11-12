@@ -35,13 +35,6 @@ pub(super) struct LayerProps {
     timer: Option<(Id, TimerStatus, Instant)>,
 }
 
-/// The shape mask filter in Lightair's libobs module.
-pub(super) const SHAPE_MASK: &str = "lightair_shape_mask";
-
-fn is_audio_only(kind: &str) -> bool {
-    kind.contains("audio") || kind.contains("input_capture")
-}
-
 pub(super) fn is_text(kind: &str) -> bool {
     kind.starts_with("text_ft2_source") || kind.starts_with("text_gdiplus")
 }
@@ -53,15 +46,15 @@ pub(super) fn is_media(kind: &str) -> bool {
 }
 
 /// libobs colours are 0xAABBGGRR.
-fn abgr(rgb: u32) -> u32 {
+pub(super) fn abgr(rgb: u32) -> u32 {
     0xFF00_0000 | ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF)
 }
-fn rgb_of(abgr: u32) -> u32 {
+pub(super) fn rgb_of(abgr: u32) -> u32 {
     ((abgr & 0xFF) << 16) | (abgr & 0xFF00) | ((abgr >> 16) & 0xFF)
 }
 
 /// Swatches offered for text and colour layers (RGB).
-const PALETTE: &[u32] = &[0xFFFFFF, 0x0B0B0F, 0xFF4A3B, 0xFFB020, 0x2BD67B, 0x3B82F6, 0x8B5CF6, 0xF472B6];
+pub(super) const PALETTE: &[u32] = &[0xFFFFFF, 0x0B0B0F, 0xFF4A3B, 0xFFB020, 0x2BD67B, 0x3B82F6, 0x8B5CF6, 0xF472B6];
 
 /// `settings` with `key` set (a merged copy: the reconciler updates libobs from the whole object).
 fn with(settings: &Value, key: &str, value: Value) -> Value {
@@ -180,107 +173,6 @@ impl StudioWindow {
         }
     }
 
-    /// Shape: cut the layer into a rounded box, circle or pill, with a soft edge and a border.
-    /// (A mask on the input, so it shows wherever the input does.)
-    pub(super) fn shape_section(&self, input: &Input, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if is_audio_only(&input.kind) || input.kind == lightair_engine::timers::TIMER_KIND || is_text(&input.kind) {
-            return None;
-        }
-        let iid = input.id;
-        let mask = input.effects.iter().find(|e| e.kind == SHAPE_MASK).cloned();
-        let shape = mask.as_ref().map(|m| m.settings["shape"].as_i64().unwrap_or(0));
-        let set_shape = |value: Option<i64>| -> Command {
-            match (&mask, value) {
-                (None, None) => Command::Batch { label: "No shape".into(), commands: vec![] },
-                (Some(m), None) => Command::RemoveInputEffect { input: iid, effect: m.id },
-                (Some(m), Some(v)) => Command::SetInputEffectSettings {
-                    input: iid,
-                    effect: m.id,
-                    settings: with(&m.settings, "shape", json!(v)),
-                },
-                (None, Some(v)) => Command::AddInputEffect {
-                    input: iid,
-                    effect: lightair_core::Effect::new(
-                        "Shape",
-                        SHAPE_MASK,
-                        json!({"shape": v, "radius": 0.25, "feather": 1.0, "border": 0.0, "border_color": 0xFFFFFFFFu32}),
-                    ),
-                    index: None,
-                },
-            }
-        };
-        let options = vec![
-            ("None", set_shape(None), shape.is_none()),
-            ("Rounded", set_shape(Some(0)), shape == Some(0)),
-            ("Circle", set_shape(Some(1)), shape == Some(1)),
-            ("Pill", set_shape(Some(2)), shape == Some(2)),
-        ];
-        let mut col = self.section("Shape", None, cx).child(self.segmented("shape", options, cx));
-        if let Some(m) = mask {
-            let (eid, settings) = (m.id, m.settings.clone());
-            let row = |label: &'static str, slider: gpui_kit::component::slider::Slider, value: String| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().w(px(64.)).text_size(px(12.)).text_color(tok::text_secondary()).child(label))
-                    .child(div().flex_1().child(slider))
-                    .child(
-                        div()
-                            .w(px(40.))
-                            .text_right()
-                            .text_size(px(11.))
-                            .font_family("Menlo")
-                            .text_color(tok::text_tertiary())
-                            .child(value),
-                    )
-            };
-            let setter = |key: &'static str| {
-                let settings = settings.clone();
-                move |v: f32| Command::SetInputEffectSettings {
-                    input: iid,
-                    effect: eid,
-                    settings: with(&settings, key, json!(v)),
-                }
-            };
-            if shape == Some(0) {
-                let r = settings["radius"].as_f64().unwrap_or(0.25) as f32;
-                let s = self.slider(format!("mask:{eid}:radius"), (0.0, 1.0, 0.01), r, setter("radius"), cx);
-                col = col.child(row("Corners", s, format!("{:.0}%", r * 100.0)));
-            }
-            let feather = settings["feather"].as_f64().unwrap_or(1.0) as f32;
-            let s = self.slider(format!("mask:{eid}:feather"), (0.0, 40.0, 1.0), feather, setter("feather"), cx);
-            col = col.child(row("Softness", s, format!("{feather:.0} px")));
-            let border = settings["border"].as_f64().unwrap_or(0.0) as f32;
-            let s = self.slider(format!("mask:{eid}:border"), (0.0, 40.0, 1.0), border, setter("border"), cx);
-            col = col.child(row("Border", s, format!("{border:.0} px")));
-            if border > 0.0 {
-                let current = settings["border_color"].as_u64().map(|c| rgb_of(c as u32));
-                let mut swatches = div().flex().flex_wrap().gap_1p5();
-                for (i, &rgb) in PALETTE.iter().enumerate() {
-                    let cmd = Command::SetInputEffectSettings {
-                        input: iid,
-                        effect: eid,
-                        settings: with(&settings, "border_color", json!(abgr(rgb))),
-                    };
-                    swatches = swatches.child(
-                        div()
-                            .id(("border-swatch", i))
-                            .size(px(20.))
-                            .rounded_full()
-                            .cursor_pointer()
-                            .bg(rgb_to_hsla(rgb))
-                            .border_2()
-                            .border_color(if current == Some(rgb) { tok::text() } else { tok::border() })
-                            .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
-                    );
-                }
-                col = col.child(swatches);
-            }
-        }
-        Some(col.into_any_element())
-    }
-
     /// The layer's video effects (except Camera Studio, which has its own section).
     pub(super) fn effects_section(&self, input: &Input, cx: &mut Context<Self>) -> AnyElement {
         use crate::video_effects as fx;
@@ -313,12 +205,7 @@ impl StudioWindow {
             }
             col = col.child(menu);
         }
-        let shown: Vec<_> = input
-            .effects
-            .iter()
-            .filter(|e| e.kind != crate::camera_studio::KIND && e.kind != SHAPE_MASK)
-            .cloned()
-            .collect();
+        let shown: Vec<_> = input.effects.iter().filter(|e| e.kind != crate::camera_studio::KIND).cloned().collect();
         if shown.is_empty() && !self.props.effect_menu {
             col = col.child(div().text_color(tok::text_tertiary()).child("No effects"));
         }
@@ -816,7 +703,7 @@ impl StudioWindow {
     }
 }
 
-fn rgb_to_hsla(rgb_value: u32) -> Hsla {
+pub(super) fn rgb_to_hsla(rgb_value: u32) -> Hsla {
     rgb(rgb_value).into()
 }
 

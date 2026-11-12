@@ -76,6 +76,10 @@ pub mod tok {
     pub fn canvas_safe_area_fill() -> Hsla {
         rgba(0xFFFFFF14).into()
     }
+    /// The cut-away part of a picture in crop mode.
+    pub fn crop_dim() -> Hsla {
+        rgba(0x0000_00A6).into()
+    }
     pub fn scrim() -> Hsla {
         rgba(0x00000066).into()
     }

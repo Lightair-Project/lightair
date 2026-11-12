@@ -37,6 +37,11 @@ pub struct Reconciler {
     scenes: HashMap<(Id, Id), Scene>,
     /// Scene items are owned by their scene; (scene, format, layer) → item.
     items: HashMap<(Id, Id, Id), ItemPtr>,
+    /// Shaped layers: the item above is a one-item group; this is the input's item inside it
+    /// (carrying the crop) and the shape mask on the group.
+    masks: HashMap<(Id, Id, Id), Masked>,
+    /// The layer being cropped (scene, format, layer): shown whole and unshaped meanwhile.
+    crop_preview: Option<(Id, Id, Id)>,
     formats: Vec<Id>,
     primary_format: Option<Id>,
     program: Option<Id>,
@@ -71,6 +76,13 @@ unsafe impl Send for VolmeterPtr {}
 #[derive(Clone, Copy)]
 struct ItemPtr(*mut sys::obs_sceneitem_t);
 unsafe impl Send for ItemPtr {}
+
+/// The inside of a shaped layer.
+pub(crate) struct Masked {
+    pub inner: *mut sys::obs_sceneitem_t,
+    pub filter: Source,
+}
+unsafe impl Send for Masked {}
 
 impl Reconciler {
     /// Applies patches computed from two snapshots; `project` is the newer one.
@@ -155,11 +167,15 @@ impl Reconciler {
                             match lp {
                                 LayerPatch::Added { layer, index } => self.add_layer(after.id, format, layer, index),
                                 LayerPatch::Removed { layer } => {
+                                    self.masks.remove(&(after.id, format, layer));
                                     if let Some(item) = self.items.remove(&(after.id, format, layer)) {
                                         unsafe { sys::obs_sceneitem_remove(item.0) };
                                     }
                                 }
-                                LayerPatch::Changed { layer } => self.update_layer(after.id, format, layer),
+                                LayerPatch::Changed { layer } => {
+                                    let index = after.layers.iter().position(|l| l.id == layer.id).unwrap_or(0);
+                                    self.update_layer(after.id, format, layer, index)
+                                }
                                 LayerPatch::Order(order) => self.reorder(after.id, format, &order),
                             }
                         }
@@ -170,6 +186,7 @@ impl Reconciler {
                         self.set_program(None, project);
                     }
                     self.items.retain(|(scene, _, _), _| scene != id);
+                    self.masks.retain(|(scene, _, _), _| scene != id);
                     self.scenes.retain(|(scene, _), _| scene != id);
                 }
                 Patch::ProgramChanged(program) => self.set_program(*program, project),
@@ -229,6 +246,7 @@ impl Reconciler {
         self.finish_move();
         self.transitions.remove(&id);
         self.items.retain(|(_, f, _), _| *f != id);
+        self.masks.retain(|(_, f, _), _| *f != id);
         self.scenes.retain(|(_, f), _| *f != id);
         self.canvases.remove(&id);
         self.formats.retain(|f| *f != id);
@@ -254,6 +272,21 @@ impl Reconciler {
     /// The libobs source of an input (borrowed; valid while the input exists).
     pub(crate) fn input_ptr(&self, input: Id) -> Option<*mut sys::obs_source_t> {
         self.inputs.get(&input).map(|s| s.as_ptr())
+    }
+
+    /// Shows a layer whole while it's being cropped (crop mode), or `None` to end it. The
+    /// document is untouched: this is only how libobs draws it meanwhile.
+    pub fn set_crop_preview(&mut self, target: Option<(Id, Id, Id)>, project: &Project) {
+        if self.crop_preview == target {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.crop_preview, target);
+        for (scene, format, layer) in previous.into_iter().chain(target) {
+            let Some(s) = project.scene(scene) else { continue };
+            let Some(index) = s.layers.iter().position(|l| l.id == layer) else { continue };
+            let l = s.layers[index].clone();
+            self.update_layer(scene, format, &l, index);
+        }
     }
 
     /// Starts inputs as if they were on screen (captures open, media loads) without putting
@@ -458,6 +491,7 @@ impl Reconciler {
             let Some(temp) = temp else { continue };
             let mut tweens = Vec::new();
             let mut fades = Vec::new();
+            let mut masks = Vec::new();
             // Which of A's layers continue into B.
             let mut used: Vec<Id> = Vec::new();
             let matches: Vec<Option<Layer>> = scene_b
@@ -477,11 +511,13 @@ impl Reconciler {
                 if !lo.visible {
                     continue;
                 }
-                let item = temp.add(input);
-                if item.is_null() {
+                let Some((item, masked)) =
+                    (unsafe { add_item(temp.as_ptr(), input, lo.shape.as_ref(), &format!("{}", l.id)) })
+                else {
                     continue;
-                }
-                unsafe { apply_layout(item, lo) };
+                };
+                unsafe { layout_item(item, masked.as_ref(), lo) };
+                masks.extend(masked);
                 item_fade(item, false, ms, &mut fades);
                 unsafe {
                     sys::obs_sceneitem_set_visible(item, false);
@@ -493,17 +529,21 @@ impl Reconciler {
                 if !to.visible {
                     continue;
                 }
-                let item = temp.add(input);
-                if item.is_null() {
+                // The shape (if any) is B's: a layer gliding into a circle is a circle on the way.
+                let Some((item, masked)) =
+                    (unsafe { add_item(temp.as_ptr(), input, to.shape.as_ref(), &format!("{}", l.id)) })
+                else {
                     continue;
-                }
+                };
                 match m.as_ref().and_then(|m| m.layouts.get(&format)).filter(|f| f.visible) {
                     Some(from) => {
-                        unsafe { apply_layout(item, from) };
-                        tweens.push(Tween { item, from: *from, to: *to });
+                        let from = Layout { shape: to.shape, ..*from };
+                        unsafe { layout_item(item, masked.as_ref(), &from) };
+                        tweens.push(Tween { item, masked, from, to: *to });
                     }
                     None => unsafe {
-                        apply_layout(item, to);
+                        layout_item(item, masked.as_ref(), to);
+                        masks.extend(masked);
                         sys::obs_sceneitem_set_visible(item, false);
                         item_fade(item, true, ms, &mut fades);
                         sys::obs_sceneitem_set_visible(item, true);
@@ -511,7 +551,7 @@ impl Reconciler {
                 }
             }
             unsafe { sys::obs_transition_set(tr.as_ptr(), temp.source_ptr()) };
-            formats.push(FormatMove { temp, tweens, transition: tr.as_ptr(), dest, fades });
+            formats.push(FormatMove { temp, tweens, transition: tr.as_ptr(), dest, fades, masks });
         }
         if formats.is_empty() {
             return false;
@@ -575,21 +615,47 @@ impl Reconciler {
             tracing::warn!(%scene, layer = %layer.id, "layer references a missing scene or input");
             return;
         };
-        let item = obs_scene.add(input);
-        if item.is_null() {
+        let shape = layer.layouts.get(&format).and_then(|l| l.shape);
+        let Some((item, masked)) =
+            (unsafe { add_item(obs_scene.as_ptr(), input, shape.as_ref(), &format!("{}:{format}", layer.id)) })
+        else {
             return;
-        }
+        };
         unsafe { sys::obs_sceneitem_set_order_position(item, index as i32) };
-        self.items.insert((scene, format, layer.id), ItemPtr(item));
-        self.update_layer(scene, format, layer);
+        let key = (scene, format, layer.id);
+        self.items.insert(key, ItemPtr(item));
+        if let Some(m) = masked {
+            self.masks.insert(key, m);
+        }
+        self.update_layer(scene, format, layer, index);
     }
 
-    fn update_layer(&mut self, scene: Id, format: Id, layer: &Layer) {
-        let Some(item) = self.items.get(&(scene, format, layer.id)).copied() else { return };
+    fn update_layer(&mut self, scene: Id, format: Id, layer: &Layer, index: usize) {
+        let key = (scene, format, layer.id);
+        let Some(item) = self.items.get(&key).copied() else { return };
+        // Gaining or losing a shape changes the item's structure: rebuild it in place.
+        let shaped = layer.layouts.get(&format).is_some_and(|l| l.shape.is_some());
+        if shaped != self.masks.contains_key(&key) {
+            self.masks.remove(&key);
+            self.items.remove(&key);
+            unsafe { sys::obs_sceneitem_remove(item.0) };
+            self.add_layer(scene, format, layer, index);
+            return;
+        }
         unsafe {
             sys::obs_sceneitem_set_locked(item.0, layer.locked);
+            let size = (self.crop_preview == Some(key)).then(|| self.input_size(layer.input)).flatten();
             match layer.layouts.get(&format) {
-                Some(l) => apply_layout(item.0, l),
+                // Being cropped: the whole picture, unshaped, where it would sit uncropped.
+                Some(l) if size.is_some() => {
+                    let (w, h) = size.unwrap();
+                    let masked = self.masks.get(&key);
+                    layout_item(item.0, masked, &l.uncropped((w as f32, h as f32)));
+                    if let Some(m) = masked {
+                        sys::obs_source_set_enabled(m.filter.as_ptr(), false);
+                    }
+                }
+                Some(l) => layout_item(item.0, self.masks.get(&key), l),
                 // No layout in this format: the layer is hidden there.
                 None => {
                     sys::obs_sceneitem_set_visible(item.0, false);
@@ -771,6 +837,7 @@ impl Reconciler {
                 unsafe { chain_remove(src.as_ptr(), &mut chain) };
             }
         }
+        self.masks.clear();
         self.items.clear();
         self.scenes.clear();
         self.canvases.clear();
@@ -807,6 +874,83 @@ pub(crate) unsafe fn apply_layout(item: *mut sys::obs_sceneitem_t, l: &Layout) {
         };
         sys::obs_sceneitem_set_crop(item, &crop);
         sys::obs_sceneitem_set_visible(item, l.visible);
+    }
+}
+
+/// Shape-mask filter settings (Lightair's libobs module, `lightair_shape_mask`).
+fn mask_settings(s: &lightair_core::Shape) -> serde_json::Value {
+    let kind = match s.kind {
+        lightair_core::ShapeKind::Rounded => 0,
+        lightair_core::ShapeKind::Circle => 1,
+        lightair_core::ShapeKind::Pill => 2,
+    };
+    serde_json::json!({
+        "shape": kind,
+        "radius": s.radius,
+        "feather": s.feather,
+        "border": s.border,
+        "border_color": s.border_color,
+    })
+}
+
+/// Adds `input` to `scene` as a layer's item. A shaped layer becomes a one-item group: the input
+/// sits inside (carrying the crop) and the shape mask is on the group, so the shape is cut from
+/// the cropped picture and belongs to this layer alone.
+pub(crate) unsafe fn add_item(
+    scene: *mut sys::obs_scene_t,
+    input: &Source,
+    shape: Option<&lightair_core::Shape>,
+    name: &str,
+) -> Option<(*mut sys::obs_sceneitem_t, Option<Masked>)> {
+    unsafe {
+        let Some(shape) = shape else {
+            let item = sys::obs_scene_add(scene, input.as_ptr());
+            return (!item.is_null()).then_some((item, None));
+        };
+        let group_name = std::ffi::CString::new(format!("shape {name} {}", Id::new())).unwrap_or_default();
+        let group = sys::obs_scene_add_group2(scene, group_name.as_ptr(), false);
+        if group.is_null() {
+            return None;
+        }
+        let inner = sys::obs_scene_add(sys::obs_sceneitem_group_get_scene(group), input.as_ptr());
+        let filter = Source::create_private(
+            "lightair_shape_mask",
+            &format!("mask {name}"),
+            Some(&data_from_json(&mask_settings(shape))),
+        );
+        let Some(filter) = filter else {
+            tracing::warn!("shape mask unavailable (is the Lightair module loaded?)");
+            sys::obs_sceneitem_remove(group);
+            let item = sys::obs_scene_add(scene, input.as_ptr());
+            return (!item.is_null()).then_some((item, None));
+        };
+        sys::obs_source_filter_add(sys::obs_sceneitem_get_source(group), filter.as_ptr());
+        Some((group, Some(Masked { inner, filter })))
+    }
+}
+
+/// Lays out a layer's item; for a shaped layer the crop goes inside the group (so the mask is
+/// computed on the cropped picture) and the box, fit and rotation on the group.
+pub(crate) unsafe fn layout_item(item: *mut sys::obs_sceneitem_t, masked: Option<&Masked>, l: &Layout) {
+    unsafe {
+        let Some(m) = masked else { return apply_layout(item, l) };
+        sys::obs_sceneitem_set_alignment(m.inner, sys::OBS_ALIGN_LEFT | sys::OBS_ALIGN_TOP);
+        sys::obs_sceneitem_set_bounds_type(m.inner, sys::OBS_BOUNDS_NONE);
+        sys::obs_sceneitem_set_scale(m.inner, &vec2(1.0, 1.0));
+        sys::obs_sceneitem_set_rot(m.inner, 0.0);
+        sys::obs_sceneitem_set_pos(m.inner, &vec2(0.0, 0.0));
+        let crop = sys::obs_sceneitem_crop {
+            left: l.crop.left as i32,
+            top: l.crop.top as i32,
+            right: l.crop.right as i32,
+            bottom: l.crop.bottom as i32,
+        };
+        sys::obs_sceneitem_set_crop(m.inner, &crop);
+        apply_layout(item, &Layout { crop: lightair_core::Crop::default(), ..*l });
+        if let Some(shape) = &l.shape {
+            m.filter.update(&data_from_json(&mask_settings(shape)));
+        }
+        sys::obs_source_set_enabled(m.filter.as_ptr(), l.shape.is_some());
     }
 }
 
