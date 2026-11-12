@@ -93,6 +93,9 @@ struct Drag {
     others: Vec<(Id, Layout)>,
 }
 
+/// A selection box being dragged: format, start, current point (canvas units), adding (⇧).
+type Marquee = (Id, (f32, f32), (f32, f32), bool);
+
 /// Snap guides shown while dragging: (vertical?, canvas coordinate).
 type Guides = Vec<(bool, f32)>;
 
@@ -130,6 +133,9 @@ pub struct StudioWindow {
     palette: Option<palette::Palette>,
     /// The Go Live review sheet, while open.
     go_live_sheet: Option<golive::GoLiveSheet>,
+    /// A drag-to-select box on the canvas: format, start and current point (canvas units), and
+    /// whether it adds to the selection (⇧).
+    marquee: Option<Marquee>,
 }
 
 const HANDLE: f32 = 10.0;
@@ -169,6 +175,7 @@ impl StudioWindow {
             safe_vertical: None,
             palette: None,
             go_live_sheet: None,
+            marquee: None,
         }
     }
 
@@ -495,12 +502,27 @@ impl StudioWindow {
                     self.select_layer(Some(id), cx);
                 }
             }
-            None if ev.modifiers.shift => {}
-            None => self.select_layer(None, cx),
+            // Empty space: start a selection box (⇧ adds to the selection).
+            None => {
+                if !ev.modifiers.shift {
+                    self.select_layer(None, cx);
+                }
+                self.marquee = Some((format, (x, y), (x, y), ev.modifiers.shift));
+            }
         }
     }
 
     fn canvas_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((format, ..)) = self.marquee {
+            let project = self.studio.read(cx).project().clone();
+            if let Some(p) = self.to_canvas(&project, format, ev.position)
+                && let Some((_, _, to, _)) = &mut self.marquee
+            {
+                *to = p;
+                cx.notify();
+            }
+            return;
+        }
         let Some(drag) = &self.drag else { return };
         if ev.pressed_button != Some(MouseButton::Left) {
             return;
@@ -560,6 +582,34 @@ impl StudioWindow {
     }
 
     fn canvas_up(&mut self, _: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((format, from, to, additive)) = self.marquee.take() {
+            let moved = (from.0 - to.0).abs() > 2.0 || (from.1 - to.1).abs() > 2.0;
+            self.studio.update(cx, |s, cx| {
+                let p = s.project().clone();
+                if let Some(scene) = s.selected_scene.and_then(|id| p.scene(id))
+                    && moved
+                {
+                    let hit: Vec<Id> = scene
+                        .layers
+                        .iter()
+                        .rev()
+                        .filter(|l| !l.locked)
+                        .filter(|l| l.layouts.get(&format).is_some_and(|lo| lo.visible && geo::touches(lo, from, to)))
+                        .map(|l| l.id)
+                        .collect();
+                    let mut all = if additive { s.selection() } else { vec![] };
+                    for id in hit {
+                        if !all.contains(&id) {
+                            all.push(id);
+                        }
+                    }
+                    s.selected_layer = all.first().copied();
+                    s.also_selected = all.into_iter().skip(1).collect();
+                }
+                cx.notify();
+            });
+            return;
+        }
         if self.drag.take().is_some() {
             self.guides.clear();
             self.studio.update(cx, |s, cx| {
@@ -1464,6 +1514,23 @@ impl StudioWindow {
                 .and_then(|id| project.scene(id))
                 .and_then(|scene| studio.selected_layer.and_then(|l| scene.layer(l)))
                 .and_then(|l| l.layouts.get(&fid).map(|lo| (*lo, l.locked)));
+            if let Some((mf, a, b, _)) = self.marquee
+                && mf == fid
+            {
+                let (x0, y0) = (lx + a.0.min(b.0) * s, ly + a.1.min(b.1) * s);
+                let (w, h) = ((a.0 - b.0).abs() * s, (a.1 - b.1).abs() * s);
+                stage = stage.child(
+                    div()
+                        .absolute()
+                        .left(px(x0))
+                        .top(px(y0))
+                        .w(px(w))
+                        .h(px(h))
+                        .border_1()
+                        .border_color(tok::canvas_selection())
+                        .bg(tok::canvas_safe_area_fill()),
+                );
+            }
             // Other selected layers: outlines only.
             let extras: Vec<[(f32, f32); 4]> = studio
                 .selected_scene
@@ -1770,6 +1837,21 @@ impl StudioWindow {
             .child(align_button(3, "align-start-horizontal", "Align top edges", geo::Align::Top))
             .child(align_button(4, "align-center-horizontal", "Align middles", geo::Align::Middle))
             .child(align_button(5, "align-end-horizontal", "Align bottom edges", geo::Align::Bottom));
+        let distribute_button = |i: usize, icon: &'static str, tip: &'static str, horizontal: bool| {
+            let layers = layers.clone();
+            ui::icon_button(("distribute", i), icon, tok::text_secondary())
+                .tooltip(move |w, cx| Tooltip::new(tip).build(w, cx))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let layouts: Vec<Layout> = layers.iter().map(|(_, l)| *l).collect();
+                    let spaced = geo::distribute(&layouts, horizontal);
+                    let moved = layers.iter().map(|(id, _)| *id).zip(spaced).collect();
+                    this.set_layouts(sid, fid, moved, "Distribute layers", cx);
+                }))
+        };
+        let row = row.child(div().w(px(8.))).when(layers.len() >= 3, |r| {
+            r.child(distribute_button(0, "align-horizontal-distribute-center", "Space evenly across", true))
+                .child(distribute_button(1, "align-vertical-distribute-center", "Space evenly down", false))
+        });
         body.child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{} layers selected", selection.len())))
             .child(
                 div()

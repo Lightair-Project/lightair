@@ -182,6 +182,45 @@ pub fn align(layouts: &[Layout], how: Align) -> Vec<Layout> {
         .collect()
 }
 
+/// Spaces layers evenly between the outermost two (by visible bounds): equal gaps, along x
+/// when `horizontal`, else y. Needs three or more; fewer are returned unchanged.
+pub fn distribute(layouts: &[Layout], horizontal: bool) -> Vec<Layout> {
+    if layouts.len() < 3 {
+        return layouts.to_vec();
+    }
+    let span = |l: &Layout| {
+        let b = bounds(l);
+        if horizontal { (b.0, b.2) } else { (b.1, b.3) }
+    };
+    let mut order: Vec<usize> = (0..layouts.len()).collect();
+    order.sort_by(|a, b| span(&layouts[*a]).0.total_cmp(&span(&layouts[*b]).0));
+    let first = span(&layouts[order[0]]).0;
+    let last = span(&layouts[*order.last().unwrap()]).1;
+    let total: f32 = layouts.iter().map(|l| span(l).1 - span(l).0).sum();
+    let gap = (last - first - total) / (layouts.len() - 1) as f32;
+    let mut out = layouts.to_vec();
+    let mut at = first;
+    for i in order {
+        let (start, end) = span(&layouts[i]);
+        let d = at - start;
+        if horizontal {
+            out[i].x += d;
+        } else {
+            out[i].y += d;
+        }
+        at += end - start + gap;
+    }
+    out
+}
+
+/// Whether a layer's visible bounds overlap the rectangle between two points.
+pub fn touches(l: &Layout, a: (f32, f32), b: (f32, f32)) -> bool {
+    let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
+    let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
+    let (l0, t0, r0, b0) = bounds(l);
+    l0 <= x1 && r0 >= x0 && t0 <= y1 && b0 >= y0
+}
+
 /// An angle in (−180, 180].
 pub fn normalise_degrees(a: f32) -> f32 {
     let a = a.rem_euclid(360.0);
@@ -251,6 +290,27 @@ mod tests {
         let turned = Layout { rotation: 90.0, ..Layout::boxed(300.0, 0.0, 100.0, 50.0) };
         let r = align(&[a, turned], Align::Left);
         assert!((bounds(&r[1]).0 - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn distribute_makes_equal_gaps() {
+        let ls = [
+            Layout::boxed(0.0, 0.0, 100.0, 10.0),
+            Layout::boxed(500.0, 0.0, 100.0, 10.0),
+            Layout::boxed(130.0, 0.0, 50.0, 10.0),
+        ];
+        let d = distribute(&ls, true);
+        // Span 0..600, widths 250: two gaps of 175.
+        assert_eq!((d[0].x, d[2].x, d[1].x), (0.0, 275.0, 500.0));
+        assert_eq!(distribute(&ls[..2], true), ls[..2].to_vec(), "two layers stay put");
+    }
+
+    #[test]
+    fn marquee_touches() {
+        let l = Layout::boxed(100.0, 100.0, 50.0, 50.0);
+        assert!(touches(&l, (0.0, 0.0), (120.0, 120.0)));
+        assert!(touches(&l, (200.0, 200.0), (140.0, 140.0)), "either drag direction");
+        assert!(!touches(&l, (0.0, 0.0), (90.0, 300.0)));
     }
 
     #[test]
