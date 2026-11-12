@@ -85,6 +85,12 @@ pub fn plain_project() -> Project {
         lightair_engine::timers::TIMER_KIND,
         json!({"mode": "countdown", "seconds": 300, "font": {"face": "Helvetica Neue", "size": 96, "flags": 0}, "color1": 0xFFFFFFFFu32, "color2": 0xFFFFFFFFu32}),
     );
+    let icon = std::env::var_os("LIGHTAIR_REPO")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_exe().ok().and_then(|e| e.ancestors().nth(3).map(|p| p.to_path_buf())))
+        .map(|root| root.join("branding/final/icon/lightair-icon-512.png"))
+        .unwrap_or_default();
+    let logo = Input::new("Logo", "image_source", json!({"file": icon.to_string_lossy()}));
     let f = format.id;
     let mut main = Scene::new("Main");
     main.layers.push(Layer::new("Background", bg.id, [(f, Layout::boxed(0.0, 0.0, w, h))]));
@@ -93,6 +99,7 @@ pub fn plain_project() -> Project {
     let mut soon = Scene::new("Starting Soon");
     soon.layers.push(Layer::new("Background", bg.id, [(f, Layout::boxed(0.0, 0.0, w, h))]));
     soon.layers.push(Layer::new("Countdown", timer.id, [(f, Layout::boxed(760.0, 470.0, 400.0, 140.0))]));
+    soon.layers.push(Layer::new("Logo", logo.id, [(f, Layout::boxed(1700.0, 860.0, 160.0, 160.0))]));
     let tone = |name: &str| Input::new(name, "color_source_v3", json!({}));
     let (a, b) = (tone("Mic (demo)"), tone("Music (demo)"));
     let tracks = [Track::new("Mic", a.id), Track::new("Music", b.id)];
@@ -101,6 +108,7 @@ pub fn plain_project() -> Project {
         Command::AddInput { input: card },
         Command::AddInput { input: title },
         Command::AddInput { input: timer },
+        Command::AddInput { input: logo },
         Command::AddInput { input: a },
         Command::AddInput { input: b },
         Command::AddScene { scene: soon, index: None },

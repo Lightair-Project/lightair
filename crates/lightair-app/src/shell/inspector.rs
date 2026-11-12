@@ -321,7 +321,11 @@ impl StudioWindow {
         });
         let transform = self.section("Transform", reset_crop, cx).child(grid).child(fits);
 
-        let mut col = body.gap_0().child(header).child(transform);
+        let mut col = body.gap_0().child(header);
+        if let Some(source) = input.as_ref().and_then(|i| self.source_section(i, cx)) {
+            col = col.child(source);
+        }
+        col = col.child(transform);
         if let Some(input) = &input {
             if let Some(content) = self.content_section(input, cx) {
                 col = col.child(content);
