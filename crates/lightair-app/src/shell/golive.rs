@@ -21,6 +21,11 @@ pub(super) struct GoLiveSheet {
 
 impl StudioWindow {
     pub(super) fn open_go_live(&mut self, cx: &mut Context<Self>) {
+        // Preference: skip the review and go straight live.
+        if !self.prefs.review_before_live {
+            self.studio.update(cx, |s, cx| s.go_live(cx));
+            return;
+        }
         let project = self.studio.read(cx).project().clone();
         let has_key =
             project.outputs.destinations.iter().map(|d| (d.id, crate::secrets::stream_key(d.id).is_some())).collect();

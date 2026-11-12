@@ -5,6 +5,7 @@ mod geometry;
 mod mixer;
 mod outputs_panel;
 mod preflight;
+mod prefs;
 mod reframe;
 mod rows;
 mod safe_areas;

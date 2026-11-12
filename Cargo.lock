@@ -3529,6 +3529,7 @@ dependencies = [
  "lightair-preview",
  "lightair-store",
  "parking_lot",
+ "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",

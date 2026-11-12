@@ -32,6 +32,7 @@ pub(super) enum PaletteAction {
     Transition(TransitionKind),
     Undo,
     Redo,
+    Settings,
 }
 
 pub(super) struct Entry {
@@ -107,6 +108,7 @@ fn entries(project: &Project, studio_mode: bool) -> Vec<Entry> {
         ("Import OBS scenes", "", "import", ImportObs),
         ("Undo", "⌘Z", "undo-2", Undo),
         ("Redo", "⇧⌘Z", "redo-2", Redo),
+        ("Settings", "⌘,", "settings", Settings),
     ];
     out.extend(fixed.iter().map(|(label, hint, icon, action)| Entry {
         label: label.to_string(),
@@ -214,6 +216,7 @@ impl StudioWindow {
             }
             Undo => self.studio.update(cx, |s, cx| s.undo(cx)),
             Redo => self.studio.update(cx, |s, cx| s.redo(cx)),
+            Settings => self.toggle_settings(cx),
         }
     }
 
