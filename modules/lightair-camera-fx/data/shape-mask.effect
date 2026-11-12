@@ -4,6 +4,8 @@ uniform float4x4 ViewProj;
 uniform texture2d image;
 
 uniform float2 size;          // source size, px
+uniform float2 centre;        // the shape's centre, px (the crop window's centre)
+uniform float outside;        // how much of the picture outside the shape shows (crop view)
 uniform float2 half_box;      // half extents of the shape, px
 uniform float radius;         // corner radius, px
 uniform float feather;        // soft edge, px
@@ -40,8 +42,9 @@ float4 PSShapeMask(VertData v_in) : TARGET
 {
 	float4 rgba = image.Sample(textureSampler, v_in.uv);
 	rgba.rgb *= (rgba.a > 0.) ? (1. / rgba.a) : 0.;
+	float4 source = rgba;
 
-	float2 p = (v_in.uv - 0.5) * size;
+	float2 p = v_in.uv * size - centre;
 	float d = rounded_box(p, half_box, radius);
 	float edge = max(feather, 0.75);
 	float inside = 1.0 - smoothstep(-edge, 0.0, d);
@@ -54,6 +57,15 @@ float4 PSShapeMask(VertData v_in) : TARGET
 	}
 	rgba.a *= inside;
 	rgba.rgb *= rgba.a;
+
+	// Crop view: what the crop cuts away shows as a cool, faded ghost around the shape.
+	if (outside > 0.001) {
+		float grey = dot(source.rgb, float3(0.2126, 0.7152, 0.0722));
+		float3 ghost = lerp(source.rgb, float3(grey, grey, grey), 0.55) * float3(0.80, 0.86, 0.95);
+		float a = source.a * outside * (1.0 - inside);
+		rgba.rgb += ghost * a;
+		rgba.a += a;
+	}
 	return rgba;
 }
 
