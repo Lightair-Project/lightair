@@ -1407,6 +1407,7 @@ impl StudioWindow {
                 .relative()
                 .flex()
                 .items_center()
+                .gap_2()
                 .h(px(36.))
                 .mx_2()
                 .px_3()
