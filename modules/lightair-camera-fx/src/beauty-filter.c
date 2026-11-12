@@ -124,6 +124,8 @@ struct beauty_filter {
 
 	/* background (Lightair): 0 off, 1 blur, 2 remove, 3 colour, 4 image */
 	int bg_mode;
+	int bg_model;   /* person mask: 0 Apple Vision, 1 MediaPipe */
+	int bg_quality; /* Apple Vision: 0 fast, 1 balanced, 2 accurate */
 	float bg_blur, bg_feather, bg_shift, bg_wrap;
 	struct vec4 bg_color;
 	char bg_path[512], bg_loaded[512];
@@ -239,6 +241,8 @@ static void beauty_update(void *data, obs_data_t *settings)
 		fx_layers_update(f->fx, settings);
 
 	f->bg_mode = (int)obs_data_get_int(settings, "bg_mode");
+	f->bg_model = (int)obs_data_get_int(settings, "bg_model");
+	f->bg_quality = (int)obs_data_get_int(settings, "bg_quality");
 	f->bg_blur = (float)obs_data_get_int(settings, "bg_blur") / 100.0f;
 	f->bg_feather = (float)obs_data_get_int(settings, "bg_feather") / 100.0f;
 	f->bg_shift = (float)obs_data_get_int(settings, "bg_shift") / 100.0f;
@@ -435,6 +439,8 @@ static void beauty_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "atmo_amt", 70);
 	obs_data_set_default_int(settings, "motion_amt", 50);
 	obs_data_set_default_int(settings, "bg_mode", BG_OFF);
+	obs_data_set_default_int(settings, "bg_model", 0);
+	obs_data_set_default_int(settings, "bg_quality", 1);
 	obs_data_set_default_int(settings, "bg_blur", 60);
 	obs_data_set_default_int(settings, "bg_feather", 30);
 	obs_data_set_default_int(settings, "bg_shift", 0);
@@ -488,6 +494,15 @@ static obs_properties_t *beauty_properties(void *data)
 	obs_properties_add_int_slider(bg, "bg_feather", obs_module_text("Edge softness"), 0, 100, 1);
 	obs_properties_add_int_slider(bg, "bg_shift", obs_module_text("Edge shift"), -100, 100, 1);
 	obs_properties_add_int_slider(bg, "bg_wrap", obs_module_text("Light wrap"), 0, 100, 1);
+	obs_property_t *bmod = obs_properties_add_list(bg, "bg_model", obs_module_text("Model"), OBS_COMBO_TYPE_LIST,
+						       OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(bmod, "Apple Vision", 0);
+	obs_property_list_add_int(bmod, "MediaPipe", 1);
+	obs_property_t *bq = obs_properties_add_list(bg, "bg_quality", obs_module_text("Quality"), OBS_COMBO_TYPE_LIST,
+						     OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(bq, obs_module_text("Fast"), 0);
+	obs_property_list_add_int(bq, obs_module_text("Balanced"), 1);
+	obs_property_list_add_int(bq, obs_module_text("Accurate"), 2);
 	obs_properties_add_color(bg, "bg_color", obs_module_text("Colour"));
 	obs_properties_add_path(bg, "bg_image", obs_module_text("Image"), OBS_PATH_FILE,
 				"Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)", NULL);
@@ -1196,8 +1211,8 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 
 	/* --- Apple Vision's person mask, for the background --- */
 	gs_texture_t *vseg = NULL;
-	bool want_person = f->bg_mode != BG_OFF;
-	face_tracker_set_person(f->tracker, want_person);
+	bool want_person = f->bg_mode != BG_OFF && f->bg_model == 0;
+	face_tracker_set_person(f->tracker, want_person, f->bg_quality);
 	if (want_person) {
 		uint32_t vw = 0, vh = 0;
 		uint8_t *vb = face_tracker_take_person(f->tracker, &f->vp_serial, &vw, &vh);

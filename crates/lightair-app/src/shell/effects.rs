@@ -297,6 +297,10 @@ impl StudioWindow {
                     continue;
                 }
             }
+            // Quality levels are Apple Vision's.
+            if key == Some("bg_quality") && e.settings["bg_model"].as_i64() == Some(1) {
+                continue;
+            }
             match *c {
                 Control::Heading(h) => {
                     let gk = format!("{eid}:{h}");
@@ -338,6 +342,11 @@ impl StudioWindow {
                         .map(|(n, (l, p))| (*l, set(with(&e.settings, key, p.json())), chosen == Some(n)))
                         .collect();
                     col = col.child(control_row(label, self.segmented(key, opts, cx).flex_1()));
+                    if let Some(hint) = chosen.and_then(|n| choice_hint(key, n)) {
+                        col = col.child(
+                            div().pl(px(96.)).text_size(px(11.)).text_color(tok::text_tertiary()).child(hint),
+                        );
+                    }
                 }
                 Control::Colour { key, label, default } => {
                     let current = e.settings.get(key).and_then(Value::as_u64).map_or(default, |v| v as u32);
@@ -821,6 +830,20 @@ impl StudioWindow {
                 .into_any_element(),
         )
     }
+}
+
+/// What a choice means, for the ones whose trade-off isn't obvious.
+fn choice_hint(key: &str, chosen: usize) -> Option<&'static str> {
+    let hints: &[&str] = match key {
+        "bg_model" => &["Apple's person segmentation: finer, steadier edges", "Lighter on the GPU; rougher edges and hair"],
+        "bg_quality" => &[
+            "Lowest cost; coarse edges",
+            "Made for video: fine edges that stay steady",
+            "Finest edges, most GPU; may trail fast movement",
+        ],
+        _ => return None,
+    };
+    hints.get(chosen).copied()
 }
 
 fn control_row(label: &'static str, control: impl IntoElement) -> Div {

@@ -112,8 +112,9 @@ void face_tracker_set_segmentation_fast(face_tracker_t *ft, bool fast);
 uint8_t *face_tracker_take_mask(face_tracker_t *ft, uint64_t *serial, uint32_t *w, uint32_t *h);
 
 /* Person segmentation with Apple Vision (macOS; a no-op elsewhere): a finer mask for the
- * background effects, on the segmentation thread while enabled. */
-void face_tracker_set_person(face_tracker_t *ft, bool enabled);
+ * background effects, on the segmentation thread while enabled. Quality: 0 fast, 1 balanced,
+ * 2 accurate. */
+void face_tracker_set_person(face_tracker_t *ft, bool enabled, int quality);
 /* Newer person mask than *serial? Returns a malloc'd 8-bit copy (free() it), w x h, covering the
  * whole frame. NULL if nothing new. */
 uint8_t *face_tracker_take_person(face_tracker_t *ft, uint64_t *serial, uint32_t *w, uint32_t *h);

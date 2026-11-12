@@ -201,6 +201,7 @@ struct face_tracker {
 	std::unique_ptr<PersonVision> person_vision;
 #endif
 	std::atomic<bool> person_enabled{false};
+	std::atomic<int> person_quality{1};
 
 	/* results */
 	std::mutex res_m;
@@ -416,6 +417,7 @@ void face_tracker::run_segmentation()
 		if (person_enabled.load()) {
 			if (!person_vision)
 				person_vision = std::make_unique<PersonVision>();
+			person_vision->set_quality(person_quality.load());
 			std::vector<uint8_t> p;
 			int pw = 0, ph = 0;
 			if (person_vision->run(seg.buf.data(), seg.w, seg.h, seg.w * 4, p, pw, ph)) {
@@ -610,13 +612,15 @@ extern "C" uint8_t *face_tracker_take_mask(face_tracker_t *t, uint64_t *serial, 
 	return copy;
 }
 
-extern "C" void face_tracker_set_person(face_tracker_t *t, bool enabled)
+extern "C" void face_tracker_set_person(face_tracker_t *t, bool enabled, int quality)
 {
 #if defined(__APPLE__)
 	t->person_enabled = enabled;
+	t->person_quality = quality;
 #else
 	(void)t;
 	(void)enabled;
+	(void)quality;
 #endif
 }
 
