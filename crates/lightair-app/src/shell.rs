@@ -2150,8 +2150,10 @@ impl StudioWindow {
                 .when(self.studio_mode, |d| d.bg(tok::bg_selected()))
                 .hover(|d| d.bg(tok::bg_raised()))
                 .child(ui::icon("columns-2").size(px(14.)).text_color(tok::text_secondary()))
-                .child("Studio mode")
-                .tooltip(|w, cx| Tooltip::new("Edit a scene off air, then Take it live").build(w, cx))
+                .child("Cue scenes")
+                .tooltip(|w, cx| {
+                    Tooltip::new("Edit the next scene without viewers seeing it, then Take it live (⌘↩)").build(w, cx)
+                })
                 .on_click(cx.listener(|this, _, _, cx| this.set_studio_mode(!this.studio_mode, cx))),
         );
         let Some((w_in, h_in)) = &self.format_menu else { return div().w_full().child(bar) };
@@ -2817,8 +2819,8 @@ impl StudioWindow {
             .border_l_1()
             .border_color(tok::border())
             .bg(tok::bg_panel())
-            .child(label("PREVIEW", preview_name, tok::text()))
-            .child(label("PROGRAM", program_name, tok::live()))
+            .child(label("CUED", preview_name, tok::text()))
+            .child(label("ON AIR", program_name, tok::live()))
             .child(
                 div()
                     .relative()

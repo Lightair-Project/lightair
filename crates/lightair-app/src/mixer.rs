@@ -433,7 +433,7 @@ impl MixerPanel {
                     .flex()
                     .justify_center()
                     .gap_1()
-                    .child(toggle("cue", "headphones", "Listen (cue)", cue, tok::text()).on_click(cx.listener(
+                    .child(toggle("cue", "headphones", "Listen in headphones", cue, tok::text()).on_click(cx.listener(
                         move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.exec(Command::SetTrackCue { track: id, cue: !cue }, cx)
@@ -573,7 +573,7 @@ fn strip_menu(
                 .on_click(run(Command::SetTrackMuted { track: id, muted: !muted })),
         )
         .item(
-            PopupMenuItem::new("Listen (cue)")
+            PopupMenuItem::new("Listen in headphones")
                 .icon(crate::ui::icon("headphones"))
                 .checked(cue)
                 .on_click(run(Command::SetTrackCue { track: id, cue: !cue })),
