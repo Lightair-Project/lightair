@@ -196,11 +196,7 @@ impl Render for MixerPanel {
                     .overflow_x_scroll()
                     .children(strips)
                     .when(project.tracks.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .text_color(tok::text_tertiary())
-                                .child("No audio tracks. Add a microphone or desktop audio with +."),
-                        )
+                        d.child(div().text_color(tok::text_tertiary()).child("No tracks"))
                     }),
             )
     }

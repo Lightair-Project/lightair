@@ -185,8 +185,7 @@ impl StudioWindow {
                 this.props.effect_menu = !this.props.effect_menu;
                 cx.notify();
             }));
-        let mut col = section("Effects");
-        col = col.child(div().flex().justify_end().mt(px(-26.)).child(add));
+        let mut col = self.section("Effects", Some(add.into_any_element()), cx);
         if self.props.effect_menu {
             let mut menu = div().flex().flex_wrap().gap_1();
             for (i, d) in fx::CATALOG.iter().enumerate() {
@@ -319,46 +318,91 @@ impl StudioWindow {
     }
 
     fn text_section(&self, input: &Input, cx: &mut Context<Self>) -> impl IntoElement {
-        let size = input.settings["font"]["size"].as_i64().unwrap_or(128);
+        const FONTS: &[&str] = &[
+            "Helvetica Neue",
+            "Avenir Next",
+            "Futura",
+            "Gill Sans",
+            "Georgia",
+            "Didot",
+            "Menlo",
+            "Impact",
+            "Marker Felt",
+        ];
         let (id, settings) = (input.id, input.settings.clone());
-        let resize = move |delta: i64| {
-            let mut s = settings.clone();
-            let mut font = s["font"].clone();
-            if !font.is_object() {
-                font = json!({"face": "Helvetica Neue", "flags": 0});
-            }
-            font["size"] = json!((size + delta).clamp(8, 1024));
-            s = with(&s, "font", font);
-            Command::SetInputSettings { input: id, settings: s }
+        let font = if settings["font"].is_object() {
+            settings["font"].clone()
+        } else {
+            json!({"face": "Helvetica Neue", "size": 128, "flags": 0})
         };
-        let (smaller, bigger) = (resize(-8), resize(8));
-        section("Text")
+        let size = font["size"].as_i64().unwrap_or(128);
+        let face = font["face"].as_str().unwrap_or("Helvetica Neue").to_string();
+        let flags = font["flags"].as_i64().unwrap_or(0);
+        let set_font = {
+            let (settings, font) = (settings.clone(), font.clone());
+            move |key: &str, value: Value| {
+                let mut f = font.clone();
+                f[key] = value;
+                Command::SetInputSettings { input: id, settings: with(&settings, "font", f) }
+            }
+        };
+        let next_face = FONTS[(FONTS.iter().position(|f| *f == face).map_or(0, |i| i + 1)) % FONTS.len()];
+        let cycle_face = set_font("face", json!(next_face));
+        let (smaller, bigger) =
+            (set_font("size", json!((size - 8).clamp(8, 1024))), set_font("size", json!((size + 8).clamp(8, 1024))));
+
+        // Style toggles: bold and italic are font flags (1, 2); outline and shadow are settings.
+        let mut toggles = div().flex().gap_0p5().p_0p5().rounded(px(6.)).bg(tok::bg_raised());
+        let toggle = |i: usize, label: &'static str, on: bool, cmd: Command, cx: &mut Context<Self>| {
+            div()
+                .id(("text-toggle", i))
+                .flex_1()
+                .text_center()
+                .py_1()
+                .rounded(px(4.))
+                .text_size(px(11.))
+                .cursor_pointer()
+                .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                .when(!on, |d| d.text_color(tok::text_tertiary()))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)))
+        };
+        for (i, (label, bit)) in [("Bold", 1i64), ("Italic", 2)].into_iter().enumerate() {
+            toggles = toggles.child(toggle(i, label, flags & bit != 0, set_font("flags", json!(flags ^ bit)), cx));
+        }
+        for (i, (label, key)) in [("Outline", "outline"), ("Shadow", "drop_shadow")].into_iter().enumerate() {
+            let on = settings[key].as_bool().unwrap_or(false);
+            let cmd = Command::SetInputSettings { input: id, settings: with(&settings, key, json!(!on)) };
+            toggles = toggles.child(toggle(2 + i, label, on, cmd, cx));
+        }
+
+        let font_chip = div()
+            .id("text-font")
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(30.))
+            .px_2()
+            .rounded(px(6.))
+            .bg(tok::bg_raised())
+            .cursor_pointer()
+            .hover(|d| d.bg(tok::bg_selected()))
+            .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().text_size(px(12.)).child(face))
+            .child(crate::ui::icon("chevrons-up-down").size(px(12.)).text_color(tok::text_tertiary()))
+            .on_click(cx.listener(move |this, _, _, cx| this.exec(cycle_face.clone(), cx)));
+        self.section("Text", None, cx)
             .when_some(self.props.text.as_ref().filter(|t| t.input == input.id), |d, t| {
                 d.child(TextInput::new(&t.state).small())
             })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(div().w(px(76.)).text_color(tok::text_secondary()).child("Size"))
-                    .child(
-                        Button::new("text-smaller")
-                            .label("−")
-                            .xsmall()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, _, cx| this.exec(smaller.clone(), cx))),
-                    )
-                    .child(div().w(px(48.)).text_center().font_family("Menlo").child(size.to_string()))
-                    .child(
-                        Button::new("text-bigger")
-                            .label("+")
-                            .xsmall()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, _, cx| this.exec(bigger.clone(), cx))),
-                    ),
-            )
-            .child(self.text_style_rows(input, cx))
+            .child(div().grid().grid_cols(2).gap_1().child(font_chip).child(self.field(
+                "text-size",
+                "Aa",
+                size.to_string(),
+                smaller,
+                bigger,
+                cx,
+            )))
+            .child(toggles)
             .child(self.swatches(input, "color1", &["color1", "color2"], cx))
     }
 
@@ -373,17 +417,14 @@ impl StudioWindow {
             input: id,
             settings: with(&settings, key, value),
         };
-        let mut modes = div().flex().gap_1();
-        for (i, (value, label)) in
-            [("countdown", "Countdown"), ("stopwatch", "Stopwatch"), ("clock", "Clock")].into_iter().enumerate()
-        {
-            let cmd = set("mode", json!(value));
-            let b = Button::new(("timer-mode", i))
-                .label(label)
-                .xsmall()
-                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)));
-            modes = modes.child(if mode == value { b.primary() } else { b.ghost() });
-        }
+        let modes = self.segmented(
+            "timer-mode",
+            [("countdown", "Countdown"), ("stopwatch", "Stopwatch"), ("clock", "Clock")]
+                .into_iter()
+                .map(|(value, label)| (label, set("mode", json!(value)), mode == value))
+                .collect(),
+            cx,
+        );
         let action = move |a: TimerAction| {
             move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
                 this.studio.read(cx).engine().post(move |s| s.reconciler.timer_action(id, a));
@@ -391,37 +432,11 @@ impl StudioWindow {
                 cx.notify();
             }
         };
-        let mut col = section("Timer").child(modes);
+        let mut col = self.section("Timer", None, cx).child(modes);
         if mode == "countdown" {
             let (shorter, longer) =
                 (set("seconds", json!((seconds - 60).max(10))), set("seconds", json!(seconds + 60)));
-            col = col.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(div().w(px(76.)).text_color(tok::text_secondary()).child("Length"))
-                    .child(
-                        Button::new("timer-shorter")
-                            .label("−")
-                            .xsmall()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, _, cx| this.exec(shorter.clone(), cx))),
-                    )
-                    .child(div().w(px(56.)).text_center().font_family("Menlo").child(format!(
-                        "{}:{:02}",
-                        seconds / 60,
-                        seconds % 60
-                    )))
-                    .child(
-                        Button::new("timer-longer")
-                            .label("+")
-                            .xsmall()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, _, cx| this.exec(longer.clone(), cx))),
-                    ),
-            );
-            // Then: which scene to go to when it ends.
+            // Then: which scene to go to when it ends (click to cycle).
             let project = self.studio.read(cx).project().clone();
             let end = input.settings["end_scene"].as_str().map(str::to_string);
             let current = project.scenes.iter().position(|sc| Some(sc.id.to_string()) == end);
@@ -430,60 +445,87 @@ impl StudioWindow {
                 Some(i) => project.scenes.get(i + 1).map(|sc| json!(sc.id.to_string())),
             }
             .unwrap_or(Value::Null);
-            let label = current.map_or("Nothing".to_string(), |i| project.scenes[i].name.clone());
+            let then = current.map_or("Stay".to_string(), |i| format!("→ {}", project.scenes[i].name));
             let cycle = set("end_scene", next);
             col = col.child(
                 div()
-                    .flex()
-                    .items_center()
+                    .grid()
+                    .grid_cols(2)
                     .gap_1()
-                    .child(div().w(px(76.)).text_color(tok::text_secondary()).child("Then"))
+                    .child(self.field(
+                        "timer-length",
+                        "⏱",
+                        format!("{}:{:02}", seconds / 60, seconds % 60),
+                        shorter,
+                        longer,
+                        cx,
+                    ))
                     .child(
-                        Button::new("timer-end")
-                            .label(if current.is_some() { format!("Go to {label}") } else { label })
-                            .xsmall()
-                            .outline()
-                            .tooltip("What happens when the countdown ends (click to change)")
+                        div()
+                            .id("timer-end")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .h(px(30.))
+                            .px_2()
+                            .rounded(px(6.))
+                            .bg(tok::bg_raised())
+                            .cursor_pointer()
+                            .hover(|d| d.bg(tok::bg_selected()))
+                            .tooltip(|w, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("When it ends (click to change)")
+                                    .build(w, cx)
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(px(12.))
+                                    .child(then),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| this.exec(cycle.clone(), cx))),
                     ),
             );
         }
         if mode == "clock" {
             let secs = input.settings["show_seconds"].as_bool().unwrap_or(false);
-            let toggle = set("show_seconds", json!(!secs));
-            let b = Button::new("clock-seconds")
-                .label("Seconds")
-                .xsmall()
-                .on_click(cx.listener(move |this, _, _, cx| this.exec(toggle.clone(), cx)));
-            col = col.child(if secs { b.primary() } else { b.ghost() });
+            col = col.child(self.segmented(
+                "clock-seconds",
+                vec![
+                    ("12:30", set("show_seconds", json!(false)), !secs),
+                    ("12:30:45", set("show_seconds", json!(true)), secs),
+                ],
+                cx,
+            ));
         } else {
+            let icon_button = |id: &'static str, icon: &'static str, tip: &'static str| {
+                crate::ui::icon_button(id, icon, tok::text_secondary())
+                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
+            };
             col = col.child(
                 div()
                     .flex()
                     .gap_1()
                     .child(
-                        Button::new("timer-run")
-                            .label(if running { "Pause" } else { "Start" })
-                            .small()
-                            .outline()
-                            .on_click(cx.listener(action(if running {
-                                TimerAction::Pause
-                            } else {
-                                TimerAction::Start
-                            }))),
+                        icon_button(
+                            "timer-run",
+                            if running { "pause" } else { "play" },
+                            if running { "Pause" } else { "Start" },
+                        )
+                        .on_click(cx.listener(action(if running {
+                            TimerAction::Pause
+                        } else {
+                            TimerAction::Start
+                        }))),
                     )
                     .child(
-                        Button::new("timer-reset")
-                            .label("Reset")
-                            .small()
-                            .ghost()
+                        icon_button("timer-reset", "rotate-ccw", "Reset")
                             .on_click(cx.listener(action(TimerAction::Reset))),
                     )
                     .child(
-                        Button::new("timer-add")
-                            .label("+1 min")
-                            .small()
-                            .ghost()
+                        icon_button("timer-add", "plus", "Add a minute")
                             .on_click(cx.listener(action(TimerAction::Add(60)))),
                     ),
             );
@@ -563,12 +605,12 @@ impl StudioWindow {
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(track.name.clone())),
         )
         .child(div().text_color(tok::text_tertiary()).child(input))
-        .child(section("Effects").child(if track.effects.is_empty() {
+        .child(self.section("Effects", None, cx).child(if track.effects.is_empty() {
             div().text_color(tok::text_tertiary()).child("None yet").into_any_element()
         } else {
             effects.into_any_element()
         }))
-        .child(section("Add").child(presets))
+        .child(self.section("Add effect", None, cx).child(presets))
         .child(
             div().pt_2().child(
                 Button::new("remove-track")
@@ -581,70 +623,8 @@ impl StudioWindow {
         .into_any_element()
     }
 
-    /// Font, bold/italic, outline and shadow for a FreeType text layer.
-    fn text_style_rows(&self, input: &Input, cx: &mut Context<Self>) -> impl IntoElement {
-        const FONTS: &[&str] = &[
-            "Helvetica Neue",
-            "Avenir Next",
-            "Futura",
-            "Gill Sans",
-            "Georgia",
-            "Didot",
-            "Menlo",
-            "Impact",
-            "Marker Felt",
-        ];
-        let id = input.id;
-        let settings = input.settings.clone();
-        let font = if settings["font"].is_object() {
-            settings["font"].clone()
-        } else {
-            json!({"face": "Helvetica Neue", "size": 128, "flags": 0})
-        };
-        let face = font["face"].as_str().unwrap_or("Helvetica Neue").to_string();
-        let flags = font["flags"].as_i64().unwrap_or(0);
-        let next_face = FONTS[(FONTS.iter().position(|f| *f == face).map_or(0, |i| i + 1)) % FONTS.len()];
-        let set_font = {
-            let (settings, font) = (settings.clone(), font.clone());
-            move |key: &str, value: Value| {
-                let mut f = font.clone();
-                f[key] = value;
-                Command::SetInputSettings { input: id, settings: with(&settings, "font", f) }
-            }
-        };
-        let cycle_face = set_font("face", json!(next_face));
-        let mut row = div().flex().flex_wrap().items_center().gap_1().child(
-            Button::new("text-font")
-                .label(face.clone())
-                .xsmall()
-                .outline()
-                .tooltip("Change font")
-                .on_click(cx.listener(move |this, _, _, cx| this.exec(cycle_face.clone(), cx))),
-        );
-        // FreeType flags: 1 bold, 2 italic.
-        for (i, (label, bit)) in [("B", 1i64), ("I", 2)].into_iter().enumerate() {
-            let on = flags & bit != 0;
-            let cmd = set_font("flags", json!(flags ^ bit));
-            let b = Button::new(("text-flag", i))
-                .label(label)
-                .xsmall()
-                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)));
-            row = row.child(if on { b.primary() } else { b.ghost() });
-        }
-        for (i, (label, key)) in [("Outline", "outline"), ("Shadow", "drop_shadow")].into_iter().enumerate() {
-            let on = settings[key].as_bool().unwrap_or(false);
-            let cmd = Command::SetInputSettings { input: id, settings: with(&settings, key, json!(!on)) };
-            let b = Button::new(("text-style", i))
-                .label(label)
-                .xsmall()
-                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)));
-            row = row.child(if on { b.primary() } else { b.ghost() });
-        }
-        row
-    }
-
     fn colour_section(&self, input: &Input, cx: &mut Context<Self>) -> impl IntoElement {
-        section("Colour").child(self.swatches(input, "color", &["color"], cx))
+        self.section("Colour", None, cx).child(self.swatches(input, "color", &["color"], cx))
     }
 
     fn media_section(&self, input: &Input, cx: &mut Context<Self>) -> impl IntoElement {
@@ -667,7 +647,7 @@ impl StudioWindow {
             _ => "",
         };
         let loop_settings = with(&input.settings, "looping", json!(!looping));
-        section("Media")
+        self.section("Media", None, cx)
             .child(div().text_color(tok::text_secondary()).overflow_hidden().text_ellipsis().child(file))
             .child(
                 div()
@@ -726,16 +706,6 @@ impl StudioWindow {
 
 fn rgb_to_hsla(rgb_value: u32) -> Hsla {
     rgb(rgb_value).into()
-}
-
-fn section(title: &'static str) -> Div {
-    div().flex().flex_col().gap_2().pt_3().mt_1().border_t_1().border_color(tok::border()).child(
-        div()
-            .text_size(px(11.))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(tok::text_secondary())
-            .child(title.to_uppercase()),
-    )
 }
 
 #[cfg(test)]

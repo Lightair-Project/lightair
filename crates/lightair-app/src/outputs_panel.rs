@@ -282,12 +282,7 @@ impl Render for OutputsPanel {
                 .child(div().font_weight(FontWeight::SEMIBOLD).child("Custom RTMP destination"))
                 .child(Input::new(&f.server).small())
                 .child(Input::new(&f.key).small().mask_toggle())
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(tok::text_tertiary())
-                        .child("The stream key is stored in your Keychain."),
-                )
+                .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("Saved in your Keychain"))
                 .child(
                     div()
                         .flex()
@@ -317,12 +312,7 @@ impl Render for OutputsPanel {
             .children(form)
             .when(project.outputs.destinations.is_empty() && self.form.is_none(), |d| {
                 d.child(
-                    div()
-                        .px_4()
-                        .pt_1()
-                        .text_size(px(11.))
-                        .text_color(tok::text_tertiary())
-                        .child("Add a streaming destination with +. Platform sign-in arrives in a later milestone."),
+                    div().px_4().pt_1().text_size(px(11.)).text_color(tok::text_tertiary()).child("No destinations"),
                 )
             })
             .child(div().px_4().pt_2().flex().gap_2().child(

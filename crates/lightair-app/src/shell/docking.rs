@@ -177,6 +177,13 @@ impl StudioWindow {
             Ok("add-layer") => self.open_add_layer(window, cx),
             Ok("settings") => self.toggle_settings(cx),
             Ok("palette") => self.open_palette(window, cx),
+            Ok("select") => {
+                let top = {
+                    let s = self.studio.read(cx);
+                    s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                };
+                self.select_layer(top, cx);
+            }
             _ => {}
         }
     }
