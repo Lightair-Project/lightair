@@ -526,6 +526,21 @@ impl Studio {
         }
     }
 
+    /// ⇧⌘M: mutes every microphone, or unmutes them all if they're all muted already.
+    pub fn toggle_mics(&mut self, cx: &mut Context<Self>) {
+        let mics = self.mic_tracks();
+        if mics.is_empty() {
+            return;
+        }
+        let p = self.project().clone();
+        let all_muted = mics.iter().all(|(id, _)| p.tracks.iter().any(|t| t.id == *id && t.muted));
+        let commands = mics.iter().map(|(id, _)| Command::SetTrackMuted { track: *id, muted: !all_muted }).collect();
+        let label = if all_muted { "Unmute microphones" } else { "Mute microphones" };
+        if self.execute(Command::Batch { label: label.into(), commands }, cx).is_ok() {
+            self.issue = Some(if all_muted { "Microphones on" } else { "Microphones muted" }.into());
+        }
+    }
+
     /// What the Go Live review checks. `has_key` is looked up once by the caller (Keychain).
     pub fn preflight_facts(&self, has_key: &HashMap<Id, bool>, record_too: bool) -> crate::preflight::Facts {
         let p = self.project();

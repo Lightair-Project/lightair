@@ -126,8 +126,14 @@ Done:
 Remaining:
 - Text backgrounds, gradients and any installed font, shapes, counters, timer hotkeys, browser layer (CEF), phone camera, NDI, screen draw, templates, automations; playlists and media scrubbing.
 
-## M11 · Audience & control
+## M11 · Audience & control 🔨
 Platform sign-in, stream manager, unified chat, activity, alerts, widgets, captions, hotkeys, Stream Deck, MIDI/OSC, remote API ([12](docs/12-chat-alerts-integrations.md)).
+
+Done:
+- In-app shortcuts: ⌘1–⌘9 for scenes 1–9 (shown on the scene rows; Studio mode selects instead), ⇧⌘M mutes or unmutes every microphone, plus ⌘K, ⌘↩, ⌘M, ⌘A, ⌘, from earlier slices.
+
+Remaining:
+- Global hotkeys and a hotkey settings page, Stream Deck, MIDI/OSC, remote API (Lightair protocol and obs-websocket compatibility), platform sign-in and the rest of the audience features.
 
 ## M12 · Compatibility & import 🔨
 OBS plugin classifier, frontend API shim, custom browser docks, Qt runtime, OBS scene collection import ([13](docs/13-extensibility-and-compatibility.md), [14](docs/14-data-persistence-settings.md#importing-from-obs)).

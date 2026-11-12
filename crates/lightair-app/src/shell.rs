@@ -48,7 +48,17 @@ actions!(
         Take,
         AddMarker,
         SelectAll,
-        OpenSettings
+        OpenSettings,
+        ToggleMics,
+        Scene1,
+        Scene2,
+        Scene3,
+        Scene4,
+        Scene5,
+        Scene6,
+        Scene7,
+        Scene8,
+        Scene9
     ]
 );
 
@@ -69,6 +79,16 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-m", AddMarker, Some("Studio")),
         KeyBinding::new("cmd-a", SelectAll, Some("Studio")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Studio")),
+        KeyBinding::new("cmd-shift-m", ToggleMics, Some("Studio")),
+        KeyBinding::new("cmd-1", Scene1, Some("Studio")),
+        KeyBinding::new("cmd-2", Scene2, Some("Studio")),
+        KeyBinding::new("cmd-3", Scene3, Some("Studio")),
+        KeyBinding::new("cmd-4", Scene4, Some("Studio")),
+        KeyBinding::new("cmd-5", Scene5, Some("Studio")),
+        KeyBinding::new("cmd-6", Scene6, Some("Studio")),
+        KeyBinding::new("cmd-7", Scene7, Some("Studio")),
+        KeyBinding::new("cmd-8", Scene8, Some("Studio")),
+        KeyBinding::new("cmd-9", Scene9, Some("Studio")),
     ]);
 }
 
@@ -807,6 +827,14 @@ impl StudioWindow {
         .detach();
     }
 
+    /// ⌘1–⌘9: the nth scene goes on air (or is selected, in Studio mode).
+    fn scene_shortcut(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let scene = self.studio.read(cx).project().scenes.get(index).map(|s| s.id);
+        if let Some(id) = scene {
+            self.run_palette_action(palette::PaletteAction::Scene(id), window, cx);
+        }
+    }
+
     fn add_scene(&mut self, cx: &mut Context<Self>) {
         let n = self.studio.read(cx).project().scenes.len() + 1;
         let scene = Scene::new(format!("Scene {n}"));
@@ -844,6 +872,16 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &RenameSelection, window, cx| this.rename_selection(window, cx)))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
+            .on_action(cx.listener(|this, _: &ToggleMics, _, cx| this.studio.update(cx, |s, cx| s.toggle_mics(cx))))
+            .on_action(cx.listener(|this, _: &Scene1, w, cx| this.scene_shortcut(0, w, cx)))
+            .on_action(cx.listener(|this, _: &Scene2, w, cx| this.scene_shortcut(1, w, cx)))
+            .on_action(cx.listener(|this, _: &Scene3, w, cx| this.scene_shortcut(2, w, cx)))
+            .on_action(cx.listener(|this, _: &Scene4, w, cx| this.scene_shortcut(3, w, cx)))
+            .on_action(cx.listener(|this, _: &Scene5, w, cx| this.scene_shortcut(4, w, cx)))
+            .on_action(cx.listener(|this, _: &Scene6, w, cx| this.scene_shortcut(5, w, cx)))
+            .on_action(cx.listener(|this, _: &Scene7, w, cx| this.scene_shortcut(6, w, cx)))
+            .on_action(cx.listener(|this, _: &Scene8, w, cx| this.scene_shortcut(7, w, cx)))
+            .on_action(cx.listener(|this, _: &Scene9, w, cx| this.scene_shortcut(8, w, cx)))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
                 this.studio.update(cx, |s, cx| {
                     let p = s.project().clone();
@@ -1408,6 +1446,15 @@ impl StudioWindow {
                     )
                 })
                 .child(self.row_label(target, &scene.name, tok::text()))
+                .when(i < 9, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(10.))
+                            .font_family("Menlo")
+                            .text_color(tok::text_tertiary())
+                            .child(format!("⌘{}", i + 1)),
+                    )
+                })
                 .when(on_air, |d| {
                     d.child(
                         div()
