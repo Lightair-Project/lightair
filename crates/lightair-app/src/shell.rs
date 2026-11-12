@@ -1397,9 +1397,12 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &NudgeRight, _, cx| this.nudge(1.0, 0.0, cx)))
             .on_action(cx.listener(|this, _: &NudgeUp, _, cx| this.nudge(0.0, -1.0, cx)))
             .on_action(cx.listener(|this, _: &NudgeDown, _, cx| this.nudge(0.0, 1.0, cx)))
-            .on_action(cx.listener(|this, _: &Deselect, _, cx| {
-                // Esc leaves crop mode or the rotate gizmo first.
-                if this.crop_mode.is_some() && !this.crop_leaving {
+            .on_action(cx.listener(|this, _: &Deselect, window, cx| {
+                // Esc in a rename field cancels it; otherwise it leaves crop mode or the
+                // rotate gizmo first.
+                if this.renaming.is_some() {
+                    this.finish_rename(false, window, cx);
+                } else if this.crop_mode.is_some() && !this.crop_leaving {
                     this.leave_crop_view(std::time::Duration::ZERO, cx);
                 } else if this.rotate_tool {
                     this.rotate_tool = false;
@@ -1409,7 +1412,13 @@ impl Render for StudioWindow {
                 }
             }))
             .on_action(cx.listener(|this, _: &RenameSelection, window, cx| {
-                if this.crop_mode.is_some() && !this.crop_leaving {
+                // Enter in a rename field reaches here too (the field passes it on): it
+                // commits the new name rather than starting another rename.
+                if this.renaming.is_some() {
+                    this.finish_rename(true, window, cx);
+                } else if window.context_stack().iter().any(|c| c.contains("Input")) {
+                    // Enter in any other text field (Inspector, search…) is that field's.
+                } else if this.crop_mode.is_some() && !this.crop_leaving {
                     this.leave_crop_view(std::time::Duration::ZERO, cx);
                 } else {
                     this.rename_selection(window, cx)
