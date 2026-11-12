@@ -1904,6 +1904,27 @@ impl StudioWindow {
                     }),
             );
         }
+        // + right after the tabs: another shape for every scene.
+        let open = self.format_menu.is_some();
+        bar = bar.child(
+            ui::icon_button("add-format", "plus", if open { tok::text() } else { tok::text_secondary() })
+                .when(open, |d| d.bg(tok::bg_selected()))
+                .tooltip(|w, cx| Tooltip::new("Add format (vertical, square, custom…)").build(w, cx))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.format_menu = match this.format_menu.take() {
+                        Some(_) => None,
+                        None => {
+                            let w = cx
+                                .new(|cx| gpui_kit::component::input::InputState::new(window, cx).placeholder("Width"));
+                            let h = cx.new(|cx| {
+                                gpui_kit::component::input::InputState::new(window, cx).placeholder("Height")
+                            });
+                            Some((w, h))
+                        }
+                    };
+                    cx.notify();
+                })),
+        );
         if project.formats.len() > 1 {
             bar = bar.child(div().w(px(1.)).h(px(16.)).mx_1().bg(tok::border())).child(
                 div()
@@ -1972,27 +1993,6 @@ impl StudioWindow {
                 .child("Studio mode")
                 .tooltip(|w, cx| Tooltip::new("Edit a scene off air, then Take it live").build(w, cx))
                 .on_click(cx.listener(|this, _, _, cx| this.set_studio_mode(!this.studio_mode, cx))),
-        );
-        bar = bar.child(
-            Button::new("add-format")
-                .label("Add format")
-                .xsmall()
-                .ghost()
-                .tooltip("Another shape for every scene (vertical, square, …)")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.format_menu = match this.format_menu.take() {
-                        Some(_) => None,
-                        None => {
-                            let w = cx
-                                .new(|cx| gpui_kit::component::input::InputState::new(window, cx).placeholder("Width"));
-                            let h = cx.new(|cx| {
-                                gpui_kit::component::input::InputState::new(window, cx).placeholder("Height")
-                            });
-                            Some((w, h))
-                        }
-                    };
-                    cx.notify();
-                })),
         );
         let Some((w_in, h_in)) = &self.format_menu else { return div().w_full().child(bar) };
         let has = |w: u32, h: u32| project.formats.iter().any(|f| f.width == w && f.height == h);
