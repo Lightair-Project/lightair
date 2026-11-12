@@ -4,6 +4,7 @@ mod camera_studio;
 mod geometry;
 mod mixer;
 mod outputs_panel;
+mod preflight;
 mod reframe;
 mod rows;
 mod safe_areas;

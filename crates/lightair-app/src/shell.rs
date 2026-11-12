@@ -17,6 +17,7 @@ use lightair_core::{
 use lightair_preview::Preview;
 use serde_json::json;
 
+mod golive;
 mod layer_props;
 mod palette;
 
@@ -127,6 +128,8 @@ pub struct StudioWindow {
     safe_vertical: Option<Profile>,
     /// The open command palette (⌘K).
     palette: Option<palette::Palette>,
+    /// The Go Live review sheet, while open.
+    go_live_sheet: Option<golive::GoLiveSheet>,
 }
 
 const HANDLE: f32 = 10.0;
@@ -165,6 +168,7 @@ impl StudioWindow {
             safe_landscape: None,
             safe_vertical: None,
             palette: None,
+            go_live_sheet: None,
         }
     }
 
@@ -796,6 +800,7 @@ impl Render for StudioWindow {
                     .child(self.right_column(&project, cx)),
             )
             .child(self.status_bar(cx))
+            .children(self.go_live_overlay(cx))
             .children(self.palette_overlay(cx))
     }
 }
@@ -877,7 +882,7 @@ impl StudioWindow {
                 } else {
                     "Add a destination in Outputs first"
                 })
-                .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.go_live(cx))))
+                .on_click(cx.listener(|this, _, _, cx| this.open_go_live(cx)))
         };
 
         div()
