@@ -3,6 +3,7 @@
 //!   cargo xtask modules    configure and build every in-tree libobs module (modules/*)
 //!   cargo xtask bundle     assemble target/debug/Lightair.app for development (macOS)
 //!   cargo xtask dev        link OBS's helper programs next to target/debug for `cargo run`
+//!   cargo xtask test [filter]  build every test program, then run them all at once
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -135,8 +136,9 @@ fn main() -> anyhow::Result<()> {
         Some("modules") => modules(),
         Some("bundle") => bundle(),
         Some("dev") => dev(),
+        Some("test") => test(std::env::args().skip(2).collect()),
         _ => {
-            eprintln!("usage: cargo xtask (modules | bundle | dev)");
+            eprintln!("usage: cargo xtask (modules | bundle | dev | test [filter])");
             Ok(())
         }
     }
@@ -151,4 +153,155 @@ fn apple_development_identity() -> Option<String> {
         .and_then(|l| l.split_whitespace().nth(1))
         .filter(|h| h.len() == 40)
         .map(str::to_string)
+}
+
+/// A test program to run: its name, path, and package directory (cargo runs tests from there).
+struct TestBin {
+    name: String,
+    exe: PathBuf,
+    dir: PathBuf,
+}
+
+/// `cargo test` runs test programs one after another, and most of ours start libobs and record
+/// real seconds of video, so they spend their time waiting. This builds them all, then runs them
+/// side by side, slowest first (timings from the last run), so the whole suite takes about as
+/// long as its slowest program. Arguments after `test` are passed to every program (a filter,
+/// `--nocapture`, ...). Doc tests aren't run; `cargo test --doc` does those.
+fn test(args: Vec<String>) -> anyhow::Result<()> {
+    use std::io::BufRead;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let started = Instant::now();
+    let mut build = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["test", "--workspace", "--no-run", "--message-format=json-render-diagnostics"])
+        .current_dir(root())
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let mut bins = Vec::new();
+    for line in std::io::BufReader::new(build.stdout.take().unwrap()).lines() {
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line?) else { continue };
+        if msg["reason"] != "compiler-artifact" || msg["profile"]["test"] != true {
+            continue;
+        }
+        let Some(exe) = msg["executable"].as_str() else { continue };
+        let manifest = PathBuf::from(msg["manifest_path"].as_str().unwrap_or_default());
+        let package = manifest.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned());
+        let target = msg["target"]["name"].as_str().unwrap_or_default();
+        let kind = msg["target"]["kind"][0].as_str().unwrap_or_default();
+        let name = match kind {
+            "test" => format!("{}/{target}", package.unwrap_or_default()),
+            _ => format!("{} ({kind})", package.unwrap_or_default()),
+        };
+        bins.push(TestBin { name, exe: exe.into(), dir: manifest.parent().unwrap().to_path_buf() });
+    }
+    anyhow::ensure!(build.wait()?.success(), "build failed");
+    let built = started.elapsed();
+
+    // Slowest first, so the long ones aren't left starting last.
+    let times_path = root().join("target/test-times.json");
+    let mut times: serde_json::Map<String, serde_json::Value> =
+        std::fs::read_to_string(&times_path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    bins.sort_by(|a, b| {
+        let t = |n: &str| times.get(n).and_then(|v| v.as_f64()).unwrap_or(f64::MAX);
+        t(&b.name).total_cmp(&t(&a.name))
+    });
+
+    // Each program runs from a folder of its own (a hard link, no copy). macOS treats a bare
+    // program's folder as its bundle and lists it while libobs starts; target/debug/deps holds
+    // every build's leftovers (hundreds of thousands of files), which costs seconds per program.
+    // The recording tests need OBS's mux helper next to the program.
+    let run_dir = root().join("target/test-run");
+    let mux = PathBuf::from(std::env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into()))
+        .join("Contents/MacOS/obs-ffmpeg-mux");
+    for bin in &mut bins {
+        let file = bin.exe.file_name().unwrap().to_owned();
+        let dir = run_dir.join(&file);
+        std::fs::create_dir_all(&dir)?;
+        let linked = dir.join(&file);
+        let _ = std::fs::remove_file(&linked);
+        if std::fs::hard_link(&bin.exe, &linked).is_err() {
+            std::fs::copy(&bin.exe, &linked)?;
+        }
+        let helper = dir.join("obs-ffmpeg-mux");
+        if !helper.exists() && mux.exists() {
+            let _ = std::os::unix::fs::symlink(&mux, &helper);
+        }
+        bin.exe = linked;
+    }
+
+    let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+    let queue = Arc::new(Mutex::new(bins.into_iter().collect::<std::collections::VecDeque<_>>()));
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let workers: Vec<_> = (0..jobs)
+        .map(|_| {
+            let (queue, results, args) = (queue.clone(), results.clone(), args.clone());
+            std::thread::spawn(move || {
+                loop {
+                    // Take the next one and let go of the lock before running it.
+                    let next = queue.lock().unwrap().pop_front();
+                    let Some(bin) = next else { break };
+                    let t = Instant::now();
+                    let out = Command::new(&bin.exe)
+                        .args(&args)
+                        .current_dir(&bin.dir)
+                        .env("CARGO_MANIFEST_DIR", &bin.dir)
+                        // Camera and capture-card modules wait seconds on system services as
+                        // they load; tests don't use them (the smoke test asks for every module).
+                        .env(
+                            "LIGHTAIR_SKIP_MODULES",
+                            std::env::var("LIGHTAIR_SKIP_MODULES").unwrap_or_else(|_| {
+                                "mac-avcapture,mac-avcapture-legacy,mac-syphon,aja,decklink,vlc-video".into()
+                            }),
+                        )
+                        .output();
+                    let took = t.elapsed();
+                    let (ok, log) = match out {
+                        Ok(o) => (
+                            o.status.success(),
+                            format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+                        ),
+                        Err(e) => (false, e.to_string()),
+                    };
+                    let passed: usize = log
+                        .lines()
+                        .filter_map(|l| l.strip_prefix("test result: "))
+                        .filter_map(|l| l.split("; ").next()?.split_whitespace().nth(1)?.parse::<usize>().ok())
+                        .sum();
+                    eprintln!(
+                        "{} {:>6.1}s  {} ({passed})",
+                        if ok { "ok  " } else { "FAIL" },
+                        took.as_secs_f64(),
+                        bin.name
+                    );
+                    results.lock().unwrap().push((bin.name, ok, took, passed, log));
+                }
+            })
+        })
+        .collect();
+    for w in workers {
+        let _ = w.join();
+    }
+
+    let results = std::mem::take(&mut *results.lock().unwrap());
+    for (name, _, took, _, _) in &results {
+        times.insert(name.clone(), serde_json::json!(took.as_secs_f64()));
+    }
+    let _ = std::fs::write(&times_path, serde_json::to_string_pretty(&times)?);
+    let failed: Vec<_> = results.iter().filter(|r| !r.1).collect();
+    for (name, _, _, _, log) in &failed {
+        eprintln!("\n──── {name} ────\n{log}");
+    }
+    let passed: usize = results.iter().map(|r| r.3).sum();
+    let serial: Duration = results.iter().map(|r| r.2).sum();
+    eprintln!(
+        "\n{} programs, {passed} tests, {} failed · build {:.1}s, run {:.1}s (one after another: {:.1}s)",
+        results.len(),
+        failed.len(),
+        built.as_secs_f64(),
+        (started.elapsed() - built).as_secs_f64(),
+        serial.as_secs_f64(),
+    );
+    anyhow::ensure!(failed.is_empty(), "{} test program(s) failed", failed.len());
+    Ok(())
 }

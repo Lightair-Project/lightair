@@ -19,8 +19,13 @@ fn main() {
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let include_dir = out.join("include");
     fs::create_dir_all(&include_dir).unwrap();
-    fs::write(include_dir.join("obsconfig.h"), "#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n")
-        .unwrap();
+    // Written only when it differs: bindgen asks cargo to watch every header it reads, so a fresh
+    // timestamp here would rebuild this crate and everything above it on every build.
+    let config = include_dir.join("obsconfig.h");
+    let contents = "#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n";
+    if fs::read_to_string(&config).ok().as_deref() != Some(contents) {
+        fs::write(&config, contents).unwrap();
+    }
 
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-env-changed=OBS_APP");

@@ -10,8 +10,14 @@ use lightair_engine::{Engine, EngineConfig};
 fn engine_starts_renders_and_stops() {
     let _ = tracing_subscriber::fmt().with_env_filter("info,libobs=warn").with_test_writer().try_init();
 
-    let engine = Engine::start(EngineConfig { canvas: (1280, 720), output: (1280, 720), ..Default::default() })
-        .expect("engine starts");
+    // Every default module, even when the test runner skips some elsewhere.
+    let engine = Engine::start(EngineConfig {
+        canvas: (1280, 720),
+        output: (1280, 720),
+        allowed_modules: lightair_engine::DEFAULT_MODULES.iter().map(|m| m.to_string()).collect(),
+        ..Default::default()
+    })
+    .expect("engine starts");
     assert!(engine.version.starts_with("33."), "libobs version {}", engine.version);
     for id in ["color_source_v3", "image_source", "display_capture", "av_capture_input_v2"] {
         assert!(engine.capabilities.inputs.iter().any(|i| i == id), "missing input type {id}");

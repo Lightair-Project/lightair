@@ -43,6 +43,13 @@ Lightair is measured against OBS Studio of the same engine version with an equiv
 
 ## Testing strategy
 
+Run everything with `cargo xtask test` (a filter or `--nocapture` after it goes to every test
+program). It builds all test programs, then runs them side by side, slowest first, from small
+folders of their own, without the camera and capture-card modules that wait seconds on macOS
+services (the smoke test still loads every module). The suite takes about as long as its slowest
+program, around ten seconds, where `cargo test` runs the programs one after another. Each engine
+test file is its own program because libobs runs once per process.
+
 | Level | What | Tooling |
 |---|---|---|
 | **Unit** | `lightair-core` commands, validation, undo coalescing, migrations, reconciler diffing | `cargo test`, property tests (`proptest`) for command sequences and undo/redo round trips |
