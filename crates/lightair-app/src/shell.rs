@@ -1974,6 +1974,118 @@ impl StudioWindow {
         )
     }
 
+    /// The canvas's floating controls, bottom right: side by side (with several formats), zoom
+    /// and safe areas.
+    fn canvas_controls(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        let divider = || div().w(px(1.)).h(px(16.)).mx_0p5().bg(tok::border_header());
+        let mut bar = div()
+            .id("canvas-controls")
+            .absolute()
+            .right(px(12.))
+            .bottom(px(12.))
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .p_1()
+            .rounded(px(8.))
+            .bg(tok::bg_header())
+            .border_1()
+            .border_color(tok::border_header())
+            .shadow_md()
+            // Clicks here are for the controls, not the canvas under them.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation());
+        if project.formats.len() > 1 {
+            bar = bar
+                .child(
+                    ui::icon_button(
+                        "side-by-side",
+                        "columns-2",
+                        if self.side_by_side { tok::text() } else { tok::text_secondary() },
+                    )
+                    .when(self.side_by_side, |d| d.bg(tok::bg_selected()))
+                    .tooltip(|w, cx| Tooltip::new("Every format side by side").build(w, cx))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.side_by_side = !this.side_by_side;
+                        cx.notify();
+                    })),
+                )
+                .child(divider());
+        }
+        let shape = self.format(project).clone();
+        let vertical = shape.height > shape.width;
+        // Zoom: − 100% +, the number fits the canvas to the stage again.
+        let percent = self.zoom_percent(project);
+        let fitted = (self.zoom - 1.0).abs() < 0.001 && self.pan == (0.0, 0.0);
+        let zoom = div()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .child(
+                ui::icon_button("zoom-out", "minus", tok::text_secondary())
+                    .tooltip(|w, cx| Tooltip::new("Zoom out (⌘−)").build(w, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.zoom_by(0.8, None, cx))),
+            )
+            .child(
+                div()
+                    .id("zoom-fit")
+                    .min_w(px(46.))
+                    .h(px(22.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_size(px(11.))
+                    .font_family("Menlo")
+                    .text_color(if fitted { tok::text_secondary() } else { tok::text() })
+                    .hover(|d| d.bg(tok::bg_raised()))
+                    .child(format!("{percent:.0}%"))
+                    .tooltip(|w, cx| Tooltip::new("Fit (⌘0) · double-click: 100% (⌥⌘0)").build(w, cx))
+                    .on_click(cx.listener(|this, ev: &ClickEvent, _, cx| {
+                        if ev.click_count() == 2 { this.zoom_to_actual(cx) } else { this.zoom_to_fit(cx) }
+                    })),
+            )
+            .child(
+                ui::icon_button("zoom-in", "plus", tok::text_secondary())
+                    .tooltip(|w, cx| Tooltip::new("Zoom in (⌘=)").build(w, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.zoom_by(1.25, None, cx))),
+            );
+        let safe = if vertical { self.safe_vertical } else { self.safe_landscape };
+        bar = bar.child(zoom).child(divider()).child(
+            div()
+                .id("safe-areas")
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .h(px(24.))
+                .px_1p5()
+                .rounded(px(5.))
+                .cursor_pointer()
+                .text_size(px(11.))
+                .when(safe.is_some(), |d| d.bg(tok::bg_selected()))
+                .hover(|d| d.bg(tok::bg_raised()))
+                .child(ui::icon("scan").size(px(14.)).text_color(tok::text_secondary()))
+                // The icon alone until a profile is on; then its name.
+                .children(safe.map(Profile::label))
+                .tooltip(|w, cx| {
+                    Tooltip::new("Where platforms draw their own buttons and captions (approximate)").build(w, cx)
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let next = safe_areas::next(safe, shape.width, shape.height);
+                    if vertical {
+                        this.safe_vertical = next;
+                    } else {
+                        this.safe_landscape = next;
+                    }
+                    cx.notify();
+                })),
+        );
+        bar
+    }
+
     fn format_tabs(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.format_id(project);
         let mut bar = div()
@@ -2046,96 +2158,7 @@ impl StudioWindow {
                     cx.notify();
                 })),
         );
-        if project.formats.len() > 1 {
-            bar = bar.child(div().w(px(1.)).h(px(16.)).mx_1().bg(tok::border())).child(
-                div()
-                    .id("side-by-side")
-                    .flex()
-                    .items_center()
-                    .h(px(26.))
-                    .px_2()
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .when(self.side_by_side, |d| d.bg(tok::bg_selected()))
-                    .hover(|d| d.bg(tok::bg_raised()))
-                    .child("Side by side")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.side_by_side = !this.side_by_side;
-                        cx.notify();
-                    })),
-            );
-        }
-        let shape = self.format(project).clone();
-        let vertical = shape.height > shape.width;
-        // Zoom: − 100% +, the number fits the canvas to the stage again.
-        let percent = self.zoom_percent(project);
-        let fitted = (self.zoom - 1.0).abs() < 0.001 && self.pan == (0.0, 0.0);
-        let zoom = div()
-            .flex()
-            .items_center()
-            .gap_0p5()
-            .mr_2()
-            .child(
-                ui::icon_button("zoom-out", "minus", tok::text_secondary())
-                    .tooltip(|w, cx| Tooltip::new("Zoom out (⌘−)").build(w, cx))
-                    .on_click(cx.listener(|this, _, _, cx| this.zoom_by(0.8, None, cx))),
-            )
-            .child(
-                div()
-                    .id("zoom-fit")
-                    .min_w(px(46.))
-                    .h(px(22.))
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .text_size(px(11.))
-                    .font_family("Menlo")
-                    .text_color(if fitted { tok::text_secondary() } else { tok::text() })
-                    .hover(|d| d.bg(tok::bg_raised()))
-                    .child(format!("{percent:.0}%"))
-                    .tooltip(|w, cx| Tooltip::new("Fit (⌘0) · double-click: 100% (⌥⌘0)").build(w, cx))
-                    .on_click(cx.listener(|this, ev: &ClickEvent, _, cx| {
-                        if ev.click_count() == 2 { this.zoom_to_actual(cx) } else { this.zoom_to_fit(cx) }
-                    })),
-            )
-            .child(
-                ui::icon_button("zoom-in", "plus", tok::text_secondary())
-                    .tooltip(|w, cx| Tooltip::new("Zoom in (⌘=)").build(w, cx))
-                    .on_click(cx.listener(|this, _, _, cx| this.zoom_by(1.25, None, cx))),
-            );
-        let safe = if vertical { self.safe_vertical } else { self.safe_landscape };
-        bar = bar.child(div().flex_1()).child(zoom).child(
-            div()
-                .id("safe-areas")
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .h(px(26.))
-                .px_2()
-                .rounded(px(6.))
-                .cursor_pointer()
-                .text_size(px(12.))
-                .when(safe.is_some(), |d| d.bg(tok::bg_selected()))
-                .hover(|d| d.bg(tok::bg_raised()))
-                .child(ui::icon("scan").size(px(14.)).text_color(tok::text_secondary()))
-                .child(safe.map_or("Safe areas", Profile::label))
-                .tooltip(|w, cx| {
-                    Tooltip::new("Where platforms draw their own buttons and captions (approximate)").build(w, cx)
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let next = safe_areas::next(safe, shape.width, shape.height);
-                    if vertical {
-                        this.safe_vertical = next;
-                    } else {
-                        this.safe_landscape = next;
-                    }
-                    cx.notify();
-                })),
-        );
+        bar = bar.child(div().flex_1());
         bar = bar.child(
             div()
                 .id("studio-mode")
@@ -2719,6 +2742,7 @@ impl StudioWindow {
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::canvas_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::canvas_up))
                     .children(stages)
+                    .child(self.canvas_controls(project, cx))
                     .drag_over::<assets::DraggedAsset>(|s, _, _, _| s.border_2().border_color(tok::accent_primary()))
                     .drag_over::<ExternalPaths>(|s, _, _, _| s.border_2().border_color(tok::accent_primary()))
                     .on_drop(cx.listener(|this, a: &assets::DraggedAsset, window, cx| {
