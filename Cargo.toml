@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 # internal
 libobs-sys = { path = "crates/libobs-sys" }
+lightair-audio = { path = "crates/lightair-audio" }
 lightair-core = { path = "crates/lightair-core" }
 lightair-engine = { path = "crates/lightair-engine" }
 lightair-preview = { path = "crates/lightair-preview" }
