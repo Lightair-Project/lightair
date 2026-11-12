@@ -2,18 +2,33 @@
 //! area. Recording, streaming, clips and canvases travel with the project; General is this
 //! Mac's. Each destination has its own settings too, in Outputs (click it).
 
-use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::DropdownMenu;
+use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{ClipSettings, Command, Format, Reconnect, RecordingSettings, VideoEncoder};
 
+use gpui_kit::component::input::{Input, InputState};
+
 use super::StudioWindow;
 use crate::ui::{self, tok};
+
+/// A canvas being edited: its name and size fields, and the frame rate picked.
+pub(crate) struct CanvasEdit {
+    id: lightair_core::Id,
+    name: Entity<InputState>,
+    width: Entity<InputState>,
+    height: Entity<InputState>,
+    fps: u32,
+    error: Option<String>,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Page {
     General,
+    Audio,
+    Camera,
     Recording,
     Streaming,
     Clips,
@@ -24,10 +39,12 @@ pub(crate) enum Page {
 
 const PAGES: &[(Page, &str, &str)] = &[
     (Page::General, "General", "settings"),
+    (Page::Audio, "Audio", "audio-lines"),
     (Page::Recording, "Recording", "circle-dot"),
     (Page::Streaming, "Streaming", "radio"),
     (Page::Clips, "Clips", "scissors"),
     (Page::Canvases, "Canvases", "proportions"),
+    (Page::Camera, "Camera", "camera"),
     (Page::Shortcuts, "Shortcuts", "keyboard"),
     (Page::About, "About", "info"),
 ];
@@ -111,6 +128,113 @@ impl StudioWindow {
         .detach();
     }
 
+    pub(super) fn edit_canvas(&mut self, id: lightair_core::Id, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(f) = self.studio.read(cx).project().format(id).cloned() else { return };
+        let field = |value: String, window: &mut Window, cx: &mut Context<Self>| {
+            let e = cx.new(|cx| InputState::new(window, cx));
+            e.update(cx, |i, cx| i.set_value(value, window, cx));
+            e
+        };
+        let name = field(f.name.clone(), window, cx);
+        let width = field(f.width.to_string(), window, cx);
+        let height = field(f.height.to_string(), window, cx);
+        let fps = f.fps_num / f.fps_den.max(1);
+        self.canvas_edit = Some(CanvasEdit { id, name, width, height, fps, error: None });
+        cx.notify();
+    }
+
+    /// Applies the canvas edit: the new size, with every top-level object reframed into it.
+    fn apply_canvas_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = &mut self.canvas_edit else { return };
+        let project = self.studio.read(cx).project().clone();
+        let Some(old) = project.format(edit.id).cloned() else { return };
+        let num = |e: &Entity<InputState>, cx: &App| e.read(cx).value().trim().parse::<u32>().ok();
+        let (Some(w), Some(h)) = (num(&edit.width, cx), num(&edit.height, cx)) else {
+            edit.error = Some("Width and height are whole numbers of pixels.".into());
+            cx.notify();
+            return;
+        };
+        if !(16..=7680).contains(&w) || !(16..=7680).contains(&h) {
+            edit.error = Some("A canvas is 16 to 7680 pixels each way.".into());
+            cx.notify();
+            return;
+        }
+        let name = edit.name.read(cx).value().trim().to_string();
+        let new = Format {
+            name: if name.is_empty() { old.name.clone() } else { name },
+            width: w & !1,
+            height: h & !1,
+            fps_num: edit.fps,
+            fps_den: 1,
+            ..old.clone()
+        };
+        let mut commands = vec![Command::UpdateFormat { format: new.clone() }];
+        if (new.width, new.height) != (old.width, old.height) {
+            for scene in &project.scenes {
+                for layer in scene.layers.iter().filter(|l| l.parent.is_none()) {
+                    if let Some(l) = layer.layouts.get(&old.id) {
+                        let layout = crate::reframe::reframe(l, &old, &new);
+                        commands.push(Command::SetLayout { scene: scene.id, layer: layer.id, format: old.id, layout });
+                    }
+                }
+            }
+        }
+        self.canvas_edit = None;
+        self.exec(Command::Batch { label: format!("Change {}", new.name.to_lowercase()), commands }, cx);
+    }
+
+    /// The keys pressed for the global shortcut being set.
+    fn capture_hotkey(&mut self, k: &Keystroke, cx: &mut Context<Self>) {
+        let Some(action) = self.hotkey_capture else { return };
+        if k.key == "escape" {
+            self.hotkey_capture = None;
+            cx.notify();
+            return;
+        }
+        // Wait for a key, not just modifiers.
+        if matches!(k.key.as_str(), "shift" | "control" | "alt" | "cmd" | "platform" | "function" | "") {
+            return;
+        }
+        let mut parts = Vec::new();
+        for (on, name) in [
+            (k.modifiers.control, "ctrl"),
+            (k.modifiers.alt, "alt"),
+            (k.modifiers.shift, "shift"),
+            (k.modifiers.platform, "cmd"),
+        ] {
+            if on {
+                parts.push(name.to_string());
+            }
+        }
+        parts.push(k.key.to_lowercase());
+        let keys = parts.join("-");
+        if crate::hotkeys::parse(&keys).is_none() {
+            self.hotkey_note = Some("Use ⌘, ⌃ or ⌥ with a letter or number, or an F key.".into());
+            cx.notify();
+            return;
+        }
+        self.hotkey_capture = None;
+        let mut list = self.prefs.global_hotkeys.clone();
+        list.retain(|h| h.action != action && h.keys != keys);
+        list.push(crate::prefs::GlobalHotkey { action, keys: keys.clone() });
+        let refused = crate::hotkeys::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+        if refused.contains(&action) {
+            list.retain(|h| h.action != action);
+            crate::hotkeys::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+            self.hotkey_note = Some(format!("{} is taken by macOS or another app.", crate::hotkeys::display(&keys)));
+        } else {
+            self.hotkey_note = None;
+        }
+        self.set_pref(|p| p.global_hotkeys = list, cx);
+    }
+
+    fn clear_hotkey(&mut self, action: crate::hotkeys::GlobalAction, cx: &mut Context<Self>) {
+        let mut list = self.prefs.global_hotkeys.clone();
+        list.retain(|h| h.action != action);
+        crate::hotkeys::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+        self.set_pref(|p| p.global_hotkeys = list, cx);
+    }
+
     fn set_pref(&mut self, f: impl FnOnce(&mut crate::prefs::Preferences), cx: &mut Context<Self>) {
         f(&mut self.prefs);
         if let Err(e) = crate::prefs::save_to(&crate::prefs::path(), &self.prefs) {
@@ -146,17 +270,24 @@ impl StudioWindow {
                     .child(*label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.settings_page = p;
+                        this.hotkey_capture = None;
+                        if p == Page::Audio {
+                            this.monitor_devices =
+                                this.studio.read(cx).engine().call(|_| lightair_engine::monitoring::devices());
+                        }
                         cx.notify();
                     })),
             );
         }
         let content = match page {
             Page::General => self.general_page(cx),
+            Page::Audio => self.audio_page(cx),
+            Page::Camera => self.camera_page(cx),
             Page::Recording => self.recording_page(cx),
             Page::Streaming => self.streaming_page(cx),
             Page::Clips => self.clips_page(cx),
             Page::Canvases => self.canvases_page(cx),
-            Page::Shortcuts => shortcuts_page(),
+            Page::Shortcuts => self.shortcuts_page(cx),
             Page::About => self.about_page(cx),
         };
         let title = PAGES.iter().find(|(p, ..)| *p == page).map_or("", |(_, l, _)| *l);
@@ -185,7 +316,10 @@ impl StudioWindow {
                         .shadow_lg()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                            if ev.keystroke.key == "escape" {
+                            if this.hotkey_capture.is_some() {
+                                cx.stop_propagation();
+                                this.capture_hotkey(&ev.keystroke, cx);
+                            } else if ev.keystroke.key == "escape" {
                                 this.toggle_settings(cx);
                             }
                         }))
@@ -280,6 +414,165 @@ impl StudioWindow {
                 reveal_button("reveal-project", project_dir),
             )))
             .child(note("General settings belong to this Mac. The rest are saved with the project."))
+    }
+
+    fn audio_page(&self, cx: &mut Context<Self>) -> Div {
+        let prefs = &self.prefs;
+        let current = prefs.monitor_device.clone().unwrap_or(("System default".into(), "default".into()));
+        let devices = self.monitor_devices.clone();
+        let me = cx.entity().downgrade();
+        let device = Button::new("monitor-device").label(current.0.clone()).small().outline().dropdown_menu(
+            move |mut menu, _, _| {
+                for (name, id) in devices.iter().cloned() {
+                    let me = me.clone();
+                    let on = id == current.1;
+                    menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(name.clone()).checked(on).on_click(
+                        move |_, _, cx| {
+                            if let Some(me) = me.upgrade() {
+                                let (n, i) = (name.clone(), id.clone());
+                                me.update(cx, |this, cx| {
+                                    let (n2, i2) = (n.clone(), i.clone());
+                                    this.studio
+                                        .read(cx)
+                                        .engine()
+                                        .call(move |_| lightair_engine::monitoring::set(&n2, &i2));
+                                    this.set_pref(|p| p.monitor_device = (i != "default").then_some((n, i)), cx);
+                                });
+                            }
+                        },
+                    ));
+                }
+                menu
+            },
+        );
+        let rate = prefs.sample_rate;
+        let running = crate::prefs::RUNNING_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
+        let rates: Vec<(String, bool, bool, Option<u32>)> = [(48_000, "48 kHz"), (44_100, "44.1 kHz")]
+            .into_iter()
+            .map(|(r, l)| (l.to_string(), rate == r, true, Some(r)))
+            .collect();
+        let mut rate_chips = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
+        for (i, (label, on, _, r)) in rates.into_iter().enumerate() {
+            rate_chips = rate_chips.child(pref_chip(("sample-rate", i), label, on).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    if let Some(r) = r {
+                        this.set_pref(|p| p.sample_rate = r, cx);
+                    }
+                },
+            )));
+        }
+        let target = prefs.loudness_target;
+        let mut targets = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
+        for (i, (t, label)) in
+            [(-14, "−14 Streaming"), (-16, "−16 Podcasts"), (-23, "−23 Broadcast")].into_iter().enumerate()
+        {
+            targets = targets.child(pref_chip(("loudness-target", i), label.to_string(), target == t).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    crate::prefs::LOUDNESS_TARGET.store(t, std::sync::atomic::Ordering::Relaxed);
+                    this.set_pref(|p| p.loudness_target = t, cx);
+                }),
+            ));
+        }
+        pages()
+            .child(group("Listening").child(row("Headphones", Some("Where Listen in headphones plays."), device)))
+            .child(
+                group("Loudness")
+                    .child(row("Target", Some("The mixer's LUFS readout turns green on it."), targets))
+                    .child(note("YouTube, Twitch and Spotify even out to about −14 LUFS; Apple Podcasts −16; TV −23.")),
+            )
+            .child(
+                group("Engine")
+                    .child(row("Sample rate", Some("48 kHz suits video; 44.1 kHz matches music files."), rate_chips))
+                    .when(rate != running, |g| {
+                        g.child(
+                            div()
+                                .px_1()
+                                .text_size(px(11.))
+                                .text_color(tok::warn())
+                                .child("Takes effect the next time Lightair opens."),
+                        )
+                    }),
+            )
+    }
+
+    fn camera_page(&self, cx: &mut Context<Self>) -> Div {
+        let cam = self.prefs.camera;
+        let mut sizes = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
+        for (i, (h, label)) in
+            [(None, "Best"), (Some(720), "720p"), (Some(1080), "1080p"), (Some(2160), "4K")].into_iter().enumerate()
+        {
+            sizes = sizes.child(
+                pref_chip(("camera-size", i), label.to_string(), cam.height == h)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_pref(|p| p.camera.height = h, cx))),
+            );
+        }
+        let studio_on = cam.studio_on;
+        pages()
+            .child(
+                group("New cameras")
+                    .child(row("Resolution", Some("Best uses the most the camera offers."), sizes))
+                    .child(row(
+                        "Camera Studio on",
+                        Some("Start with a look applied (change it in the Inspector)."),
+                        switch("camera-studio", studio_on).on_click(
+                            cx.listener(move |this, _, _, cx| this.set_pref(|p| p.camera.studio_on = !studio_on, cx)),
+                        ),
+                    )),
+            )
+            .child(note("Cameras already added keep their settings; change them in their Inspector."))
+    }
+
+    fn shortcuts_page(&self, cx: &mut Context<Self>) -> Div {
+        use crate::hotkeys::{GlobalAction, display};
+        let mut global = group("Anywhere on your Mac");
+        for (i, action) in GlobalAction::ALL.iter().copied().enumerate() {
+            let keys = self.prefs.global_hotkeys.iter().find(|h| h.action == action).map(|h| h.keys.clone());
+            let capturing = self.hotkey_capture == Some(action);
+            let control = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(if capturing {
+                    div().text_size(px(12.)).text_color(tok::warn()).child("Press keys… (Esc cancels)")
+                } else {
+                    value(&keys.as_deref().map(display).unwrap_or_else(|| "—".into()))
+                })
+                .child(
+                    Button::new(("set-hotkey", i))
+                        .label(if keys.is_some() { "Change" } else { "Set" })
+                        .xsmall()
+                        .outline()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.hotkey_capture = Some(action);
+                            this.hotkey_note = None;
+                            cx.notify();
+                        })),
+                )
+                .when(keys.is_some(), |d| {
+                    d.child(
+                        Button::new(("clear-hotkey", i))
+                            .icon(ui::icon("x"))
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| this.clear_hotkey(action, cx))),
+                    )
+                });
+            global = global.child(row(&action.label(), None, control));
+        }
+        if let Some(n) = &self.hotkey_note {
+            global = global.child(div().px_1().text_size(px(11.)).text_color(tok::warn()).child(n.clone()));
+        }
+        let mut page = pages().child(global.child(note(
+            "These work whichever app is in front: start a recording or switch scenes from a game or a call.",
+        )));
+        for (title, items) in SHORTCUTS {
+            let mut g = group(title);
+            for (what, keys) in *items {
+                g = g.child(row(what, None, value(keys)));
+            }
+            page = page.child(g);
+        }
+        page
     }
 
     fn recording_page(&self, cx: &mut Context<Self>) -> Div {
@@ -509,15 +802,28 @@ impl StudioWindow {
     fn canvases_page(&self, cx: &mut Context<Self>) -> Div {
         let project = self.studio.read(cx).project().clone();
         let primary = project.primary_format().id;
+        let busy = lightair_engine::outputs::runtime().any_stream_running()
+            || lightair_engine::outputs::runtime().any_recording_running();
         let mut list = group("Canvases");
         for (i, f) in project.formats.iter().enumerate() {
             let id = f.id;
+            if let Some(edit) = self.canvas_edit.as_ref().filter(|e| e.id == id) {
+                list = list.child(self.canvas_editor(f, edit, busy, cx));
+                continue;
+            }
             let detail = format!("{}×{} · {} fps", f.width, f.height, f.fps_num / f.fps_den.max(1));
-            list = list.child(row(
-                &f.name,
-                Some(&detail),
-                if id == primary {
-                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child("Main").into_any_element()
+            let actions = div()
+                .flex()
+                .gap_1()
+                .child(
+                    Button::new(("edit-format", i))
+                        .label("Edit")
+                        .xsmall()
+                        .outline()
+                        .on_click(cx.listener(move |this, _, window, cx| this.edit_canvas(id, window, cx))),
+                )
+                .child(if id == primary {
+                    div().px_2().text_size(px(11.)).text_color(tok::text_tertiary()).child("Main").into_any_element()
                 } else {
                     Button::new(("remove-format", i))
                         .label("Remove")
@@ -527,8 +833,8 @@ impl StudioWindow {
                             cx.listener(move |this, _, _, cx| this.exec(Command::RemoveFormat { format: id }, cx)),
                         )
                         .into_any_element()
-                },
-            ));
+                });
+            list = list.child(row(&f.name, Some(&detail), actions));
         }
         let has = |w: u32, h: u32| project.formats.iter().any(|f| f.width == w && f.height == h);
         let mut add = div().flex().flex_wrap().gap_1();
@@ -549,6 +855,115 @@ impl StudioWindow {
                 "Each canvas is another shape of every scene (vertical for TikTok, say), recorded and streamed on its own.",
             )))
             .child(group("Add a canvas").child(div().px_3().py_2().child(add)))
+    }
+
+    /// Editing one canvas: name, size (presets for its shape, or typed), frame rate.
+    fn canvas_editor(&self, f: &Format, edit: &CanvasEdit, busy: bool, cx: &mut Context<Self>) -> Div {
+        let vertical = f.height > f.width;
+        let square = f.height == f.width;
+        let presets: &[(u32, u32)] = if square {
+            &[(1080, 1080), (720, 720), (1440, 1440)]
+        } else if vertical {
+            &[(1080, 1920), (720, 1280), (1440, 2560), (2160, 3840)]
+        } else {
+            &[(1920, 1080), (1280, 720), (2560, 1440), (3840, 2160)]
+        };
+        let (fw, fh) = (edit.width.clone(), edit.height.clone());
+        let mut sizes = div().flex().flex_wrap().gap_1();
+        for (i, (w, h)) in presets.iter().copied().enumerate() {
+            let (fw, fh) = (fw.clone(), fh.clone());
+            sizes =
+                sizes.child(Button::new(("canvas-preset", i)).label(format!("{w}×{h}")).xsmall().outline().on_click(
+                    cx.listener(move |_, _, window, cx| {
+                        fw.update(cx, |i, cx| i.set_value(w.to_string(), window, cx));
+                        fh.update(cx, |i, cx| i.set_value(h.to_string(), window, cx));
+                    }),
+                ));
+        }
+        let mut rates = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
+        for (i, r) in [24, 25, 30, 50, 60].into_iter().enumerate() {
+            let on = edit.fps == r;
+            rates = rates.child(
+                div()
+                    .id(("canvas-fps", i))
+                    .px_2()
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(5.))
+                    .text_size(px(11.))
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                    .when(!on, |d| d.text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
+                    .child(format!("{r} fps"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(e) = &mut this.canvas_edit {
+                            e.fps = r;
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        let label = |t: &'static str| div().w(px(90.)).text_size(px(12.)).text_color(tok::text_secondary()).child(t);
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded(px(8.))
+            .bg(tok::bg_raised())
+            .border_1()
+            .border_color(tok::border_strong())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(label("Name"))
+                    .child(div().flex_1().child(Input::new(&edit.name).small())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(label("Size"))
+                    .child(div().w(px(80.)).child(Input::new(&edit.width).small()))
+                    .child("×")
+                    .child(div().w(px(80.)).child(Input::new(&edit.height).small()))
+                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("pixels")),
+            )
+            .child(div().flex().items_center().gap_2().child(div().w(px(90.))).child(sizes))
+            .child(div().flex().items_center().gap_2().child(label("Frame rate")).child(rates))
+            .child(note("Objects are reframed to keep their place when the size changes."))
+            .when(busy, |d| {
+                d.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(tok::warn())
+                        .child("Stop recording and streaming to change a canvas."),
+                )
+            })
+            .when_some(edit.error.clone(), |d, e| d.child(div().text_size(px(11.)).text_color(tok::error()).child(e)))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new("canvas-apply")
+                            .label("Apply")
+                            .small()
+                            .primary()
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.apply_canvas_edit(cx))),
+                    )
+                    .child(Button::new("canvas-cancel").label("Cancel").small().ghost().on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.canvas_edit = None;
+                            cx.notify();
+                        },
+                    ))),
+            )
     }
 
     fn about_page(&self, cx: &mut Context<Self>) -> Div {
@@ -572,18 +987,6 @@ impl StudioWindow {
             )))
             .child(where_)
     }
-}
-
-fn shortcuts_page() -> Div {
-    let mut page = pages();
-    for (title, items) in SHORTCUTS {
-        let mut g = group(title);
-        for (what, keys) in *items {
-            g = g.child(row(what, None, value(keys)));
-        }
-        page = page.child(g);
-    }
-    page
 }
 
 // ---------------------------------------------------------------- building blocks
@@ -639,6 +1042,21 @@ fn note(text: &str) -> Div {
 
 fn value(text: &str) -> Div {
     div().text_size(px(12.)).font_family("Menlo").text_color(tok::text_secondary()).child(text.to_string())
+}
+
+fn pref_chip(id: impl Into<ElementId>, label: String, on: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px_2()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded(px(5.))
+        .text_size(px(11.))
+        .cursor_pointer()
+        .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+        .when(!on, |d| d.text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
+        .child(label)
 }
 
 fn plural(n: usize) -> &'static str {

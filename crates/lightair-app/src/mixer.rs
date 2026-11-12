@@ -455,11 +455,14 @@ impl MixerPanel {
 fn loudness_readout(cx: &mut Context<MixerPanel>) -> Option<impl IntoElement> {
     let r = lightair_engine::loudness::stream_loudness()?;
     let show = |v: f64| if v.is_finite() { format!("{v:.1}") } else { "—".into() };
-    // Most platforms normalise around −14 LUFS: well below sounds quiet, above gets turned down.
+    // Against the loudness target (Settings › Audio): within 2 LU is on target; well below
+    // sounds quiet; above gets turned down by the platform.
+    let target = crate::prefs::LOUDNESS_TARGET.load(std::sync::atomic::Ordering::Relaxed) as f64;
     let colour = match r.short_term {
-        v if !v.is_finite() || v < -24.0 => tok::text_tertiary(),
-        v if v > -9.0 => tok::warn(),
-        _ => tok::ok(),
+        v if !v.is_finite() || v < target - 10.0 => tok::text_tertiary(),
+        v if v > target + 4.0 => tok::warn(),
+        v if (v - target).abs() <= 2.0 => tok::ok(),
+        _ => tok::text_secondary(),
     };
     Some(
         div()
@@ -479,7 +482,7 @@ fn loudness_readout(cx: &mut Context<MixerPanel>) -> Option<impl IntoElement> {
             .child(div().text_color(tok::text_secondary()).child(format!("I {}", show(r.integrated))))
             .tooltip(|w, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(
-                    "Stream loudness: short-term (3 s) and integrated. Platforms aim for about −14. Click to reset integrated.",
+                    "Stream loudness: short-term (3 s) and integrated, green on your target (Settings › Audio). Click to reset integrated.",
                 )
                 .build(w, cx)
             })

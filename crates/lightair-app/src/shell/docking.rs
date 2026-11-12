@@ -213,14 +213,24 @@ impl StudioWindow {
             Ok(hook) if hook.starts_with("settings-") => {
                 use super::settings::Page;
                 let page = match &hook[9..] {
+                    "audio" => Page::Audio,
+                    "camera" => Page::Camera,
                     "recording" => Page::Recording,
                     "streaming" => Page::Streaming,
                     "clips" => Page::Clips,
-                    "canvases" => Page::Canvases,
+                    "canvases" | "canvases-edit" => Page::Canvases,
                     "shortcuts" => Page::Shortcuts,
                     "about" => Page::About,
                     _ => Page::General,
                 };
+                if page == Page::Audio {
+                    self.monitor_devices =
+                        self.studio.read(cx).engine().call(|_| lightair_engine::monitoring::devices());
+                }
+                if hook == "settings-canvases-edit" {
+                    let id = self.studio.read(cx).project().primary_format().id;
+                    self.edit_canvas(id, window, cx);
+                }
                 self.open_settings(page, cx);
             }
             Ok("palette") => self.open_palette(window, cx),

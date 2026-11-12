@@ -4,6 +4,7 @@ mod assets;
 mod camera_studio;
 mod encoding;
 mod geometry;
+mod hotkeys;
 mod mixer;
 mod outputs_panel;
 mod platforms;
@@ -49,16 +50,25 @@ fn main() {
         .map(|p| (p.primary_format().width, p.primary_format().height))
         .unwrap_or((1920, 1080));
 
+    // This Mac's preferences: the sample rate is fixed once libobs starts.
+    let prefs = prefs::load_from(&prefs::path());
+    prefs::LOUDNESS_TARGET.store(prefs.loudness_target, std::sync::atomic::Ordering::Relaxed);
+    let sample_rate = if prefs.sample_rate == 44_100 { 44_100 } else { 48_000 };
+    prefs::RUNNING_SAMPLE_RATE.store(sample_rate, std::sync::atomic::Ordering::Relaxed);
     let engine = Arc::new(
         Engine::start(EngineConfig {
             canvas,
             output: canvas,
+            sample_rate,
             extra_plugin_dirs: camera_studio::plugin_dir().into_iter().collect(),
             ..Default::default()
         })
         .unwrap_or_else(|e| panic!("could not start the engine: {e}")),
     );
     tracing::info!(version = engine.version, project = %project_dir.display(), "libobs started");
+    if let Some((name, id)) = prefs.monitor_device.clone() {
+        engine.call(move |_| lightair_engine::monitoring::set(&name, &id));
+    }
     if let Ok(what) = std::env::var("LIGHTAIR_SELFTEST") {
         selftest::run(&engine, &what);
         return;

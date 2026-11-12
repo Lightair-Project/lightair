@@ -326,6 +326,13 @@ pub struct StudioWindow {
     /// The Add format row, with its custom width and height fields.
     settings_open: bool,
     settings_page: settings::Page,
+    /// A canvas being edited in Settings › Canvases.
+    canvas_edit: Option<settings::CanvasEdit>,
+    /// Settings › Shortcuts is waiting for the keys of this global shortcut.
+    hotkey_capture: Option<crate::hotkeys::GlobalAction>,
+    hotkey_note: Option<String>,
+    /// Monitoring devices, read when the Audio page opens.
+    monitor_devices: Vec<(String, String)>,
     prefs: crate::prefs::Preferences,
     /// Resizable, collapsible, rearrangeable panels (built on first render).
     dock: Option<Entity<gpui_kit::component::dock::DockArea>>,
@@ -352,6 +359,27 @@ impl StudioWindow {
         .detach();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        // Shortcuts that work in any app: registered now, handled as they come.
+        let saved = crate::prefs::load_from(&crate::prefs::path());
+        crate::hotkeys::register(&saved.global_hotkeys.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(40)).await;
+                let pressed = crate::hotkeys::take_pressed();
+                if pressed.is_empty() {
+                    continue;
+                }
+                let alive = this.update_in(cx, |this, window, cx| {
+                    for action in pressed {
+                        this.global_action(action, window, cx);
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let mixer = cx.new(|cx| MixerPanel::new(studio.clone(), cx));
         let outputs = cx.new(|cx| OutputsPanel::new(studio.clone(), cx));
         // Its Add destination dialog is drawn over the whole window.
@@ -417,6 +445,10 @@ impl StudioWindow {
             format_menu: None,
             settings_open: false,
             settings_page: settings::Page::General,
+            canvas_edit: None,
+            hotkey_capture: None,
+            hotkey_note: None,
+            monitor_devices: Vec::new(),
             dock: None,
             prefs: crate::prefs::load_from(&crate::prefs::path()),
         }
@@ -686,6 +718,26 @@ impl StudioWindow {
     }
 
     /// Studio mode's Take: the selected scene goes on air with the current transition.
+    /// A global shortcut was pressed (in any app).
+    fn global_action(&mut self, action: crate::hotkeys::GlobalAction, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::hotkeys::GlobalAction as A;
+        match action {
+            A::ToggleRecording => self.studio.update(cx, |s, cx| s.toggle_recording(cx)),
+            A::ToggleLive => {
+                if runtime().any_stream_running() {
+                    self.studio.update(cx, |s, cx| s.end_stream(cx))
+                } else {
+                    self.studio.update(cx, |s, cx| s.go_live(cx))
+                }
+            }
+            A::Take => self.take(cx),
+            A::AddMarker => self.studio.update(cx, |s, cx| s.add_marker(cx)),
+            A::SaveClip => self.studio.update(cx, |s, cx| s.save_clip(cx)),
+            A::MuteMics => self.studio.update(cx, |s, cx| s.toggle_mics(cx)),
+            A::Scene(n) => self.scene_shortcut(n.saturating_sub(1) as usize, window, cx),
+        }
+    }
+
     fn take(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let Some(scene) = studio.selected_scene else { return };
@@ -1256,13 +1308,31 @@ impl StudioWindow {
     }
 
     /// A camera layer; the input gets Camera Studio (off until a look is chosen).
+    /// A camera layer, set up with the camera defaults (Settings › Camera); the input gets
+    /// Camera Studio, on or off by those defaults.
     fn add_camera(&mut self, label: &str, uid: &str, cx: &mut Context<Self>) {
-        self.add_input_layer(label, "macos-avcapture", json!({"device": uid}), (1280.0, 720.0), cx);
+        let defaults = self.prefs.camera;
+        self.add_input_layer(label, "macos-avcapture", defaults.settings(uid), (1280.0, 720.0), cx);
         let project = self.studio.read(cx).project().clone();
         if let Some(input) = project.inputs.values().find(|i| i.settings["device"] == uid && i.effects.is_empty())
             && let Some(cmd) = crate::camera_studio::ensure_effect(input)
         {
+            let id = input.id;
             self.exec(cmd, cx);
+            if defaults.studio_on
+                && let Some(look) = crate::camera_studio::looks().first().and_then(|(_, l)| l.first())
+                && let Some(effect) = self
+                    .studio
+                    .read(cx)
+                    .project()
+                    .inputs
+                    .get(&id)
+                    .and_then(|i| i.effects.iter().find(|e| e.kind == crate::camera_studio::KIND))
+                    .map(|e| e.id)
+            {
+                self.exec(Command::SetInputEffectSettings { input: id, effect, settings: look.settings.clone() }, cx);
+                self.exec(Command::SetInputEffectEnabled { input: id, effect, enabled: true }, cx);
+            }
         }
     }
 

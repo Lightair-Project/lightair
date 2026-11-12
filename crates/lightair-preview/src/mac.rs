@@ -512,6 +512,12 @@ unsafe fn draw_scaled(src: *mut sys::gs_texture_t, sw: u32, sh: u32, dst: *mut s
 
 /// Reads the (Y, Cb, Cr) values at a point of a frame, given as fractions of its size
 /// (diagnostics and tests).
+/// A frame's pixel size.
+pub fn frame_size(frame: &Frame) -> (usize, usize) {
+    use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
+    (CVPixelBufferGetWidth(frame), CVPixelBufferGetHeight(frame))
+}
+
 pub fn sample_ycbcr(frame: &Frame, fx: f32, fy: f32) -> Option<(u8, u8, u8)> {
     use objc2_core_video::{
         CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight,
