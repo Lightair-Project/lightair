@@ -512,8 +512,8 @@ impl StudioWindow {
                 group("New cameras")
                     .child(row("Resolution", Some("Best uses the most the camera offers."), sizes))
                     .child(row(
-                        "Camera Studio on",
-                        Some("Start with a look applied (change it in the Inspector)."),
+                        "Beauty on",
+                        Some("Start with the Beauty effect (adjust it in the Inspector)."),
                         switch("camera-studio", studio_on).on_click(
                             cx.listener(move |this, _, _, cx| this.set_pref(|p| p.camera.studio_on = !studio_on, cx)),
                         ),

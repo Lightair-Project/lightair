@@ -1,6 +1,6 @@
 //! Effects (docs/plans/effects-revamp.md): the source's effect stack in the Inspector, each
 //! effect a card with its own switch, summary and controls, and the Effect catalog sheet that
-//! adds them (looks, face, background, colour, stylize, blur, distort, keying).
+//! adds them (face, background, colour, stylize, blur, distort, keying).
 
 use std::collections::HashMap;
 
@@ -24,7 +24,6 @@ use crate::ui::{self, tok};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
     All,
-    Looks,
     Of(Category),
 }
 
@@ -78,36 +77,6 @@ impl StudioWindow {
             .ghost()
             .on_click(cx.listener(move |this, _, window, cx| this.open_effect_catalog(iid, Page::All, window, cx)));
         let mut col = self.section("Effects", Some(add.into_any_element()), cx);
-
-        // Cameras get a look row: the whole face look in one click.
-        if camera_studio::is_camera(&input.kind) {
-            let look = camera_studio::current_look(input);
-            let has_face = input.effects.iter().any(|e| e.kind.starts_with("studio."));
-            col = col.child(
-                div()
-                    .id("fx-look")
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .h(px(36.))
-                    .px_2()
-                    .rounded(px(8.))
-                    .bg(tok::bg_raised())
-                    .cursor_pointer()
-                    .hover(|d| d.bg(tok::bg_selected()))
-                    .child(ui::icon("wand-sparkles").size(px(15.)).text_color(tok::accent_primary()))
-                    .child(div().flex_1().text_size(px(12.)).child(match look {
-                        Some(l) => SharedString::from(l),
-                        None if has_face => "Custom look".into(),
-                        None => "Choose a look".into(),
-                    }))
-                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("Looks"))
-                    .child(ui::icon("chevron-right").size(px(12.)).text_color(tok::text_tertiary()))
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.open_effect_catalog(iid, Page::Looks, window, cx)),
-                    ),
-            );
-        }
 
         if input.effects.is_empty() {
             col = col.child(
@@ -820,9 +789,6 @@ impl StudioWindow {
         // Categories down the side.
         let mut side = div().flex().flex_col().gap_0p5().w(px(168.)).flex_none().pr_2();
         let mut pages = vec![(Page::All, "All effects", "layout-grid")];
-        if !camera_studio::looks().is_empty() {
-            pages.push((Page::Looks, "Looks", "wand-sparkles"));
-        }
         for c in Category::ALL {
             pages.push((Page::Of(c), c.name(), category_icon(c)));
         }
@@ -856,60 +822,40 @@ impl StudioWindow {
         // Tiles.
         let in_stack: HashMap<&str, bool> = input.effects.iter().map(|e| (e.kind.as_str(), e.enabled)).collect();
         let mut body = div().id("fx-sheet-body").flex().flex_col().gap_3().flex_1().min_h_0().overflow_y_scroll().pr_1();
-        if page == Page::Looks && !searching {
-            let current = camera_studio::current_look(&input);
-            for (ci, (category, list)) in camera_studio::looks().iter().enumerate() {
-                let mut grid = div().grid().grid_cols(3).gap_2();
-                for (li, look) in list.iter().enumerate() {
-                    let selected = current == Some(look.name.as_str());
-                    let look = look.clone();
-                    let input = input.clone();
-                    grid = grid.child(
-                        tile(("fx-look", ci * 100 + li).into(), "wand-sparkles", &look.name, "A whole face look", None, selected)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.exec(camera_studio::apply_look(&input, &look), cx);
-                                this.close_effect_catalog(window, cx);
-                            })),
-                    );
-                }
-                body = body.child(group_heading(category)).child(grid);
-            }
+        let defs: Vec<&'static EffectDef> = if searching {
+            catalog::search(&query).collect()
         } else {
-            let defs: Vec<&'static EffectDef> = if searching {
-                catalog::search(&query).collect()
-            } else {
-                match page {
-                    Page::Of(c) => catalog::in_category(c).collect(),
-                    _ => catalog::CATALOG.iter().collect(),
-                }
-            };
-            if defs.is_empty() {
-                body = body.child(div().p_4().text_color(tok::text_tertiary()).child("No effects match"));
+            match page {
+                Page::Of(c) => catalog::in_category(c).collect(),
+                _ => catalog::CATALOG.iter().collect(),
             }
-            for c in Category::ALL {
-                let list: Vec<_> = defs.iter().copied().filter(|d| d.category == c).collect();
-                if list.is_empty() {
-                    continue;
-                }
-                let mut grid = div().grid().grid_cols(3).gap_2();
-                for d in list {
-                    let badge = match d.needs {
-                        Needs::Face => Some("Needs a face"),
-                        Needs::Person => Some("Needs a person"),
-                        Needs::Nothing => None,
-                    };
-                    let added = in_stack.contains_key(d.kind);
-                    let n = catalog::CATALOG.iter().position(|x| x.kind == d.kind).unwrap_or(0);
-                    grid = grid.child(
-                        tile(("fx-tile", n).into(), d.icon, d.name, d.description, badge, added)
-                            .on_click(cx.listener(move |this, _, window, cx| this.add_from_catalog(iid, d, window, cx))),
-                    );
-                }
-                if page == Page::All || searching {
-                    body = body.child(group_heading(c.name()));
-                }
-                body = body.child(grid);
+        };
+        if defs.is_empty() {
+            body = body.child(div().p_4().text_color(tok::text_tertiary()).child("No effects match"));
+        }
+        for c in Category::ALL {
+            let list: Vec<_> = defs.iter().copied().filter(|d| d.category == c).collect();
+            if list.is_empty() {
+                continue;
             }
+            let mut grid = div().grid().grid_cols(3).gap_2();
+            for d in list {
+                let badge = match d.needs {
+                    Needs::Face => Some("Needs a face"),
+                    Needs::Person => Some("Needs a person"),
+                    Needs::Nothing => None,
+                };
+                let added = in_stack.contains_key(d.kind);
+                let n = catalog::CATALOG.iter().position(|x| x.kind == d.kind).unwrap_or(0);
+                grid = grid.child(
+                    tile(("fx-tile", n).into(), d.icon, d.name, d.description, badge, added)
+                        .on_click(cx.listener(move |this, _, window, cx| this.add_from_catalog(iid, d, window, cx))),
+                );
+            }
+            if page == Page::All || searching {
+                body = body.child(group_heading(c.name()));
+            }
+            body = body.child(grid);
         }
 
         Some(
