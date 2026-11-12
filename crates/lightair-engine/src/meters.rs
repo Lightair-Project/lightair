@@ -35,7 +35,7 @@ pub struct Levels {
 }
 
 impl MeterCell {
-    pub(crate) fn store(&self, peak: &[f32], magnitude: &[f32]) {
+    pub fn store(&self, peak: &[f32], magnitude: &[f32]) {
         for c in 0..CHANNELS {
             let p = peak.get(c).or(peak.first()).copied().unwrap_or(f32::NEG_INFINITY);
             let m = magnitude.get(c).or(magnitude.first()).copied().unwrap_or(f32::NEG_INFINITY);

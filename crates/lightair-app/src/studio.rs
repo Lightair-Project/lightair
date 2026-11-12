@@ -82,7 +82,12 @@ impl Studio {
 
     /// Brings an older project's effects up to date (saved, but not an undo step).
     fn migrate(&mut self) {
-        let commands = lightair_core::catalog::migrate(self.doc.project());
+        let mut commands = lightair_core::catalog::migrate(self.doc.project());
+        // tracks' libobs audio filters: the audio engine runs its own (LIGHTAIR_LEGACY_AUDIO
+        // keeps libobs mixing, so the filters stay)
+        if std::env::var("LIGHTAIR_LEGACY_AUDIO").map_or(true, |v| v != "1") {
+            commands.extend(lightair_core::catalog::migrate_audio(self.doc.project()));
+        }
         if commands.is_empty() {
             return;
         }
