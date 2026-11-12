@@ -7,6 +7,7 @@
 pub mod displays;
 mod engine;
 mod log;
+pub mod loudness;
 pub mod media;
 pub mod meters;
 pub mod obs;

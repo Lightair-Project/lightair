@@ -226,6 +226,7 @@ unsafe fn bootstrap(cfg: &EngineConfig) -> Result<(Runtime, Capabilities, String
     if !unsafe { sys::obs_reset_audio2(&audio) } {
         return Err(EngineError::Audio);
     }
+    crate::loudness::attach(cfg.sample_rate, 2);
 
     let module = c(&runtime.graphics_module(cfg.graphics == Graphics::Metal).to_string_lossy());
     let mut video = sys::obs_video_info {
@@ -375,6 +376,7 @@ unsafe fn shutdown(state: EngineState) {
     // destruction thread; shutting down before that queue drains crashes inside scene_destroy.
     // The render thread can hold a scene for one more frame after its channel is cleared, so
     // let a few frames pass and keep draining until nothing is left to destroy.
+    crate::loudness::detach();
     let EngineState { sources, scenes, mut reconciler, mut outputs } = state;
     outputs.shutdown();
     reconciler.clear();

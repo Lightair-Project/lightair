@@ -71,11 +71,19 @@ fn track_levels_follow_the_fader() {
     let full = peak_after(track_id, Duration::from_millis(1200));
     eprintln!("peak at 0 dB: {full:.1} dBFS");
     assert!((-8.0..=-4.0).contains(&full), "expected about −6 dBFS, got {full}");
+    // The stream mix's loudness: a stereo 1 kHz sine at amplitude 0.5 is −6 LUFS.
+    let loud = lightair_engine::loudness::stream_loudness().expect("stream meter").momentary;
+    eprintln!("stream loudness: {loud:.1} LUFS");
+    assert!((loud + 6.0).abs() < 1.0, "expected about −6 LUFS, got {loud}");
 
     apply(&mut doc, Command::SetTrackVolume { track: track_id, volume_db: -20.0 });
     let quiet = peak_after(track_id, Duration::from_millis(600));
     eprintln!("peak at −20 dB: {quiet:.1} dBFS");
     assert!((full - quiet - 20.0).abs() < 2.0, "fader should lower the level by 20 dB ({full} → {quiet})");
+    std::thread::sleep(Duration::from_millis(500));
+    let soft = lightair_engine::loudness::stream_loudness().unwrap().momentary;
+    eprintln!("stream loudness at −20 dB: {soft:.1} LUFS");
+    assert!((soft + 26.0).abs() < 1.5, "expected about −26 LUFS, got {soft}");
 
     apply(&mut doc, Command::RemoveTrack { track: track_id });
     assert!(meters().get(track_id).is_none(), "meter cell removed with the track");
