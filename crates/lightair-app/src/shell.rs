@@ -12,7 +12,7 @@ use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{
-    Command, Direction, Fit, Format, Id, Input, Layer, Layout, Project, Scene, TransitionKind, TransitionSettings,
+    Command, Direction, Format, Id, Input, Layer, Layout, Project, Scene, TransitionKind, TransitionSettings,
 };
 use lightair_preview::Preview;
 use serde_json::json;
@@ -20,6 +20,7 @@ use serde_json::json;
 mod add_layer;
 mod docking;
 mod golive;
+mod inspector;
 mod layer_props;
 mod palette;
 mod settings;
@@ -141,6 +142,12 @@ pub struct StudioWindow {
     drag: Option<Drag>,
     guides: Guides,
     add_menu: bool,
+    /// Inspector sections the user collapsed, slider states, and the input/effect whose looks
+    /// dialog is open.
+    collapsed: RefCell<std::collections::HashSet<&'static str>>,
+    sliders: RefCell<HashMap<String, inspector::BoundSlider>>,
+    looks_for: Option<(Id, Id)>,
+    transition_menu: bool,
     /// The Add Layer picker, while open.
     add_layer: Option<add_layer::AddLayer>,
     /// Camera devices (label, id), refreshed when the Add Layer menu opens.
@@ -201,6 +208,10 @@ impl StudioWindow {
             guides: vec![],
             add_menu: false,
             add_layer: None,
+            collapsed: RefCell::new(["Formats"].into_iter().collect()),
+            sliders: RefCell::default(),
+            looks_for: None,
+            transition_menu: false,
             camera_devices: vec![],
             renaming: None,
             studio_mode: false,
@@ -927,6 +938,7 @@ impl Render for StudioWindow {
             .child(div().flex().flex_1().min_h_0().children(self.dock.clone()))
             .child(self.status_bar(cx))
             .children(self.add_layer_overlay(cx))
+            .children(self.looks_overlay(cx))
             .children(self.go_live_overlay(cx))
             .children(self.settings_overlay(cx))
             .children(self.palette_overlay(cx))
@@ -1094,9 +1106,7 @@ impl StudioWindow {
             return col.child(div().px_3().text_color(tok::text_tertiary()).child("No scene selected"));
         };
         if scene.layers.is_empty() {
-            col = col.child(
-                div().px_3().py_2().text_color(tok::text_tertiary()).child("This scene is empty. Add a layer with +."),
-            );
+            col = col.child(div().px_3().py_2().text_color(tok::text_tertiary()).child("Empty scene"));
         }
         let scene_id = scene.id;
         let count = scene.layers.len();
@@ -1172,22 +1182,24 @@ impl StudioWindow {
 
     fn transition_picker(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         let current = project.transition;
-        let seg = |i: usize, kind: TransitionKind| {
+        // The list of kinds, shown under the row while open.
+        let item = |i: usize, kind: TransitionKind| {
             let active = current.kind == kind;
             div()
                 .id(("tr-kind", i))
                 .flex()
                 .items_center()
-                .justify_center()
-                .h(px(22.))
+                .gap_2()
+                .h(px(28.))
                 .px_2()
-                .rounded(px(4.))
-                .text_size(px(11.))
+                .rounded(px(5.))
+                .text_size(px(12.))
                 .cursor_pointer()
                 .when(active, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
                 .when(!active, |d| d.text_color(tok::text_secondary()))
                 .hover(|d| d.bg(tok::bg_raised()))
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    this.transition_menu = false;
                     this.exec(Command::SetTransition { settings: TransitionSettings { kind, ..current } }, cx)
                 }))
                 .child(kind.label())
@@ -1212,7 +1224,10 @@ impl StudioWindow {
                     this.exec(Command::SetTransition { settings }, cx)
                 }))
         });
-        let kinds: Vec<_> = TransitionKind::ALL.iter().enumerate().map(|(i, k)| seg(i, *k)).collect();
+        let kinds: Vec<_> = self
+            .transition_menu
+            .then(|| TransitionKind::ALL.iter().enumerate().map(|(i, k)| item(i, *k)).collect())
+            .unwrap_or_default();
         // Stinger: its video and when the scene changes underneath it.
         let stinger = (current.kind == TransitionKind::Stinger).then(|| {
             let st = project.stinger.clone();
@@ -1254,18 +1269,36 @@ impl StudioWindow {
             }
             row
         });
-        div()
+        let row = div()
             .flex()
-            .flex_wrap()
             .items_center()
             .gap_1()
-            .px_3()
-            .pb_2()
-            .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).mr_1().child("Transition"))
-            .children(kinds)
-            .child(div().flex_1())
+            .child(
+                div()
+                    .id("tr-current")
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .gap_1p5()
+                    .h(px(26.))
+                    .px_2()
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(tok::bg_raised()))
+                    .child(ui::icon("arrow-right-left").size(px(13.)).text_color(tok::text_tertiary()))
+                    .child(div().flex_1().text_size(px(12.)).child(current.kind.label()))
+                    .child(
+                        ui::icon(if self.transition_menu { "chevron-up" } else { "chevron-down" })
+                            .size(px(12.))
+                            .text_color(tok::text_tertiary()),
+                    )
+                    .tooltip(|w, cx| Tooltip::new("Transition between scenes").build(w, cx))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.transition_menu = !this.transition_menu;
+                        cx.notify();
+                    })),
+            )
             .children(direction)
-            .children(stinger)
             .child(
                 div()
                     .id("tr-duration")
@@ -1289,7 +1322,8 @@ impl StudioWindow {
                         )
                     }))
                     .child(format!("{} ms", current.duration_ms)),
-            )
+            );
+        div().flex().flex_col().gap_1().px_2().pb_2().child(row).children(kinds).children(stinger)
     }
 
     fn scenes_panel(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1891,12 +1925,6 @@ impl StudioWindow {
                     .tooltip("Put the scene you're editing on air")
                     .on_click(cx.listener(|this, _, _, cx| this.take(cx))),
             )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(tok::text_tertiary())
-                    .child("Clicking a scene selects it for editing; Take puts it on air with the current transition."),
-            )
     }
 
     /// Several layers selected: align them, or delete them.
@@ -1951,11 +1979,7 @@ impl StudioWindow {
                 .child(distribute_button(1, "align-vertical-distribute-center", "Space evenly down", false))
         });
         body.child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{} layers selected", selection.len())))
-            .child(
-                div()
-                    .text_color(tok::text_tertiary())
-                    .child("Drag any of them to move them together. ⇧-click to add or remove."),
-            )
+            .child(div().text_color(tok::text_tertiary()).child("Drag any of them to move them together."))
             .child(row)
             .child(
                 Button::new("delete-layers")
@@ -1980,147 +2004,7 @@ impl StudioWindow {
             (Some(scene), Some(_)) if selection.len() > 1 => {
                 self.multi_inspector(&scene, &format, &selection, body, cx)
             }
-            (Some(scene), Some(layer)) => {
-                let lo = layer.layouts.get(&format.id).copied().unwrap_or(Layout::boxed(0., 0., 100., 100.));
-                let (sid, lid, fid) = (scene.id, layer.id, format.id);
-                let kind = project.inputs.get(&layer.input).map(|i| i.kind.clone()).unwrap_or_default();
-                let camera_studio: Option<AnyElement> = project.inputs.get(&layer.input).and_then(|input| {
-                    self.camera_studio_section(input, cx).or_else(|| {
-                        let cmd = crate::camera_studio::is_camera(&input.kind)
-                            .then(|| crate::camera_studio::ensure_effect(input))
-                            .flatten()?;
-                        Some(
-                            Button::new("add-camera-studio")
-                                .label("Add Camera Studio")
-                                .small()
-                                .outline()
-                                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)))
-                                .into_any_element(),
-                        )
-                    })
-                });
-                let set = move |f: fn(&mut Layout)| {
-                    let mut l = lo;
-                    f(&mut l);
-                    Command::SetLayout { scene: sid, layer: lid, format: fid, layout: l }
-                };
-                let stepper = |id: &'static str, label: &'static str, value: f32, minus: Command, plus: Command| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(div().w(px(76.)).text_color(tok::text_secondary()).child(label))
-                        .child(
-                            Button::new((id, 0usize))
-                                .label("−")
-                                .xsmall()
-                                .ghost()
-                                .on_click(cx.listener(move |this, _, _, cx| this.exec(minus.clone(), cx))),
-                        )
-                        .child(div().w(px(64.)).text_center().font_family("Menlo").child(format!("{value:.0}")))
-                        .child(
-                            Button::new((id, 1usize))
-                                .label("+")
-                                .xsmall()
-                                .ghost()
-                                .on_click(cx.listener(move |this, _, _, cx| this.exec(plus.clone(), cx))),
-                        )
-                };
-                let fit_button = |id: &'static str, label: &'static str, fit: Fit| {
-                    let cmd = Command::SetLayout { scene: sid, layer: lid, format: fid, layout: Layout { fit, ..lo } };
-                    let b = Button::new(id)
-                        .label(label)
-                        .xsmall()
-                        .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)));
-                    if lo.fit == fit { b.primary() } else { b.ghost() }
-                };
-                body.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(ui::icon(ui::input_icon(&kind)).size(px(16.)).text_color(tok::text_secondary()))
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child(layer.name.clone())),
-                )
-                .child(stepper("x", "X", lo.x, set(|l| l.x -= 10.0), set(|l| l.x += 10.0)))
-                .child(stepper("y", "Y", lo.y, set(|l| l.y -= 10.0), set(|l| l.y += 10.0)))
-                .child(stepper(
-                    "w",
-                    "Width",
-                    lo.width,
-                    set(|l| l.width = (l.width - 10.0).max(8.0)),
-                    set(|l| l.width += 10.0),
-                ))
-                .child(stepper(
-                    "h",
-                    "Height",
-                    lo.height,
-                    set(|l| l.height = (l.height - 10.0).max(8.0)),
-                    set(|l| l.height += 10.0),
-                ))
-                .child(stepper("r", "Rotation", lo.rotation, set(|l| l.rotation -= 15.0), set(|l| l.rotation += 15.0)))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(div().w(px(76.)).text_color(tok::text_secondary()).child("Fit"))
-                        .child(fit_button("fit-fit", "Fit", Fit::Fit))
-                        .child(fit_button("fit-fill", "Fill", Fit::Fill))
-                        .child(fit_button("fit-stretch", "Stretch", Fit::Stretch))
-                        .child(fit_button("fit-original", "Original", Fit::Original)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .pt_2()
-                        .child({
-                            let full = Command::SetLayout {
-                                scene: sid,
-                                layer: lid,
-                                format: fid,
-                                layout: Layout {
-                                    x: 0.0,
-                                    y: 0.0,
-                                    width: format.width as f32,
-                                    height: format.height as f32,
-                                    rotation: 0.0,
-                                    ..lo
-                                },
-                            };
-                            Button::new("fill-canvas")
-                                .label("Fill canvas")
-                                .small()
-                                .outline()
-                                .on_click(cx.listener(move |this, _, _, cx| this.exec(full.clone(), cx)))
-                        })
-                        .when(lo.crop != lightair_core::Crop::default(), |d| {
-                            let uncropped = Command::SetLayout {
-                                scene: sid,
-                                layer: lid,
-                                format: fid,
-                                layout: Layout { crop: lightair_core::Crop::default(), ..lo },
-                            };
-                            d.child(
-                                Button::new("reset-crop")
-                                    .label("Reset crop")
-                                    .small()
-                                    .outline()
-                                    .tooltip("⌥-drag a corner on the canvas to crop")
-                                    .on_click(cx.listener(move |this, _, _, cx| this.exec(uncropped.clone(), cx))),
-                            )
-                        })
-                        .child(Button::new("delete-layer").label("Delete").small().danger().on_click(cx.listener(
-                            move |this, _, _, cx| this.exec(Command::RemoveLayer { scene: sid, layer: lid }, cx),
-                        ))),
-                )
-                .children((project.formats.len() > 1).then(|| self.formats_section(project, &layer, sid, cx)))
-                .children(project.inputs.get(&layer.input).and_then(|input| self.content_section(input, cx)))
-                .children(project.inputs.get(&layer.input).map(|input| self.effects_section(input, cx)))
-                .children(camera_studio)
-                .into_any_element()
-            }
+            (Some(scene), Some(layer)) => self.layer_inspector(project, &scene, &layer, &format, body, cx),
             (Some(scene), None) => body
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(scene.name.clone()))
                 .child(div().text_color(tok::text_secondary()).child(format!(
@@ -2131,21 +2015,15 @@ impl StudioWindow {
                     format.height,
                     format.fps_num / format.fps_den.max(1)
                 )))
-                .child(
-                    div()
-                        .text_color(tok::text_tertiary())
-                        .child("Select a layer on the canvas or in Layers to edit it."),
-                )
                 .into_any_element(),
             _ => body.child(div().text_color(tok::text_tertiary()).child("Nothing selected")).into_any_element(),
         };
         div()
             .flex()
             .flex_col()
-            .flex_1()
-            .min_h_0()
+            .size_full()
             .pt_2()
-            .child(div().id("inspector-scroll").flex_1().min_h_0().pb_3().overflow_y_scroll().child(content))
+            .child(div().id("inspector-scroll").flex_1().min_h_0().w_full().pb_3().overflow_y_scroll().child(content))
     }
 
     fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
