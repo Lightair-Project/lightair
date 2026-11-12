@@ -44,7 +44,8 @@ actions!(
         RenameSelection,
         OpenPalette,
         Take,
-        AddMarker
+        AddMarker,
+        SelectAll
     ]
 );
 
@@ -63,6 +64,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-k", OpenPalette, Some("Studio")),
         KeyBinding::new("cmd-enter", Take, Some("Studio")),
         KeyBinding::new("cmd-m", AddMarker, Some("Studio")),
+        KeyBinding::new("cmd-a", SelectAll, Some("Studio")),
     ]);
 }
 
@@ -86,6 +88,8 @@ struct Drag {
     mode: DragMode,
     start: (f32, f32),
     layout: Layout,
+    /// Other selected layers moving with it (Move only), with their starting layouts.
+    others: Vec<(Id, Layout)>,
 }
 
 /// Snap guides shown while dragging: (vertical?, canvas coordinate).
@@ -236,11 +240,31 @@ impl StudioWindow {
         }
     }
 
+    /// Selects just this layer (or nothing).
     fn select_layer(&self, layer: Option<Id>, cx: &mut Context<Self>) {
         self.studio.update(cx, |s, cx| {
             s.selected_layer = layer;
+            s.also_selected.clear();
             cx.notify();
         });
+    }
+
+    fn toggle_selected(&self, layer: Id, cx: &mut Context<Self>) {
+        self.studio.update(cx, |s, cx| {
+            s.toggle_selected(layer);
+            cx.notify();
+        });
+    }
+
+    /// One command for several layers' layouts (a plain SetLayout for one).
+    fn set_layouts(&self, scene: Id, format: Id, layouts: Vec<(Id, Layout)>, label: &str, cx: &mut Context<Self>) {
+        let mut commands: Vec<Command> =
+            layouts.into_iter().map(|(layer, layout)| Command::SetLayout { scene, layer, format, layout }).collect();
+        match commands.len() {
+            0 => {}
+            1 => self.exec(commands.remove(0), cx),
+            _ => self.exec(Command::Batch { label: label.into(), commands }, cx),
+        }
     }
 
     fn format_id(&self, project: &Project) -> Id {
@@ -394,6 +418,7 @@ impl StudioWindow {
                     mode: DragMode::Rotate,
                     start: (x, y),
                     layout: *l,
+                    others: vec![],
                 });
                 self.studio.update(cx, |s, _| s.begin_gesture());
                 return;
@@ -409,7 +434,15 @@ impl StudioWindow {
                     Some((w, h)) => DragMode::Crop(*corner, (w as f32, h as f32)),
                     None => DragMode::Resize(*corner),
                 };
-                self.drag = Some(Drag { scene: scene_id, layer: sel.id, format, mode, start: (x, y), layout: *l });
+                self.drag = Some(Drag {
+                    scene: scene_id,
+                    layer: sel.id,
+                    format,
+                    mode,
+                    start: (x, y),
+                    layout: *l,
+                    others: vec![],
+                });
                 self.studio.update(cx, |s, _| s.begin_gesture());
                 return;
             }
@@ -420,17 +453,45 @@ impl StudioWindow {
             .iter()
             .rev()
             .find(|l| l.layouts.get(&format).is_some_and(|lo| lo.visible && geo::contains(lo, (x, y))));
+        let selection = studio.selection();
         match hit {
+            Some(layer) if ev.modifiers.shift => self.toggle_selected(layer.id, cx),
             Some(layer) => {
                 let id = layer.id;
+                // Dragging one of several selected layers moves them all; otherwise select it.
+                let in_selection = selection.contains(&id);
                 if !layer.locked {
                     let layout = layer.layouts[&format];
+                    let others: Vec<(Id, Layout)> = if in_selection {
+                        selection
+                            .iter()
+                            .filter(|o| **o != id)
+                            .filter_map(|o| scene.layer(*o).filter(|l| !l.locked))
+                            .filter_map(|l| l.layouts.get(&format).map(|lo| (l.id, *lo)))
+                            .collect()
+                    } else {
+                        vec![]
+                    };
                     let mode = DragMode::Move;
-                    self.drag = Some(Drag { scene: scene_id, layer: id, format, mode, start: (x, y), layout });
+                    self.drag = Some(Drag { scene: scene_id, layer: id, format, mode, start: (x, y), layout, others });
                     self.studio.update(cx, |s, _| s.begin_gesture());
                 }
-                self.select_layer(Some(id), cx);
+                if in_selection {
+                    // Keep the group; the grabbed layer becomes the Inspector's.
+                    self.studio.update(cx, |s, cx| {
+                        if s.selected_layer != Some(id) {
+                            s.also_selected.retain(|l| *l != id);
+                            if let Some(prev) = s.selected_layer.replace(id) {
+                                s.also_selected.insert(0, prev);
+                            }
+                        }
+                        cx.notify();
+                    });
+                } else {
+                    self.select_layer(Some(id), cx);
+                }
             }
+            None if ev.modifiers.shift => {}
             None => self.select_layer(None, cx),
         }
     }
@@ -486,8 +547,12 @@ impl StudioWindow {
             DragMode::Resize(corner) => l = geo::resize(&l, corner, (dx, dy), ev.modifiers.shift),
         }
         self.guides = guides;
-        let cmd = Command::SetLayout { scene: drag.scene, layer: drag.layer, format: drag.format, layout: l };
-        self.exec(cmd, cx);
+        // The group follows the grabbed layer (after snapping).
+        let (mx, my) = (l.x - drag.layout.x, l.y - drag.layout.y);
+        let mut layouts = vec![(drag.layer, l)];
+        layouts.extend(drag.others.iter().map(|(id, o)| (*id, Layout { x: o.x + mx, y: o.y + my, ..*o })));
+        let (scene, format) = (drag.scene, drag.format);
+        self.set_layouts(scene, format, layouts, "Move layers", cx);
     }
 
     fn canvas_up(&mut self, _: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -504,19 +569,26 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let project = studio.project().clone();
         let format = self.format_id(&project);
-        let (Some(scene), Some(layer)) = (studio.selected_scene, studio.selected_layer) else { return };
-        let Some(l) = project.scene(scene).and_then(|s| s.layer(layer)).and_then(|l| l.layouts.get(&format)).copied()
-        else {
-            return;
-        };
-        let layout = Layout { x: l.x + dx, y: l.y + dy, ..l };
-        self.exec(Command::SetLayout { scene, layer, format, layout }, cx);
+        let Some(scene_id) = studio.selected_scene else { return };
+        let Some(scene) = project.scene(scene_id) else { return };
+        let moved: Vec<(Id, Layout)> = studio
+            .selection()
+            .into_iter()
+            .filter_map(|id| scene.layer(id).filter(|l| !l.locked))
+            .filter_map(|l| l.layouts.get(&format).map(|lo| (l.id, Layout { x: lo.x + dx, y: lo.y + dy, ..*lo })))
+            .collect();
+        self.set_layouts(scene_id, format, moved, "Nudge layers", cx);
     }
 
     fn delete_selection(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        if let (Some(scene), Some(layer)) = (studio.selected_scene, studio.selected_layer) {
-            self.exec(Command::RemoveLayer { scene, layer }, cx);
+        let Some(scene) = studio.selected_scene else { return };
+        let mut commands: Vec<Command> =
+            studio.selection().into_iter().map(|layer| Command::RemoveLayer { scene, layer }).collect();
+        match commands.len() {
+            0 => {}
+            1 => self.exec(commands.remove(0), cx),
+            n => self.exec(Command::Batch { label: format!("Delete {n} layers"), commands }, cx),
         }
     }
 
@@ -684,6 +756,19 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &Deselect, _, cx| this.select_layer(None, cx)))
             .on_action(cx.listener(|this, _: &RenameSelection, window, cx| this.rename_selection(window, cx)))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
+            .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
+                this.studio.update(cx, |s, cx| {
+                    let p = s.project().clone();
+                    let layers: Vec<Id> = s
+                        .selected_scene
+                        .and_then(|id| p.scene(id))
+                        .map(|scene| scene.layers.iter().rev().map(|l| l.id).collect())
+                        .unwrap_or_default();
+                    s.selected_layer = layers.first().copied();
+                    s.also_selected = layers.into_iter().skip(1).collect();
+                    cx.notify();
+                })
+            }))
             .on_action(cx.listener(|this, _: &AddMarker, _, cx| {
                 if this.studio.read(cx).is_recording() {
                     this.studio.update(cx, |s, cx| s.add_marker(cx))
@@ -865,6 +950,7 @@ impl StudioWindow {
         let format = self.format_id(project);
         let scene = studio.selected_scene.and_then(|id| project.scene(id)).cloned();
         let selected = studio.selected_layer;
+        let also = studio.also_selected.clone();
         let add = ui::icon_button("add-layer", "plus", tok::text_secondary())
             .tooltip(|w, cx| Tooltip::new("Add layer").build(w, cx))
             .on_click(cx.listener(|this, _, _, cx| {
@@ -900,7 +986,7 @@ impl StudioWindow {
             let kind = project.inputs.get(&layer.input).map(|i| i.kind.clone()).unwrap_or_default();
             let visible = layer.layouts.get(&format).is_some_and(|l| l.visible);
             let locked = layer.locked;
-            let is_sel = selected == Some(id);
+            let is_sel = selected == Some(id) || also.contains(&id);
             let target = RowTarget::Layer { scene: scene_id, layer: id };
             let dragged = DraggedRow { target, name: layer.name.clone().into(), icon: ui::input_icon(&kind) };
             let name = layer.name.clone();
@@ -919,6 +1005,11 @@ impl StudioWindow {
                 .when(is_sel, |d| d.bg(tok::bg_selected()))
                 .hover(|d| d.bg(tok::bg_raised()))
                 .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                    let m = ev.modifiers();
+                    if m.shift || m.platform {
+                        this.toggle_selected(id, cx);
+                        return;
+                    }
                     this.select_layer(Some(id), cx);
                     if ev.click_count() == 2 {
                         this.start_rename(target, &name, window, cx);
@@ -1368,6 +1459,44 @@ impl StudioWindow {
                 .and_then(|id| project.scene(id))
                 .and_then(|scene| studio.selected_layer.and_then(|l| scene.layer(l)))
                 .and_then(|l| l.layouts.get(&fid).map(|lo| (*lo, l.locked)));
+            // Other selected layers: outlines only.
+            let extras: Vec<[(f32, f32); 4]> = studio
+                .selected_scene
+                .and_then(|id| project.scene(id))
+                .map(|scene| {
+                    studio
+                        .also_selected
+                        .iter()
+                        .filter_map(|id| scene.layer(*id))
+                        .filter_map(|l| l.layouts.get(&fid))
+                        .map(|lo| geo::outline(lo).map(|(px_, py_)| (lx + px_ * s, ly + py_ * s)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !extras.is_empty() {
+                let colour = tok::canvas_selection();
+                stage = stage.child(
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, _| {
+                            let o = bounds.origin;
+                            for outline in &extras {
+                                let mut path = PathBuilder::stroke(px(1.));
+                                path.move_to(point(o.x + px(outline[0].0), o.y + px(outline[0].1)));
+                                for p in &outline[1..] {
+                                    path.line_to(point(o.x + px(p.0), o.y + px(p.1)));
+                                }
+                                path.close();
+                                if let Ok(path) = path.build() {
+                                    window.paint_path(path, colour);
+                                }
+                            }
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                );
+            }
             if let Some((l, locked)) = selected {
                 let colour = if editing { tok::canvas_selection() } else { tok::text_secondary() };
                 let to_stage = move |(px_, py_): (f32, f32)| (lx + px_ * s, ly + py_ * s);
@@ -1600,13 +1729,70 @@ impl StudioWindow {
             .child(self.inspector(project, cx))
     }
 
+    /// Several layers selected: align them, or delete them.
+    fn multi_inspector(
+        &self,
+        scene: &Scene,
+        format: &Format,
+        selection: &[Id],
+        body: Div,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (sid, fid) = (scene.id, format.id);
+        let layers: Vec<(Id, Layout)> = selection
+            .iter()
+            .filter_map(|id| scene.layer(*id).filter(|l| !l.locked))
+            .filter_map(|l| l.layouts.get(&fid).map(|lo| (l.id, *lo)))
+            .collect();
+        let align_button = |i: usize, icon: &'static str, tip: &'static str, how: geo::Align| {
+            let layers = layers.clone();
+            ui::icon_button(("align", i), icon, tok::text_secondary())
+                .tooltip(move |w, cx| Tooltip::new(tip).build(w, cx))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let layouts: Vec<Layout> = layers.iter().map(|(_, l)| *l).collect();
+                    let aligned = geo::align(&layouts, how);
+                    let moved = layers.iter().map(|(id, _)| *id).zip(aligned).collect();
+                    this.set_layouts(sid, fid, moved, "Align layers", cx);
+                }))
+        };
+        let row = div()
+            .flex()
+            .gap_1()
+            .child(align_button(0, "align-start-vertical", "Align left edges", geo::Align::Left))
+            .child(align_button(1, "align-center-vertical", "Align centres", geo::Align::Centre))
+            .child(align_button(2, "align-end-vertical", "Align right edges", geo::Align::Right))
+            .child(div().w(px(8.)))
+            .child(align_button(3, "align-start-horizontal", "Align top edges", geo::Align::Top))
+            .child(align_button(4, "align-center-horizontal", "Align middles", geo::Align::Middle))
+            .child(align_button(5, "align-end-horizontal", "Align bottom edges", geo::Align::Bottom));
+        body.child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{} layers selected", selection.len())))
+            .child(
+                div()
+                    .text_color(tok::text_tertiary())
+                    .child("Drag any of them to move them together. ⇧-click to add or remove."),
+            )
+            .child(row)
+            .child(
+                Button::new("delete-layers")
+                    .label("Delete")
+                    .small()
+                    .danger()
+                    .on_click(cx.listener(|this, _, _, cx| this.delete_selection(cx))),
+            )
+            .into_any_element()
+    }
+
     fn inspector(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         let studio = self.studio.read(cx);
         let format = self.format(project).clone();
         let scene = studio.selected_scene.and_then(|id| project.scene(id)).cloned();
         let layer = scene.as_ref().and_then(|s| studio.selected_layer.and_then(|l| s.layer(l))).cloned();
+        let selection = studio.selection();
         let body = div().flex().flex_col().gap_3().px_3();
         let content = match (scene, layer) {
+            (Some(scene), Some(_)) if selection.len() > 1 => {
+                self.multi_inspector(&scene, &format, &selection, body, cx)
+            }
             (Some(scene), Some(layer)) => {
                 let lo = layer.layouts.get(&format.id).copied().unwrap_or(Layout::boxed(0., 0., 100., 100.));
                 let (sid, lid, fid) = (scene.id, layer.id, format.id);
