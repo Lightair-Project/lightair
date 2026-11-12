@@ -186,6 +186,21 @@ impl Render for OutputsPanel {
             )
             .child(rec_badge),
         );
+        // While live: how many encoders the destinations need (identical ones share).
+        if runtime().any_stream_running() {
+            let live = project
+                .outputs
+                .destinations
+                .iter()
+                .filter(|d| runtime().get(OutputKey::Stream(d.id)).state.is_running())
+                .count();
+            let encoders = studio.engine().call(|s| s.outputs.stream_encoder_count());
+            list = list.child(div().mx_4().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!(
+                "{live} destination{} · {encoders} encoder{}",
+                if live == 1 { "" } else { "s" },
+                if encoders == 1 { "" } else { "s" }
+            )));
+        }
         for (i, d) in project.outputs.destinations.iter().enumerate() {
             let id = d.id;
             let enabled = d.enabled;
