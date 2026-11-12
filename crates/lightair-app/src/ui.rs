@@ -76,10 +76,6 @@ pub mod tok {
     pub fn canvas_safe_area_fill() -> Hsla {
         rgba(0xFFFFFF14).into()
     }
-    /// The cut-away part of a picture in crop mode.
-    pub fn crop_dim() -> Hsla {
-        rgba(0x0000_00A6).into()
-    }
     /// Rotate gizmo rings (the usual 3D-tool axis colours) and the ring in use.
     pub fn gizmo_x() -> Hsla {
         rgb(0xF0524F).into()

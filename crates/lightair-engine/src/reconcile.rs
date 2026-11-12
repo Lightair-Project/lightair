@@ -42,6 +42,8 @@ pub struct Reconciler {
     masks: HashMap<(Id, Id, Id), Masked>,
     /// The layer being cropped (scene, format, layer): shown whole and unshaped meanwhile.
     crop_preview: Option<(Id, Id, Id)>,
+    /// Leaving crop view: the ghost is fading out.
+    crop_fading: bool,
     formats: Vec<Id>,
     primary_format: Option<Id>,
     program: Option<Id>,
@@ -279,16 +281,29 @@ impl Reconciler {
     /// Shows a layer whole while it's being cropped (crop mode), or `None` to end it. The
     /// document is untouched: this is only how libobs draws it meanwhile.
     pub fn set_crop_preview(&mut self, target: Option<(Id, Id, Id)>, project: &Project) {
-        if self.crop_preview == target {
+        // The same target again while fading out: back in (the ghost fades in again).
+        if self.crop_preview == target && !self.crop_fading {
             return;
         }
         let previous = std::mem::replace(&mut self.crop_preview, target);
+        self.crop_fading = false;
         for (scene, format, layer) in previous.into_iter().chain(target) {
             let Some(s) = project.scene(scene) else { continue };
             let Some(index) = s.layers.iter().position(|l| l.id == layer) else { continue };
             let l = s.layers[index].clone();
             self.update_layer(scene, format, &l, index);
         }
+    }
+
+    /// Fades the crop view's ghost out (before `set_crop_preview(None)`, so leaving crop view
+    /// doesn't pop): the picture then looks just as it will once the crop is applied again.
+    pub fn fade_crop_preview(&mut self, project: &Project) {
+        let Some((scene, format, layer)) = self.crop_preview else { return };
+        self.crop_fading = true;
+        let Some(s) = project.scene(scene) else { return };
+        let Some(index) = s.layers.iter().position(|l| l.id == layer) else { return };
+        let l = s.layers[index].clone();
+        self.update_layer(scene, format, &l, index);
     }
 
     /// Starts inputs as if they were on screen (captures open, media loads) without putting
@@ -518,7 +533,8 @@ impl Reconciler {
                 if !lo.visible {
                     continue;
                 }
-                let Some((item, masked)) = (unsafe { add_item(temp.as_ptr(), input, Some(lo), &format!("{}", l.id)) })
+                let Some((item, masked)) =
+                    (unsafe { add_item(temp.as_ptr(), input, Some(lo), &format!("{}", l.id), false) })
                 else {
                     continue;
                 };
@@ -536,7 +552,8 @@ impl Reconciler {
                     continue;
                 }
                 // The shape (if any) is B's: a layer gliding into a circle is a circle on the way.
-                let Some((item, masked)) = (unsafe { add_item(temp.as_ptr(), input, Some(to), &format!("{}", l.id)) })
+                let Some((item, masked)) =
+                    (unsafe { add_item(temp.as_ptr(), input, Some(to), &format!("{}", l.id), false) })
                 else {
                     continue;
                 };
@@ -622,13 +639,14 @@ impl Reconciler {
             return;
         };
         let layout = layer.layouts.get(&format);
+        let key = (scene, format, layer.id);
+        let filtered = self.crop_preview == Some(key);
         let Some((item, masked)) =
-            (unsafe { add_item(obs_scene.as_ptr(), input, layout, &format!("{}:{format}", layer.id)) })
+            (unsafe { add_item(obs_scene.as_ptr(), input, layout, &format!("{}:{format}", layer.id), filtered) })
         else {
             return;
         };
         unsafe { sys::obs_sceneitem_set_order_position(item, index as i32) };
-        let key = (scene, format, layer.id);
         self.items.insert(key, ItemPtr(item));
         if let Some(m) = masked {
             self.masks.insert(key, m);
@@ -639,26 +657,32 @@ impl Reconciler {
     fn update_layer(&mut self, scene: Id, format: Id, layer: &Layer, index: usize) {
         let key = (scene, format, layer.id);
         let Some(item) = self.items.get(&key).copied() else { return };
-        // Gaining or losing a shape changes the item's structure: rebuild it in place.
-        let shaped = layer.layouts.get(&format).is_some_and(|l| l.needs_filters());
+        // Gaining or losing a shape changes the item's structure (so does crop view, which
+        // needs the mask): rebuild it in place. The new item goes in before the old one comes
+        // out, so no frame is drawn without the layer.
+        let previewing = self.crop_preview == Some(key);
+        let shaped = previewing || layer.layouts.get(&format).is_some_and(|l| l.needs_filters());
         if shaped != self.masks.contains_key(&key) {
             self.masks.remove(&key);
             self.items.remove(&key);
-            unsafe { sys::obs_sceneitem_remove(item.0) };
             self.add_layer(scene, format, layer, index);
+            unsafe { sys::obs_sceneitem_remove(item.0) };
             return;
         }
         unsafe {
             sys::obs_sceneitem_set_locked(item.0, layer.locked);
-            let size = (self.crop_preview == Some(key)).then(|| self.input_size(layer.input)).flatten();
+            let size = previewing.then(|| self.input_size(layer.input)).flatten();
             match layer.layouts.get(&format) {
-                // Being cropped: the whole picture, unshaped, where it would sit uncropped.
-                Some(l) if size.is_some() => {
+                // Being cropped: the whole picture, where it would sit uncropped, with the shape
+                // in the crop window and the rest as a ghost that fades in.
+                Some(l) if size.is_some() && self.masks.contains_key(&key) => {
                     let (w, h) = size.unwrap();
                     let masked = self.masks.get(&key);
                     layout_item(item.0, masked, &l.uncropped((w as f32, h as f32)));
                     if let Some(m) = masked {
-                        sys::obs_source_set_enabled(m.filter.as_ptr(), false);
+                        let outside = if self.crop_fading { 0.0 } else { CROP_GHOST };
+                        m.filter.update(&data_from_json(&crop_view_settings(l, outside)));
+                        sys::obs_source_set_enabled(m.filter.as_ptr(), true);
                     }
                 }
                 Some(l) => layout_item(item.0, self.masks.get(&key), l),
@@ -896,7 +920,33 @@ fn mask_settings(s: &lightair_core::Shape) -> serde_json::Value {
         "feather": s.feather,
         "border": s.border,
         "border_color": s.border_color,
+        "window_left": 0.0,
+        "window_top": 0.0,
+        "window_right": 0.0,
+        "window_bottom": 0.0,
+        "outside": 0.0,
     })
+}
+
+/// How much of the cut-away picture shows around the crop while cropping.
+const CROP_GHOST: f64 = 0.42;
+
+/// The mask while a layer is being cropped: the whole picture is laid out, the shape (or a plain
+/// box) sits in the crop window, and what's outside it fades in as a ghost.
+fn crop_view_settings(l: &Layout, outside: f64) -> serde_json::Value {
+    let shape = l.shape.unwrap_or(lightair_core::Shape {
+        radius: 0.0,
+        feather: 0.0,
+        border: 0.0,
+        ..lightair_core::Shape::new(lightair_core::ShapeKind::Rounded)
+    });
+    let mut v = mask_settings(&shape);
+    v["window_left"] = l.crop.left.into();
+    v["window_top"] = l.crop.top.into();
+    v["window_right"] = l.crop.right.into();
+    v["window_bottom"] = l.crop.bottom.into();
+    v["outside"] = outside.into();
+    v
 }
 
 /// Flip/3D filter settings (Lightair's libobs module, `lightair_transform`).
@@ -912,9 +962,10 @@ pub(crate) unsafe fn add_item(
     input: &Source,
     layout: Option<&Layout>,
     name: &str,
+    always_filtered: bool,
 ) -> Option<(*mut sys::obs_sceneitem_t, Option<Masked>)> {
     unsafe {
-        let Some(layout) = layout.filter(|l| l.needs_filters()) else {
+        let Some(layout) = layout.filter(|l| always_filtered || l.needs_filters()) else {
             let item = sys::obs_scene_add(scene, input.as_ptr());
             return (!item.is_null()).then_some((item, None));
         };
