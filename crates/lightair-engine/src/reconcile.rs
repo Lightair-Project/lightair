@@ -44,6 +44,7 @@ pub struct Reconciler {
     /// Each format's output channel goes through its own transition.
     transitions: HashMap<Id, Source>,
     transition_settings: TransitionSettings,
+    stinger: Option<lightair_core::Stinger>,
     /// The running Move, driven by a libobs tick callback.
     anim: Arc<Mutex<Option<MoveAnim>>>,
     tick_registered: bool,
@@ -75,19 +76,28 @@ impl Reconciler {
     /// Applies patches computed from two snapshots; `project` is the newer one.
     pub fn apply(&mut self, project: &Project, patches: &[Patch]) {
         self.primary_format = Some(project.primary_format().id);
+        let transition_changed = self.transition_settings != project.transition || self.stinger != project.stinger;
         self.transition_settings = project.transition;
+        self.stinger = project.stinger.clone();
         self.cleanup();
         // Formats are synced from the snapshot itself, so a rebuild against `empty_like()`
         // (which keeps the formats) still creates every canvas.
+        let mut formats_added = false;
         for format in &project.formats {
             if !self.formats.contains(&format.id) {
                 self.add_format(project, format);
+                formats_added = true;
             }
         }
         for id in self.formats.clone() {
             if project.format(id).is_none() {
                 self.remove_format(id);
             }
+        }
+        // Set transitions up when they change, not at the switch: a stinger has to load its
+        // video before it can play.
+        if transition_changed || formats_added {
+            self.prepare_transitions();
         }
         for patch in patches {
             match patch {
@@ -324,8 +334,12 @@ impl Reconciler {
         let ms = self.transition_settings.duration_ms;
         match kind {
             TransitionKind::Cut => self.land(program),
-            TransitionKind::Fade | TransitionKind::Slide | TransitionKind::Wipe | TransitionKind::Dip => {
-                let (type_id, settings) = transition_source(&self.transition_settings);
+            TransitionKind::Fade
+            | TransitionKind::Slide
+            | TransitionKind::Wipe
+            | TransitionKind::Dip
+            | TransitionKind::Stinger => {
+                let (type_id, settings) = transition_source(&self.transition_settings, self.stinger.as_ref());
                 for format in self.formats.clone() {
                     self.ensure_transition(format, type_id, &settings);
                     if let Some(tr) = self.transitions.get(&format) {
@@ -348,6 +362,16 @@ impl Reconciler {
             }
         }
         self.program = program;
+    }
+
+    fn prepare_transitions(&mut self) {
+        if matches!(self.transition_settings.kind, TransitionKind::Cut | TransitionKind::Move) {
+            return;
+        }
+        let (type_id, settings) = transition_source(&self.transition_settings, self.stinger.as_ref());
+        for format in self.formats.clone() {
+            self.ensure_transition(format, type_id, &settings);
+        }
     }
 
     /// Makes `format`'s output transition a `type_id` source with `settings`, swapping the
@@ -828,8 +852,25 @@ unsafe extern "C" fn on_levels(
 
 /// The libobs transition type and settings for a transition (Cut and Move use a fade source:
 /// Cut sets it directly, Move lands through it).
-fn transition_source(t: &TransitionSettings) -> (&'static str, serde_json::Value) {
+fn transition_source(
+    t: &TransitionSettings,
+    stinger: Option<&lightair_core::Stinger>,
+) -> (&'static str, serde_json::Value) {
     match t.kind {
+        // Without a stinger video, a fade.
+        TransitionKind::Stinger => match stinger {
+            Some(s) => (
+                "obs_stinger_transition",
+                serde_json::json!({
+                    "path": s.path,
+                    "transition_point": s.cut_ms,
+                    "tp_type": 0,
+                    "hw_decode": true,
+                    "preload": true,
+                }),
+            ),
+            None => ("fade_transition", serde_json::json!({})),
+        },
         TransitionKind::Slide => ("slide_transition", serde_json::json!({"direction": t.direction.as_str()})),
         TransitionKind::Wipe => {
             // Gradient images shipped with the transitions module; the dark end is revealed

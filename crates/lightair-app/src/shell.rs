@@ -784,6 +784,22 @@ impl StudioWindow {
         .detach();
     }
 
+    /// Picks the stinger video (cut point defaults to halfway through a typical 1 s stinger).
+    fn choose_stinger(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths =
+            cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path): Option<PathBuf> = paths.into_iter().next() else { return };
+            let _ = this.update(cx, |this, cx| {
+                let cut_ms = this.studio.read(cx).project().stinger.as_ref().map_or(500, |s| s.cut_ms);
+                let stinger = lightair_core::Stinger { path: path.to_string_lossy().into_owned(), cut_ms };
+                this.exec(Command::SetStinger { stinger: Some(stinger) }, cx)
+            });
+        })
+        .detach();
+    }
+
     fn add_scene(&mut self, cx: &mut Context<Self>) {
         let n = self.studio.read(cx).project().scenes.len() + 1;
         let scene = Scene::new(format!("Scene {n}"));
@@ -1227,6 +1243,47 @@ impl StudioWindow {
                 }))
         });
         let kinds: Vec<_> = TransitionKind::ALL.iter().enumerate().map(|(i, k)| seg(i, *k)).collect();
+        // Stinger: its video and when the scene changes underneath it.
+        let stinger = (current.kind == TransitionKind::Stinger).then(|| {
+            let st = project.stinger.clone();
+            let name = st
+                .as_ref()
+                .and_then(|s| std::path::Path::new(&s.path).file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "Choose video…".into());
+            let mut row = div().flex().items_center().gap_1().w_full().child(
+                Button::new("stinger-file")
+                    .label(name)
+                    .xsmall()
+                    .outline()
+                    .on_click(cx.listener(|this, _, window, cx| this.choose_stinger(window, cx))),
+            );
+            if let Some(st) = st {
+                let step = |delta: i64| {
+                    let mut s = st.clone();
+                    s.cut_ms = (s.cut_ms as i64 + delta).clamp(0, 10_000) as u32;
+                    Command::SetStinger { stinger: Some(s) }
+                };
+                let (earlier, later) = (step(-100), step(100));
+                row = row
+                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).ml_1().child("cut at"))
+                    .child(
+                        Button::new("stinger-earlier")
+                            .label("−")
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| this.exec(earlier.clone(), cx))),
+                    )
+                    .child(div().text_size(px(11.)).font_family("Menlo").child(format!("{} ms", st.cut_ms)))
+                    .child(
+                        Button::new("stinger-later")
+                            .label("+")
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| this.exec(later.clone(), cx))),
+                    );
+            }
+            row
+        });
         div()
             .flex()
             .flex_wrap()
@@ -1238,6 +1295,7 @@ impl StudioWindow {
             .children(kinds)
             .child(div().flex_1())
             .children(direction)
+            .children(stinger)
             .child(
                 div()
                     .id("tr-duration")
