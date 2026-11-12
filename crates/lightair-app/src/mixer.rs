@@ -34,16 +34,6 @@ fn meter_frac(db: f32) -> f32 {
     if !db.is_finite() { 0.0 } else { ((db + 60.0) / 60.0).clamp(0.0, 1.0) }
 }
 
-/// Built-in effect presets: (menu label, effects added in one undo step) - the audio engine's
-/// effects with their catalog defaults.
-pub(crate) fn effect_presets() -> Vec<(&'static str, Vec<Effect>)> {
-    ["audio.voice", "audio.noise", "audio.gate", "audio.compressor", "audio.eq", "audio.deesser", "audio.limiter", "audio.gain"]
-        .into_iter()
-        .filter_map(lightair_core::catalog::def)
-        .map(|d| (d.name, vec![d.create()]))
-        .collect()
-}
-
 /// The vocal chain new microphone tracks get (docs/10-audio.md, Voice Clarity): the engine's
 /// one-knob chain (noise, expander, de-esser, EQ, compressor, limiter).
 pub fn voice_clarity() -> Vec<Effect> {

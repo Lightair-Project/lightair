@@ -420,7 +420,35 @@ impl StudioWindow {
                     }
                     self.props.open_effect = first;
                     if hook == "fx-sheet" {
-                        self.open_effect_catalog(iid, super::effects::Page::All, window, cx);
+                        self.open_effect_catalog(super::effects::Owner::Input(iid), super::effects::Page::All, window, cx);
+                    }
+                }
+            }
+            Ok(hook @ ("audio-track" | "audio-sheet")) => {
+                // the first track, its effects open (or the audio catalog over it)
+                let track = self.studio.read(cx).project().tracks.first().map(|t| (**t).clone());
+                if let Some(t) = track {
+                    let mut first = None;
+                    for kind in ["audio.eq", "audio.compressor"] {
+                        if let Some(d) = lightair_core::catalog::def(kind) {
+                            let mut effect = d.create();
+                            if kind == "audio.eq" {
+                                effect.settings["b1_on"] = serde_json::json!(true);
+                                effect.settings["b5_on"] = serde_json::json!(true);
+                                effect.settings["b5_gain"] = serde_json::json!(3.0);
+                            }
+                            first.get_or_insert(effect.id);
+                            self.exec(lightair_core::Command::AddEffect { track: t.id, effect, index: None }, cx);
+                        }
+                    }
+                    self.props.open_effect = first;
+                    self.studio.update(cx, |s, cx| {
+                        s.selected_layer = None;
+                        s.selected_track = Some(t.id);
+                        cx.notify();
+                    });
+                    if hook == "audio-sheet" {
+                        self.open_effect_catalog(super::effects::Owner::Track(t.id), super::effects::Page::All, window, cx);
                     }
                 }
             }

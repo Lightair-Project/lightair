@@ -32,9 +32,12 @@ pub const OUT_CHANNELS: std::ops::Range<u32> = 57..64;
 /// Ring size per input (frames).
 const RING_FRAMES: usize = 48_000;
 /// Buffered before an input starts playing, and the most kept (frames): libobs delivers audio
-/// in packets of 1024 frames, so a little more than one packet absorbs the jitter.
-const PRIME: usize = 1_536;
-const MOST: usize = 4_096;
+/// in packets of 1024 frames, and a busy machine delays them; two packets absorb that.
+const PRIME: usize = 2_048;
+const MOST: usize = 6_144;
+
+/// Times an input ran short (a gap in its audio), for diagnostics and tests.
+pub static SHORTFALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // ---------------------------------------------------------------- libobs source types
 
@@ -258,20 +261,28 @@ fn rt_loop(
                     c.commit_all();
                 }
             }
-            input.has = input.primed && input.ring.slots() / 2 >= BLOCK;
-            if input.primed && !input.has {
-                input.primed = false; // ran dry: buffer up again
+            let avail = input.ring.slots() / 2;
+            input.has = input.primed && avail > 0;
+            if input.primed && avail == 0 {
+                input.primed = false; // empty: the source stopped; buffer up again when it's back
             }
-            if input.has
-                && let Ok(chunk) = input.ring.read_chunk(BLOCK * 2)
-            {
-                let (a, b) = chunk.as_slices();
-                for k in 0..BLOCK {
-                    let at = |i: usize| if i < a.len() { a[i] } else { b[i - a.len()] };
-                    input.bufs[0][k] = at(k * 2);
-                    input.bufs[1][k] = at(k * 2 + 1);
+            if input.has {
+                // a short ring plays what it has and pads the rest (a tiny gap, not a silence)
+                let take = avail.min(BLOCK);
+                if take < BLOCK {
+                    SHORTFALLS.fetch_add(1, Ordering::Relaxed);
                 }
-                chunk.commit_all();
+                if let Ok(chunk) = input.ring.read_chunk(take * 2) {
+                    let (a, b) = chunk.as_slices();
+                    for k in 0..take {
+                        let at = |i: usize| if i < a.len() { a[i] } else { b[i - a.len()] };
+                        input.bufs[0][k] = at(k * 2);
+                        input.bufs[1][k] = at(k * 2 + 1);
+                    }
+                    chunk.commit_all();
+                }
+                input.bufs[0][take..BLOCK].fill(0.0);
+                input.bufs[1][take..BLOCK].fill(0.0);
             }
         }
         let graph = renderer.process(&inputs, BLOCK);
