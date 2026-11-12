@@ -33,3 +33,7 @@ gpui-kit = "0.9.1"
 # Dependencies (GPUI, gpui-kit) are slow when unoptimised; keep our own code debuggable.
 [profile.dev.package."*"]
 opt-level = 2
+
+# gpui-component with a switch to hide the dock's "…" panel menu (third_party/gpui-component/LIGHTAIR-PATCH.md).
+[patch.crates-io]
+gpui-component = { path = "third_party/gpui-component" }

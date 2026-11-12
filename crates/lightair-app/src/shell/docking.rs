@@ -78,7 +78,7 @@ impl Panel for ShellPanel {
                             s.update(cx, |w, cx| w.create_empty(None, window, cx));
                         }
                     }),
-                    button("add-layer", "plus", "Add layer").on_click(move |_, window, cx| {
+                    button("add-layer", "plus", "Add object").on_click(move |_, window, cx| {
                         if let Some(s) = shell.upgrade() {
                             s.update(cx, |w, cx| w.toggle_add_menu(window, cx));
                         }
@@ -172,6 +172,8 @@ impl StudioWindow {
         // any header to join it as a tab (and the canvas gets a header like the rest).
         let (dock, skin) = DockSkin::dock_area("lightair-studio", Some(1), window, cx);
         skin.set_panel_style(gpui_kit::component::dock::PanelStyle::TabBar, cx);
+        // No "…" menu in panel headers: each panel's actions are its own buttons.
+        skin.set_menu_button_visible(false, cx);
         dock.update(cx, |area, cx| {
             area.set_center(
                 DockLayout::v_split().child(DockLayout::tabs().panel_view(panel_handle(canvas), cx), None).child(

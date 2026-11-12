@@ -280,7 +280,7 @@ impl StudioWindow {
                             .py_2()
                             .text_size(px(12.))
                             .text_color(tok::text_tertiary())
-                            .child("Empty scene — add a layer with +"),
+                            .child("Empty scene — add an object with +"),
                     )
                 })
                 // Below the rows: to the top level, at the back.
@@ -407,7 +407,7 @@ impl StudioWindow {
             )
             .child(grid)
             .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!(
-                "Holds {count} layer{}. Moving, turning or scaling it carries them.",
+                "Holds {count} object{}. Moving, turning or scaling it carries them.",
                 if count == 1 { "" } else { "s" }
             )));
         let actions = div()
@@ -484,7 +484,7 @@ impl StudioWindow {
             return;
         }
         let n = roots.len();
-        let label = if n == 1 { label.to_string() } else { format!("{label} {n} layers") };
+        let label = if n == 1 { label.to_string() } else { format!("{label} {n} objects") };
         self.exec(Command::Batch { label, commands }, cx);
         self.studio.update(cx, |s, cx| {
             s.selected_layer = roots.first().copied();
@@ -562,7 +562,7 @@ impl StudioWindow {
             index: None,
         }));
         let scene_id = scene.id;
-        self.exec(Command::Batch { label: "Group layers".into(), commands }, cx);
+        self.exec(Command::Batch { label: "Group objects".into(), commands }, cx);
         self.select_layer(Some(gid), cx);
         self.start_rename(RowTarget::Layer { scene: scene_id, layer: gid }, "Group", window, cx);
     }

@@ -997,7 +997,7 @@ impl StudioWindow {
         let mut layouts = vec![(drag.layer, l)];
         layouts.extend(drag.others.iter().map(|(id, o)| (*id, Layout { x: o.x + mx, y: o.y + my, ..*o })));
         let (scene, format) = (drag.scene, drag.format);
-        self.set_layouts(scene, format, layouts, "Move layers", cx);
+        self.set_layouts(scene, format, layouts, "Move objects", cx);
     }
 
     fn canvas_up(&mut self, _: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1185,7 +1185,7 @@ impl StudioWindow {
                 self.frame_of(scene, l, format).map(|lo| (l.id, Layout { x: lo.x + dx, y: lo.y + dy, ..lo }))
             })
             .collect();
-        self.set_layouts(scene_id, format, moved, "Nudge layers", cx);
+        self.set_layouts(scene_id, format, moved, "Nudge objects", cx);
     }
 
     fn delete_selection(&mut self, cx: &mut Context<Self>) {
@@ -1202,7 +1202,7 @@ impl StudioWindow {
         match commands.len() {
             0 => {}
             1 => self.exec(commands.remove(0), cx),
-            n => self.exec(Command::Batch { label: format!("Delete {n} layers"), commands }, cx),
+            n => self.exec(Command::Batch { label: format!("Delete {n} objects"), commands }, cx),
         }
     }
 
@@ -2867,7 +2867,7 @@ impl StudioWindow {
                     let layouts: Vec<Layout> = layers.iter().map(|(_, l)| *l).collect();
                     let aligned = geo::align(&layouts, how);
                     let moved = layers.iter().map(|(id, _)| *id).zip(aligned).collect();
-                    this.set_layouts(sid, fid, moved, "Align layers", cx);
+                    this.set_layouts(sid, fid, moved, "Align objects", cx);
                 }))
         };
         let row = div()
@@ -2888,14 +2888,14 @@ impl StudioWindow {
                     let layouts: Vec<Layout> = layers.iter().map(|(_, l)| *l).collect();
                     let spaced = geo::distribute(&layouts, horizontal);
                     let moved = layers.iter().map(|(id, _)| *id).zip(spaced).collect();
-                    this.set_layouts(sid, fid, moved, "Distribute layers", cx);
+                    this.set_layouts(sid, fid, moved, "Distribute objects", cx);
                 }))
         };
         let row = row.child(div().w(px(8.))).when(layers.len() >= 3, |r| {
             r.child(distribute_button(0, "align-horizontal-distribute-center", "Space evenly across", true))
                 .child(distribute_button(1, "align-vertical-distribute-center", "Space evenly down", false))
         });
-        body.child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{} layers selected", selection.len())))
+        body.child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{} objects selected", selection.len())))
             .child(div().text_color(tok::text_tertiary()).child("Drag any of them to move them together."))
             .child(row)
             .child(
@@ -2963,7 +2963,7 @@ impl StudioWindow {
                             ),
                     );
                 let info = div().text_size(px(12.)).text_color(tok::text_secondary()).child(format!(
-                    "{} layer{} · {}×{} @ {} fps",
+                    "{} object{} · {}×{} @ {} fps",
                     scene.layers.len(),
                     if scene.layers.len() == 1 { "" } else { "s" },
                     format.width,

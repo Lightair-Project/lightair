@@ -263,9 +263,9 @@ impl Studio {
             return;
         }
         let n = commands.len();
-        if self.execute(Command::Batch { label: "Size imported layers".into(), commands }, cx).is_ok() {
+        if self.execute(Command::Batch { label: "Size imported objects".into(), commands }, cx).is_ok() {
             self.issue =
-                Some(format!("Corrected the size of {n} imported layer{}", if n == 1 { "" } else { "s" }).into());
+                Some(format!("Corrected the size of {n} imported object{}", if n == 1 { "" } else { "s" }).into());
         }
     }
 

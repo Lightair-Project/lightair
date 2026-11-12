@@ -108,7 +108,7 @@ impl StudioWindow {
             .map(|layer| Command::SetLayerVisible { scene: scene.id, layer: *layer, format, visible })
             .collect();
         if !commands.is_empty() {
-            let label = if visible { "Show layers" } else { "Hide layers" };
+            let label = if visible { "Show objects" } else { "Hide objects" };
             self.exec(Command::Batch { label: label.into(), commands }, cx);
         }
     }
@@ -122,7 +122,7 @@ impl StudioWindow {
         let commands: Vec<Command> =
             selection.iter().map(|layer| Command::SetLayerLocked { scene: scene.id, layer: *layer, locked }).collect();
         if !commands.is_empty() {
-            let label = if locked { "Lock layers" } else { "Unlock layers" };
+            let label = if locked { "Lock objects" } else { "Unlock objects" };
             self.exec(Command::Batch { label: label.into(), commands }, cx);
         }
     }
@@ -290,7 +290,7 @@ pub(super) fn blank_menu(menu: PopupMenu, shell: &WeakEntity<StudioWindow>, cx: 
     menu.action_context(focus)
         .menu_with_icon_and_disabled("Paste", ui::icon("clipboard-paste"), Box::new(PasteLayers), !paste)
         .separator()
-        .item(PopupMenuItem::new("Add layer…").icon(ui::icon("plus")).on_click(move |_, window, cx| {
+        .item(PopupMenuItem::new("Add object…").icon(ui::icon("plus")).on_click(move |_, window, cx| {
             if let Some(s) = s.upgrade() {
                 s.update(cx, |w, cx| w.open_add_layer(window, cx));
             }
