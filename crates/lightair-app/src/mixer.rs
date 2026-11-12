@@ -503,7 +503,11 @@ impl gpui_kit::component::dock::Panel for MixerPanel {
     }
 
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        "Audio Mixer"
+        ui::panel_title("audio-lines", "Audio Mixer")
+    }
+
+    fn title_style(&self, _: &App) -> Option<gpui_kit::component::dock::TitleStyle> {
+        Some(ui::panel_header_style())
     }
 
     fn toolbar_buttons(

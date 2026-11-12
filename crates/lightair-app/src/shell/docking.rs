@@ -10,7 +10,8 @@ use gpui_kit::component::dock::{
 use gpui_kit::*;
 
 use super::StudioWindow;
-use crate::ui;
+use crate::ui::{self, tok};
+use gpui_kit::prelude::FluentBuilder;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Region {
@@ -60,8 +61,18 @@ impl Panel for ShellPanel {
         )
     }
 
-    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.tab_name(cx).unwrap_or_default()
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        match self.region {
+            Region::Layers => ui::panel_title("list-tree", "Hierarchy"),
+            Region::Scenes => ui::panel_title("layout-dashboard", "Scenes"),
+            Region::Canvas => ui::panel_title("monitor", "Canvas"),
+            Region::Inspector => ui::panel_title("sliders-horizontal", "Inspector"),
+            Region::Assets => ui::panel_title("folder", "Assets"),
+        }
+    }
+
+    fn title_style(&self, _: &App) -> Option<gpui_kit::component::dock::TitleStyle> {
+        Some(ui::panel_header_style())
     }
 
     fn toolbar_buttons(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<Vec<Button>> {
@@ -148,7 +159,7 @@ impl Render for ShellPanel {
             window.request_animation_frame();
         }
         let region = self.region;
-        shell.update(cx, |w, cx| {
+        let body = shell.update(cx, |w, cx| {
             let project = w.studio.read(cx).project().clone();
             match region {
                 Region::Layers => w.hierarchy_panel(&project, cx).into_any_element(),
@@ -157,7 +168,13 @@ impl Render for ShellPanel {
                 Region::Inspector => w.inspector(&project, cx).into_any_element(),
                 Region::Assets => w.assets_panel(&project, cx).into_any_element(),
             }
-        })
+        });
+        // A line between the header band and the body.
+        div()
+            .size_full()
+            .when(region != Region::Canvas, |d| d.border_t_1().border_color(tok::border_header()))
+            .child(body)
+            .into_any_element()
     }
 }
 
