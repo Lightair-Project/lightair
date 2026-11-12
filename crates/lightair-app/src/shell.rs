@@ -649,7 +649,19 @@ impl StudioWindow {
         let (bx, by) = (f32::from(b.origin.x) + (bw - cw * s2) / 2.0, f32::from(b.origin.y) + (bh - ch * s2) / 2.0);
         self.zoom = zoom;
         self.pan = (ax - bx - px_ * s2, ay - by - py_ * s2);
+        self.clamp_pan(&project);
         cx.notify();
+    }
+
+    /// Keeps the pan inside its bounds (geometry::clamp_pan): the canvas never leaves the view.
+    fn clamp_pan(&mut self, project: &Project) {
+        let format = self.format_id(project);
+        let Some(b) = self.stage_bounds.borrow().get(&format).copied() else { return };
+        let Some(f) = project.format(format) else { return };
+        let (cw, ch) = (f.width as f32, f.height as f32);
+        let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
+        let s = (bw / cw).min(bh / ch) * self.zoom;
+        self.pan = (geo::clamp_pan(self.pan.0, bw, cw * s), geo::clamp_pan(self.pan.1, bh, ch * s));
     }
 
     fn zoom_to_fit(&mut self, cx: &mut Context<Self>) {
@@ -681,6 +693,8 @@ impl StudioWindow {
             self.zoom_by((delta.1 * 0.01).exp(), Some(ev.position), cx);
         } else {
             self.pan = (self.pan.0 + delta.0, self.pan.1 + delta.1);
+            let project = self.studio.read(cx).project().clone();
+            self.clamp_pan(&project);
             cx.notify();
         }
     }
@@ -961,6 +975,8 @@ impl StudioWindow {
         if let Some((from, pan)) = self.panning {
             let d = ev.position - from;
             self.pan = (pan.0 + f32::from(d.x), pan.1 + f32::from(d.y));
+            let project = self.studio.read(cx).project().clone();
+            self.clamp_pan(&project);
             cx.notify();
             return;
         }
@@ -1076,7 +1092,14 @@ impl StudioWindow {
             }
             // In Fit the picture keeps its shape, so the frame does too (Stretch to distort).
             DragMode::Resize(corner) => {
-                l = geo::resize(&l, corner, (dx, dy), ev.modifiers.shift || l.fit == lightair_core::Fit::Fit)
+                let keep = ev.modifiers.shift || l.fit == lightair_core::Fit::Fit;
+                l = geo::resize(&l, corner, (dx, dy), keep);
+                if !ev.modifiers.platform {
+                    // The dragged corner snaps to the canvas edges and centre lines (⌘: free).
+                    let (snapped, lines) = geo::snap_resize(&l, corner, (cw, ch), SNAP_PX / s, keep);
+                    l = snapped;
+                    guides.extend(lines);
+                }
             }
         }
         self.guides = guides;
