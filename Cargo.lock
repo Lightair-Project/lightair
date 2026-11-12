@@ -3518,6 +3518,7 @@ name = "lightair-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "block2 0.6.2",
  "chrono",
  "gpui-kit",
  "keyring",
@@ -3526,6 +3527,8 @@ dependencies = [
  "lightair-engine",
  "lightair-preview",
  "lightair-store",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
  "parking_lot",
  "serde",
  "serde_json",

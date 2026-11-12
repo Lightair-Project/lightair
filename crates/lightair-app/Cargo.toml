@@ -25,3 +25,7 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 parking_lot.workspace = true
+# The eyedropper: macOS's colour sampler (NSColorSampler).
+objc2 = "0.6"
+block2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSColor", "NSColorSampler", "NSColorSpace"] }

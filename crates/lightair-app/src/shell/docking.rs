@@ -149,7 +149,10 @@ impl Render for ShellPanel {
                 Region::Layers => w.hierarchy_panel(&project, cx).into_any_element(),
                 Region::Scenes => w.scenes_panel(&project, cx).into_any_element(),
                 Region::Canvas => w.canvas(&project, cx).into_any_element(),
-                Region::Inspector => w.inspector(&project, cx).into_any_element(),
+                Region::Inspector => {
+                    w.ensure_colour_pickers(window, cx);
+                    w.inspector(&project, cx).into_any_element()
+                }
                 Region::Assets => w.assets_panel(&project, cx).into_any_element(),
             }
         })
@@ -376,7 +379,7 @@ impl StudioWindow {
                 self.select_layer(top, cx);
                 self.rotate_tool = true;
             }
-            Ok(hook @ ("fx-stack" | "fx-sheet" | "fx-looks" | "fx-shape" | "fx-none" | "fx-bg" | "fx-system")) => {
+            Ok(hook @ ("fx-stack" | "fx-sheet" | "fx-looks" | "fx-shape" | "fx-none" | "fx-bg" | "fx-system" | "fx-key" | "fx-key-open")) => {
                 // A picture with a few effects, its stack open (or the catalog over it).
                 let board = concat!(env!("CARGO_MANIFEST_DIR"), "/../../branding/final/board.png");
                 self.add_input_layer("Board", "image_source", serde_json::json!({"file": board}), (1920.0, 1080.0), cx);
@@ -388,7 +391,9 @@ impl StudioWindow {
                 self.select_layer(layer, cx);
                 self.collapsed.borrow_mut().extend(["Source", "Transform"]);
                 if let Some(iid) = input {
-                    let kinds: &[&str] = if hook == "fx-system" {
+                    let kinds: &[&str] = if hook.starts_with("fx-key") {
+                        &["chroma_key_filter_v2"]
+                    } else if hook == "fx-system" {
                         &["studio.bg_replace"]
                     } else if hook == "fx-bg" {
                         &["studio.bg_blur"]
@@ -403,6 +408,9 @@ impl StudioWindow {
                     for kind in kinds {
                         if let Some(d) = lightair_core::catalog::def(kind) {
                             let mut effect = d.create();
+                            if hook.starts_with("fx-key") {
+                                effect.settings["key_color_type"] = serde_json::json!("custom");
+                            }
                             if hook == "fx-system" {
                                 effect.settings["bg_model"] = serde_json::json!(lightair_core::catalog::BG_MODEL_SYSTEM);
                             }

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
@@ -39,6 +40,24 @@ pub(super) struct EffectSheet {
 pub(super) struct Presence {
     pub face: Option<bool>,
     pub person: Option<bool>,
+}
+
+/// A colour control's picker, kept per effect and key (it needs the window to be made).
+pub(super) struct ColourPicker {
+    state: Entity<ColorPickerState>,
+    /// The value it last showed (0xAABBGGRR), to follow undo and other changes.
+    shown: u32,
+    _events: Subscription,
+}
+
+fn hsla_of_abgr(abgr: u32) -> Hsla {
+    super::layer_props::rgb_to_hsla(super::layer_props::rgb_of(abgr))
+}
+
+fn abgr_of_hsla(c: Hsla) -> u32 {
+    let rgba = Rgba::from(c);
+    let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    super::layer_props::abgr((ch(rgba.r) << 16) | (ch(rgba.g) << 8) | ch(rgba.b))
 }
 
 /// Colours offered for effect colour controls: neutrals, then makeup-friendly and bright ones.
@@ -303,6 +322,13 @@ impl StudioWindow {
                     continue;
                 }
             }
+            // Green screen's own colour only when it's Custom.
+            if d.kind == "chroma_key_filter_v2"
+                && key == Some("key_color")
+                && e.settings.get("key_color_type").and_then(Value::as_str) != Some("custom")
+            {
+                continue;
+            }
             // Quality levels are Apple Vision's; macOS's own effect has its settings in Control Center.
             let model = e.settings.get("bg_model").and_then(Value::as_i64).unwrap_or(0);
             if key == Some("bg_quality") && model != 0 {
@@ -360,27 +386,7 @@ impl StudioWindow {
                 }
                 Control::Colour { key, label, default } => {
                     let current = e.settings.get(key).and_then(Value::as_u64).map_or(default, |v| v as u32);
-                    let mut row = div().flex().flex_wrap().gap_1().flex_1();
-                    let mut swatches: Vec<u32> = SWATCHES.to_vec();
-                    let cur_rgb = super::layer_props::rgb_of(current);
-                    if !swatches.contains(&cur_rgb) {
-                        swatches.insert(0, cur_rgb);
-                    }
-                    for (n, rgb) in swatches.into_iter().enumerate() {
-                        let settings = with(&e.settings, key, json!(super::layer_props::abgr(rgb)));
-                        row = row.child(
-                            div()
-                                .id(SharedString::from(format!("fx-sw-{key}-{n}")))
-                                .size(px(18.))
-                                .rounded_full()
-                                .cursor_pointer()
-                                .bg(super::layer_props::rgb_to_hsla(rgb))
-                                .border_2()
-                                .border_color(if rgb == cur_rgb { tok::text() } else { tok::border() })
-                                .on_click(cx.listener(move |this, _, _, cx| this.exec(set(settings.clone()), cx))),
-                        );
-                    }
-                    col = col.child(control_row(label, row));
+                    col = col.child(control_row(label, self.colour_control(iid, eid, key, current, cx)));
                 }
                 Control::Presets { key, set: which, default, .. } => {
                     col = col.child(self.fx_presets(iid, e, key, which, default, cx));
@@ -575,6 +581,133 @@ impl StudioWindow {
             let _ = this.update(cx, |this, cx| {
                 this.exec(Command::SetInputEffectSettings { input: iid, effect: eid, settings }, cx)
             });
+        })
+        .detach();
+    }
+
+    /// A colour: the swatch opens the picker (palette, HSLA, hex); the dropper picks from the
+    /// screen; the hex says what it is.
+    fn colour_control(&self, iid: Id, eid: Id, key: &'static str, current: u32, cx: &mut Context<Self>) -> Div {
+        let hex = format!("#{:06X}", super::layer_props::rgb_of(current));
+        let picker = match self.colour_pickers.get(&format!("{eid}:{key}")) {
+            Some(p) => ColorPicker::new(&p.state)
+                .featured_colors(SWATCHES.iter().map(|rgb| super::layer_props::rgb_to_hsla(*rgb)).collect())
+                .anchor(Anchor::TopRight) // opens towards the canvas: the Inspector sits at the window's edge
+                .small()
+                .into_any_element(),
+            None => div().size(px(22.)).rounded(px(5.)).bg(hsla_of_abgr(current)).into_any_element(),
+        };
+        div()
+            .flex()
+            .flex_1()
+            .items_center()
+            .gap_2()
+            .child(picker)
+            .child(div().flex_1().text_size(px(11.)).font_family("Menlo").text_color(tok::text_secondary()).child(hex))
+            .child(
+                ui::icon_button(SharedString::from(format!("fx-drop-{eid}-{key}")), "pipette", tok::text_secondary())
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Pick a colour from the screen").build(window, cx)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_colour(iid, eid, key, cx))),
+            )
+    }
+
+    /// Makes (or brings up to date) the colour pickers of the selected object's effects. Called
+    /// from the Inspector's render, which has the window the pickers need.
+    pub(super) fn ensure_colour_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let studio = self.studio.read(cx);
+        let input = studio
+            .selected_layer
+            .and_then(|l| studio.selected_scene.and_then(|s| studio.project().scene(s)).and_then(|s| s.layer(l)))
+            .and_then(|l| l.input)
+            .and_then(|i| studio.project().inputs.get(&i).cloned());
+        let Some(input) = input else {
+            self.colour_pickers.clear();
+            return;
+        };
+        let mut wanted = Vec::new();
+        for e in &input.effects {
+            let Some(d) = catalog::def(&e.kind) else { continue };
+            for c in d.controls {
+                if let Control::Colour { key, default, .. } = *c {
+                    let v = e.settings.get(key).and_then(Value::as_u64).map_or(default, |v| v as u32);
+                    wanted.push((input.id, e.id, key, v));
+                }
+            }
+        }
+        self.colour_pickers.retain(|k, _| wanted.iter().any(|(_, e, key, _)| *k == format!("{e}:{key}")));
+        for (iid, eid, key, v) in wanted {
+            let k = format!("{eid}:{key}");
+            match self.colour_pickers.get_mut(&k) {
+                Some(p) if p.shown != v => {
+                    p.shown = v;
+                    p.state.update(cx, |s, cx| s.set_value(hsla_of_abgr(v), window, cx));
+                }
+                Some(_) => {}
+                None => {
+                    let state = cx.new(|cx| ColorPickerState::new(window, cx).default_value(hsla_of_abgr(v)));
+                    if std::env::var("LIGHTAIR_OPEN").as_deref() == Ok("fx-key-open") && key == "key_color" {
+                        state.update(cx, |s, cx| s.set_open(true, cx)); // screenshot hook
+                    }
+                    let events = cx.subscribe_in(&state, window, move |this, _, ev: &ColorPickerEvent, _, cx| {
+                        if let ColorPickerEvent::Change(Some(c)) = ev {
+                            this.set_effect_colour(iid, eid, key, abgr_of_hsla(*c), cx);
+                        }
+                    });
+                    self.colour_pickers.insert(k, ColourPicker { state, shown: v, _events: events });
+                }
+            }
+        }
+    }
+
+    fn set_effect_colour(&mut self, iid: Id, eid: Id, key: &'static str, abgr: u32, cx: &mut Context<Self>) {
+        let project = self.studio.read(cx).project().clone();
+        let Some(e) = project.inputs.get(&iid).and_then(|i| i.effects.iter().find(|e| e.id == eid)) else { return };
+        if e.settings.get(key).and_then(Value::as_u64) == Some(abgr as u64) {
+            return;
+        }
+        if let Some(p) = self.colour_pickers.get_mut(&format!("{eid}:{key}")) {
+            p.shown = abgr;
+        }
+        let settings = with(&e.settings, key, json!(abgr));
+        self.exec(Command::SetInputEffectSettings { input: iid, effect: eid, settings }, cx);
+    }
+
+    /// The eyedropper: macOS's loupe picks a colour from anywhere on screen. Off air, the effect
+    /// being picked for is switched off meanwhile, so a key colour is picked from the picture
+    /// before the key (on air, the picture stays as viewers see it).
+    fn pick_colour(&mut self, iid: Id, eid: Id, key: &'static str, cx: &mut Context<Self>) {
+        use lightair_engine::outputs::runtime;
+        let project = self.studio.read(cx).project().clone();
+        let Some(input) = project.inputs.get(&iid) else { return };
+        let Some(effect) = input.effects.iter().find(|e| e.id == eid) else { return };
+        let filter = if effect.kind.starts_with("studio.") { catalog::STUDIO_ID } else { eid };
+        let restore = catalog::lower(&input.effects).iter().find(|f| f.id == filter).is_some_and(|f| f.enabled);
+        let on_air = runtime().any_stream_running() || runtime().any_recording_running();
+        let engine = self.studio.read(cx).engine().clone();
+        if !on_air {
+            engine.call(move |s| s.reconciler.set_filter_live(iid, filter, false));
+        }
+        let picked = crate::eyedropper::pick();
+        cx.spawn(async move |this, cx| {
+            let result = loop {
+                match picked.try_recv() {
+                    Ok(r) => break r,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        cx.background_executor().timer(std::time::Duration::from_millis(30)).await
+                    }
+                    Err(_) => break None,
+                }
+            };
+            if !on_air {
+                engine.call(move |s| s.reconciler.set_filter_live(iid, filter, restore));
+            }
+            if let Some(rgb) = result {
+                let _ = this.update(cx, |this, cx| {
+                    this.set_effect_colour(iid, eid, key, super::layer_props::abgr(rgb), cx)
+                });
+            }
         })
         .detach();
     }
