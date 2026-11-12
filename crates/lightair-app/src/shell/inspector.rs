@@ -314,37 +314,107 @@ impl StudioWindow {
                     .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
             );
         }
-        // Crop: handles on the canvas (also a double-click on the layer), and a reset.
-        let cropping = self.crop_mode == Some(lid);
+        // Crop is on the canvas (the side handles); here, undo it.
         let cropped = lo.crop != lightair_core::Crop::default();
         let reset = set(&|l| l.crop = lightair_core::Crop::default());
-        let crop_actions = div()
-            .flex()
-            .gap_1()
-            .when(cropped, |d| {
-                d.child(
-                    Button::new("reset-crop")
-                        .label("Reset")
-                        .xsmall()
-                        .ghost()
-                        .tooltip("Uncrop")
-                        .on_click(cx.listener(move |this, _, _, cx| this.exec(reset.clone(), cx))),
-                )
-            })
-            .child({
-                let b = Button::new("crop-mode")
-                    .label(if cropping { "Done" } else { "Crop" })
-                    .icon(ui::icon("crop"))
+        let crop_actions = div().flex().gap_1().when(cropped, |d| {
+            d.child(
+                Button::new("reset-crop")
+                    .label("Uncrop")
                     .xsmall()
-                    .tooltip("Drag the edges and corners on the canvas (or double-click the layer)")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.crop_mode = if this.crop_mode == Some(lid) { None } else { Some(lid) };
-                        cx.notify();
-                    }));
-                if cropping { b.primary() } else { b.ghost() }
-            });
+                    .ghost()
+                    .tooltip("Drag a side handle on the canvas to crop")
+                    .on_click(cx.listener(move |this, _, _, cx| this.exec(reset.clone(), cx))),
+            )
+        });
         let mut transform =
             self.section("Transform", Some(crop_actions.into_any_element()), cx).child(grid).child(fits);
+        // Flip and 3D.
+        let toggle = |id: &'static str,
+                      icon: &'static str,
+                      tip: &'static str,
+                      on: bool,
+                      cmd: Command,
+                      cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(30.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .bg(if on { tok::bg_selected() } else { tok::bg_raised() })
+                .hover(|d| d.bg(tok::bg_selected()))
+                .tooltip(move |w, cx| Tooltip::new(tip).build(w, cx))
+                .child(ui::icon(icon).size(px(14.)).text_color(if on { tok::text() } else { tok::text_secondary() }))
+                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)))
+        };
+        let flip_h = set(&|l| l.flip_h = !l.flip_h);
+        let flip_v = set(&|l| l.flip_v = !l.flip_v);
+        let flat = set(&|l| {
+            l.tilt_x = 0.0;
+            l.tilt_y = 0.0;
+        });
+        let tilted = lo.tilt_x.abs() > 0.01 || lo.tilt_y.abs() > 0.01;
+        transform = transform.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(toggle("flip-h", "flip-horizontal-2", "Flip left↔right", lo.flip_h, flip_h, cx))
+                .child(toggle("flip-v", "flip-vertical-2", "Flip top↕bottom", lo.flip_v, flip_v, cx))
+                .child(div().flex_1())
+                .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("3D: drag the ⊙ handle"))
+                .when(tilted, |d| {
+                    d.child(
+                        Button::new("flat")
+                            .label("Flat")
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| this.exec(flat.clone(), cx))),
+                    )
+                }),
+        );
+        if tilted {
+            let row = |label: &'static str, slider: Slider, value: String| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(64.)).text_size(px(12.)).text_color(tok::text_secondary()).child(label))
+                    .child(div().flex_1().child(slider))
+                    .child(
+                        div()
+                            .w(px(40.))
+                            .text_right()
+                            .text_size(px(11.))
+                            .font_family("Menlo")
+                            .text_color(tok::text_tertiary())
+                            .child(value),
+                    )
+            };
+            let key = |name: &str| format!("tilt:{lid}:{fid}:{name}");
+            let tx = self.slider(
+                key("x"),
+                (-75.0, 75.0, 1.0),
+                lo.tilt_x,
+                move |v| Command::SetLayout { scene: sid, layer: lid, format: fid, layout: Layout { tilt_x: v, ..lo } },
+                cx,
+            );
+            let ty = self.slider(
+                key("y"),
+                (-75.0, 75.0, 1.0),
+                lo.tilt_y,
+                move |v| Command::SetLayout { scene: sid, layer: lid, format: fid, layout: Layout { tilt_y: v, ..lo } },
+                cx,
+            );
+            transform = transform.child(row("Tilt ↕", tx, format!("{:.0}°", lo.tilt_x))).child(row(
+                "Tilt ↔",
+                ty,
+                format!("{:.0}°", lo.tilt_y),
+            ));
+        }
         // Shape: part of the layer's frame, cut from the cropped picture.
         let shape = lo.shape;
         let with_shape = |sh: Option<Shape>| Command::SetLayout {

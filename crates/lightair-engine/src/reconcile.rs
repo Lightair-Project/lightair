@@ -77,10 +77,12 @@ unsafe impl Send for VolmeterPtr {}
 struct ItemPtr(*mut sys::obs_sceneitem_t);
 unsafe impl Send for ItemPtr {}
 
-/// The inside of a shaped layer.
+/// The inside of a layer drawn through Lightair's filters: the input's item in the group, the
+/// shape mask, and the flip/3D transform (applied in that order).
 pub(crate) struct Masked {
     pub inner: *mut sys::obs_sceneitem_t,
     pub filter: Source,
+    pub transform: Option<Source>,
 }
 unsafe impl Send for Masked {}
 
@@ -516,8 +518,7 @@ impl Reconciler {
                 if !lo.visible {
                     continue;
                 }
-                let Some((item, masked)) =
-                    (unsafe { add_item(temp.as_ptr(), input, lo.shape.as_ref(), &format!("{}", l.id)) })
+                let Some((item, masked)) = (unsafe { add_item(temp.as_ptr(), input, Some(lo), &format!("{}", l.id)) })
                 else {
                     continue;
                 };
@@ -535,14 +536,14 @@ impl Reconciler {
                     continue;
                 }
                 // The shape (if any) is B's: a layer gliding into a circle is a circle on the way.
-                let Some((item, masked)) =
-                    (unsafe { add_item(temp.as_ptr(), input, to.shape.as_ref(), &format!("{}", l.id)) })
+                let Some((item, masked)) = (unsafe { add_item(temp.as_ptr(), input, Some(to), &format!("{}", l.id)) })
                 else {
                     continue;
                 };
                 match m.as_ref().and_then(|m| m.layouts.get(&format)).filter(|f| f.visible) {
                     Some(from) => {
-                        let from = Layout { shape: to.shape, ..*from };
+                        // B's shape and flips throughout; tilt glides.
+                        let from = Layout { shape: to.shape, flip_h: to.flip_h, flip_v: to.flip_v, ..*from };
                         unsafe { layout_item(item, masked.as_ref(), &from) };
                         tweens.push(Tween { item, masked, from, to: *to });
                     }
@@ -620,9 +621,9 @@ impl Reconciler {
             tracing::warn!(%scene, layer = %layer.id, "layer references a missing scene or input");
             return;
         };
-        let shape = layer.layouts.get(&format).and_then(|l| l.shape);
+        let layout = layer.layouts.get(&format);
         let Some((item, masked)) =
-            (unsafe { add_item(obs_scene.as_ptr(), input, shape.as_ref(), &format!("{}:{format}", layer.id)) })
+            (unsafe { add_item(obs_scene.as_ptr(), input, layout, &format!("{}:{format}", layer.id)) })
         else {
             return;
         };
@@ -639,7 +640,7 @@ impl Reconciler {
         let key = (scene, format, layer.id);
         let Some(item) = self.items.get(&key).copied() else { return };
         // Gaining or losing a shape changes the item's structure: rebuild it in place.
-        let shaped = layer.layouts.get(&format).is_some_and(|l| l.shape.is_some());
+        let shaped = layer.layouts.get(&format).is_some_and(|l| l.needs_filters());
         if shaped != self.masks.contains_key(&key) {
             self.masks.remove(&key);
             self.items.remove(&key);
@@ -898,17 +899,22 @@ fn mask_settings(s: &lightair_core::Shape) -> serde_json::Value {
     })
 }
 
+/// Flip/3D filter settings (Lightair's libobs module, `lightair_transform`).
+fn transform_settings(l: &Layout) -> serde_json::Value {
+    serde_json::json!({"flip_h": l.flip_h, "flip_v": l.flip_v, "tilt_x": l.tilt_x, "tilt_y": l.tilt_y})
+}
+
 /// Adds `input` to `scene` as a layer's item. A shaped layer becomes a one-item group: the input
 /// sits inside (carrying the crop) and the shape mask is on the group, so the shape is cut from
 /// the cropped picture and belongs to this layer alone.
 pub(crate) unsafe fn add_item(
     scene: *mut sys::obs_scene_t,
     input: &Source,
-    shape: Option<&lightair_core::Shape>,
+    layout: Option<&Layout>,
     name: &str,
 ) -> Option<(*mut sys::obs_sceneitem_t, Option<Masked>)> {
     unsafe {
-        let Some(shape) = shape else {
+        let Some(layout) = layout.filter(|l| l.needs_filters()) else {
             let item = sys::obs_scene_add(scene, input.as_ptr());
             return (!item.is_null()).then_some((item, None));
         };
@@ -918,10 +924,11 @@ pub(crate) unsafe fn add_item(
             return None;
         }
         let inner = sys::obs_scene_add(sys::obs_sceneitem_group_get_scene(group), input.as_ptr());
+        let shape = layout.shape.unwrap_or(lightair_core::Shape::new(lightair_core::ShapeKind::Rounded));
         let filter = Source::create_private(
             "lightair_shape_mask",
             &format!("mask {name}"),
-            Some(&data_from_json(&mask_settings(shape))),
+            Some(&data_from_json(&mask_settings(&shape))),
         );
         let Some(filter) = filter else {
             tracing::warn!("shape mask unavailable (is the Lightair module loaded?)");
@@ -929,8 +936,17 @@ pub(crate) unsafe fn add_item(
             let item = sys::obs_scene_add(scene, input.as_ptr());
             return (!item.is_null()).then_some((item, None));
         };
-        sys::obs_source_filter_add(sys::obs_sceneitem_get_source(group), filter.as_ptr());
-        Some((group, Some(Masked { inner, filter })))
+        let group_source = sys::obs_sceneitem_get_source(group);
+        sys::obs_source_filter_add(group_source, filter.as_ptr());
+        let transform = Source::create_private(
+            "lightair_transform",
+            &format!("transform {name}"),
+            Some(&data_from_json(&transform_settings(layout))),
+        );
+        if let Some(t) = &transform {
+            sys::obs_source_filter_add(group_source, t.as_ptr());
+        }
+        Some((group, Some(Masked { inner, filter, transform })))
     }
 }
 
@@ -956,6 +972,10 @@ pub(crate) unsafe fn layout_item(item: *mut sys::obs_sceneitem_t, masked: Option
             m.filter.update(&data_from_json(&mask_settings(shape)));
         }
         sys::obs_source_set_enabled(m.filter.as_ptr(), l.shape.is_some());
+        if let Some(t) = &m.transform {
+            t.update(&data_from_json(&transform_settings(l)));
+            sys::obs_source_set_enabled(t.as_ptr(), l.has_transform());
+        }
     }
 }
 

@@ -106,8 +106,10 @@ enum DragMode {
     Crop(Corner, (f32, f32)),
     /// Crop mode: an edge handle crops one side.
     CropEdge(geo::Edge, (f32, f32)),
-    /// Crop mode: dragging inside slides the picture under the crop.
+    /// ⌥-drag inside: slides the picture under its crop.
     CropPan((f32, f32)),
+    /// The bottom knob: tilt in 3D.
+    Tilt,
 }
 
 /// Distance of the rotation handle above the selection, in screen pixels.
@@ -502,70 +504,46 @@ impl StudioWindow {
         let Some(scene) = project.scene(scene_id) else { return };
         let tol = HANDLE / s;
 
-        // A handle of the selected layer?
+        // A handle of the selected layer? One set does everything: corners resize (⌥ crops),
+        // edges crop, the top knob rotates, the bottom knob tilts in 3D, ⌥-drag inside pans
+        // a cropped picture.
         if let Some(sel) = studio.selected_layer.and_then(|id| scene.layer(id))
             && let Some(frame) = self.frame_of(sel, format).filter(|_| !sel.locked)
         {
             // The frame hugs the picture: handles sit on it, and a drag snaps the box to it.
             let l = &frame;
-            // Crop mode: corners and edges crop.
-            if self.crop_mode == Some(sel.id) {
-                let input = sel.input;
-                let size = studio.engine().call(move |s| s.reconciler.input_size(input));
-                let near = |(px_, py_): (f32, f32)| (x - px_).abs() <= tol && (y - py_).abs() <= tol;
-                let mode = match size {
-                    Some((w, h)) => {
-                        let size = (w as f32, h as f32);
-                        // Handles sit on the shape (a circle's on the circle); inside pans.
-                        let (corners, edges) = geo::crop_handles(l);
-                        corners
-                            .iter()
-                            .find(|(_, p)| near(*p))
-                            .map(|(c, _)| DragMode::Crop(*c, size))
-                            .or_else(|| edges.iter().find(|(_, p)| near(*p)).map(|(e, _)| DragMode::CropEdge(*e, size)))
-                            .or_else(|| geo::contains(l, (x, y)).then_some(DragMode::CropPan(size)))
-                    }
-                    None => None,
-                };
-                if let Some(mode) = mode {
-                    self.drag = Some(Drag {
-                        scene: scene_id,
-                        layer: sel.id,
-                        format,
-                        mode,
-                        start: (x, y),
-                        layout: *l,
-                        others: vec![],
-                    });
-                    self.studio.update(cx, |s, _| s.begin_gesture());
+            let near = |(px_, py_): (f32, f32)| (x - px_).abs() <= tol && (y - py_).abs() <= tol;
+            let size = self.sizes.borrow().1.get(&sel.input).map(|(w, h)| (*w as f32, *h as f32));
+            let (_, crop_edges) = geo::crop_handles(l);
+            let cropped = l.crop != lightair_core::Crop::default();
+            let mode = if near(geo::rotate_handle(l, ROTATE_OFFSET / s)) {
+                Some(DragMode::Rotate)
+            } else if near(geo::tilt_handle(l, ROTATE_OFFSET / s)) {
+                if ev.click_count == 2 {
+                    // Double-click: flat again.
+                    let stored = sel.layouts[&format];
+                    let layout = Layout { tilt_x: 0.0, tilt_y: 0.0, ..stored };
+                    self.exec(Command::SetLayout { scene: scene_id, layer: sel.id, format, layout }, cx);
                     return;
                 }
-            }
-            let (hx, hy) = geo::rotate_handle(l, ROTATE_OFFSET / s);
-            if self.crop_mode != Some(sel.id) && (x - hx).abs() <= tol && (y - hy).abs() <= tol {
-                self.drag = Some(Drag {
-                    scene: scene_id,
-                    layer: sel.id,
-                    format,
-                    mode: DragMode::Rotate,
-                    start: (x, y),
-                    layout: *l,
-                    others: vec![],
-                });
-                self.studio.update(cx, |s, _| s.begin_gesture());
-                return;
-            }
-            if let Some(corner) = CORNERS.iter().find(|c| {
-                let (px_, py_) = geo::corner(l, **c);
-                self.crop_mode != Some(sel.id) && (x - px_).abs() <= tol && (y - py_).abs() <= tol
-            }) {
-                let input = sel.input;
-                let size =
-                    ev.modifiers.alt.then(|| studio.engine().call(move |s| s.reconciler.input_size(input))).flatten();
-                let mode = match size {
-                    Some((w, h)) => DragMode::Crop(*corner, (w as f32, h as f32)),
-                    None => DragMode::Resize(*corner),
-                };
+                Some(DragMode::Tilt)
+            } else if let Some(c) = CORNERS.iter().find(|c| near(geo::corner(l, **c))) {
+                Some(match (ev.modifiers.alt, size) {
+                    (true, Some(sz)) => DragMode::Crop(*c, sz),
+                    _ => DragMode::Resize(*c),
+                })
+            } else if let (Some(sz), Some((e, _))) = (size, crop_edges.iter().find(|(_, p)| near(*p))) {
+                Some(DragMode::CropEdge(*e, sz))
+            } else if let (true, true, Some(sz)) = (ev.modifiers.alt, cropped, size) {
+                geo::contains(l, (x, y)).then_some(DragMode::CropPan(sz))
+            } else {
+                None
+            };
+            if let Some(mode) = mode {
+                // Cropping shows the whole picture, dimmed outside the crop, while dragging.
+                if matches!(mode, DragMode::Crop(..) | DragMode::CropEdge(..) | DragMode::CropPan(..)) {
+                    self.crop_mode = Some(sel.id);
+                }
                 self.drag = Some(Drag {
                     scene: scene_id,
                     layer: sel.id,
@@ -588,14 +566,6 @@ impl StudioWindow {
         let selection = studio.selection();
         match hit {
             Some(layer) if ev.modifiers.shift => self.toggle_selected(layer.id, cx),
-            // Double-click: crop handles on, or off again.
-            Some(layer) if ev.click_count == 2 && !layer.locked => {
-                let id = layer.id;
-                let crop = if self.crop_mode == Some(id) { None } else { Some(id) };
-                self.select_layer(Some(id), cx);
-                self.crop_mode = crop;
-                cx.notify();
-            }
             Some(layer) => {
                 let id = layer.id;
                 // Dragging one of several selected layers moves them all; otherwise select it.
@@ -679,6 +649,14 @@ impl StudioWindow {
             DragMode::Crop(corner, size) => l = geo::crop(&l, corner, size, (dx, dy)),
             DragMode::CropEdge(edge, size) => l = geo::crop_edge(&l, edge, size, (dx, dy)),
             DragMode::CropPan(size) => l = geo::crop_pan(&l, size, (dx, dy)),
+            DragMode::Tilt => {
+                // Drag right: the right side turns away; drag down: the bottom does. Screen
+                // degrees per pixel; ⇧ snaps to 15°.
+                let k = 0.35 * s;
+                let snap = |a: f32| if ev.modifiers.shift { (a / 15.0).round() * 15.0 } else { a };
+                l.tilt_y = snap((drag.layout.tilt_y - dx * k).clamp(-75.0, 75.0));
+                l.tilt_x = snap((drag.layout.tilt_x + dy * k).clamp(-75.0, 75.0));
+            }
             DragMode::Move => {
                 l.x += dx;
                 l.y += dy;
@@ -744,8 +722,12 @@ impl StudioWindow {
             });
             return;
         }
-        if self.drag.take().is_some() {
+        if let Some(drag) = self.drag.take() {
             self.guides.clear();
+            // A crop drag showed the whole picture; back to the result.
+            if matches!(drag.mode, DragMode::Crop(..) | DragMode::CropEdge(..) | DragMode::CropPan(..)) {
+                self.crop_mode = None;
+            }
             self.studio.update(cx, |s, cx| {
                 s.end_gesture();
                 cx.notify();
@@ -1867,6 +1849,31 @@ impl StudioWindow {
                 let knob = (!locked && editing && !cropping).then(|| {
                     (to_stage(geo::rotate_handle(&l, 0.0)), to_stage(geo::rotate_handle(&l, ROTATE_OFFSET / s)))
                 });
+                // The 3D knob below, mirroring the rotate knob above.
+                let tilt_knob = knob
+                    .map(|_| (to_stage(geo::tilt_handle(&l, 0.0)), to_stage(geo::tilt_handle(&l, ROTATE_OFFSET / s))));
+                // Crop bars at the middle of each side (on the shape), along the side.
+                let crop_bars: Vec<((f32, f32), (f32, f32))> = if knob.is_some() {
+                    let (_, edges) = geo::crop_handles(&l);
+                    let (sin, cos) = l.rotation.to_radians().sin_cos();
+                    edges
+                        .iter()
+                        .map(|(e, p)| {
+                            let (cx_, cy_) = to_stage(*p);
+                            // Along the side: horizontal for top/bottom, vertical for left/right.
+                            let (ux, uy) = match e {
+                                geo::Edge::Top | geo::Edge::Bottom => (cos, sin),
+                                geo::Edge::Left | geo::Edge::Right => (-sin, cos),
+                            };
+                            ((cx_ - ux * 9.0, cy_ - uy * 9.0), (cx_ + ux * 9.0, cy_ + uy * 9.0))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                // How the picture looks tilted in 3D, when it is.
+                let tilted =
+                    (l.tilt_x.abs() > 0.01 || l.tilt_y.abs() > 0.01).then(|| geo::projected_outline(&l).map(to_stage));
                 let edge = tok::canvas_selection_edge();
                 // The outline turns with the layer, so it's painted as a path.
                 stage = stage.child(
@@ -1888,12 +1895,33 @@ impl StudioWindow {
                                     window.paint_path(path, c);
                                 }
                             }
-                            if let Some((from, to)) = knob {
+                            for (from, to) in knob.into_iter().chain(tilt_knob) {
                                 let mut path = PathBuilder::stroke(px(1.));
                                 path.move_to(at(from));
                                 path.line_to(at(to));
                                 if let Ok(path) = path.build() {
                                     window.paint_path(path, colour);
+                                }
+                            }
+                            if let Some(t) = &tilted {
+                                let mut path = PathBuilder::stroke(px(1.5));
+                                path.move_to(at(t[0]));
+                                for p in &t[1..] {
+                                    path.line_to(at(*p));
+                                }
+                                path.close();
+                                if let Ok(path) = path.build() {
+                                    window.paint_path(path, tok::accent_primary());
+                                }
+                            }
+                            for (width, c) in [(6.0, edge), (4.0, colour)] {
+                                for (a, b) in &crop_bars {
+                                    let mut path = PathBuilder::stroke(px(width));
+                                    path.move_to(at(*a));
+                                    path.line_to(at(*b));
+                                    if let Ok(path) = path.build() {
+                                        window.paint_path(path, c);
+                                    }
                                 }
                             }
                             if let Some((full, shape)) = &crop_paths {
@@ -1945,6 +1973,24 @@ impl StudioWindow {
                                 .border_color(tok::canvas_selection_edge()),
                         );
                     }
+                }
+                if let Some((_, (tx, ty))) = tilt_knob {
+                    // A ring with a dot: "turn in space".
+                    stage = stage.child(
+                        div()
+                            .absolute()
+                            .left(px(tx - 7.))
+                            .top(px(ty - 7.))
+                            .size(px(14.))
+                            .rounded_full()
+                            .bg(tok::canvas_selection_edge())
+                            .border_2()
+                            .border_color(tok::accent_primary())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(div().size(px(4.)).rounded_full().bg(tok::accent_primary())),
+                    );
                 }
                 if let Some((_, (kx, ky))) = knob {
                     stage = stage.child(

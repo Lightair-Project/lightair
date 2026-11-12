@@ -66,6 +66,8 @@ pub(crate) fn lerp_layout(a: &Layout, b: &Layout, t: f32) -> Layout {
         width: lerp(a.width, b.width, t),
         height: lerp(a.height, b.height, t),
         rotation: lerp(a.rotation, b.rotation, t),
+        tilt_x: lerp(a.tilt_x, b.tilt_x, t),
+        tilt_y: lerp(a.tilt_y, b.tilt_y, t),
         crop: lightair_core::Crop {
             left: crop(a.crop.left, b.crop.left),
             top: crop(a.crop.top, b.crop.top),
