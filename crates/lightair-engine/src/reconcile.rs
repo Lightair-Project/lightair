@@ -353,6 +353,11 @@ impl Reconciler {
         out
     }
 
+    /// Every input's pixel size that's known (for the editor's frames and handles).
+    pub fn input_sizes(&self) -> HashMap<Id, (u32, u32)> {
+        self.inputs.keys().filter_map(|id| self.input_size(*id).map(|s| (*id, s))).collect()
+    }
+
     /// An input's pixel size, once it has one (async sources report it after their first frame).
     pub fn input_size(&self, input: Id) -> Option<(u32, u32)> {
         let src = self.inputs.get(&input)?;
