@@ -290,6 +290,8 @@ pub struct StudioWindow {
     /// Canvas zoom (1 = the format fits the stage) and pan (screen pixels from centred).
     zoom: f32,
     pan: (f32, f32),
+    /// The performance panel under the FPS readout is open.
+    perf_open: bool,
     /// A pan drag: where the pointer started and the pan then.
     panning: Option<(Point<Pixels>, (f32, f32))>,
     /// Space is held: dragging the canvas pans it.
@@ -385,6 +387,7 @@ impl StudioWindow {
             selected_asset: None,
             zoom: 1.0,
             pan: (0.0, 0.0),
+            perf_open: false,
             panning: None,
             space_down: false,
             sizes: RefCell::default(),
@@ -1620,17 +1623,7 @@ impl StudioWindow {
                 )
             })
             .child(div().flex_1())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(11.))
-                    .text_color(tok::text_secondary())
-                    .child(div().size(px(8.)).rounded_full().bg(fps_color))
-                    .child(format!("{:.1} FPS", stats.active_fps))
-                    .child(format!("{:.1} ms", stats.average_frame_time_ms)),
-            )
+            .child(self.performance(fps_color, cx))
             .child(go_live)
             .children(recording_tools)
             .child(record)
@@ -1926,15 +1919,6 @@ impl StudioWindow {
                     )
                 })
                 .child(self.row_label(target, &scene.name, tok::text()))
-                .when(i < 9, |d| {
-                    d.child(
-                        div()
-                            .text_size(px(10.))
-                            .font_family("Menlo")
-                            .text_color(tok::text_tertiary())
-                            .child(format!("⌘{}", i + 1)),
-                    )
-                })
                 .when(on_air, |d| {
                     d.child(
                         div()
@@ -1942,6 +1926,15 @@ impl StudioWindow {
                             .text_color(tok::live())
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("ON AIR"),
+                    )
+                })
+                .when(i < 9, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(10.))
+                            .font_family("Menlo")
+                            .text_color(tok::text_tertiary())
+                            .child(format!("⌘{}", i + 1)),
                     )
                 })
                 .context_menu({
@@ -3018,10 +3011,90 @@ impl StudioWindow {
             .child(div().id("inspector-scroll").flex_1().min_h_0().w_full().pb_3().overflow_y_scroll().child(content))
     }
 
+    /// The FPS readout in the top bar; a click shows the frame counts.
+    fn performance(&self, dot: Hsla, cx: &mut Context<Self>) -> impl IntoElement {
+        let studio = self.studio.read(cx);
+        let stats = studio.stats;
+        let recent = studio.recent_lagged;
+        let preview = self.previews.values().map(|p| p.frames()).max().unwrap_or(0);
+        let open = self.perf_open;
+        // Fixed-width digits so the numbers don't jiggle as they change.
+        let readout = div()
+            .id("performance")
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(24.))
+            .px_2()
+            .rounded(px(5.))
+            .cursor_pointer()
+            .text_size(px(11.))
+            .font_family("Menlo")
+            .text_color(tok::text_secondary())
+            .when(open, |d| d.bg(tok::bg_raised()))
+            .hover(|d| d.bg(tok::bg_raised()))
+            .child(div().size(px(8.)).rounded_full().bg(dot))
+            .child(format!("{:>4.1} FPS", stats.active_fps))
+            .child(format!("{:>4.1} ms", stats.average_frame_time_ms))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.perf_open = !this.perf_open;
+                cx.notify();
+            }));
+        let row = |label: &'static str, value: String| {
+            div()
+                .flex()
+                .justify_between()
+                .gap_6()
+                .child(div().text_color(tok::text_secondary()).child(label))
+                .child(div().font_family("Menlo").text_color(tok::text()).child(value))
+        };
+        let share = if stats.total_frames > 0 {
+            format!(" ({:.2}%)", stats.lagged_frames as f64 * 100.0 / stats.total_frames as f64)
+        } else {
+            String::new()
+        };
+        let panel = open.then(|| {
+            deferred(
+                div()
+                    .id("performance-panel")
+                    .absolute()
+                    .top(px(30.))
+                    .right_0()
+                    .w(px(260.))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .rounded(px(8.))
+                    .bg(tok::bg_header())
+                    .border_1()
+                    .border_color(tok::border_header())
+                    .shadow_lg()
+                    .text_size(px(12.))
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.perf_open = false;
+                        cx.notify();
+                    }))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).pb_1().child("Performance"))
+                    .child(row("Frame rate", format!("{:.1} fps", stats.active_fps)))
+                    .child(row("Render time", format!("{:.1} ms", stats.average_frame_time_ms)))
+                    .child(row("Frames rendered", stats.total_frames.to_string()))
+                    .child(row("Frames late", format!("{}{share}", stats.lagged_frames)))
+                    .child(row("Late in the last second", recent.to_string()))
+                    .child(row("Preview frames", preview.to_string()))
+                    .child(div().pt_1().text_size(px(11.)).text_color(tok::text_tertiary()).child(
+                        "Late frames are ones the renderer couldn't finish in time; a few at start-up are normal.",
+                    )),
+            )
+            .with_priority(1)
+        });
+        div().relative().child(readout).children(panel)
+    }
+
     fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let studio = self.studio.read(cx);
         let issue = studio.issue.clone();
-        let stats = studio.stats;
         div()
             .flex()
             .items_center()
@@ -3034,12 +3107,6 @@ impl StudioWindow {
             .text_color(tok::text_secondary())
             .children(issue.map(|i| div().child(i)))
             .child(div().flex_1())
-            .child(format!(
-                "{} frames · {} lagged · preview {}",
-                stats.total_frames,
-                stats.lagged_frames,
-                self.previews.values().map(|p| p.frames()).max().unwrap_or(0)
-            ))
             .child(div().text_color(tok::text_tertiary()).child(concat!("Lightair ", env!("CARGO_PKG_VERSION"))))
     }
 }

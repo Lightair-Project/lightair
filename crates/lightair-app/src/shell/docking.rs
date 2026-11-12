@@ -211,6 +211,7 @@ impl StudioWindow {
             Ok("add-layer") => self.open_add_layer(window, cx),
             Ok("settings") => self.toggle_settings(cx),
             Ok("palette") => self.open_palette(window, cx),
+            Ok("perf") => self.perf_open = true,
             Ok("source") => {
                 let input = {
                     let s = self.studio.read(cx);
