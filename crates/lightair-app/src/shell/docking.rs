@@ -376,7 +376,7 @@ impl StudioWindow {
                 self.select_layer(top, cx);
                 self.rotate_tool = true;
             }
-            Ok(hook @ ("fx-stack" | "fx-sheet" | "fx-looks" | "fx-shape" | "fx-none")) => {
+            Ok(hook @ ("fx-stack" | "fx-sheet" | "fx-looks" | "fx-shape" | "fx-none" | "fx-bg")) => {
                 // A picture with a few effects, its stack open (or the catalog over it).
                 let board = concat!(env!("CARGO_MANIFEST_DIR"), "/../../branding/final/board.png");
                 self.add_input_layer("Board", "image_source", serde_json::json!({"file": board}), (1920.0, 1080.0), cx);
@@ -388,7 +388,9 @@ impl StudioWindow {
                 self.select_layer(layer, cx);
                 self.collapsed.borrow_mut().extend(["Source", "Transform"]);
                 if let Some(iid) = input {
-                    let kinds: &[&str] = if hook == "fx-none" {
+                    let kinds: &[&str] = if hook == "fx-bg" {
+                        &["studio.bg_blur"]
+                    } else if hook == "fx-none" {
                         &[]
                     } else if hook == "fx-shape" {
                         &["studio.light", "studio.beauty"]

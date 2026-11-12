@@ -10,6 +10,9 @@ class PersonVision {
 public:
 	PersonVision();
 	~PersonVision();
+	/* 0 fast, 1 balanced (Apple's choice for video), 2 accurate */
+	void set_quality(int quality);
+	int quality() const;
 	/* BGRA frame in, 8-bit person mask out (mw x mh, top-left origin). */
 	bool run(const uint8_t *bgra, int w, int h, int stride, std::vector<uint8_t> &mask, int &mw, int &mh);
 

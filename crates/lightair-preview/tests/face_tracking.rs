@@ -153,6 +153,18 @@ fn the_background_is_replaced_around_the_person() {
         assert!(replaced > 540, "no one in the picture: all of it is background");
     }
 
+    // Every model and quality finds the same person.
+    if expect {
+        for (model, quality, name) in [(0, 0, "Vision fast"), (0, 2, "Vision accurate"), (1, 1, "MediaPipe")] {
+            let settings = json!({"bg_mode": 3, "bg_color": 0xFF0000FFu32, "bg_model": model, "bg_quality": quality});
+            apply(&engine, &mut doc, Command::SetInputEffectSettings { input: iid, effect: eid, settings });
+            std::thread::sleep(Duration::from_millis(1500));
+            let n = red(&chroma(&preview));
+            eprintln!("{name}: {n} of 576 grid points red");
+            assert!(n > 40 && n < 540, "{name}: background replaced, person kept");
+        }
+    }
+
     // Blur keeps the background's own colours: nothing red.
     // (one face effect for another: the same Camera Studio filter, updated in place)
     let blur = Effect::new("Blur", "studio.bg_blur", json!({"bg_blur": 80}));

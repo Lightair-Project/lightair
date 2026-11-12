@@ -1,5 +1,5 @@
 // Apple Vision person segmentation (VNGeneratePersonSegmentationRequest) at the balanced quality
-// level Apple recommends for video, through a sequence handler so the mask stays steady from frame
+// level asked for (balanced is what Apple recommends for video), through a sequence handler so the mask stays steady from frame
 // to frame.
 
 #include "person-vision.hpp"
@@ -15,6 +15,20 @@ struct PersonVision::Impl {
 	VNSequenceRequestHandler *sequence = nil;
 	CVPixelBufferPoolRef pool = nullptr;
 	int pool_w = 0, pool_h = 0;
+	int quality = -1;
+
+	void configure(int q)
+	{
+		@autoreleasepool {
+			request = [VNGeneratePersonSegmentationRequest new];
+			request.qualityLevel = q == 0   ? VNGeneratePersonSegmentationRequestQualityLevelFast
+					       : q == 2 ? VNGeneratePersonSegmentationRequestQualityLevelAccurate
+							: VNGeneratePersonSegmentationRequestQualityLevelBalanced;
+			request.outputPixelFormat = kCVPixelFormatType_OneComponent8;
+			sequence = [VNSequenceRequestHandler new]; /* a fresh sequence for the new level */
+			quality = q;
+		}
+	}
 
 	CVPixelBufferRef wrap(const uint8_t *bgra, int w, int h, int stride)
 	{
@@ -47,12 +61,18 @@ struct PersonVision::Impl {
 
 PersonVision::PersonVision() : impl(new Impl)
 {
-	@autoreleasepool {
-		impl->request = [VNGeneratePersonSegmentationRequest new];
-		impl->request.qualityLevel = VNGeneratePersonSegmentationRequestQualityLevelBalanced;
-		impl->request.outputPixelFormat = kCVPixelFormatType_OneComponent8;
-		impl->sequence = [VNSequenceRequestHandler new];
-	}
+	impl->configure(1);
+}
+
+void PersonVision::set_quality(int quality)
+{
+	if (quality != impl->quality)
+		impl->configure(quality);
+}
+
+int PersonVision::quality() const
+{
+	return impl->quality;
 }
 
 PersonVision::~PersonVision()
