@@ -126,6 +126,7 @@ struct beauty_filter {
 	int bg_mode;
 	int bg_model;   /* person mask: 0 Apple Vision, 1 MediaPipe */
 	int bg_quality; /* Apple Vision: 0 fast, 1 balanced, 2 accurate */
+	bool bg_show_mask; /* diagnostics: the person mask as grey */
 	float bg_blur, bg_feather, bg_shift, bg_wrap;
 	struct vec4 bg_color;
 	char bg_path[512], bg_loaded[512];
@@ -134,7 +135,7 @@ struct beauty_filter {
 	gs_texrender_t *tr_bg_q, *tr_bg_t1, *tr_bg_t2, *tr_bg_out;
 	/* Apple Vision's person mask (A), finer than the multiclass one: the background uses it */
 	gs_texture_t *vp_tex;
-	gs_texrender_t *tr_vp_ref;
+	gs_texrender_t *tr_vp_ref, *tr_vp_ref2;
 	uint32_t vp_w, vp_h;
 	uint64_t vp_serial;
 	uint8_t *vp_cpu; /* latest copy, 8-bit (snap_mutex) */
@@ -243,6 +244,7 @@ static void beauty_update(void *data, obs_data_t *settings)
 	f->bg_mode = (int)obs_data_get_int(settings, "bg_mode");
 	f->bg_model = (int)obs_data_get_int(settings, "bg_model");
 	f->bg_quality = (int)obs_data_get_int(settings, "bg_quality");
+	f->bg_show_mask = obs_data_get_bool(settings, "bg_show_mask");
 	f->bg_blur = (float)obs_data_get_int(settings, "bg_blur") / 100.0f;
 	f->bg_feather = (float)obs_data_get_int(settings, "bg_feather") / 100.0f;
 	f->bg_shift = (float)obs_data_get_int(settings, "bg_shift") / 100.0f;
@@ -338,6 +340,7 @@ static void *beauty_create(obs_data_t *settings, obs_source_t *source)
 	f->tr_bg_t2 = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
 	f->tr_bg_out = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	f->tr_vp_ref = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	f->tr_vp_ref2 = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	for (int i = 0; i < RING_N; i++)
 		f->tr_ring[i] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	gs_texrender_t **trs[] = {&f->tr_half, &f->tr_tmp,   &f->tr_smooth, &f->tr_q,
@@ -380,6 +383,7 @@ static void beauty_destroy(void *data)
 	gs_texrender_destroy(f->tr_bg_t2);
 	gs_texrender_destroy(f->tr_bg_out);
 	gs_texrender_destroy(f->tr_vp_ref);
+	gs_texrender_destroy(f->tr_vp_ref2);
 	gs_texture_destroy(f->vp_tex);
 	gs_image_file_ex_free(&f->bg_image);
 	for (int i = 0; i < RING_N; i++)
@@ -498,6 +502,7 @@ static obs_properties_t *beauty_properties(void *data)
 						       OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(bmod, "Apple Vision", 0);
 	obs_property_list_add_int(bmod, "MediaPipe", 1);
+	obs_property_list_add_int(bmod, obs_module_text("macOS camera effect"), 2);
 	obs_property_t *bq = obs_properties_add_list(bg, "bg_quality", obs_module_text("Quality"), OBS_COMBO_TYPE_LIST,
 						     OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(bq, obs_module_text("Fast"), 0);
@@ -769,6 +774,7 @@ static gs_texture_t *render_background(struct beauty_filter *f, gs_texture_t *in
 	gs_effect_set_float(gs_effect_get_param_by_name(e, "wrap"), mode == BG_REMOVE ? 0.0f : f->bg_wrap);
 	gs_effect_set_vec2(gs_effect_get_param_by_name(e, "bg_scale"), &scale);
 	gs_effect_set_vec2(gs_effect_get_param_by_name(e, "bg_offset"), &off);
+	gs_effect_set_int(gs_effect_get_param_by_name(e, "show_mask"), f->bg_show_mask ? 1 : 0);
 	gs_texrender_reset(f->tr_bg_out);
 	if (!gs_texrender_begin(f->tr_bg_out, w, h))
 		return in;
@@ -792,9 +798,15 @@ static bool makeup_active(const struct beauty_filter *f)
 	return grade || paint;
 }
 
+/* bg_model 2 is macOS's own camera effect: the frames arrive already done */
+static bool background_active(const struct beauty_filter *f)
+{
+	return f->bg_mode != BG_OFF && f->bg_model != 2;
+}
+
 static bool face_effects_active(const struct beauty_filter *f)
 {
-	if (makeup_active(f) || fx_layers_active(f->fx) || f->bg_mode != BG_OFF)
+	if (makeup_active(f) || fx_layers_active(f->fx) || background_active(f))
 		return true;
 	if (f->pouch > 0 || f->teeth > 0 || f->eyelight > 0 || f->clarity > 0 || !f->all_skin ||
 	    f->show_landmarks || f->debug_view)
@@ -1160,7 +1172,7 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 
 	/* --- learned segmentation: R skin, G face skin, B hair, A person --- */
 	face_tracker_set_segmentation(f->tracker, true);
-	face_tracker_set_segmentation_fast(f->tracker, fx_layers_light_active(f->fx) || f->bg_mode != BG_OFF);
+	face_tracker_set_segmentation_fast(f->tracker, fx_layers_light_active(f->fx) || background_active(f));
 	uint32_t mw = 0, mh = 0;
 	uint8_t *segbuf = face_tracker_take_mask(f->tracker, &f->pm_serial, &mw, &mh);
 	if (segbuf) {
@@ -1236,10 +1248,15 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 			f->vp_h = vh;
 			pthread_mutex_unlock(&f->snap_mutex);
 		}
-		/* snapped to this frame's edges like the multiclass mask */
-		if (f->vp_tex)
-			vseg = guided_pass(f, f->tr_vp_ref, "Refine", f->vp_tex, half, 1.0f / (float)f->vp_w,
-					   1.0f / (float)f->vp_h, hw, hh, 0.07f);
+		/* Smoothed at the mask's own size, not re-snapped to this frame's colours: snapping to
+		 * noisy colour edges every frame is what makes edges shimmer. Vision's edges are already
+		 * on the person; the composite's smoothstep sets their softness. */
+		if (f->vp_tex) {
+			gs_texture_t *t1 = blur_pass(f, f->tr_vp_ref, "Gauss", f->vp_tex, f->vp_w, f->vp_h, f->vp_w, f->vp_h,
+						     1, 0, 0.6f, 0);
+			vseg = t1 ? blur_pass(f, f->tr_vp_ref2, "Gauss", t1, f->vp_w, f->vp_h, f->vp_w, f->vp_h, 0, 1, 0.6f, 0)
+				  : NULL;
+		}
 	} else if (f->vp_tex) {
 		gs_texture_destroy(f->vp_tex);
 		f->vp_tex = NULL;
@@ -1402,7 +1419,7 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 	/* background: behind the person, under stickers and atmosphere */
 	/* Apple Vision's mask once it has one; the multiclass one until then */
 	gs_texture_t *person_mask = vseg ? vseg : seg;
-	if (out && person_mask && f->bg_mode != BG_OFF && !f->debug_view)
+	if (out && person_mask && background_active(f) && !f->debug_view)
 		out = render_background(f, out, person_mask, w, h);
 
 	/* stickers, motion and atmosphere */

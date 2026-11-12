@@ -229,6 +229,8 @@ struct face_tracker {
 	std::vector<uint8_t> person;
 	uint32_t person_w = 0, person_h = 0;
 	uint64_t person_serial = 0;
+	std::vector<float> person_luma;   /* the last frame's mean luma per mask tile */
+	std::vector<float> person_motion; /* how much each tile of the picture moved, 0..1 */
 
 	/* skin pigment basis (melanin / hemoglobin), recalibrated every ~2 s */
 	PigmentBasis pigment = pigment_prior_basis();
@@ -370,6 +372,69 @@ void face_tracker::run_landmarks()
 	}
 }
 
+static const int PERSON_TILE = 16; /* mask pixels per motion tile */
+
+/* How much the picture moved in each mask tile since the last frame (0 still .. 1 moving): the
+ * change of each tile's mean luma. Averaging a tile cancels sensor noise; someone moving changes
+ * the mean. The motion of the most-changed neighbour counts, so motion at a tile border is seen
+ * on both sides. */
+static std::vector<float> tile_motion(const uint8_t *bgra, int fw, int fh, int mw, int mh, std::vector<float> &prev)
+{
+	const int T = PERSON_TILE;
+	int tw = (mw + T - 1) / T, th = (mh + T - 1) / T;
+	std::vector<float> luma((size_t)tw * th, 0.0f);
+	for (int ty = 0; ty < th; ty++)
+		for (int tx = 0; tx < tw; tx++) {
+			int x0 = tx * T * fw / mw, x1 = std::min(fw, (tx + 1) * T * fw / mw);
+			int y0 = ty * T * fh / mh, y1 = std::min(fh, (ty + 1) * T * fh / mh);
+			long sum = 0, n = 0;
+			for (int y = y0; y < y1; y += 2)
+				for (int x = x0; x < x1; x += 2, n++) {
+					const uint8_t *px = bgra + ((size_t)y * fw + x) * 4;
+					sum += px[0] * 29 + px[1] * 150 + px[2] * 77;
+				}
+			luma[(size_t)ty * tw + tx] = n ? (float)sum / (float)(n * 256) : 0.0f;
+		}
+	std::vector<float> motion((size_t)tw * th, 1.0f);
+	if (prev.size() == luma.size()) {
+		for (int ty = 0; ty < th; ty++)
+			for (int tx = 0; tx < tw; tx++) {
+				float m = 0.0f;
+				for (int dy = -1; dy <= 1; dy++)
+					for (int dx = -1; dx <= 1; dx++) {
+						int x = tx + dx, y = ty + dy;
+						if (x >= 0 && y >= 0 && x < tw && y < th) {
+							size_t i = (size_t)y * tw + x;
+							m = std::max(m, std::fabs(luma[i] - prev[i]));
+						}
+					}
+				/* under ~1.5 levels of mean change: still; ~6 or more: moving */
+				motion[(size_t)ty * tw + tx] = std::clamp((m - 1.5f) / 4.5f, 0.0f, 1.0f);
+			}
+	}
+	prev.swap(luma);
+	return motion;
+}
+
+/* Temporal smoothing of the person mask, gated by the picture's motion: where the picture holds
+ * still, the mask blends slowly, so the edge doesn't shimmer with sensor noise or the model's own
+ * frame-to-frame wobble; where it moves, the new mask is taken at once, so the edge never trails. */
+static void smooth_person(std::vector<uint8_t> &mask, const std::vector<uint8_t> &next, int w, int h,
+			  const std::vector<float> &motion)
+{
+	const int T = PERSON_TILE;
+	int tw = (w + T - 1) / T;
+	bool have = motion.size() == (size_t)tw * ((h + T - 1) / T);
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++) {
+			size_t i = (size_t)y * w + x;
+			float k = have ? motion[(size_t)(y / T) * tw + x / T] : 1.0f;
+			int wgt = (int)(28.0f + k * 228.0f); /* still: ~1/9 of the new mask per frame */
+			int d = (int)next[i] - (int)mask[i];
+			mask[i] = (uint8_t)std::clamp((int)mask[i] + ((d * wgt) >> 8), 0, 255);
+		}
+}
+
 void face_tracker::run_segmentation()
 {
 	if (!models_dir.empty())
@@ -421,10 +486,15 @@ void face_tracker::run_segmentation()
 			std::vector<uint8_t> p;
 			int pw = 0, ph = 0;
 			if (person_vision->run(seg.buf.data(), seg.w, seg.h, seg.w * 4, p, pw, ph)) {
+				person_motion = tile_motion(seg.buf.data(), seg.w, seg.h, pw, ph, person_luma);
 				std::lock_guard<std::mutex> g(mask_m);
-				person.swap(p);
-				person_w = pw;
-				person_h = ph;
+				if (person_w == (uint32_t)pw && person_h == (uint32_t)ph && person.size() == p.size()) {
+					smooth_person(person, p, pw, ph, person_motion);
+				} else {
+					person.swap(p);
+					person_w = pw;
+					person_h = ph;
+				}
 				person_serial++;
 			}
 		}
@@ -514,7 +584,9 @@ extern "C" bool face_tracker_submit_bgra(face_tracker_t *t, const uint8_t *data,
 {
 	/* segmentation on its own thread, never blocking landmarks: ~30 Hz while a light follows the
 	 * body with it, ~15 Hz otherwise; edges are snapped to every frame on the GPU */
-	const uint64_t SEG_INTERVAL_NS = t->seg_fast.load() ? 33000000ULL : 66000000ULL;
+	/* every new frame while the background needs the person (Vision is fast on the Neural
+	 * Engine; the worker drops frames while busy) */
+	const uint64_t SEG_INTERVAL_NS = t->person_enabled.load() ? 0ULL : t->seg_fast.load() ? 33000000ULL : 66000000ULL;
 	if (t->seg_enabled.load() && timestamp_ns - t->seg_last_ns >= SEG_INTERVAL_NS &&
 	    queue_frame(t->seg, data, linesize, width, height, frame_id, timestamp_ns))
 		t->seg_last_ns = timestamp_ns;

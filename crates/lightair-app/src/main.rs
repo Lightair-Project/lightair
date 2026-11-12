@@ -18,6 +18,7 @@ mod selftest;
 mod shell;
 mod starter;
 mod studio;
+mod system_effects;
 mod ui;
 
 use std::path::PathBuf;

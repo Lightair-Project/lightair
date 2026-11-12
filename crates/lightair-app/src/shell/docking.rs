@@ -376,7 +376,7 @@ impl StudioWindow {
                 self.select_layer(top, cx);
                 self.rotate_tool = true;
             }
-            Ok(hook @ ("fx-stack" | "fx-sheet" | "fx-looks" | "fx-shape" | "fx-none" | "fx-bg")) => {
+            Ok(hook @ ("fx-stack" | "fx-sheet" | "fx-looks" | "fx-shape" | "fx-none" | "fx-bg" | "fx-system")) => {
                 // A picture with a few effects, its stack open (or the catalog over it).
                 let board = concat!(env!("CARGO_MANIFEST_DIR"), "/../../branding/final/board.png");
                 self.add_input_layer("Board", "image_source", serde_json::json!({"file": board}), (1920.0, 1080.0), cx);
@@ -388,7 +388,9 @@ impl StudioWindow {
                 self.select_layer(layer, cx);
                 self.collapsed.borrow_mut().extend(["Source", "Transform"]);
                 if let Some(iid) = input {
-                    let kinds: &[&str] = if hook == "fx-bg" {
+                    let kinds: &[&str] = if hook == "fx-system" {
+                        &["studio.bg_replace"]
+                    } else if hook == "fx-bg" {
                         &["studio.bg_blur"]
                     } else if hook == "fx-none" {
                         &[]
@@ -400,7 +402,10 @@ impl StudioWindow {
                     let mut first = None;
                     for kind in kinds {
                         if let Some(d) = lightair_core::catalog::def(kind) {
-                            let effect = d.create();
+                            let mut effect = d.create();
+                            if hook == "fx-system" {
+                                effect.settings["bg_model"] = serde_json::json!(lightair_core::catalog::BG_MODEL_SYSTEM);
+                            }
                             first.get_or_insert(effect.id);
                             self.exec(lightair_core::Command::AddInputEffect { input: iid, effect, index: None }, cx);
                         }
