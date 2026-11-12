@@ -76,6 +76,10 @@ actions!(
         MoveOutOfParent,
         FillCanvas,
         SaveAsPrefab,
+        ZoomIn,
+        ZoomOut,
+        ZoomToFit,
+        ZoomToActual,
         Scene1,
         Scene2,
         Scene3,
@@ -108,6 +112,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("e", ToggleRotateTool, Some("Studio")),
         KeyBinding::new("cmd-shift-m", ToggleMics, Some("Studio")),
         KeyBinding::new("cmd-g", GroupSelection, Some("Studio")),
+        KeyBinding::new("cmd-=", ZoomIn, Some("Studio")),
+        KeyBinding::new("cmd-+", ZoomIn, Some("Studio")),
+        KeyBinding::new("cmd--", ZoomOut, Some("Studio")),
+        KeyBinding::new("cmd-0", ZoomToFit, Some("Studio")),
+        KeyBinding::new("cmd-alt-0", ZoomToActual, Some("Studio")),
         KeyBinding::new("cmd-c", CopySelection, Some("Studio")),
         KeyBinding::new("cmd-x", CutSelection, Some("Studio")),
         KeyBinding::new("cmd-v", PasteLayers, Some("Studio")),
@@ -278,6 +287,13 @@ pub struct StudioWindow {
     /// The assets folder's files, and when they were read.
     asset_cache: RefCell<(Option<Instant>, Vec<assets::Asset>)>,
     selected_asset: Option<PathBuf>,
+    /// Canvas zoom (1 = the format fits the stage) and pan (screen pixels from centred).
+    zoom: f32,
+    pan: (f32, f32),
+    /// A pan drag: where the pointer started and the pan then.
+    panning: Option<(Point<Pixels>, (f32, f32))>,
+    /// Space is held: dragging the canvas pans it.
+    space_down: bool,
     /// Inputs' pixel sizes, refreshed a few times a second: frames and handles hug the picture.
     sizes: RefCell<SizeCache>,
     /// The source picker, and fetched source lists per (input, setting).
@@ -367,6 +383,10 @@ impl StudioWindow {
             tree_drop: None,
             asset_cache: RefCell::new((None, Vec::new())),
             selected_asset: None,
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+            panning: None,
+            space_down: false,
             sizes: RefCell::default(),
             source_picker: None,
             source_cache: RefCell::default(),
@@ -533,8 +553,72 @@ impl StudioWindow {
         let f = project.format(format)?;
         let (cw, ch) = (f.width as f32, f.height as f32);
         let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
-        let s = (bw / cw).min(bh / ch);
-        Some((f32::from(b.origin.x) + (bw - cw * s) / 2.0, f32::from(b.origin.y) + (bh - ch * s) / 2.0, s))
+        let s = (bw / cw).min(bh / ch) * self.zoom;
+        Some((
+            f32::from(b.origin.x) + (bw - cw * s) / 2.0 + self.pan.0,
+            f32::from(b.origin.y) + (bh - ch * s) / 2.0 + self.pan.1,
+            s,
+        ))
+    }
+
+    /// Zooms by `factor`, keeping the canvas point under `anchor` (a window point; `None`: the
+    /// middle of the stage) where it is.
+    fn zoom_by(&mut self, factor: f32, anchor: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+        let project = self.studio.read(cx).project().clone();
+        let format = anchor.and_then(|a| self.stage_at(&project, a)).unwrap_or_else(|| self.format_id(&project));
+        let Some(b) = self.stage_bounds.borrow().get(&format).copied() else { return };
+        let Some(f) = project.format(format) else { return };
+        let (cw, ch) = (f.width as f32, f.height as f32);
+        let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
+        let fit = (bw / cw).min(bh / ch);
+        let anchor = anchor.unwrap_or(b.center());
+        let Some((ox, oy, s)) = self.mapping(&project, format) else { return };
+        let (ax, ay) = (f32::from(anchor.x), f32::from(anchor.y));
+        let (px_, py_) = ((ax - ox) / s, (ay - oy) / s);
+        let zoom = (self.zoom * factor).clamp(0.1, 16.0);
+        let s2 = fit * zoom;
+        // Where the canvas origin lands centred at the new zoom, then shift so the point stays.
+        let (bx, by) = (f32::from(b.origin.x) + (bw - cw * s2) / 2.0, f32::from(b.origin.y) + (bh - ch * s2) / 2.0);
+        self.zoom = zoom;
+        self.pan = (ax - bx - px_ * s2, ay - by - py_ * s2);
+        cx.notify();
+    }
+
+    fn zoom_to_fit(&mut self, cx: &mut Context<Self>) {
+        self.zoom = 1.0;
+        self.pan = (0.0, 0.0);
+        cx.notify();
+    }
+
+    /// One canvas pixel to one screen point.
+    fn zoom_to_actual(&mut self, cx: &mut Context<Self>) {
+        let project = self.studio.read(cx).project().clone();
+        let format = self.format_id(&project);
+        let Some((_, _, s)) = self.mapping(&project, format) else { return };
+        self.zoom_by(1.0 / s, None, cx);
+    }
+
+    /// The current scale as a percentage (100: one canvas pixel per screen point).
+    fn zoom_percent(&self, project: &Project) -> f32 {
+        self.mapping(project, self.format_id(project)).map_or(100.0, |(_, _, s)| s * 100.0)
+    }
+
+    fn canvas_scroll(&mut self, ev: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let delta = match ev.delta {
+            ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
+            ScrollDelta::Lines(p) => (p.x * 20.0, p.y * 20.0),
+        };
+        if ev.modifiers.platform || ev.modifiers.control {
+            // ⌘/Ctrl + scroll zooms at the pointer.
+            self.zoom_by((delta.1 * 0.01).exp(), Some(ev.position), cx);
+        } else {
+            self.pan = (self.pan.0 + delta.0, self.pan.1 + delta.1);
+            cx.notify();
+        }
+    }
+
+    fn canvas_pinch(&mut self, ev: &PinchEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_by(1.0 + ev.delta, Some(ev.position), cx);
     }
 
     fn to_canvas(&self, project: &Project, format: Id, p: Point<Pixels>) -> Option<(f32, f32)> {
@@ -641,6 +725,10 @@ impl StudioWindow {
     // ------------------------------------------------------------ canvas interaction
     fn canvas_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        if self.space_down {
+            self.panning = Some((ev.position, self.pan));
+            return;
+        }
         self.add_menu = false;
         let project = self.studio.read(cx).project().clone();
         let Some(format) = self.stage_at(&project, ev.position) else { return };
@@ -782,6 +870,12 @@ impl StudioWindow {
     }
 
     fn canvas_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((from, pan)) = self.panning {
+            let d = ev.position - from;
+            self.pan = (pan.0 + f32::from(d.x), pan.1 + f32::from(d.y));
+            cx.notify();
+            return;
+        }
         if let Some((format, ..)) = self.marquee {
             let project = self.studio.read(cx).project().clone();
             if let Some(p) = self.to_canvas(&project, format, ev.position)
@@ -907,6 +1001,10 @@ impl StudioWindow {
     }
 
     fn canvas_up(&mut self, _: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.panning.take().is_some() {
+            cx.notify();
+            return;
+        }
         if let Some((format, from, to, additive)) = self.marquee.take() {
             let moved = (from.0 - to.0).abs() > 2.0 || (from.1 - to.1).abs() > 2.0;
             self.studio.update(cx, |s, cx| {
@@ -1032,6 +1130,12 @@ impl StudioWindow {
 
     /// The canvas's cursor: what a press would do here (or is doing).
     fn canvas_cursor(&self, project: &Project, cx: &App) -> CursorStyle {
+        if self.panning.is_some() {
+            return CursorStyle::ClosedHand;
+        }
+        if self.space_down {
+            return CursorStyle::OpenHand;
+        }
         let handle = match &self.drag {
             Some(d) if d.mode == DragMode::Move => return CursorStyle::ClosedHand,
             Some(d) => d.mode.handle(self.rotate_tool),
@@ -1333,6 +1437,23 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &ToggleLayerLocked, _, cx| this.toggle_selection_locked(cx)))
             .on_action(cx.listener(|this, _: &MoveOutOfParent, _, cx| this.move_out_of_parent(cx)))
             .on_action(cx.listener(|this, _: &FillCanvas, _, cx| this.fill_canvas(cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(1.25, None, cx)))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(0.8, None, cx)))
+            .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.zoom_to_fit(cx)))
+            .on_action(cx.listener(|this, _: &ZoomToActual, _, cx| this.zoom_to_actual(cx)))
+            // Space held: dragging the canvas pans it.
+            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "space" && !ev.keystroke.modifiers.modified() && !this.space_down {
+                    this.space_down = true;
+                    cx.notify();
+                }
+            }))
+            .capture_key_up(cx.listener(|this, ev: &KeyUpEvent, _, cx| {
+                if ev.keystroke.key == "space" && this.space_down {
+                    this.space_down = false;
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(|this, _: &SaveAsPrefab, _, cx| {
                 if let Some(layer) = this.studio.read(cx).selected_layer {
                     this.save_prefab(layer, cx);
@@ -1947,8 +2068,47 @@ impl StudioWindow {
         }
         let shape = self.format(project).clone();
         let vertical = shape.height > shape.width;
+        // Zoom: − 100% +, the number fits the canvas to the stage again.
+        let percent = self.zoom_percent(project);
+        let fitted = (self.zoom - 1.0).abs() < 0.001 && self.pan == (0.0, 0.0);
+        let zoom = div()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .mr_2()
+            .child(
+                ui::icon_button("zoom-out", "minus", tok::text_secondary())
+                    .tooltip(|w, cx| Tooltip::new("Zoom out (⌘−)").build(w, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.zoom_by(0.8, None, cx))),
+            )
+            .child(
+                div()
+                    .id("zoom-fit")
+                    .min_w(px(46.))
+                    .h(px(22.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_size(px(11.))
+                    .font_family("Menlo")
+                    .text_color(if fitted { tok::text_secondary() } else { tok::text() })
+                    .hover(|d| d.bg(tok::bg_raised()))
+                    .child(format!("{percent:.0}%"))
+                    .tooltip(|w, cx| Tooltip::new("Fit (⌘0) · double-click: 100% (⌥⌘0)").build(w, cx))
+                    .on_click(cx.listener(|this, ev: &ClickEvent, _, cx| {
+                        if ev.click_count() == 2 { this.zoom_to_actual(cx) } else { this.zoom_to_fit(cx) }
+                    })),
+            )
+            .child(
+                ui::icon_button("zoom-in", "plus", tok::text_secondary())
+                    .tooltip(|w, cx| Tooltip::new("Zoom in (⌘=)").build(w, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.zoom_by(1.25, None, cx))),
+            );
         let safe = if vertical { self.safe_vertical } else { self.safe_landscape };
-        bar = bar.child(div().flex_1()).child(
+        bar = bar.child(div().flex_1()).child(zoom).child(
             div()
                 .id("safe-areas")
                 .flex()
@@ -2062,7 +2222,18 @@ impl StudioWindow {
                 .size_full(),
             )
             .child(match frame {
-                Some(f) => surface(f).absolute().size_full().object_fit(ObjectFit::Contain).into_any_element(),
+                Some(f) => match (self.mapping(project, fid), self.stage_bounds.borrow().get(&fid).copied()) {
+                    // Placed where the canvas is (zoomed and panned).
+                    (Some((ox, oy, s)), Some(b)) => surface(f)
+                        .absolute()
+                        .left(px(ox - f32::from(b.origin.x)))
+                        .top(px(oy - f32::from(b.origin.y)))
+                        .w(px(format.width as f32 * s))
+                        .h(px(format.height as f32 * s))
+                        .object_fit(ObjectFit::Fill)
+                        .into_any_element(),
+                    _ => surface(f).absolute().size_full().object_fit(ObjectFit::Contain).into_any_element(),
+                },
                 None => div()
                     .absolute()
                     .size_full()
@@ -2533,6 +2704,14 @@ impl StudioWindow {
                     .when(live, |d| d.border_2().border_color(tok::live()))
                     .cursor(self.canvas_cursor(project, cx))
                     .on_mouse_down(MouseButton::Right, cx.listener(Self::canvas_right_down))
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(|this, ev: &MouseDownEvent, _, _| this.panning = Some((ev.position, this.pan))),
+                    )
+                    .on_mouse_up(MouseButton::Middle, cx.listener(Self::canvas_up))
+                    .on_scroll(cx.listener(Self::canvas_scroll))
+                    .on_pinch(cx.listener(Self::canvas_pinch))
+                    .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::canvas_down))
                     .on_mouse_move(cx.listener(Self::canvas_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::canvas_up))

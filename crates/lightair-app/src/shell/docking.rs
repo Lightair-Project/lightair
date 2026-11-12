@@ -4,14 +4,11 @@
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::dock::{
-    BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel, PanelEvent, panel_handle,
-};
+use gpui_kit::component::dock::{BasePanel, DockLayout, DockPlacement, DockSkin, Panel, PanelEvent, panel_handle};
 use gpui_kit::*;
 
 use super::StudioWindow;
-use crate::ui::{self, tok};
-use gpui_kit::prelude::FluentBuilder;
+use crate::ui;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Region {
@@ -48,17 +45,9 @@ impl BasePanel for ShellPanel {
 }
 
 impl Panel for ShellPanel {
+    /// None: tabs show `title` (icon and name).
     fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some(
-            match self.region {
-                Region::Layers => "Hierarchy",
-                Region::Scenes => "Scenes",
-                Region::Canvas => "Canvas",
-                Region::Inspector => "Inspector",
-                Region::Assets => "Assets",
-            }
-            .into(),
-        )
+        None
     }
 
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -137,11 +126,6 @@ impl Panel for ShellPanel {
     fn inner_padding(&self, _: &App) -> bool {
         false
     }
-
-    /// The canvas carries its own format bar.
-    fn title_bar(&self, _: &App) -> bool {
-        self.region != Region::Canvas
-    }
 }
 
 impl EventEmitter<PanelEvent> for ShellPanel {}
@@ -169,12 +153,7 @@ impl Render for ShellPanel {
                 Region::Assets => w.assets_panel(&project, cx).into_any_element(),
             }
         });
-        // A line between the header band and the body.
-        div()
-            .size_full()
-            .when(region != Region::Canvas, |d| d.border_t_1().border_color(tok::border_header()))
-            .child(body)
-            .into_any_element()
+        body
     }
 }
 
@@ -190,7 +169,10 @@ impl StudioWindow {
         let (canvas, inspector) = (panel(Region::Canvas, cx), panel(Region::Inspector, cx));
         let assets = panel(Region::Assets, cx);
         let (mixer, outputs) = (self.mixer.clone(), self.outputs.clone());
-        let dock = cx.new(|cx| DockArea::new("lightair-studio", Some(1), window, cx).with_renderer(DockSkin::new(cx)));
+        // Every group shows a tab bar, even with one panel, so any panel can be dropped onto
+        // any header to join it as a tab (and the canvas gets a header like the rest).
+        let (dock, skin) = DockSkin::dock_area("lightair-studio", Some(1), window, cx);
+        skin.set_panel_style(gpui_kit::component::dock::PanelStyle::TabBar, cx);
         dock.update(cx, |area, cx| {
             area.set_center(
                 DockLayout::v_split().child(DockLayout::tabs().panel_view(panel_handle(canvas), cx), None).child(
@@ -282,6 +264,15 @@ impl StudioWindow {
                 });
                 self.group_selection(window, cx);
                 self.renaming = None;
+            }
+            Ok("zoom") => {
+                let top = {
+                    let s = self.studio.read(cx);
+                    s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                };
+                self.select_layer(top, cx);
+                self.zoom = 2.5;
+                self.pan = (-700.0, -350.0);
             }
             Ok("gizmo") => {
                 let top = {
