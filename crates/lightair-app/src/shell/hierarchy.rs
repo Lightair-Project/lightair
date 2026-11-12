@@ -12,6 +12,7 @@ use gpui_kit::*;
 use lightair_core::{Clip, Command, Id, Layer, Layout, Project, Scene};
 
 use super::StudioWindow;
+use super::assets::DraggedAsset;
 use crate::rows::{DraggedRow, RowTarget};
 use crate::ui::{self, tok};
 
@@ -102,7 +103,14 @@ impl StudioWindow {
         for (i, (layer, depth, holds)) in list.into_iter().enumerate() {
             let id = layer.id;
             let kind = layer.input.and_then(|i| project.inputs.get(&i)).map(|i| i.kind.clone()).unwrap_or_default();
-            let icon = if layer.is_empty() { "box" } else { ui::input_icon(&kind) };
+            let prefab = layer.prefab.is_some();
+            let icon = if prefab {
+                "package"
+            } else if layer.is_empty() {
+                "box"
+            } else {
+                ui::input_icon(&kind)
+            };
             let own_visible = layer.layouts.get(&format).is_some_and(|l| l.visible);
             let shown = scene.shown(id, format);
             let locked = layer.locked;
@@ -113,7 +121,12 @@ impl StudioWindow {
             let name = layer.name.clone();
             let collapsed = self.collapsed_layers.contains(&id);
             let zone = hint.filter(|(t, _)| *t == id).map(|(_, z)| z);
-            let text = if shown { tok::text() } else { tok::text_tertiary() };
+            // Prefab instances' names in the accent colour, as in Unity.
+            let text = match (shown, prefab) {
+                (false, _) => tok::text_tertiary(),
+                (true, true) => tok::prefab(),
+                (true, false) => tok::text(),
+            };
             let row = div()
                 .id(("tree", i))
                 .relative()
@@ -164,6 +177,29 @@ impl StudioWindow {
                     this.tree_drop = None;
                     this.drop_on_tree(row, Some((id, zone)), cx);
                 }))
+                // Assets dropped here: placed above, below or into this row.
+                .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DraggedAsset>, _, cx| {
+                    if !ev.bounds.contains(&ev.event.position) {
+                        return;
+                    }
+                    let f = (ev.event.position.y - ev.bounds.origin.y) / ev.bounds.size.height;
+                    let zone = if f < 0.28 {
+                        TreeDrop::Above
+                    } else if f > 0.72 {
+                        TreeDrop::Below
+                    } else {
+                        TreeDrop::Into
+                    };
+                    if this.tree_drop != Some((id, zone)) {
+                        this.tree_drop = Some((id, zone));
+                        cx.notify();
+                    }
+                }))
+                .on_drop(cx.listener(move |this, a: &DraggedAsset, _, cx| {
+                    let zone = this.tree_drop.filter(|(t, _)| *t == id).map_or(TreeDrop::Into, |(_, z)| z);
+                    this.tree_drop = None;
+                    this.drop_asset_on_tree(&a.0, Some((id, zone)), cx);
+                }))
                 // Fold arrow, or room for one.
                 .child(div().id(("fold", i)).size(px(14.)).flex().items_center().justify_center().when(holds, |d| {
                     d.child(
@@ -179,10 +215,10 @@ impl StudioWindow {
                         cx.notify();
                     }))
                 }))
-                .child(ui::icon(icon).size(px(14.)).text_color(if shown {
-                    tok::text_secondary()
-                } else {
-                    tok::text_tertiary()
+                .child(ui::icon(icon).size(px(14.)).text_color(match (shown, prefab) {
+                    (false, _) => tok::text_tertiary(),
+                    (true, true) => tok::prefab(),
+                    (true, false) => tok::text_secondary(),
                 }))
                 .child(self.row_label(target, &layer.name, text))
                 .child(
@@ -258,6 +294,11 @@ impl StudioWindow {
                         .on_drop(cx.listener(move |this, row: &DraggedRow, _, cx| {
                             this.tree_drop = None;
                             this.drop_on_tree(row, None, cx);
+                        }))
+                        .drag_over::<DraggedAsset>(|s, _, _, _| s.bg(tok::bg_raised()))
+                        .on_drop(cx.listener(|this, a: &DraggedAsset, _, cx| {
+                            this.tree_drop = None;
+                            this.drop_asset_on_tree(&a.0, None, cx);
                         }))
                         .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.select_layer(None, cx)))
                         .context_menu({
