@@ -10,11 +10,13 @@ use serde::{Deserialize, Serialize};
 pub struct Preferences {
     /// Show the Go Live review sheet before going live.
     pub review_before_live: bool,
+    /// Ending a stream takes a second click.
+    pub confirm_end_stream: bool,
 }
 
 impl Default for Preferences {
     fn default() -> Self {
-        Self { review_before_live: true }
+        Self { review_before_live: true, confirm_end_stream: true }
     }
 }
 
@@ -49,7 +51,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lightair-prefs-{}", std::process::id()));
         let file = dir.join("preferences.json");
         assert_eq!(load_from(&file), Preferences::default(), "missing file → defaults");
-        let p = Preferences { review_before_live: false };
+        let p = Preferences { review_before_live: false, confirm_end_stream: false };
         save_to(&file, &p).unwrap();
         assert_eq!(load_from(&file), p);
         std::fs::write(&file, b"{}").unwrap();

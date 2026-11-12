@@ -79,6 +79,11 @@ impl Studio {
         studio
     }
 
+    /// Where the project lives on disk (`None` for an unsaved project).
+    pub fn project_dir(&self) -> Option<std::path::PathBuf> {
+        self.package.as_ref().map(|p| p.dir().to_path_buf())
+    }
+
     /// The project's `assets` folder (prefabs, images, video, sound), made if missing; `None`
     /// for an unsaved project.
     pub fn assets_dir(&self) -> Option<std::path::PathBuf> {
@@ -403,12 +408,14 @@ impl Studio {
                 Some(l) => format!("Lightair {stamp} {l}.{}", container.extension()),
                 None => format!("Lightair {stamp}.{}", container.extension()),
             };
+            let Some(format) = project.format(canvas) else { continue };
             let cfg = RecordingConfig {
                 canvas,
                 path: self.recording_folder().join(name),
                 label,
+                split_minutes: settings.split_minutes,
                 container,
-                encoders: default_encoders(&self.engine.capabilities.encoders, settings.bitrate_kbps, false),
+                encoders: crate::encoding::for_recording(&self.engine.capabilities.encoders, &settings, format),
             };
             self.engine.post(move |s| {
                 let video = s.reconciler.format_video(canvas);
@@ -463,15 +470,13 @@ impl Studio {
                 self.issue = Some(format!("No stream key saved for {}.", d.name).into());
                 continue;
             };
+            let reconnect = project.outputs.reconnect;
             let cfg = StreamConfig {
                 id: d.id,
                 server: d.server.clone(),
                 key,
-                encoders: default_encoders(
-                    &self.engine.capabilities.encoders,
-                    project.outputs.stream_bitrate_kbps,
-                    true,
-                ),
+                encoders: crate::encoding::for_stream(&self.engine.capabilities.encoders, &project, &d),
+                reconnect: Some((reconnect.retries, reconnect.delay_s)),
             };
             let format = d.format;
             self.engine.post(move |s| {

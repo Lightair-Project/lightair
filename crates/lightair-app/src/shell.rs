@@ -325,6 +325,7 @@ pub struct StudioWindow {
     marquee: Option<Marquee>,
     /// The Add format row, with its custom width and height fields.
     settings_open: bool,
+    settings_page: settings::Page,
     prefs: crate::prefs::Preferences,
     /// Resizable, collapsible, rearrangeable panels (built on first render).
     dock: Option<Entity<gpui_kit::component::dock::DockArea>>,
@@ -357,6 +358,10 @@ impl StudioWindow {
         cx.observe(&outputs, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&outputs, |this, _, _: &crate::outputs_panel::AddVerticalFormat, cx| {
             this.add_format(Format::vertical(), cx)
+        })
+        .detach();
+        cx.subscribe(&outputs, |this, _, _: &crate::outputs_panel::OpenRecordingSettings, cx| {
+            this.open_settings(settings::Page::Recording, cx)
         })
         .detach();
         let primary = studio.read(cx).project().primary_format().id;
@@ -411,6 +416,7 @@ impl StudioWindow {
             marquee: None,
             format_menu: None,
             settings_open: false,
+            settings_page: settings::Page::General,
             dock: None,
             prefs: crate::prefs::load_from(&crate::prefs::path()),
         }
@@ -1592,7 +1598,7 @@ impl StudioWindow {
                 live_since.map(|t| format!("Live {}", elapsed(t))).unwrap_or_else(|| "Going live…".into())
             };
             Button::new("go-live").label(label).small().danger().on_click(cx.listener(|this, _, _, cx| {
-                if this.confirm_end.is_some_and(|t| t.elapsed().as_secs_f32() < 3.0) {
+                if !this.prefs.confirm_end_stream || this.confirm_end.is_some_and(|t| t.elapsed().as_secs_f32() < 3.0) {
                     this.confirm_end = None;
                     this.studio.update(cx, |s, cx| s.end_stream(cx));
                 } else {

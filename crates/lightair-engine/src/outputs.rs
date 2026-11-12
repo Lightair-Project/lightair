@@ -199,6 +199,10 @@ pub struct EncoderConfig {
     pub constant_bitrate: bool,
     /// B-frames (WebRTC/WHIP can't carry them).
     pub bframes: bool,
+    /// Seconds between keyframes.
+    pub keyint_sec: u32,
+    /// Encode at this size instead of the canvas's (scaled on the GPU).
+    pub scaled: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +212,8 @@ pub struct RecordingConfig {
     pub path: PathBuf,
     /// Added to split files' names so canvases recorded together don't collide ("Vertical").
     pub label: Option<String>,
+    /// Start a new file every this many minutes.
+    pub split_minutes: Option<u32>,
     pub container: Container,
     pub encoders: EncoderConfig,
 }
@@ -265,6 +271,8 @@ pub struct StreamConfig {
     pub server: String,
     pub key: String,
     pub encoders: EncoderConfig,
+    /// (retries, seconds apart) when the connection drops; `None`: libobs's defaults.
+    pub reconnect: Option<(u32, u32)>,
 }
 
 // ---------------------------------------------------------------- libobs objects
@@ -457,10 +465,14 @@ unsafe fn create_encoders(
     video_output: *mut sys::video_t,
 ) -> Result<(*mut sys::obs_encoder_t, *mut sys::obs_encoder_t), String> {
     let mut v = Data::new();
-    v.set_int("bitrate", cfg.video_bitrate_kbps as i64)
-        .set_int("keyint_sec", 2)
-        .set_str("rate_control", if cfg.constant_bitrate { "CBR" } else { "ABR" })
-        .set_str("profile", "high");
+    let prores = cfg.video_encoder.contains("prores");
+    let hevc = cfg.video_encoder.contains("hevc");
+    v.set_int("keyint_sec", cfg.keyint_sec.max(1) as i64);
+    if !prores {
+        v.set_int("bitrate", cfg.video_bitrate_kbps as i64)
+            .set_str("rate_control", if cfg.constant_bitrate { "CBR" } else { "ABR" })
+            .set_str("profile", if hevc { "main" } else { "high" });
+    }
     if cfg.video_encoder == "obs_x264" {
         v.set_str("preset", "veryfast");
         if !cfg.bframes {
@@ -492,8 +504,11 @@ unsafe fn create_encoders(
             sys::obs_encoder_release(video);
             return Err(format!("Couldn't create the audio encoder ({}).", cfg.audio_encoder));
         }
-        // The format's canvas (main canvas when null).
+        // The format's canvas (main canvas when null), scaled when asked.
         sys::obs_encoder_set_video(video, if video_output.is_null() { sys::obs_get_video() } else { video_output });
+        if let Some((w, h)) = cfg.scaled {
+            sys::obs_encoder_set_scaled_size(video, w & !1, h & !1);
+        }
         sys::obs_encoder_set_audio(audio, sys::obs_get_audio());
         Ok((video, audio))
     }
@@ -590,9 +605,9 @@ impl Outputs {
         };
         let mut settings = Data::new();
         settings.set_str(path_key, &cfg.path.to_string_lossy());
-        // Manual splits only (no size/time limits); later files go next to the first one.
+        // Splits on request, or every N minutes; later files go next to the first one.
         settings.set_bool("split_file", true);
-        settings.set_int("max_time_sec", 0);
+        settings.set_int("max_time_sec", cfg.split_minutes.map_or(0, |m| m as i64 * 60));
         settings.set_int("max_size_mb", 0);
         if let Some(dir) = cfg.path.parent() {
             settings.set_str("directory", &dir.to_string_lossy());
@@ -740,6 +755,9 @@ impl Outputs {
             .map(|r| unsafe { (sys::obs_encoder_get_ref(r.video), sys::obs_encoder_get_ref(r.audio)) });
         let shared = shared.filter(|(v, a)| !v.is_null() && !a.is_null());
         let running = unsafe { start(key, output_type, &output_settings, &encoders, service, video_output, shared)? };
+        if let Some((retries, delay)) = cfg.reconnect {
+            unsafe { sys::obs_output_set_reconnect_settings(running.output, retries as i32, delay as i32) };
+        }
         self.streams.insert(cfg.id, running);
         Ok(())
     }
@@ -896,6 +914,8 @@ pub fn default_encoders(available: &[String], video_bitrate_kbps: u32, constant_
         audio_bitrate_kbps: 160,
         constant_bitrate,
         bframes: true,
+        keyint_sec: 2,
+        scaled: None,
     }
 }
 

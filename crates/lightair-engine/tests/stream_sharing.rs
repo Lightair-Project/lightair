@@ -87,6 +87,7 @@ fn identical_destinations_share_an_encoder() {
         server: format!("rtmp://127.0.0.1:{port}/live"),
         key: "test".into(),
         encoders: default_encoders(&caps, kbps, true),
+        reconnect: None,
     };
     let (a, b, c) = (config(ports[0], 2500), config(ports[1], 2500), config(ports[2], 1200));
     let ids = [a.id, b.id, c.id];

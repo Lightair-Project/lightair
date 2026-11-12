@@ -79,6 +79,7 @@ fn two_canvases_record_together() {
                 canvas,
                 path: path.clone(),
                 label: Some(label.into()),
+                split_minutes: None,
                 container: Container::HybridMp4,
                 encoders: encoders.clone(),
             };

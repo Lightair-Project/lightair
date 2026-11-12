@@ -65,6 +65,7 @@ fn pause_marker_split() {
     let cfg = RecordingConfig {
         canvas: lightair_core::Id::new(),
         label: None,
+        split_minutes: None,
         path: first.clone(),
         container: Container::HybridMp4,
         encoders: default_encoders(&engine.capabilities.encoders, 2500, false),
