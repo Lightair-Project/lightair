@@ -21,7 +21,7 @@ pub(super) struct SourcePicker {
 }
 
 /// The list setting that picks the source for an input kind (screen capture depends on its mode).
-fn device_key(kind: &str, settings: &Value) -> Option<&'static str> {
+pub(super) fn device_key(kind: &str, settings: &Value) -> Option<&'static str> {
     match kind {
         "macos-avcapture" | "macos-avcapture-fast" | "av_capture_input_v2" | "av_capture_input" => Some("device"),
         "screen_capture" => Some(match settings["type"].as_i64().unwrap_or(0) {

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -23,6 +24,7 @@ mod golive;
 mod hierarchy;
 mod inspector;
 mod layer_props;
+mod menus;
 mod palette;
 mod settings;
 mod source;
@@ -64,6 +66,14 @@ actions!(
         CutSelection,
         PasteLayers,
         DuplicateSelection,
+        BringToFront,
+        SendToBack,
+        BringForward,
+        SendBackward,
+        ToggleLayerVisible,
+        ToggleLayerLocked,
+        MoveOutOfParent,
+        FillCanvas,
         Scene1,
         Scene2,
         Scene3,
@@ -100,6 +110,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-x", CutSelection, Some("Studio")),
         KeyBinding::new("cmd-v", PasteLayers, Some("Studio")),
         KeyBinding::new("cmd-d", DuplicateSelection, Some("Studio")),
+        KeyBinding::new("cmd-shift-]", BringToFront, Some("Studio")),
+        KeyBinding::new("cmd-shift-[", SendToBack, Some("Studio")),
+        KeyBinding::new("cmd-]", BringForward, Some("Studio")),
+        KeyBinding::new("cmd-[", SendBackward, Some("Studio")),
+        KeyBinding::new("cmd-shift-h", ToggleLayerVisible, Some("Studio")),
+        KeyBinding::new("cmd-shift-l", ToggleLayerLocked, Some("Studio")),
         KeyBinding::new("cmd-shift-g", UngroupSelection, Some("Studio")),
         KeyBinding::new("cmd-shift-n", CreateEmpty, Some("Studio")),
         KeyBinding::new("alt-shift-n", CreateEmptyChild, Some("Studio")),
@@ -1300,6 +1316,16 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &CutSelection, _, cx| this.cut_selection(cx)))
             .on_action(cx.listener(|this, _: &PasteLayers, _, cx| this.paste_layers(cx)))
             .on_action(cx.listener(|this, _: &DuplicateSelection, _, cx| this.duplicate_selection(cx)))
+            .on_action(cx.listener(|this, _: &BringToFront, _, cx| this.arrange("Bring to front", |_, n| n - 1, cx)))
+            .on_action(cx.listener(|this, _: &SendToBack, _, cx| this.arrange("Send to back", |_, _| 0, cx)))
+            .on_action(cx.listener(|this, _: &BringForward, _, cx| this.arrange("Bring forward", |i, _| i + 1, cx)))
+            .on_action(cx.listener(|this, _: &SendBackward, _, cx| {
+                this.arrange("Send backward", |i, _| i.saturating_sub(1), cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleLayerVisible, _, cx| this.toggle_selection_visible(cx)))
+            .on_action(cx.listener(|this, _: &ToggleLayerLocked, _, cx| this.toggle_selection_locked(cx)))
+            .on_action(cx.listener(|this, _: &MoveOutOfParent, _, cx| this.move_out_of_parent(cx)))
+            .on_action(cx.listener(|this, _: &FillCanvas, _, cx| this.fill_canvas(cx)))
             .on_action(cx.listener(|this, _: &UngroupSelection, _, cx| this.ungroup_selection(cx)))
             .on_action(cx.listener(|this, _: &CreateEmpty, window, cx| this.create_empty(None, window, cx)))
             .on_action(cx.listener(|this, _: &CreateEmptyChild, window, cx| {
@@ -1707,6 +1733,7 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let selected = studio.selected_scene;
         let program = project.program;
+        let shell = cx.entity().downgrade();
         let rows = project.scenes.iter().enumerate().map(|(i, scene)| {
             let id = scene.id;
             let on_air = program == Some(id);
@@ -1745,6 +1772,15 @@ impl StudioWindow {
                 .on_drag(dragged, |row, _, _, cx| cx.new(|_| row.clone()))
                 .drag_over::<DraggedRow>(|style, _, _, _| style.bg(tok::bg_selected()))
                 .on_drop(cx.listener(move |this, row: &DraggedRow, _, cx| this.drop_row(row, target, i, cx)))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _, _, cx| {
+                        this.studio.update(cx, |s, cx| {
+                            s.selected_scene = Some(id);
+                            cx.notify();
+                        })
+                    }),
+                )
                 .when(on_air, |d| {
                     d.child(
                         div()
@@ -1776,6 +1812,10 @@ impl StudioWindow {
                             .child("ON AIR"),
                     )
                 })
+                .context_menu({
+                    let shell = shell.clone();
+                    move |m, _, cx| menus::scene_menu(id, m, &shell, cx)
+                })
         });
         div()
             .flex()
@@ -1791,7 +1831,12 @@ impl StudioWindow {
                     .min_h_0()
                     .gap_0p5()
                     .overflow_y_scroll()
-                    .children(rows),
+                    .children(rows)
+                    // Empty space below: its own menu.
+                    .child(div().id("scenes-end").flex_1().min_h(px(24.)).context_menu({
+                        let shell = cx.entity().downgrade();
+                        move |m, _, _| menus::scenes_blank_menu(m, &shell)
+                    })),
             )
             .child(div().border_t_1().border_color(tok::border()).pt_2().child(picker))
     }
@@ -2466,11 +2511,16 @@ impl StudioWindow {
                 .bg(tok::bg_canvas_well())
                 .when(live, |d| d.border_2().border_color(tok::live()))
                 .cursor(self.canvas_cursor(project, cx))
+                .on_mouse_down(MouseButton::Right, cx.listener(Self::canvas_right_down))
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::canvas_down))
                 .on_mouse_move(cx.listener(Self::canvas_move))
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::canvas_up))
                 .on_mouse_up_out(MouseButton::Left, cx.listener(Self::canvas_up))
-                .children(stages),
+                .children(stages)
+                .context_menu({
+                    let shell = cx.entity().downgrade();
+                    move |m, window, cx| menus::layer_menu(m, &shell, window, cx)
+                }),
         );
         let well = match self.studio_mode.then(|| self.program_column(project, cx)) {
             Some(column) => well.child(column),

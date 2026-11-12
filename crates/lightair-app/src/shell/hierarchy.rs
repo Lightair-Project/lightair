@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{Clip, Command, Id, Layer, Layout, Project, Scene};
@@ -96,6 +97,7 @@ impl StudioWindow {
         let dragging = cx.has_active_drag();
         let hint = self.tree_drop.filter(|_| dragging);
         let list = rows(&scene, &self.collapsed_layers);
+        let shell = cx.entity().downgrade();
         let mut items = Vec::new();
         for (i, (layer, depth, holds)) in list.into_iter().enumerate() {
             let id = layer.id;
@@ -138,6 +140,7 @@ impl StudioWindow {
                         this.start_rename(target, &name, window, cx);
                     }
                 }))
+                .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.row_right_down(id, cx)))
                 .on_drag(dragged, |row, _, _, cx| cx.new(|_| row.clone()))
                 .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DraggedRow>, _, cx| {
                     if !ev.bounds.contains(&ev.event.position) {
@@ -218,6 +221,10 @@ impl StudioWindow {
                         .rounded_full()
                         .bg(tok::accent_primary());
                     d.child(if z == TreeDrop::Above { line.top(px(-1.)) } else { line.bottom(px(-1.)) })
+                })
+                .context_menu({
+                    let shell = shell.clone();
+                    move |m, window, cx| super::menus::layer_menu(m, &shell, window, cx)
                 });
             items.push(row);
         }
@@ -251,7 +258,12 @@ impl StudioWindow {
                         .on_drop(cx.listener(move |this, row: &DraggedRow, _, cx| {
                             this.tree_drop = None;
                             this.drop_on_tree(row, None, cx);
-                        })),
+                        }))
+                        .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.select_layer(None, cx)))
+                        .context_menu({
+                            let shell = shell.clone();
+                            move |m, _, cx| super::menus::blank_menu(m, &shell, cx)
+                        }),
                 ),
         )
     }

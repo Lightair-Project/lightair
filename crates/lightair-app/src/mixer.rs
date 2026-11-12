@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
+use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{Command, Effect, Id, Input, Track};
@@ -167,7 +168,28 @@ impl Render for MixerPanel {
                 *value = if target > fallen { target } else { fallen.max(-90.0) };
             }
             let shown = *shown;
-            strips.push(self.strip(i, track, shown, cx).into_any_element());
+            let strip = self.strip(i, track, shown, cx);
+            let menu = strip_menu(self.studio.downgrade(), track);
+            strips.push(
+                div()
+                    .id(("strip-menu", i))
+                    .flex_none()
+                    .h_full()
+                    .child(strip)
+                    .on_mouse_down(MouseButton::Right, {
+                        let (studio, id) = (self.studio.downgrade(), track.id);
+                        move |_, _, cx| {
+                            if let Some(s) = studio.upgrade() {
+                                s.update(cx, |s, cx| {
+                                    s.select_track(Some(id));
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    })
+                    .context_menu(move |m, _, _| menu(m))
+                    .into_any_element(),
+            );
         }
         self.display.retain(|id, _| project.track(*id).is_some());
 
@@ -519,5 +541,48 @@ impl EventEmitter<gpui_kit::component::dock::PanelEvent> for MixerPanel {}
 impl Focusable for MixerPanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+/// A strip's right-click menu: mute, listen, back to 0 dB, remove.
+fn strip_menu(
+    studio: WeakEntity<Studio>,
+    track: &Track,
+) -> impl Fn(gpui_kit::component::menu::PopupMenu) -> gpui_kit::component::menu::PopupMenu + 'static {
+    use gpui_kit::component::menu::PopupMenuItem;
+    let (id, muted, cue, at_zero) = (track.id, track.muted, track.cue, track.volume_db.abs() < 0.05);
+    move |menu| {
+        let run = |cmd: Command| {
+            let studio = studio.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                if let Some(s) = studio.upgrade() {
+                    s.update(cx, |s, cx| {
+                        let _ = s.execute(cmd.clone(), cx);
+                    });
+                }
+            }
+        };
+        menu.item(
+            PopupMenuItem::new(if muted { "Unmute" } else { "Mute" })
+                .icon(crate::ui::icon(if muted { "volume-2" } else { "volume-x" }))
+                .on_click(run(Command::SetTrackMuted { track: id, muted: !muted })),
+        )
+        .item(
+            PopupMenuItem::new("Listen (cue)")
+                .icon(crate::ui::icon("headphones"))
+                .checked(cue)
+                .on_click(run(Command::SetTrackCue { track: id, cue: !cue })),
+        )
+        .item(
+            PopupMenuItem::new("Reset to 0 dB")
+                .disabled(at_zero)
+                .on_click(run(Command::SetTrackVolume { track: id, volume_db: 0.0 })),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new("Remove track")
+                .icon(crate::ui::icon("trash"))
+                .on_click(run(Command::RemoveTrack { track: id })),
+        )
     }
 }

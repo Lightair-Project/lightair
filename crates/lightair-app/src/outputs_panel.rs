@@ -6,6 +6,7 @@ use std::time::Instant;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{Command, Destination, Id};
@@ -259,14 +260,46 @@ impl Render for OutputsPanel {
                             })
                         })),
                 )
-                .child(ui::icon_button(("dest-remove", i), "trash", tok::text_tertiary()).on_click(
-                    cx.listener(move |this, _, _, cx| {
+                .child(ui::icon_button(("dest-remove", i), "trash", tok::text_tertiary()).on_click(cx.listener(
+                    move |this, _, _, cx| {
                         crate::secrets::delete_stream_key(id);
                         this.studio.update(cx, |s, cx| {
                             let _ = s.execute(Command::RemoveDestination { destination: id }, cx);
                         })
-                    }),
-                )),
+                    },
+                )))
+                .context_menu({
+                    let studio = self.studio.downgrade();
+                    move |menu, _, _| {
+                        use gpui_kit::component::menu::PopupMenuItem;
+                        let run = |cmd: Command, forget_key: bool| {
+                            let studio = studio.clone();
+                            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                if forget_key {
+                                    crate::secrets::delete_stream_key(id);
+                                }
+                                if let Some(s) = studio.upgrade() {
+                                    s.update(cx, |s, cx| {
+                                        let _ = s.execute(cmd.clone(), cx);
+                                    });
+                                }
+                            }
+                        };
+                        menu.item(
+                            PopupMenuItem::new(if enabled { "Skip when going live" } else { "Use when going live" })
+                                .on_click(run(
+                                    Command::SetDestinationEnabled { destination: id, enabled: !enabled },
+                                    false,
+                                )),
+                        )
+                        .separator()
+                        .item(
+                            PopupMenuItem::new("Remove")
+                                .icon(ui::icon("trash"))
+                                .on_click(run(Command::RemoveDestination { destination: id }, true)),
+                        )
+                    }
+                }),
             );
         }
 
