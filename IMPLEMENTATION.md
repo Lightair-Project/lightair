@@ -35,13 +35,13 @@ Done:
 - Inspector: position, size, rotation steppers; fit mode; fill canvas; delete.
 - Rename layers and scenes inline (double-click, or Enter on the selection; Enter or clicking away commits); drag rows to reorder layers and scenes.
 - Rotation handle above the selection (⇧ snaps to 15°) and crop by ⌥-dragging a corner (the picture keeps its scale; Reset crop in the Inspector). Rotated layers are outlined, hit-tested, resized and cropped in their own frame (the opposite corner stays put); the geometry is unit-tested.
-- Multi-select: ⇧/⌘-click in Layers, ⇧-click on the canvas, ⌘A; dragging any selected layer moves them all (one undo step), arrow keys nudge them, Delete removes them, and the Inspector aligns them by their visible bounds.
+- Multi-select: ⇧/⌘-click in Layers, ⇧-click on the canvas, ⌘A; dragging any selected layer moves them all (one undo step), arrow keys nudge them, Delete removes them, and the Inspector aligns and evenly spaces them by their visible bounds. Dragging on empty canvas draws a selection box (⇧ adds).
 - Command palette (⌘K): fuzzy search over scenes and actions (Take, Studio mode, record, go live, clip, add layers and scenes, add vertical, import, transitions, undo/redo); ↑↓ ↩ Esc.
 
 Remaining:
 - `lightair-ui` crate with the studio components (scrubbable fields, `LayerRow`, `SceneCard`, `FormatTabs`).
 - gpui-kit dock layout (resize, collapse, pop-out, workspaces).
-- Groups, marquee selection, distribute, rulers and guides.
+- Groups, rulers and guides.
 - Onboarding, settings window.
 
 ## M5 · Audio 🔨
