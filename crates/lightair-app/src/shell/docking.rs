@@ -143,7 +143,7 @@ impl Render for ShellPanel {
             window.request_animation_frame();
         }
         let region = self.region;
-        let body = shell.update(cx, |w, cx| {
+        shell.update(cx, |w, cx| {
             let project = w.studio.read(cx).project().clone();
             match region {
                 Region::Layers => w.hierarchy_panel(&project, cx).into_any_element(),
@@ -152,8 +152,7 @@ impl Render for ShellPanel {
                 Region::Inspector => w.inspector(&project, cx).into_any_element(),
                 Region::Assets => w.assets_panel(&project, cx).into_any_element(),
             }
-        });
-        body
+        })
     }
 }
 
