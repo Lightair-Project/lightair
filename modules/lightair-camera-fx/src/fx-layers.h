@@ -17,6 +17,7 @@ void fx_layers_update(struct fx_layers *fx, obs_data_t *settings);
 
 bool fx_layers_active(const struct fx_layers *fx);
 bool fx_layers_needs_face(const struct fx_layers *fx);
+bool fx_layers_light_active(const struct fx_layers *fx);
 bool fx_layers_needs_person(const struct fx_layers *fx); /* light uses the body mask */
 
 /* Adds the selected effect's distortion to the user's reshape sliders. */

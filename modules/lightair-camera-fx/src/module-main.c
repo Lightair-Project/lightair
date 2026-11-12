@@ -8,8 +8,6 @@ the License, or (at your option) any later version.
 */
 
 #include <obs-module.h>
-#include <util/dstr.h>
-#include <string.h>
 
 #include "makeup.h"
 #include "presets.h"
@@ -30,32 +28,11 @@ const char *obs_module_description(void)
 	return "Face-aware skin, shape, makeup, effects, atmosphere, colour and light for cameras.";
 }
 
-/* ONNX Runtime ships inside the plugin bundle (Contents/Frameworks), loaded by full path so it
- * can't clash with another copy in the process. */
-static void set_runtime_path(void)
-{
-#ifdef BEAUTY_ORT_FILE
-	const char *bin = obs_get_module_binary_path(obs_current_module());
-	if (!bin)
-		return;
-	struct dstr p = {0};
-	dstr_copy(&p, bin);
-	char *slash = strrchr(p.array, '/');
-	if (slash)
-		*slash = 0;
-	p.len = strlen(p.array);
-	dstr_cat(&p, "/../Frameworks/" BEAUTY_ORT_FILE);
-	face_tracker_set_runtime_library(p.array);
-	dstr_free(&p);
-#endif
-}
-
 extern struct obs_source_info shape_mask_info;
 extern struct obs_source_info transform3d_info;
 
 bool obs_module_load(void)
 {
-	set_runtime_path();
 	makeup_presets_load();
 	presets_load();
 	obs_register_source(&beauty_filter_info);

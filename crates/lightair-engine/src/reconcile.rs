@@ -328,6 +328,33 @@ impl Reconciler {
         self.update_layer(scene, format, &l, index);
     }
 
+    /// Whether the input's face effects see a face right now (`None`: it has none running).
+    pub fn face_present(&self, input: Id) -> Option<bool> {
+        let chain = self.input_effects.get(&input)?;
+        chain.iter().find_map(|(_, filter)| unsafe {
+            let id = std::ffi::CStr::from_ptr(sys::obs_source_get_id(filter.as_ptr()));
+            if id.to_bytes() != b"lightair_camera_studio" || !sys::obs_source_enabled(filter.as_ptr()) {
+                return None;
+            }
+            let ph = sys::obs_source_get_proc_handler(filter.as_ptr());
+            let mut cd = sys::calldata_t::default();
+            let mut present = false;
+            if sys::proc_handler_call(ph, c"face_present".as_ptr(), &mut cd) {
+                // calldata_get_bool is a header inline over calldata_get_data.
+                sys::calldata_get_data(
+                    &cd,
+                    c"present".as_ptr(),
+                    &mut present as *mut bool as *mut std::ffi::c_void,
+                    std::mem::size_of::<bool>(),
+                );
+            }
+            if !cd.fixed && !cd.stack.is_null() {
+                sys::bfree(cd.stack as *mut std::ffi::c_void);
+            }
+            Some(present)
+        })
+    }
+
     /// Starts inputs as if they were on screen (captures open, media loads) without putting
     /// them on air, until `release_inputs`.
     pub fn hold_inputs(&mut self, inputs: &[Id]) {
