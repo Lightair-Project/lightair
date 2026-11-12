@@ -19,11 +19,7 @@ pub fn starter_project() -> Project {
         display_settings["display_uuid"] = uuid.into();
     }
     let display = Input::new("Main display", "screen_capture", display_settings);
-    let icon_path = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.ancestors().nth(3).map(|root| root.join("branding/final/icon/lightair-icon-512.png")))
-        .filter(|p| p.exists())
-        .unwrap_or_default();
+    let icon_path = brand_icon();
     let logo = Input::new("Lightair logo", "image_source", json!({"file": icon_path.to_string_lossy()}));
 
     let mut main = Scene::new("Main");
@@ -85,11 +81,7 @@ pub fn plain_project() -> Project {
         lightair_engine::timers::TIMER_KIND,
         json!({"mode": "countdown", "seconds": 300, "font": {"face": "Helvetica Neue", "size": 96, "flags": 0}, "color1": 0xFFFFFFFFu32, "color2": 0xFFFFFFFFu32}),
     );
-    let icon = std::env::var_os("LIGHTAIR_REPO")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::current_exe().ok().and_then(|e| e.ancestors().nth(3).map(|p| p.to_path_buf())))
-        .map(|root| root.join("branding/final/icon/lightair-icon-512.png"))
-        .unwrap_or_default();
+    let icon = brand_icon();
     let logo = Input::new("Logo", "image_source", json!({"file": icon.to_string_lossy()}));
     let f = format.id;
     let mut main = Scene::new("Main");
@@ -99,7 +91,12 @@ pub fn plain_project() -> Project {
     let mut soon = Scene::new("Starting Soon");
     soon.layers.push(Layer::new("Background", bg.id, [(f, Layout::boxed(0.0, 0.0, w, h))]));
     soon.layers.push(Layer::new("Countdown", timer.id, [(f, Layout::boxed(760.0, 470.0, 400.0, 140.0))]));
-    soon.layers.push(Layer::new("Logo", logo.id, [(f, Layout::boxed(1700.0, 860.0, 160.0, 160.0))]));
+    let logo_box = Layout {
+        shape: Some(lightair_core::Shape::new(lightair_core::ShapeKind::Circle)),
+        crop: lightair_core::Crop { left: 64, top: 64, right: 64, bottom: 64 },
+        ..Layout::boxed(1500.0, 640.0, 360.0, 360.0)
+    };
+    soon.layers.push(Layer::new("Logo", logo.id, [(f, logo_box)]));
     let tone = |name: &str| Input::new(name, "color_source_v3", json!({}));
     let (a, b) = (tone("Mic (demo)"), tone("Music (demo)"));
     let tracks = [Track::new("Mic", a.id), Track::new("Music", b.id)];
@@ -119,4 +116,15 @@ pub fn plain_project() -> Project {
         c.apply(&mut p).expect("plain starter is valid");
     }
     p
+}
+
+/// The brand icon in the repository, found from the running executable whether it runs from
+/// `target/debug` or inside the development app bundle.
+fn brand_icon() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.ancestors().map(|a| a.join("branding/final/icon/lightair-icon-512.png")).find(|p| p.exists())
+        })
+        .unwrap_or_default()
 }

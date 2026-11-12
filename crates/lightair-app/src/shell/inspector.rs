@@ -10,7 +10,7 @@ use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Fit, Format, Input, Layer, Layout, Project, Scene};
+use lightair_core::{Command, Fit, Format, Input, Layer, Layout, Project, Scene, Shape, ShapeKind};
 
 use super::StudioWindow;
 use crate::camera_studio::{KIND as CAMERA_STUDIO, looks};
@@ -343,7 +343,82 @@ impl StudioWindow {
                     }));
                 if cropping { b.primary() } else { b.ghost() }
             });
-        let transform = self.section("Transform", Some(crop_actions.into_any_element()), cx).child(grid).child(fits);
+        let mut transform =
+            self.section("Transform", Some(crop_actions.into_any_element()), cx).child(grid).child(fits);
+        // Shape: part of the layer's frame, cut from the cropped picture.
+        let shape = lo.shape;
+        let with_shape = |sh: Option<Shape>| Command::SetLayout {
+            scene: sid,
+            layer: lid,
+            format: fid,
+            layout: Layout { shape: sh, ..lo },
+        };
+        let keep = |kind: ShapeKind| Some(Shape { kind, ..shape.unwrap_or(Shape::new(kind)) });
+        transform = transform.child(self.segmented(
+            "shape",
+            vec![
+                ("Rectangle", with_shape(None), shape.is_none()),
+                ("Rounded", with_shape(keep(ShapeKind::Rounded)), shape.is_some_and(|s| s.kind == ShapeKind::Rounded)),
+                ("Circle", with_shape(keep(ShapeKind::Circle)), shape.is_some_and(|s| s.kind == ShapeKind::Circle)),
+                ("Pill", with_shape(keep(ShapeKind::Pill)), shape.is_some_and(|s| s.kind == ShapeKind::Pill)),
+            ],
+            cx,
+        ));
+        if let Some(sh) = shape {
+            let row = |label: &'static str, slider: Slider, value: String| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(64.)).text_size(px(12.)).text_color(tok::text_secondary()).child(label))
+                    .child(div().flex_1().child(slider))
+                    .child(
+                        div()
+                            .w(px(40.))
+                            .text_right()
+                            .text_size(px(11.))
+                            .font_family("Menlo")
+                            .text_color(tok::text_tertiary())
+                            .child(value),
+                    )
+            };
+            let set_shape = move |f: fn(&mut Shape, f32)| {
+                move |v: f32| {
+                    let mut s = sh;
+                    f(&mut s, v);
+                    Command::SetLayout { scene: sid, layer: lid, format: fid, layout: Layout { shape: Some(s), ..lo } }
+                }
+            };
+            let key = |name: &str| format!("shape:{lid}:{fid}:{name}");
+            if sh.kind == ShapeKind::Rounded {
+                let s = self.slider(key("radius"), (0.0, 1.0, 0.01), sh.radius, set_shape(|s, v| s.radius = v), cx);
+                transform = transform.child(row("Corners", s, format!("{:.0}%", sh.radius * 100.0)));
+            }
+            let s = self.slider(key("feather"), (0.0, 40.0, 1.0), sh.feather, set_shape(|s, v| s.feather = v), cx);
+            transform = transform.child(row("Softness", s, format!("{:.0} px", sh.feather)));
+            let s = self.slider(key("border"), (0.0, 40.0, 1.0), sh.border, set_shape(|s, v| s.border = v), cx);
+            transform = transform.child(row("Border", s, format!("{:.0} px", sh.border)));
+            if sh.border > 0.0 {
+                let current = super::layer_props::rgb_of(sh.border_color);
+                let mut swatches = div().flex().flex_wrap().gap_1p5();
+                for (i, &rgb) in super::layer_props::PALETTE.iter().enumerate() {
+                    let colour = Shape { border_color: super::layer_props::abgr(rgb), ..sh };
+                    let cmd = with_shape(Some(colour));
+                    swatches = swatches.child(
+                        div()
+                            .id(("border-swatch", i))
+                            .size(px(20.))
+                            .rounded_full()
+                            .cursor_pointer()
+                            .bg(super::layer_props::rgb_to_hsla(rgb))
+                            .border_2()
+                            .border_color(if current == rgb { tok::text() } else { tok::border() })
+                            .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
+                    );
+                }
+                transform = transform.child(swatches);
+            }
+        }
 
         let mut col = body.gap_0().child(header);
         if let Some(source) = input.as_ref().and_then(|i| self.source_section(i, cx)) {
@@ -353,9 +428,6 @@ impl StudioWindow {
         if let Some(input) = &input {
             if let Some(content) = self.content_section(input, cx) {
                 col = col.child(content);
-            }
-            if let Some(shape) = self.shape_section(input, cx) {
-                col = col.child(shape);
             }
             col = col.child(self.effects_section(input, cx));
             if let Some(cs) = self.camera_studio_compact(input, cx) {

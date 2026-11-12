@@ -15,6 +15,8 @@ use crate::obs::{Scene, Source};
 
 pub(crate) struct Tween {
     pub item: *mut sys::obs_sceneitem_t,
+    /// For a shaped layer: the item inside its group and the mask.
+    pub masked: Option<crate::reconcile::Masked>,
     pub from: Layout,
     pub to: Layout,
 }
@@ -27,9 +29,11 @@ pub(crate) struct FormatMove {
     /// The format's transition and the scene to land on.
     pub transition: *mut sys::obs_source_t,
     pub dest: *mut sys::obs_source_t,
-    /// Per-item fade transitions, kept alive for the animation.
+    /// Per-item fade transitions and shape masks, kept alive for the animation.
     #[allow(dead_code)]
     pub fades: Vec<Source>,
+    #[allow(dead_code)]
+    pub masks: Vec<crate::reconcile::Masked>,
 }
 
 pub(crate) struct MoveAnim {
@@ -82,7 +86,9 @@ impl MoveAnim {
         let e = ease_in_out(t);
         for f in &self.formats {
             for tw in &f.tweens {
-                unsafe { crate::reconcile::apply_layout(tw.item, &lerp_layout(&tw.from, &tw.to, e)) };
+                unsafe {
+                    crate::reconcile::layout_item(tw.item, tw.masked.as_ref(), &lerp_layout(&tw.from, &tw.to, e))
+                };
             }
         }
         if t >= 1.0 {

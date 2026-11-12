@@ -26,7 +26,7 @@ mod palette;
 mod settings;
 mod source;
 
-use crate::geometry::{self as geo, CORNERS, Corner, EDGES};
+use crate::geometry::{self as geo, CORNERS, Corner};
 use crate::mixer::MixerPanel;
 use crate::outputs_panel::{OutputsPanel, elapsed};
 use crate::rows::{DraggedRow, Renaming, RowTarget};
@@ -106,6 +106,8 @@ enum DragMode {
     Crop(Corner, (f32, f32)),
     /// Crop mode: an edge handle crops one side.
     CropEdge(geo::Edge, (f32, f32)),
+    /// Crop mode: dragging inside slides the picture under the crop.
+    CropPan((f32, f32)),
 }
 
 /// Distance of the rotation handle above the selection, in screen pixels.
@@ -156,6 +158,7 @@ pub struct StudioWindow {
     transition_menu: bool,
     /// The layer showing crop handles instead of resize handles.
     crop_mode: Option<Id>,
+    crop_preview_sent: Option<(Id, Id, Id)>,
     /// The source picker, and fetched source lists per (input, setting).
     source_picker: Option<source::SourcePicker>,
     source_cache: RefCell<HashMap<(Id, &'static str), SourceOptions>>,
@@ -224,6 +227,7 @@ impl StudioWindow {
             looks_for: None,
             transition_menu: false,
             crop_mode: None,
+            crop_preview_sent: None,
             source_picker: None,
             source_cache: RefCell::default(),
             camera_devices: vec![],
@@ -504,14 +508,14 @@ impl StudioWindow {
                 let mode = match size {
                     Some((w, h)) => {
                         let size = (w as f32, h as f32);
-                        CORNERS.iter().find(|c| near(geo::corner(l, **c))).map(|c| DragMode::Crop(*c, size)).or_else(
-                            || {
-                                EDGES
-                                    .iter()
-                                    .find(|e| near(geo::edge_middle(l, **e)))
-                                    .map(|e| DragMode::CropEdge(*e, size))
-                            },
-                        )
+                        // Handles sit on the shape (a circle's on the circle); inside pans.
+                        let (corners, edges) = geo::crop_handles(l);
+                        corners
+                            .iter()
+                            .find(|(_, p)| near(*p))
+                            .map(|(c, _)| DragMode::Crop(*c, size))
+                            .or_else(|| edges.iter().find(|(_, p)| near(*p)).map(|(e, _)| DragMode::CropEdge(*e, size)))
+                            .or_else(|| geo::contains(l, (x, y)).then_some(DragMode::CropPan(size)))
                     }
                     None => None,
                 };
@@ -666,6 +670,7 @@ impl StudioWindow {
             }
             DragMode::Crop(corner, size) => l = geo::crop(&l, corner, size, (dx, dy)),
             DragMode::CropEdge(edge, size) => l = geo::crop_edge(&l, edge, size, (dx, dy)),
+            DragMode::CropPan(size) => l = geo::crop_pan(&l, size, (dx, dy)),
             DragMode::Move => {
                 l.x += dx;
                 l.y += dy;
@@ -934,6 +939,7 @@ impl Render for StudioWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.request_animation_frame();
         self.ensure_dock(window, cx);
+        self.sync_crop_preview(cx);
         self.sync_previews(cx);
         self.sync_layer_props(window, cx);
         let studio = self.studio.read(cx);
@@ -1162,6 +1168,19 @@ impl StudioWindow {
                     .tooltip(|w, cx| Tooltip::new("Settings (⌘,)").build(w, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
             )
+    }
+
+    /// Keeps libobs showing the layer being cropped whole (crop mode), or not.
+    fn sync_crop_preview(&mut self, cx: &mut Context<Self>) {
+        let studio = self.studio.read(cx);
+        let project = studio.project().clone();
+        let want = self
+            .crop_mode
+            .and_then(|layer| studio.selected_scene.map(|scene| (scene, self.format_id(&project), layer)));
+        if want != self.crop_preview_sent {
+            self.crop_preview_sent = want;
+            studio.engine().post(move |s| s.reconciler.set_crop_preview(want, &project));
+        }
     }
 
     fn toggle_add_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1794,29 +1813,29 @@ impl StudioWindow {
                 let to_stage = move |(px_, py_): (f32, f32)| (lx + px_ * s, ly + py_ * s);
                 let outline = geo::outline(&l).map(to_stage);
                 let cropping = editing && !locked && self.crop_mode == Some(lid);
-                // Crop handles: an L at each corner and a bar at each edge's middle, following
-                // the layer's rotation (screen pixels).
-                let crop_marks: Vec<((f32, f32), (f32, f32))> = if cropping {
-                    let unit = |a: (f32, f32), b: (f32, f32)| {
-                        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-                        let n = (dx * dx + dy * dy).sqrt().max(1.0);
-                        (dx / n, dy / n)
-                    };
-                    let mut marks = Vec::new();
-                    for i in 0..4 {
-                        let (c, next, prev) = (outline[i], outline[(i + 1) % 4], outline[(i + 3) % 4]);
-                        for other in [next, prev] {
-                            let (ux, uy) = unit(c, other);
-                            marks.push((c, (c.0 + ux * 16.0, c.1 + uy * 16.0)));
-                        }
-                        let m = ((c.0 + next.0) / 2.0, (c.1 + next.1) / 2.0);
-                        let (ux, uy) = unit(c, next);
-                        marks.push(((m.0 - ux * 12.0, m.1 - uy * 12.0), (m.0 + ux * 12.0, m.1 + uy * 12.0)));
-                    }
-                    marks
-                } else {
-                    Vec::new()
-                };
+                // Crop mode: the whole picture (where it would sit uncropped), dimmed outside the
+                // crop's shape; the shape's outline; handles on the shape.
+                let crop_view = cropping.then(|| {
+                    // The full frame needs the source's size; the shape and handles don't.
+                    let input = studio
+                        .selected_scene
+                        .and_then(|id| project.scene(id))
+                        .and_then(|sc| sc.layer(lid))
+                        .map(|layer| layer.input);
+                    let size = input.and_then(|i| studio.engine().call(move |s| s.reconciler.input_size(i)));
+                    let full = size.map(|(w, h)| geo::outline(&l.uncropped((w as f32, h as f32))).map(to_stage));
+                    let shape: Vec<(f32, f32)> = geo::shape_outline(&l).into_iter().map(to_stage).collect();
+                    let (corners, edges) = geo::crop_handles(&l);
+                    let handles: Vec<(f32, f32)> = corners
+                        .iter()
+                        .map(|(_, p)| to_stage(*p))
+                        .chain(edges.iter().map(|(_, p)| to_stage(*p)))
+                        .collect();
+                    (full, shape, handles)
+                });
+                let crop_paths = crop_view.as_ref().map(|(full, shape, _)| (*full, shape.clone()));
+                let round_handles =
+                    l.shape.is_some_and(|sh| sh.kind != lightair_core::ShapeKind::Rounded || sh.radius > 0.3);
                 let knob = (!locked && editing && !cropping).then(|| {
                     (to_stage(geo::rotate_handle(&l, 0.0)), to_stage(geo::rotate_handle(&l, ROTATE_OFFSET / s)))
                 });
@@ -1828,7 +1847,9 @@ impl StudioWindow {
                         move |bounds, _, window, _| {
                             let o = bounds.origin;
                             let at = |(x, y): (f32, f32)| point(o.x + px(x), o.y + px(y));
-                            for (width, c) in [(3.0, edge), (1.0, colour)] {
+                            // While cropping, the shape's outline replaces the box.
+                            for (width, c) in [(3.0, edge), (1.0, colour)].into_iter().filter(|_| crop_paths.is_none())
+                            {
                                 let mut path = PathBuilder::stroke(px(width));
                                 path.move_to(at(outline[0]));
                                 for p in &outline[1..] {
@@ -1847,11 +1868,31 @@ impl StudioWindow {
                                     window.paint_path(path, colour);
                                 }
                             }
-                            for (width, c) in [(6.0, edge), (4.0, colour)] {
-                                for (a, b) in &crop_marks {
+                            if let Some((full, shape)) = &crop_paths {
+                                // Dim the cut-away part: the full frame with the shape as a hole.
+                                if let Some(full) = full {
+                                    let mut dim = PathBuilder::fill();
+                                    dim.move_to(at(full[0]));
+                                    for p in &full[1..] {
+                                        dim.line_to(at(*p));
+                                    }
+                                    dim.close();
+                                    dim.move_to(at(shape[0]));
+                                    for p in shape[1..].iter().rev() {
+                                        dim.line_to(at(*p));
+                                    }
+                                    dim.close();
+                                    if let Ok(path) = dim.build() {
+                                        window.paint_path(path, tok::crop_dim());
+                                    }
+                                }
+                                for (width, c) in [(3.0, edge), (1.5, colour)] {
                                     let mut path = PathBuilder::stroke(px(width));
-                                    path.move_to(at(*a));
-                                    path.line_to(at(*b));
+                                    path.move_to(at(shape[0]));
+                                    for p in &shape[1..] {
+                                        path.line_to(at(*p));
+                                    }
+                                    path.close();
                                     if let Ok(path) = path.build() {
                                         window.paint_path(path, c);
                                     }
@@ -1862,6 +1903,21 @@ impl StudioWindow {
                     .absolute()
                     .size_full(),
                 );
+                if let Some((_, _, handles)) = &crop_view {
+                    for (hx, hy) in handles {
+                        stage = stage.child(
+                            div()
+                                .absolute()
+                                .left(px(hx - 5.))
+                                .top(px(hy - 5.))
+                                .size(px(10.))
+                                .when(round_handles, |d| d.rounded_full())
+                                .bg(tok::canvas_selection())
+                                .border_1()
+                                .border_color(tok::canvas_selection_edge()),
+                        );
+                    }
+                }
                 if let Some((_, (kx, ky))) = knob {
                     stage = stage.child(
                         div()
