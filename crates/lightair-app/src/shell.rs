@@ -2067,7 +2067,7 @@ impl StudioWindow {
                 .text_size(px(11.))
                 .when(safe.is_some(), |d| d.bg(tok::bg_selected()))
                 .hover(|d| d.bg(tok::bg_raised()))
-                .child(ui::icon("scan").size(px(14.)).text_color(tok::text_secondary()))
+                .child(ui::icon("lightair-safe-areas").size(px(14.)).text_color(tok::text_secondary()))
                 // The icon alone until a profile is on; then its name.
                 .children(safe.map(Profile::label))
                 .tooltip(|w, cx| {
@@ -2172,7 +2172,7 @@ impl StudioWindow {
                 .text_size(px(12.))
                 .when(self.studio_mode, |d| d.bg(tok::bg_selected()))
                 .hover(|d| d.bg(tok::bg_raised()))
-                .child(ui::icon("columns-2").size(px(14.)).text_color(tok::text_secondary()))
+                .child(ui::icon("lightair-cue").size(px(14.)).text_color(tok::text_secondary()))
                 .child("Cue scenes")
                 .tooltip(|w, cx| {
                     Tooltip::new("Edit the next scene without viewers seeing it, then Take it live (⌘↩)").build(w, cx)

@@ -1,5 +1,6 @@
 //! Lightair application entry point.
 
+mod assets;
 mod camera_studio;
 mod geometry;
 mod mixer;
@@ -62,7 +63,7 @@ fn main() {
     }
     let preview = Preview::attach();
 
-    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx: &mut App| {
+    gpui_kit::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         gpui_kit::init(cx);
         ui::apply_theme(cx);
         shell::bind_keys(cx);
