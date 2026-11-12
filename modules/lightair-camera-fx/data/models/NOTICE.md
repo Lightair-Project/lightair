@@ -1,6 +1,8 @@
 # Bundled models
 
-Downloaded at configure time by CMakeLists.txt; redistributed unchanged.
+The models below run on Core ML: `coreml/*.mlpackage` are fp16 conversions of these ONNX files
+(made by `tools/convert-coreml.py`; the segmenter has its softmax and class mix built in), compiled
+into the module at build time. The ONNX originals are only needed to re-run the conversion.
 
 | File | Model | Source | License |
 |---|---|---|---|
@@ -16,5 +18,5 @@ Model weights © Google LLC / OpenCV contributors, used under their licenses.
 `art/face-mesh/canonical_face_model.obj` is Google MediaPipe's canonical face model (468
 vertices, UVs, triangles) from
 [mediapipe/modules/face_geometry/data](https://github.com/google-ai-edge/mediapipe/tree/master/mediapipe/modules/face_geometry/data),
-© Google LLC, Apache-2.0. `src/face-mesh-data.h` and `data/makeup/face-paint.png` are generated
-from it by `tools/gen-face-paint.py`.
+© Google LLC, Apache-2.0. `src/face-mesh-data.h` and `data/makeup/face-{paint,liner,normal}.png` are generated from it by
+Dewy's `tools/gen-face-paint.py`.

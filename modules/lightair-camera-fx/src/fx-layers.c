@@ -186,6 +186,11 @@ bool fx_layers_active(const struct fx_layers *fx)
 	       effect_active(fx);
 }
 
+bool fx_layers_light_active(const struct fx_layers *fx)
+{
+	return fx->light_on && fx->light_amt > 0;
+}
+
 bool fx_layers_needs_face(const struct fx_layers *fx)
 {
 	return (fx->light_on && fx->light_amt > 0) || effect_active(fx);

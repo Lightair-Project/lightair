@@ -28,7 +28,7 @@
 #include <graphics/image-file.h>
 #include <util/threading.h>
 
-#define TRACK_SHORT_SIDE 360.0f
+#define TRACK_SHORT_SIDE 720.0f /* eyelid detail for eyeliner on HD cameras */
 /* Captured frames kept for sync mode: the frame shown is up to RING_N - 1 frames old. */
 #define RING_N 4
 /* A tracker faster than this (Apple Vision, ~1 ms) is waited for briefly; slower ones
@@ -49,9 +49,17 @@ struct beauty_filter {
 	uint32_t stage_w, stage_h;
 	gs_texture_t *data_tex;
 	gs_texrender_t *tr_mask, *tr_mask_tmp; /* R lips, B eye interior + mouth opening, A brow band */
-	gs_texture_t *paint_map;   /* face-paint.png: R contour, G highlight, B eyeliner, A brow (mesh UV space) */
+	gs_texture_t *paint_map;   /* face-paint.png: R contour, G highlight, A brow (mesh UV space) */
+	gs_texture_t *liner_map;   /* face-liner.png: the eyeliner styles, one per channel */
 	gs_vertbuffer_t *mesh_vb;  /* the face mesh's triangles, positions from the tracker each frame */
 	gs_texrender_t *tr_paint;  /* paint_map drawn through the tracked mesh, frame-sized */
+	gs_texture_t *normal_map;  /* face-normal.png: the face's surface directions (mesh UV space) */
+	gs_texrender_t *tr_fnorm;  /* normal_map drawn through the tracked mesh (light) */
+	gs_texrender_t *tr_fin;    /* Finish pass: light + the look's colour grade */
+	bool mesh_ok;              /* this frame's mesh triangles are in mesh_vb */
+	struct vec3 face_axes[3];  /* the canonical face axes in image space (head pose) */
+	struct vec2 head_center;   /* image position of the head ellipsoid's centre (px) */
+	float head_scale;          /* px per canonical cm */
 	gs_texture_t *lut_tex;
 	int lut_size;
 	char lut_loaded[512];
@@ -238,10 +246,18 @@ static gs_effect_t *load_effect(const char *name)
 
 static void paint_init(struct beauty_filter *f);
 
+/* Lightair: "face_present" proc, so the app can say when a face effect has no face to work on. */
+static void proc_face_present(void *data, calldata_t *cd)
+{
+	struct beauty_filter *f = data;
+	calldata_set_bool(cd, "present", f->face.present);
+}
+
 static void *beauty_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct beauty_filter *f = bzalloc(sizeof(*f));
 	f->source = source;
+	proc_handler_add(obs_source_get_proc_handler(source), "void face_present(out bool present)", proc_face_present, f);
 	f->fx = fx_layers_create();
 	f->start_ns = os_gettime_ns();
 	pthread_mutex_init(&f->snap_mutex, NULL);
@@ -296,6 +312,10 @@ static void beauty_destroy(void *data)
 	gs_texture_destroy(f->data_tex);
 	gs_texture_destroy(f->lut_tex);
 	gs_texture_destroy(f->paint_map);
+	gs_texture_destroy(f->liner_map);
+	gs_texture_destroy(f->normal_map);
+	gs_texrender_destroy(f->tr_fnorm);
+	gs_texrender_destroy(f->tr_fin);
 	gs_vertexbuffer_destroy(f->mesh_vb);
 	gs_texrender_destroy(f->tr_paint);
 	gs_texrender_destroy(f->tr_mask);
@@ -582,7 +602,7 @@ static bool makeup_active(const struct beauty_filter *f)
 	bool grade = m->filter_amt > 0 && (m->exposure != 0 || m->contrast != 0 || m->saturation != 0 ||
 					   m->warmth != 0 || m->tint != 0 || m->fade != 0 || f->lut_tex);
 	bool paint = m->makeup_amt > 0 && (m->lip_opacity > 0 || m->blush_opacity > 0 || m->shadow_opacity > 0 ||
-					   m->liner > 0 || m->contour > 0 || m->highlight > 0 || m->brow > 0);
+					   m->liner_style > 0 || m->contour > 0 || m->highlight > 0 || m->brow > 0);
 	return grade || paint;
 }
 
@@ -658,21 +678,34 @@ static void draw_band(const struct face_layout *L, const float *xy, int n, float
  * face-paint.png in the mesh's UV space. Each frame that map is drawn through the tracked face
  * mesh, so the makeup sits on the skin, turns and foreshortens with the head, and triangles that
  * face away from the camera are dropped. No per-frame placement maths that noise could shake. */
-static void paint_init(struct beauty_filter *f) /* graphics context */
+/* A mesh-space map: four independent masks (straight alpha), mipmapped so it stays smooth when the
+ * face is small on screen. */
+static gs_texture_t *load_map(const char *name)
 {
-	char *path = obs_module_file("makeup/face-paint.png");
+	gs_texture_t *tex = NULL;
+	char *path = obs_module_file(name);
 	if (path) {
 		gs_image_file_ex_t img;
-		gs_image_file_ex_init(&img, path, GS_IMAGE_ALPHA_STRAIGHT); /* four independent masks */
+		gs_image_file_ex_init(&img, path, GS_IMAGE_ALPHA_STRAIGHT);
 		if (img.loaded && img.texture_data) {
 			const uint8_t *data = img.texture_data;
-			f->paint_map = gs_texture_create(img.cx, img.cy, img.format, 1, &data, GS_BUILD_MIPMAPS);
+			tex = gs_texture_create(img.cx, img.cy, img.format, 1, &data, GS_BUILD_MIPMAPS);
 		}
 		gs_image_file_ex_free(&img);
 		bfree(path);
 	}
-	if (!f->paint_map)
-		blog(LOG_WARNING, "[camera-studio] makeup/face-paint.png missing: contour, highlight, eyeliner and brow are off");
+	if (!tex)
+		blog(LOG_WARNING, "[camera-studio] %s missing: contour, highlight, eyeliner and brow are off", name);
+	return tex;
+}
+
+static void paint_init(struct beauty_filter *f) /* graphics context */
+{
+	f->paint_map = load_map("makeup/face-paint.png");
+	f->liner_map = load_map("makeup/face-liner.png");
+	f->normal_map = load_map("makeup/face-normal.png");
+	f->tr_fnorm = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	f->tr_fin = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 
 	struct gs_vb_data *vd = gs_vbdata_create();
 	vd->num = FACE_MESH_TRIS * 3;
@@ -689,15 +722,91 @@ static void paint_init(struct beauty_filter *f) /* graphics context */
 	f->tr_paint = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 }
 
-static gs_texture_t *render_paint(struct beauty_filter *f, uint32_t w, uint32_t h)
+/* Head pose: the 3x3 that best maps the canonical face onto the tracked mesh (an affine camera fit
+ * over all 468 points, made orthonormal). Its columns are the canonical axes in image space
+ * (x right, y down, z towards the camera); it turns the face's normals for the light. */
+static void fit_head_pose(struct beauty_filter *f, const ft_point *mp, uint32_t w, uint32_t h)
+{
+	static double inv[3][3];
+	static float mean_c[3];
+	static bool init;
+	if (!init) { /* canonical centroid and (Xc^T Xc)^-1, once */
+		double xx[3][3] = {{0}};
+		for (int i = 0; i < FACE_MESH_VERTS; i++)
+			for (int k = 0; k < 3; k++)
+				mean_c[k] += face_mesh_pos[i][k] / FACE_MESH_VERTS;
+		for (int i = 0; i < FACE_MESH_VERTS; i++)
+			for (int a = 0; a < 3; a++)
+				for (int b = 0; b < 3; b++)
+					xx[a][b] += (face_mesh_pos[i][a] - mean_c[a]) * (face_mesh_pos[i][b] - mean_c[b]);
+		double det = xx[0][0] * (xx[1][1] * xx[2][2] - xx[1][2] * xx[2][1]) -
+			     xx[0][1] * (xx[1][0] * xx[2][2] - xx[1][2] * xx[2][0]) +
+			     xx[0][2] * (xx[1][0] * xx[2][1] - xx[1][1] * xx[2][0]);
+		for (int a = 0; a < 3; a++)
+			for (int b = 0; b < 3; b++) {
+				int a1 = (b + 1) % 3, a2 = (b + 2) % 3, b1 = (a + 1) % 3, b2 = (a + 2) % 3;
+				inv[a][b] = (xx[a1][b1] * xx[a2][b2] - xx[a1][b2] * xx[a2][b1]) / det;
+			}
+		init = true;
+	}
+	double mx = 0, my = 0;
+	for (int i = 0; i < FACE_MESH_VERTS; i++) {
+		mx += mp[i].x * w;
+		my += mp[i].y * h;
+	}
+	mx /= FACE_MESH_VERTS;
+	my /= FACE_MESH_VERTS;
+	double sx[3] = {0}, sy[3] = {0}; /* sum of image (x, y) * canonical (centred) */
+	for (int i = 0; i < FACE_MESH_VERTS; i++) {
+		double ix = mp[i].x * w - mx, iy = mp[i].y * h - my;
+		for (int k = 0; k < 3; k++) {
+			sx[k] += ix * (face_mesh_pos[i][k] - mean_c[k]);
+			sy[k] += iy * (face_mesh_pos[i][k] - mean_c[k]);
+		}
+	}
+	double r0[3], r1[3], r2[3];
+	for (int k = 0; k < 3; k++) {
+		r0[k] = sx[0] * inv[0][k] + sx[1] * inv[1][k] + sx[2] * inv[2][k];
+		r1[k] = sy[0] * inv[0][k] + sy[1] * inv[1][k] + sy[2] * inv[2][k];
+	}
+	double n0 = sqrt(r0[0] * r0[0] + r0[1] * r0[1] + r0[2] * r0[2]);
+	double n1raw = sqrt(r1[0] * r1[0] + r1[1] * r1[1] + r1[2] * r1[2]);
+	if (n0 < 1e-9)
+		return;
+	for (int k = 0; k < 3; k++)
+		r0[k] /= n0;
+	double d = r1[0] * r0[0] + r1[1] * r0[1] + r1[2] * r0[2];
+	for (int k = 0; k < 3; k++)
+		r1[k] -= d * r0[k];
+	double n1 = sqrt(r1[0] * r1[0] + r1[1] * r1[1] + r1[2] * r1[2]);
+	if (n1 < 1e-9)
+		return;
+	for (int k = 0; k < 3; k++)
+		r1[k] /= n1;
+	r2[0] = r0[1] * r1[2] - r0[2] * r1[1];
+	r2[1] = r0[2] * r1[0] - r0[0] * r1[2];
+	r2[2] = r0[0] * r1[1] - r0[1] * r1[0];
+	if (r2[2] < 0) /* the face looks towards the camera (also right for a mirrored picture) */
+		for (int k = 0; k < 3; k++)
+			r2[k] = -r2[k];
+	for (int k = 0; k < 3; k++)
+		vec3_set(&f->face_axes[k], (float)r0[k], (float)r1[k], (float)r2[k]);
+
+	/* the head ellipsoid (beauty-final.effect: HEAD_R) centred at (0, 3, -4) cm in the canonical
+	 * frame, placed in the image by the same fit */
+	double sc = (n0 + n1raw) * 0.5, hc[3] = {0.0 - mean_c[0], 3.0 - mean_c[1], -4.0 - mean_c[2]};
+	f->head_scale = (float)sc;
+	vec2_set(&f->head_center, (float)(mx + sc * (r0[0] * hc[0] + r0[1] * hc[1] + r0[2] * hc[2])),
+		 (float)(my + sc * (r1[0] * hc[0] + r1[1] * hc[1] + r1[2] * hc[2])));
+}
+
+/* This frame's mesh triangles (facing ones only) into mesh_vb, and the head pose. */
+static bool mesh_update(struct beauty_filter *f, uint32_t w, uint32_t h)
 {
 	const ft_face *fc = &f->face;
-	const struct makeup_params *m = &f->mk;
-	if (!f->paint_map || !f->mesh_vb || !f->layout.has_face || f->face_weight < 0.01f || !fc->valid ||
-	    fc->region_count[FT_MESH] < FACE_MESH_VERTS || m->makeup_amt <= 0.0f ||
-	    !(m->liner > 0.0f || m->contour > 0.0f || m->highlight > 0.0f || m->brow > 0.0f))
-		return NULL;
-
+	if (!f->mesh_vb || !f->layout.has_face || f->face_weight < 0.01f || !fc->valid ||
+	    fc->region_count[FT_MESH] < FACE_MESH_VERTS)
+		return false;
 	const ft_point *mp = &fc->pts[fc->region_start[FT_MESH]];
 	/* a mirrored picture flips every triangle's winding */
 	float facing = mp[263].x > mp[33].x ? 1.0f : -1.0f;
@@ -712,9 +821,15 @@ static gs_texture_t *render_paint(struct beauty_filter *f, uint32_t w, uint32_t 
 			vec3_set(&vd->points[t * 3 + k], shown ? p[k]->x * w : 0.0f, shown ? p[k]->y * h : 0.0f, 0.0f);
 	}
 	gs_vertexbuffer_flush(f->mesh_vb);
+	fit_head_pose(f, mp, w, h);
+	return true;
+}
 
-	gs_texrender_reset(f->tr_paint);
-	if (!gs_texrender_begin(f->tr_paint, w, h))
+/* Draw the mesh into tr with the blur effect's `tech` (its textures already set). */
+static gs_texture_t *mesh_render(struct beauty_filter *f, gs_texrender_t *tr, uint32_t w, uint32_t h, const char *tech)
+{
+	gs_texrender_reset(tr);
+	if (!gs_texrender_begin(tr, w, h))
 		return NULL;
 	struct vec4 zero;
 	vec4_zero(&zero);
@@ -724,9 +839,7 @@ static gs_texture_t *render_paint(struct beauty_filter *f, uint32_t w, uint32_t 
 	gs_enable_blending(false);
 	enum gs_cull_mode cull = gs_get_cull_mode();
 	gs_set_cull_mode(GS_NEITHER);
-	gs_effect_t *e = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-	gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), f->paint_map);
-	while (gs_effect_loop(e, "Draw")) {
+	while (gs_effect_loop(f->blur_effect, tech)) {
 		gs_load_vertexbuffer(f->mesh_vb);
 		gs_load_indexbuffer(NULL);
 		gs_draw(GS_TRIS, 0, FACE_MESH_TRIS * 3);
@@ -734,8 +847,32 @@ static gs_texture_t *render_paint(struct beauty_filter *f, uint32_t w, uint32_t 
 	gs_load_vertexbuffer(NULL);
 	gs_set_cull_mode(cull);
 	gs_blend_state_pop();
-	gs_texrender_end(f->tr_paint);
-	return gs_texrender_get_texture(f->tr_paint);
+	gs_texrender_end(tr);
+	return gs_texrender_get_texture(tr);
+}
+
+static gs_texture_t *render_paint(struct beauty_filter *f, uint32_t w, uint32_t h)
+{
+	const struct makeup_params *m = &f->mk;
+	if (!f->mesh_ok || !f->paint_map || !f->liner_map || m->makeup_amt <= 0.0f ||
+	    !(m->liner_style > 0 || m->contour > 0.0f || m->highlight > 0.0f || m->brow > 0.0f))
+		return NULL;
+	gs_effect_t *e = f->blur_effect;
+	struct vec4 sel; /* liner style 1..4 = face-liner.png channel R..A */
+	vec4_set(&sel, m->liner_style == 1, m->liner_style == 2, m->liner_style == 3, m->liner_style == 4);
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), f->paint_map);
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "guide"), f->liner_map);
+	gs_effect_set_vec4(gs_effect_get_param_by_name(e, "liner_sel"), &sel);
+	return mesh_render(f, f->tr_paint, w, h, "Paint");
+}
+
+/* The face's surface directions, drawn through the mesh, for the light. */
+static gs_texture_t *render_facenorm(struct beauty_filter *f, uint32_t w, uint32_t h)
+{
+	if (!f->mesh_ok || !f->normal_map || !fx_layers_light_active(f->fx))
+		return NULL;
+	gs_effect_set_texture(gs_effect_get_param_by_name(f->blur_effect, "image"), f->normal_map);
+	return mesh_render(f, f->tr_fnorm, w, h, "Draw");
 }
 
 static gs_texture_t *render_mask(struct beauty_filter *f, uint32_t w, uint32_t h, uint32_t hw, uint32_t hh)
@@ -837,6 +974,7 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 
 	/* --- learned segmentation: R skin, G face skin, B hair, A person --- */
 	face_tracker_set_segmentation(f->tracker, true);
+	face_tracker_set_segmentation_fast(f->tracker, fx_layers_light_active(f->fx));
 	uint32_t mw = 0, mh = 0;
 	uint8_t *segbuf = face_tracker_take_mask(f->tracker, &f->pm_serial, &mw, &mh);
 	if (segbuf) {
@@ -868,9 +1006,13 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 		gs_texture_t *st = blur_pass(f, f->tr_skin_t, "Gauss", se, ew, eh, ew, eh, 1, 0, ps, 0);
 		skin_od = blur_pass(f, f->tr_skin_tone, "Gauss", st, ew, eh, ew, eh, 0, 1, ps, 0);
 		/* soft body height field for whole-body light normals (alpha channel) */
+		/* from the segmentation snapped to this frame's edges (not the raw, older mask), so the
+		 * body's lighting stays on the body when it moves */
 		float stp = fmaxf((float)f->pm_w * 0.012f, 1.0f);
-		gs_texture_t *b1 = blur_pass(f, f->tr_pm1, "Gauss", f->person_tex, f->pm_w, f->pm_h, f->pm_w, f->pm_h, 1,
-					     0, stp, 0);
+		gs_texture_t *seg_src = seg ? seg : f->person_tex;
+		uint32_t sw_ = seg ? hw : f->pm_w, sh_ = seg ? hh : f->pm_h;
+		gs_texture_t *b1 = blur_pass(f, f->tr_pm1, "Gauss", seg_src, sw_, sh_, f->pm_w, f->pm_h, 1,
+					     0, stp * (float)sw_ / (float)f->pm_w, 0);
 		person_blur = blur_pass(f, f->tr_pm2, "Gauss", b1, f->pm_w, f->pm_h, f->pm_w, f->pm_h, 0, 1, stp, 0);
 		/* packed into tone's alpha: the final effect is limited to 8 textures */
 		gs_texture_t *tp = person_blur ? guided_pass(f, f->tr_tone_pb, "WithAlpha", tone, person_blur, 0, 0, ew, eh, 0)
@@ -883,7 +1025,9 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 
 	/* --- makeup masks (lips / eyeliner / eye interior), soft-edged --- */
 	gs_texture_t *mask = render_mask(f, w, h, hw, hh);
+	f->mesh_ok = mesh_update(f, w, h);
 	gs_texture_t *paint = render_paint(f, w, h);
+	gs_texture_t *facenorm = render_facenorm(f, w, h);
 	if (mask) {
 		float ms = fmaxf(iod_half * 0.012f, 0.6f);
 		gs_texture_t *m1 = blur_pass(f, f->tr_mask_tmp, "Gauss", mask, hw, hh, hw, hh, 1, 0, ms, 0);
@@ -944,7 +1088,7 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 	vec4_set(&lc, m->lip[0], m->lip[1], m->lip[2], m->lip_opacity);
 	vec4_set(&bc, m->blush[0], m->blush[1], m->blush[2], m->blush_opacity);
 	vec4_set(&sc, m->shadow[0], m->shadow[1], m->shadow[2], m->shadow_opacity);
-	vec4_set(&extra, m->liner, m->contour, m->highlight, m->brow);
+	vec4_set(&extra, 0.0f, m->contour, m->highlight, m->brow); /* x: free (eyeliner is a style, in the paint) */
 	gs_effect_set_vec4(P("lip_color"), &lc);
 	gs_effect_set_float(P("lip_gloss"), m->lip_gloss);
 	gs_effect_set_vec4(P("blush_color"), &bc);
@@ -985,11 +1129,52 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 			gs_draw_sprite(src, 0, w, h);
 		gs_texrender_end(f->tr_out);
 	}
+	gs_texture_t *out = gs_texrender_get_texture(f->tr_out);
+
+	/* Finish: light + the look's colour grade (own pass, see beauty-final.effect) */
+	bool grade = en * m->filter_amt > 0.0f;
+	if (out && !f->debug_view && (fx_layers_light_active(f->fx) || grade)) {
+		/* libobs resets an effect's parameters when a technique ends: set what Finish reads again */
+#define PF(n) gs_effect_get_param_by_name(fe, n)
+		gs_effect_set_texture(PF("tone_tex"), tone);
+		gs_effect_set_texture(PF("data_tex"), f->data_tex);
+		gs_effect_set_texture(PF("seg_tex"), seg ? seg : tone);
+		gs_effect_set_vec2(PF("size"), &size);
+		gs_effect_set_int(PF("warp_count"), f->layout.warp_count);
+		gs_effect_set_vec4(PF("warp_bounds"), &b);
+		gs_effect_set_float(PF("face_weight"), f->layout.has_face ? f->face_weight : 0.0f);
+		gs_effect_set_int(PF("debug_view"), f->debug_view);
+		gs_effect_set_float(PF("filter_amt"), en * m->filter_amt);
+		gs_effect_set_vec4(PF("grade0"), &g0);
+		gs_effect_set_vec4(PF("grade1"), &g1);
+		fx_layers_set_final_params(f->fx, fe, tone);
+		bool hp = seg && person_blur;
+		struct vec2 pt;
+		vec2_set(&pt, hp ? 1.0f / (float)f->pm_w : 0.0f, hp ? 1.0f / (float)f->pm_h : 0.0f);
+		gs_effect_set_vec2(PF("person_texel"), &pt);
+		gs_effect_set_float(PF("has_person"), hp ? 1.0f : 0.0f);
+#undef PF
+		gs_effect_set_texture(gs_effect_get_param_by_name(fe, "image"), out);
+		gs_effect_set_texture(gs_effect_get_param_by_name(fe, "facenorm_tex"), facenorm ? facenorm : out);
+		gs_effect_set_float(gs_effect_get_param_by_name(fe, "has_facenorm"), facenorm ? 1.0f : 0.0f);
+		gs_effect_set_vec3(gs_effect_get_param_by_name(fe, "face_rx"), &f->face_axes[0]);
+		gs_effect_set_vec3(gs_effect_get_param_by_name(fe, "face_ry"), &f->face_axes[1]);
+		gs_effect_set_vec3(gs_effect_get_param_by_name(fe, "face_rz"), &f->face_axes[2]);
+		gs_effect_set_vec2(gs_effect_get_param_by_name(fe, "head_center"), &f->head_center);
+		gs_effect_set_float(gs_effect_get_param_by_name(fe, "head_scale"), f->mesh_ok ? f->head_scale : 0.0f);
+		gs_texrender_reset(f->tr_fin);
+		if (gs_texrender_begin(f->tr_fin, w, h)) {
+			gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
+			while (gs_effect_loop(fe, "Finish"))
+				gs_draw_sprite(out, 0, w, h);
+			gs_texrender_end(f->tr_fin);
+			out = gs_texrender_get_texture(f->tr_fin);
+		}
+	}
 
 	/* stickers, motion and atmosphere */
 	float t = (float)fmod((double)(os_gettime_ns() - f->start_ns) / 1e9, 3600.0);
-	f->present = fx_layers_render(f->fx, gs_texrender_get_texture(f->tr_out), w, h, &f->layout,
-				      f->layout.has_face ? f->face_weight : 0.0f, t);
+	f->present = fx_layers_render(f->fx, out, w, h, &f->layout, f->layout.has_face ? f->face_weight : 0.0f, t);
 }
 
 static void draw_landmarks(struct beauty_filter *f, uint32_t w, uint32_t h)

@@ -103,6 +103,8 @@ bool face_tracker_get_at(face_tracker_t *ft, uint64_t frame_id, ft_face *out);
 
 /* Skin / person segmentation on its own thread, only while enabled. */
 void face_tracker_set_segmentation(face_tracker_t *ft, bool enabled);
+/* How often segmentation may run: fast (~30 Hz, the light follows the body with it) or ~15 Hz. */
+void face_tracker_set_segmentation_fast(face_tracker_t *ft, bool fast);
 
 /* Newer segmentation mask than *serial? Returns a malloc'd RGBA8 copy (free() it), w x h,
  * covering the whole frame: R skin, G face skin, B hair, A person. Temporally smoothed.
