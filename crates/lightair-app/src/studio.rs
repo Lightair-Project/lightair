@@ -363,6 +363,8 @@ impl Studio {
             return;
         }
         self.flush();
+        // Integrated loudness covers this show.
+        lightair_engine::loudness::reset_stream_loudness();
         for d in enabled {
             let Some(key) = crate::secrets::stream_key(d.id) else {
                 self.issue = Some(format!("No stream key saved for {}.", d.name).into());

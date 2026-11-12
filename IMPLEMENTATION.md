@@ -51,9 +51,11 @@ Done:
 - Lock-free meter cells fed by libobs volume meters; the end-to-end test checks a −6 dBFS tone reads −6.0 and drops by exactly the fader amount.
 - Mixer panel: channel strips with effect list (bypass dot, remove, presets), L/R meters with zones and falling peaks, dB-taper fader (one undo step per drag, double-click for unity), Cue, Mute, input name. Microphone and desktop-audio tracks; new mic tracks get the Voice Clarity chain.
 
+- Stream loudness (EBU R128): K-weighted momentary, short-term and gated integrated LUFS on the stream mix, from libobs's raw audio callback; the Mixer shows short-term and integrated (click resets; going live resets). Reference tones from BS.1770 read exactly (−23 LUFS for 1 kHz at −20 dBFS on one channel), and the engine test reads −6.0 / −26.0 LUFS through a real track and fader.
+
 Remaining:
 - Voice Clarity as one native effect with calibration (`lightair-audio-fx`), plus EQ, de-esser, ducking, reverb, delay, pitch.
-- Mixes and routing (Stream, Recording n, Cue, VOD), master chains, LUFS meters.
+- Mixes and routing (Stream, Recording n, Cue, VOD), master chains, true peak, per-platform loudness targets and Normalise.
 - Scene tracks, per-scene volume (link/unlink), folders, channel remap, sync offset and auto-sync, VST3/AU host, hardware mixer integrations.
 
 ## M6 · Outputs 🔨

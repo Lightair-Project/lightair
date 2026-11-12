@@ -197,7 +197,9 @@ impl Render for MixerPanel {
                     .px_3()
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("Audio Mixer"))
                     .child(add)
-                    .when(self.add_track_menu, |d| d.child(self.add_track_menu(cx))),
+                    .when(self.add_track_menu, |d| d.child(self.add_track_menu(cx)))
+                    .child(div().flex_1())
+                    .children(loudness_readout(cx)),
             )
             .child(div().id("strips").flex().flex_1().gap_2().px_3().pb_3().overflow_x_scroll().children(strips).when(
                 project.tracks.is_empty(),
@@ -486,4 +488,44 @@ impl MixerPanel {
                     .child(input_name),
             )
     }
+}
+
+/// Stream loudness (EBU R128): short-term and integrated, against the common −14 LUFS target.
+/// Click to start integrated loudness over.
+fn loudness_readout(cx: &mut Context<MixerPanel>) -> Option<impl IntoElement> {
+    let r = lightair_engine::loudness::stream_loudness()?;
+    let show = |v: f64| if v.is_finite() { format!("{v:.1}") } else { "—".into() };
+    // Most platforms normalise around −14 LUFS: well below sounds quiet, above gets turned down.
+    let colour = match r.short_term {
+        v if !v.is_finite() || v < -24.0 => tok::text_tertiary(),
+        v if v > -9.0 => tok::warn(),
+        _ => tok::ok(),
+    };
+    Some(
+        div()
+            .id("loudness")
+            .flex()
+            .items_baseline()
+            .gap_2()
+            .px_2()
+            .py_0p5()
+            .rounded(px(5.))
+            .cursor_pointer()
+            .hover(|d| d.bg(tok::bg_raised()))
+            .font_family("Menlo")
+            .text_size(px(11.))
+            .child(div().text_color(tok::text_tertiary()).child("LUFS"))
+            .child(div().text_color(colour).child(format!("S {}", show(r.short_term))))
+            .child(div().text_color(tok::text_secondary()).child(format!("I {}", show(r.integrated))))
+            .tooltip(|w, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(
+                    "Stream loudness: short-term (3 s) and integrated. Platforms aim for about −14. Click to reset integrated.",
+                )
+                .build(w, cx)
+            })
+            .on_click(cx.listener(|_, _, _, cx| {
+                lightair_engine::loudness::reset_stream_loudness();
+                cx.notify();
+            })),
+    )
 }
