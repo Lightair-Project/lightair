@@ -3523,6 +3523,7 @@ dependencies = [
  "chrono",
  "gpui-kit",
  "keyring",
+ "libc",
  "lightair-core",
  "lightair-engine",
  "lightair-preview",

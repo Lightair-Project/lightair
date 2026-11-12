@@ -195,7 +195,7 @@ impl StudioWindow {
             PauseRecording => self.studio.update(cx, |s, cx| s.pause_recording(cx)),
             Marker => self.studio.update(cx, |s, cx| s.add_marker(cx)),
             SplitRecording => self.studio.update(cx, |s, cx| s.split_recording(cx)),
-            GoLive => self.studio.update(cx, |s, cx| s.go_live(cx)),
+            GoLive => self.open_go_live(cx),
             Clip => self.studio.update(cx, |s, cx| s.save_clip(cx)),
             AddScene => self.add_scene(cx),
             AddImage => self.add_image(window, cx),

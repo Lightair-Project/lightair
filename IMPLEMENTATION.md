@@ -62,6 +62,7 @@ Done:
 - End-to-end test, verified with ffprobe: a recording has H.264 + AAC of the right length, and a stream reaches a local ffmpeg RTMP server.
 - Output settings and destinations in the document (`outputs.json`); stream keys only in the Keychain.
 - Clips: a libobs replay buffer kept running while Clips is on (length and format per project); the Clip button saves the last seconds; a test saves a 3 s clip and probes it. libobs writes clips through OBS's `obs-ffmpeg-mux` helper, which `cargo xtask dev` / `bundle` link next to the executable.
+- Go Live review sheet: choose destinations, then plain-language checks (stream keys, encoder, rendering keeping up, upload estimate with shared encoders, each mic's level over the last 10 s for silence or clipping, disk space when also recording); blocking problems disable Go live. The checks are a pure, tested function; mic windows come from a lock-free loudest-peak value on each meter.
 - Encoder sharing: destinations with identical encoder settings on the same canvas share one video and audio encoder (the Outputs panel shows "N destinations · M encoders" while live). A test streams to three local servers: two identical ones share, a different bitrate gets its own, and stopping one shared stream leaves the other running.
 - Recording pause/resume (the timer shows recorded time), markers as MP4/MOV chapters (⌘M), and split into a new file without a gap, from the title bar and the palette. A test checks with ffprobe that paused time is left out, the chapter is there, and the split produced a second file.
 - A headless self-test inside the app bundle (`LIGHTAIR_SELFTEST=camera`) confirms camera frames with Camera Studio attached.
@@ -69,7 +70,7 @@ Done:
 
 Remaining:
 - Per-destination bitrates and encoder settings (sharing then splits automatically).
-- Go Live review sheet, stream manager (titles, categories), platform sign-in (with M11).
+- Stream manager (titles, categories) and platform sign-in (with M11); camera-frozen and bandwidth checks in the Go Live sheet; a setting to skip the sheet.
 - Clip library (browse, trim, share); virtual camera, NDI, SRT/WHIP, ISO and multitrack recording, markers for MKV (sidecar file), test recording.
 
 ## M7 · Formats 🔨

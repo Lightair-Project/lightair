@@ -21,6 +21,9 @@ pub struct MeterCell {
     magnitude: [AtomicU32; CHANNELS],
     /// Microseconds since the meter bank started, at the last update.
     updated_us: AtomicU64,
+    /// Loudest peak since `take_window_peak`, as linear amplitude bits (non-negative floats
+    /// order the same as their bits, so `fetch_max` works lock-free).
+    window_max: AtomicU32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,6 +43,14 @@ impl MeterCell {
             self.magnitude[c].store(m.to_bits(), Ordering::Relaxed);
         }
         self.updated_us.store(epoch().elapsed().as_micros() as u64, Ordering::Release);
+        let loudest = peak.iter().copied().map(db_to_mul).fold(0.0f32, f32::max);
+        self.window_max.fetch_max(loudest.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The loudest peak (dBFS) since the last call, and starts a new window.
+    pub fn take_window_peak(&self) -> f32 {
+        let lin = f32::from_bits(self.window_max.swap(0, Ordering::Relaxed));
+        if lin > 0.0 { 20.0 * lin.log10() } else { f32::NEG_INFINITY }
     }
 
     pub fn levels(&self) -> Levels {
@@ -97,4 +108,19 @@ pub fn meters() -> &'static MeterBank {
 /// dB → linear amplitude multiplier for libobs volume.
 pub fn db_to_mul(db: f32) -> f32 {
     if db.is_finite() { 10f32.powf(db / 20.0) } else { 0.0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_peak_keeps_the_loudest() {
+        let cell = MeterCell::default();
+        cell.store(&[-30.0, -20.0], &[-40.0, -40.0]);
+        cell.store(&[-6.0, -50.0], &[-40.0, -40.0]);
+        cell.store(&[-12.0, -12.0], &[-40.0, -40.0]);
+        assert!((cell.take_window_peak() + 6.0).abs() < 0.01);
+        assert_eq!(cell.take_window_peak(), f32::NEG_INFINITY, "a new window starts silent");
+    }
 }

@@ -4,6 +4,7 @@
 //! applied to the document, appended to the project journal, and the resulting diff is sent to
 //! the engine thread for reconciliation (docs/03-architecture.md, "Document flow").
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -31,6 +32,8 @@ pub struct Studio {
     clips_seen: u32,
     /// Frames libobs lagged since the previous stats sample (health is about now, not startup).
     pub recent_lagged: u32,
+    /// Microphone tracks' loudest peak (dBFS) for each of the last ten seconds.
+    mic_history: std::collections::HashMap<Id, std::collections::VecDeque<f32>>,
     /// Imported layers whose size was guessed, waiting for their sources to report a size.
     refit: Option<(Vec<lightair_store::EstimatedLayer>, std::time::Instant)>,
 }
@@ -61,6 +64,7 @@ impl Studio {
             clips_seen: 0,
             recent_lagged: 0,
             refit: None,
+            mic_history: Default::default(),
         };
         studio.rebuild_engine();
         studio.sync_clips();
@@ -426,6 +430,71 @@ impl Studio {
         let stats = lightair_engine::read_stats();
         self.recent_lagged = stats.lagged_frames.saturating_sub(self.stats.lagged_frames);
         self.stats = stats;
+        self.sample_mics();
+    }
+
+    fn mic_tracks(&self) -> Vec<(Id, String)> {
+        let p = self.project();
+        p.tracks
+            .iter()
+            .filter(|t| p.inputs.get(&t.input).is_some_and(|i| i.kind == "coreaudio_input_capture"))
+            .map(|t| (t.id, t.name.clone()))
+            .collect()
+    }
+
+    fn sample_mics(&mut self) {
+        let mics = self.mic_tracks();
+        self.mic_history.retain(|id, _| mics.iter().any(|(m, _)| m == id));
+        for (id, _) in mics {
+            let Some(cell) = lightair_engine::meters::meters().get(id) else { continue };
+            let h = self.mic_history.entry(id).or_default();
+            h.push_back(cell.take_window_peak());
+            while h.len() > 10 {
+                h.pop_front();
+            }
+        }
+    }
+
+    /// What the Go Live review checks. `has_key` is looked up once by the caller (Keychain).
+    pub fn preflight_facts(&self, has_key: &HashMap<Id, bool>, record_too: bool) -> crate::preflight::Facts {
+        let p = self.project();
+        let enabled: Vec<_> = p.outputs.destinations.iter().filter(|d| d.enabled).collect();
+        let encoders = default_encoders(&self.engine.capabilities.encoders, p.outputs.stream_bitrate_kbps, true);
+        let encoder_ok = self.engine.capabilities.encoders.contains(&encoders.video_encoder);
+        // Identical settings share an encoder: one per distinct format.
+        let mut formats: Vec<_> = enabled.iter().map(|d| d.format).collect();
+        formats.sort_by_key(|f| f.map(|id| id.to_string()));
+        formats.dedup();
+        let target_fps = p.primary_format().fps_num as f64 / p.primary_format().fps_den.max(1) as f64;
+        crate::preflight::Facts {
+            destinations: p
+                .outputs
+                .destinations
+                .iter()
+                .map(|d| crate::preflight::Destination {
+                    name: d.name.clone(),
+                    enabled: d.enabled,
+                    has_key: has_key.get(&d.id).copied().unwrap_or(false),
+                })
+                .collect(),
+            encoder: encoder_ok.then(|| match encoders.video_encoder.as_str() {
+                "obs_x264" => "x264 (software)".to_string(),
+                _ => "Apple hardware H.264".to_string(),
+            }),
+            encoders: formats.len() as u32,
+            video_kbps: encoders.video_bitrate_kbps,
+            audio_kbps: encoders.audio_bitrate_kbps,
+            lagged_recent: self.recent_lagged,
+            fps: self.stats.active_fps,
+            target_fps,
+            mics: self
+                .mic_tracks()
+                .into_iter()
+                .filter_map(|(id, name)| self.mic_history.get(&id).map(|h| (name, h.iter().copied().collect())))
+                .collect(),
+            record_too,
+            free_gb: free_gb(&self.recording_folder()),
+        }
     }
 
     fn push(&self, before: Arc<Project>, after: Arc<Project>) {
@@ -477,4 +546,13 @@ impl Studio {
             self.also_selected.clear();
         }
     }
+}
+
+/// Free space on the volume holding `path` (or its nearest existing parent), in GB.
+fn free_gb(path: &std::path::Path) -> Option<f64> {
+    use std::os::unix::ffi::OsStrExt;
+    let existing = path.ancestors().find(|p| p.exists())?;
+    let c = std::ffi::CString::new(existing.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as f64 * st.f_frsize as f64 / 1e9)
 }
