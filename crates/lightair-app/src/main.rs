@@ -2,6 +2,7 @@
 
 mod assets;
 mod camera_studio;
+mod encoding;
 mod geometry;
 mod mixer;
 mod outputs_panel;

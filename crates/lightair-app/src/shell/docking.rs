@@ -210,6 +210,19 @@ impl StudioWindow {
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
             Ok("add-layer") => self.open_add_layer(window, cx),
             Ok("settings") => self.toggle_settings(cx),
+            Ok(hook) if hook.starts_with("settings-") => {
+                use super::settings::Page;
+                let page = match &hook[9..] {
+                    "recording" => Page::Recording,
+                    "streaming" => Page::Streaming,
+                    "clips" => Page::Clips,
+                    "canvases" => Page::Canvases,
+                    "shortcuts" => Page::Shortcuts,
+                    "about" => Page::About,
+                    _ => Page::General,
+                };
+                self.open_settings(page, cx);
+            }
             Ok("palette") => self.open_palette(window, cx),
             Ok("perf") => self.perf_open = true,
             Ok("two-canvases") => self.add_format(lightair_core::Format::vertical(), cx),
@@ -227,9 +240,28 @@ impl StudioWindow {
                         enabled: on,
                         format: None,
                         platform: Some(platform.into()),
+                        encoding: None,
                     };
                     self.exec(lightair_core::Command::AddDestination { destination }, cx);
                 }
+            }
+            Ok("edit-dest") => {
+                let destination = lightair_core::Destination {
+                    id: lightair_core::Id::new(),
+                    name: "Twitch".into(),
+                    server: "rtmp://aps10.contribute.live-video.net/app/".into(),
+                    enabled: true,
+                    format: None,
+                    platform: Some("twitch".into()),
+                    encoding: Some(lightair_core::Encoding {
+                        bitrate_kbps: 8000,
+                        height: Some(720),
+                        ..Default::default()
+                    }),
+                };
+                let id = destination.id;
+                self.exec(lightair_core::Command::AddDestination { destination }, cx);
+                self.outputs.update(cx, |o, cx| o.open_edit(id, window, cx));
             }
             Ok("dest-tiktok-vertical") => {
                 if let Some(p) = crate::platforms::by_id("tiktok") {

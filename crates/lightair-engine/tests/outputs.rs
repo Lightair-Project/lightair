@@ -129,6 +129,7 @@ fn record_and_stream() {
         canvas,
         path: file.clone(),
         label: None,
+        split_minutes: None,
         container: Container::HybridMp4,
         encoders: encoders.clone(),
     };
@@ -209,6 +210,7 @@ fn record_and_stream() {
             server: "rtmp://127.0.0.1:19350/live".into(),
             key: "test".into(),
             encoders: default_encoders(&engine.capabilities.encoders, 2500, true),
+            reconnect: None,
         };
         engine.call(move |s| s.outputs.start_stream(&cfg, None)).expect("stream starts");
         let state =

@@ -1,0 +1,155 @@
+//! From settings to encoders (docs/11-outputs-streaming-recording.md, "Encoding"): which libobs
+//! encoder a choice means on this Mac, the size it encodes at, and what Automatic picks for a
+//! destination.
+
+use lightair_core::{Destination, Encoding, Format, Project, RecordingSettings, VideoEncoder};
+use lightair_engine::outputs::EncoderConfig;
+
+use crate::platforms;
+
+/// The libobs encoder for a choice, among those this Mac has; hardware H.264 (then x264) when
+/// the choice isn't available.
+pub fn encoder_id(available: &[String], choice: VideoEncoder) -> String {
+    let has = |id: &str| available.iter().any(|e| e == id);
+    let find = |ids: &[&str]| ids.iter().find(|id| has(id)).map(|id| id.to_string());
+    let h264 = || {
+        find(&["com.apple.videotoolbox.videoencoder.ave.avc", "com.apple.videotoolbox.videoencoder.h264", "obs_x264"])
+            .unwrap_or_else(|| "obs_x264".into())
+    };
+    match choice {
+        VideoEncoder::H264 => h264(),
+        VideoEncoder::Hevc => {
+            find(&["com.apple.videotoolbox.videoencoder.ave.hevc", "com.apple.videotoolbox.videoencoder.hevc.vcp"])
+                .unwrap_or_else(h264)
+        }
+        VideoEncoder::ProRes => find(&[
+            "com.apple.videotoolbox.videoencoder.appleproreshw.422",
+            "com.apple.videotoolbox.videoencoder.prores-422",
+        ])
+        .unwrap_or_else(h264),
+        VideoEncoder::X264 => "obs_x264".into(),
+    }
+}
+
+/// Whether this Mac has an encoder for the choice.
+pub fn available(available: &[String], choice: VideoEncoder) -> bool {
+    let id = encoder_id(available, choice);
+    match choice {
+        VideoEncoder::H264 => true,
+        VideoEncoder::Hevc => id.contains("hevc"),
+        VideoEncoder::ProRes => id.contains("prores"),
+        VideoEncoder::X264 => available.iter().any(|e| e == "obs_x264"),
+    }
+}
+
+/// The size to encode at for a height (the width follows the canvas, both even); `None` when
+/// that is the canvas's own size or larger.
+pub fn scaled(canvas: &Format, height: Option<u32>) -> Option<(u32, u32)> {
+    let h = height?;
+    // "1080p" means the short side: a vertical canvas scales its width to it.
+    let (w, ch) = (canvas.width as f32, canvas.height as f32);
+    let (sw, sh) =
+        if canvas.height > canvas.width { (h as f32, h as f32 * ch / w) } else { (h as f32 * w / ch, h as f32) };
+    let (sw, sh) = ((sw.round() as u32) & !1, (sh.round() as u32) & !1);
+    (sw < canvas.width || sh < canvas.height).then_some((sw, sh))
+}
+
+/// What Automatic means for a destination: the shared bitrate, capped at what its platform
+/// takes; H.264, 2-second keyframes, the canvas's size.
+pub fn automatic(project: &Project, d: &Destination) -> Encoding {
+    let platform = d.platform.as_deref().and_then(platforms::by_id).or_else(|| platforms::guess(&d.server));
+    let cap = platform.and_then(|p| p.max_kbps).unwrap_or(u32::MAX);
+    Encoding { bitrate_kbps: project.outputs.stream_bitrate_kbps.min(cap), ..Encoding::default() }
+}
+
+/// A destination's encoders.
+pub fn for_stream(caps: &[String], project: &Project, d: &Destination) -> EncoderConfig {
+    let e = d.encoding.unwrap_or_else(|| automatic(project, d));
+    let canvas = d.format.and_then(|f| project.format(f)).unwrap_or(project.primary_format());
+    EncoderConfig {
+        video_encoder: encoder_id(caps, e.encoder),
+        video_bitrate_kbps: e.bitrate_kbps,
+        audio_encoder: audio_id(caps),
+        audio_bitrate_kbps: e.audio_kbps,
+        constant_bitrate: true,
+        bframes: true,
+        keyint_sec: e.keyframe_s.max(1),
+        scaled: scaled(canvas, e.height),
+    }
+}
+
+/// A recording's encoders for one canvas.
+pub fn for_recording(caps: &[String], settings: &RecordingSettings, canvas: &Format) -> EncoderConfig {
+    EncoderConfig {
+        video_encoder: encoder_id(caps, settings.encoder),
+        video_bitrate_kbps: settings.bitrate_kbps,
+        audio_encoder: audio_id(caps),
+        audio_bitrate_kbps: settings.audio_kbps,
+        constant_bitrate: false,
+        bframes: true,
+        keyint_sec: 2,
+        scaled: scaled(canvas, settings.height),
+    }
+}
+
+fn audio_id(caps: &[String]) -> String {
+    if caps.iter().any(|e| e == "CoreAudio_AAC") { "CoreAudio_AAC".into() } else { "ffmpeg_aac".into() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mac() -> Vec<String> {
+        [
+            "obs_x264",
+            "com.apple.videotoolbox.videoencoder.ave.avc",
+            "com.apple.videotoolbox.videoencoder.ave.hevc",
+            "com.apple.videotoolbox.videoencoder.appleproreshw.422",
+            "CoreAudio_AAC",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    #[test]
+    fn choices_map_to_this_macs_encoders() {
+        let caps = mac();
+        assert!(encoder_id(&caps, VideoEncoder::H264).ends_with("ave.avc"));
+        assert!(encoder_id(&caps, VideoEncoder::Hevc).ends_with("ave.hevc"));
+        assert!(encoder_id(&caps, VideoEncoder::ProRes).contains("prores"));
+        // No HEVC here: H.264 instead, and the choice reads as unavailable.
+        let old = vec!["obs_x264".to_string(), "com.apple.videotoolbox.videoencoder.h264".to_string()];
+        assert!(encoder_id(&old, VideoEncoder::Hevc).ends_with("h264"));
+        assert!(!available(&old, VideoEncoder::Hevc));
+    }
+
+    #[test]
+    fn heights_scale_by_the_short_side() {
+        let landscape = Format::landscape();
+        assert_eq!(scaled(&landscape, Some(720)), Some((1280, 720)));
+        assert_eq!(scaled(&landscape, Some(1080)), None, "its own size");
+        assert_eq!(scaled(&landscape, None), None);
+        let vertical = Format::vertical();
+        assert_eq!(scaled(&vertical, Some(720)), Some((720, 1280)));
+    }
+
+    #[test]
+    fn automatic_caps_at_the_platform() {
+        let mut project = Project::new("P");
+        project.outputs.stream_bitrate_kbps = 9000;
+        let d = |platform: &str| Destination {
+            id: lightair_core::Id::new(),
+            name: platform.into(),
+            server: "rtmp://example.com/live".into(),
+            enabled: true,
+            format: None,
+            platform: Some(platform.into()),
+            encoding: None,
+        };
+        assert_eq!(automatic(&project, &d("twitch")).bitrate_kbps, 6000, "Twitch takes 6 Mbps");
+        assert_eq!(automatic(&project, &d("youtube")).bitrate_kbps, 9000);
+        let cfg = for_stream(&mac(), &project, &d("youtube"));
+        assert!(cfg.constant_bitrate && cfg.keyint_sec == 2 && cfg.scaled.is_none());
+    }
+}

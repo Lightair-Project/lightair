@@ -11,7 +11,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Destination, Format, Id, Project};
+use lightair_core::{Command, Destination, Encoding, Format, Id, Project, VideoEncoder};
 use lightair_engine::outputs::{OutputKey, OutputState, StreamProtocol, runtime};
 
 use crate::platforms::{self, PLATFORMS, Platform, Shape};
@@ -22,7 +22,27 @@ use crate::ui::{self, tok};
 enum Setup {
     Pick,
     Configure(Configure),
+    Edit(Edit),
 }
+
+/// A destination's own settings.
+struct Edit {
+    id: Id,
+    platform: &'static Platform,
+    name: Entity<InputState>,
+    /// Index into the platform's servers, or `None` for the typed address.
+    server: Option<usize>,
+    server_input: Entity<InputState>,
+    /// A new key; empty keeps the saved one.
+    key: Entity<InputState>,
+    format: Option<Id>,
+    /// `None`: Automatic.
+    encoding: Option<Encoding>,
+    error: Option<String>,
+}
+
+/// Asks the window to open Settings at its Recording page.
+pub struct OpenRecordingSettings;
 
 struct Configure {
     platform: &'static Platform,
@@ -238,6 +258,7 @@ impl OutputsPanel {
             enabled: true,
             format: c.format,
             platform: Some(c.platform.id.to_string()),
+            encoding: None,
         };
         if let Err(e) = crate::secrets::set_stream_key(destination.id, &key) {
             c.error = Some(format!("Couldn't save the stream key: {e}"));
@@ -249,6 +270,340 @@ impl OutputsPanel {
         });
         self.setup = None;
         cx.notify();
+    }
+
+    /// Opens a destination's settings.
+    pub fn open_edit(&mut self, id: Id, window: &mut Window, cx: &mut Context<Self>) {
+        let project = self.studio.read(cx).project().clone();
+        let Some(d) = project.outputs.destinations.iter().find(|d| d.id == id).cloned() else { return };
+        let platform = d
+            .platform
+            .as_deref()
+            .and_then(platforms::by_id)
+            .or_else(|| platforms::guess(&d.server))
+            .unwrap_or(&PLATFORMS[PLATFORMS.len() - 1]);
+        let server = platform.servers.iter().position(|(_, url)| *url == d.server);
+        let name = cx.new(|cx| InputState::new(window, cx));
+        name.update(cx, |i, cx| i.set_value(d.name.clone(), window, cx));
+        let server_input = cx.new(|cx| InputState::new(window, cx).placeholder("Server URL"));
+        if server.is_none() {
+            server_input.update(cx, |i, cx| i.set_value(d.server.clone(), window, cx));
+        }
+        let key = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Saved in your Keychain · paste a new key to replace it")
+                .masked(true)
+        });
+        self.setup = Some(Setup::Edit(Edit {
+            id,
+            platform,
+            name,
+            server,
+            server_input,
+            key,
+            format: d.format,
+            encoding: d.encoding,
+            error: None,
+        }));
+        cx.notify();
+    }
+
+    fn save_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(Setup::Edit(e)) = &mut self.setup else { return };
+        let project = self.studio.read(cx).project().clone();
+        let Some(old) = project.outputs.destinations.iter().find(|d| d.id == e.id).cloned() else { return };
+        let server = match e.server.and_then(|i| e.platform.servers.get(i)) {
+            Some((_, url)) => url.to_string(),
+            None => e.server_input.read(cx).value().trim().to_string(),
+        };
+        if StreamProtocol::of(&server).is_none() {
+            e.error = Some("That doesn't look like a server URL (rtmp://, rtmps://, srt:// or https://).".into());
+            cx.notify();
+            return;
+        }
+        let name = e.name.read(cx).value().trim().to_string();
+        let key = e.key.read(cx).value().trim().to_string();
+        if !key.is_empty()
+            && let Err(err) = crate::secrets::set_stream_key(e.id, &key)
+        {
+            e.error = Some(format!("Couldn't save the stream key: {err}"));
+            cx.notify();
+            return;
+        }
+        let destination = Destination {
+            name: if name.is_empty() { old.name.clone() } else { name },
+            server,
+            format: e.format,
+            encoding: e.encoding,
+            ..old
+        };
+        self.studio.update(cx, |s, cx| {
+            let _ = s.execute(Command::UpdateDestination { destination }, cx);
+        });
+        self.setup = None;
+        cx.notify();
+    }
+
+    fn remove_destination(&mut self, id: Id, cx: &mut Context<Self>) {
+        crate::secrets::delete_stream_key(id);
+        self.studio.update(cx, |s, cx| {
+            let _ = s.execute(Command::RemoveDestination { destination: id }, cx);
+        });
+        self.setup = None;
+        cx.notify();
+    }
+
+    fn edit_view(&self, e: &Edit, project: &Project, cx: &mut Context<Self>) -> Div {
+        let p = e.platform;
+        let caps = self.studio.read(cx).engine().capabilities.encoders.clone();
+        let label = |text: &'static str| {
+            div().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(tok::text_secondary()).child(text)
+        };
+        let field = |name: &'static str| div().flex().flex_col().gap_1().child(label(name));
+        let me = cx.entity().downgrade();
+        // Change the dialog's draft encoding.
+        let set = move |f: Box<dyn Fn(&mut Encoding)>| {
+            let me = me.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                if let Some(me) = me.upgrade() {
+                    me.update(cx, |this, cx| {
+                        if let Some(Setup::Edit(e)) = &mut this.setup
+                            && let Some(enc) = &mut e.encoding
+                        {
+                            f(enc);
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        };
+        let chip = |id: (&'static str, usize), text: String, on: bool, enabled: bool| {
+            div()
+                .id(id)
+                .px_2()
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .text_size(px(11.))
+                .border_1()
+                .border_color(if on { tok::text_secondary() } else { tok::border() })
+                .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                .when(!on && enabled, |d| {
+                    d.cursor_pointer().text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised()))
+                })
+                .when(!enabled, |d| d.opacity(0.4).text_color(tok::text_tertiary()))
+                .child(text)
+        };
+
+        // Server: the platform's list, or the typed address.
+        let server = if p.servers.len() > 1 {
+            let current = e.server.and_then(|i| p.servers.get(i)).map_or("Custom address", |(l, _)| *l);
+            let selected = e.server;
+            let me = cx.entity().downgrade();
+            field("Server").child(Button::new("edit-server").label(current).small().outline().w_full().dropdown_menu(
+                move |mut menu, _, _| {
+                    for (i, (l, _)) in p.servers.iter().enumerate() {
+                        let me = me.clone();
+                        menu =
+                            menu.item(PopupMenuItem::new(*l).checked(selected == Some(i)).on_click(move |_, _, cx| {
+                                if let Some(me) = me.upgrade() {
+                                    me.update(cx, |this, cx| {
+                                        if let Some(Setup::Edit(e)) = &mut this.setup {
+                                            e.server = Some(i);
+                                        }
+                                        cx.notify();
+                                    });
+                                }
+                            }));
+                    }
+                    menu.max_h(px(320.)).scrollable(true)
+                },
+            ))
+        } else if p.servers.len() == 1 && e.server.is_some() {
+            field("Server")
+                .child(div().text_size(px(12.)).text_color(tok::text_tertiary()).child(host_of(p.servers[0].1)))
+        } else {
+            field("Server URL").child(Input::new(&e.server_input).small())
+        };
+
+        // Shape.
+        let mut shapes = div().flex().flex_wrap().gap_1();
+        for (i, f) in project.formats.iter().enumerate() {
+            let id = (f.id != project.primary_format().id).then_some(f.id);
+            shapes = shapes.child(
+                chip(("edit-shape", i), format!("{} {}", f.name, aspect_label(f)), e.format == id, true).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        if let Some(Setup::Edit(e)) = &mut this.setup {
+                            e.format = id;
+                        }
+                        cx.notify();
+                    }),
+                ),
+            );
+        }
+
+        // Quality: Automatic, or its own.
+        let destination = project.outputs.destinations.iter().find(|d| d.id == e.id).cloned();
+        let auto = destination.as_ref().map(|d| crate::encoding::automatic(project, d)).unwrap_or_default();
+        let automatic = e.encoding.is_none();
+        let summary = |enc: &Encoding| {
+            format!(
+                "{} · {:.1} Mbps · {} · keyframes every {} s · audio {} kbps",
+                enc.encoder.label(),
+                enc.bitrate_kbps as f32 / 1000.0,
+                enc.height.map_or("canvas size".to_string(), |h| format!("{h}p")),
+                enc.keyframe_s,
+                enc.audio_kbps
+            )
+        };
+        let mut quality = div().flex().flex_col().gap_2().p_3().rounded(px(8.)).bg(tok::bg_raised()).child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().flex().flex_col().child(div().text_size(px(13.)).child("Automatic")).child(
+                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(if automatic {
+                        summary(&auto)
+                    } else {
+                        "Off: this destination uses its own settings below.".to_string()
+                    }),
+                ))
+                .child(toggle("edit-auto", automatic).on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(Setup::Edit(e)) = &mut this.setup {
+                        e.encoding = if e.encoding.is_some() { None } else { Some(auto) };
+                    }
+                    cx.notify();
+                }))),
+        );
+        if let Some(enc) = e.encoding {
+            let mut encoders = div().flex().flex_wrap().gap_1();
+            for (i, choice) in [VideoEncoder::H264, VideoEncoder::Hevc, VideoEncoder::X264].into_iter().enumerate() {
+                let ok = crate::encoding::available(&caps, choice);
+                let mut c = chip(("edit-encoder", i), choice.label().to_string(), enc.encoder == choice, ok);
+                if ok {
+                    c = c.on_click(set(Box::new(move |e| e.encoder = choice)));
+                }
+                encoders = encoders.child(c);
+            }
+            let max = p.max_kbps;
+            let bitrate = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    Button::new("edit-bitrate-down")
+                        .icon(ui::icon("minus"))
+                        .xsmall()
+                        .ghost()
+                        .on_click(set(Box::new(|e| e.bitrate_kbps = e.bitrate_kbps.saturating_sub(500).max(500)))),
+                )
+                .child(
+                    div()
+                        .w(px(84.))
+                        .text_center()
+                        .text_size(px(12.))
+                        .font_family("Menlo")
+                        .child(format!("{:.1} Mbps", enc.bitrate_kbps as f32 / 1000.0)),
+                )
+                .child(
+                    Button::new("edit-bitrate-up")
+                        .icon(ui::icon("plus"))
+                        .xsmall()
+                        .ghost()
+                        .on_click(set(Box::new(|e| e.bitrate_kbps = (e.bitrate_kbps + 500).min(51_000)))),
+                )
+                .when_some(max.filter(|m| enc.bitrate_kbps > *m), |d, m| {
+                    d.child(div().text_size(px(11.)).text_color(tok::warn()).child(format!(
+                        "{} takes up to {} Mbps",
+                        p.name,
+                        m / 1000
+                    )))
+                });
+            let mut heights = div().flex().flex_wrap().gap_1();
+            for (i, h) in [None, Some(1080), Some(720), Some(480), Some(360)].into_iter().enumerate() {
+                heights = heights.child(
+                    chip(
+                        ("edit-height", i),
+                        h.map_or("Canvas".to_string(), |h| format!("{h}p")),
+                        enc.height == h,
+                        true,
+                    )
+                    .on_click(set(Box::new(move |e| e.height = h))),
+                );
+            }
+            let mut keys = div().flex().flex_wrap().gap_1();
+            for (i, k) in [1, 2, 4].into_iter().enumerate() {
+                keys = keys.child(
+                    chip(("edit-keyframe", i), format!("{k} s"), enc.keyframe_s == k, true)
+                        .on_click(set(Box::new(move |e| e.keyframe_s = k))),
+                );
+            }
+            let mut audio = div().flex().flex_wrap().gap_1();
+            for (i, k) in [96, 128, 160, 320].into_iter().enumerate() {
+                audio = audio.child(
+                    chip(("edit-audio", i), format!("{k} kbps"), enc.audio_kbps == k, true)
+                        .on_click(set(Box::new(move |e| e.audio_kbps = k))),
+                );
+            }
+            quality = quality
+                .child(field("Encoder").child(encoders).when(enc.encoder == VideoEncoder::Hevc, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(tok::text_tertiary())
+                            .child("HEVC streams to YouTube; most other platforms need H.264."),
+                    )
+                }))
+                .child(field("Bitrate").child(bitrate))
+                .child(field("Resolution").child(heights))
+                .child(field("Keyframes every").child(keys))
+                .child(field("Audio").child(audio));
+        }
+        let id = e.id;
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(badge(p, 36.))
+                    .child(div().flex_1().child(Input::new(&e.name).small()))
+                    .child(
+                        Button::new("edit-remove")
+                            .label("Remove")
+                            .icon(ui::icon("trash"))
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| this.remove_destination(id, cx))),
+                    ),
+            )
+            .child(server)
+            .child(field("Stream key").child(Input::new(&e.key).small().mask_toggle()))
+            .child(field("Send").child(shapes))
+            .child(field("Quality").child(quality))
+            .when_some(e.error.clone(), |d, err| d.child(div().text_size(px(11.)).text_color(tok::error()).child(err)))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new("edit-save")
+                            .label("Save")
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(|this, _, _, cx| this.save_edit(cx))),
+                    )
+                    .child(Button::new("edit-cancel").label("Cancel").small().ghost().on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.setup = None;
+                            cx.notify();
+                        },
+                    ))),
+            )
     }
 
     /// The grid of platforms to start from.
@@ -297,6 +652,7 @@ impl OutputsPanel {
         let body = match self.setup.as_ref()? {
             Setup::Pick => self.picker(cx),
             Setup::Configure(c) => self.configure(c, &project, cx),
+            Setup::Edit(e) => self.edit_view(e, &project, cx),
         };
         let close = cx.listener(|this, _, _, cx| {
             this.setup = None;
@@ -309,14 +665,14 @@ impl OutputsPanel {
                 .flex()
                 .justify_center()
                 .items_start()
-                .pt(px(72.))
+                .pt(px(48.))
                 .bg(tok::scrim())
                 .on_mouse_down(MouseButton::Left, close)
                 .child(
                     div()
                         .id("destination-dialog")
                         .w(px(520.))
-                        .max_h(px(640.))
+                        .max_h(relative(0.88))
                         .overflow_y_scroll()
                         .p_4()
                         .rounded(px(14.))
@@ -684,13 +1040,16 @@ impl Render for OutputsPanel {
                 .unwrap_or_else(|| format!("{} · {}", host_of(&d.server), StreamProtocol::label(&d.server)));
             streams = streams.child(
                 card(("out-dest", i).into())
+                    .cursor_pointer()
                     .when(!enabled, |d| d.opacity(0.6))
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_edit(id, window, cx)))
                     .child(badge(platform, 28.))
                     .child(two_lines(d.name.clone(), where_))
                     .child(format_badge(("dest-format", i), &project, d.format).on_click(cx.listener({
                         let project = project.clone();
                         let current = d.format;
                         move |this, _, _, cx| {
+                            cx.stop_propagation();
                             let format = next_format(&project, current);
                             this.studio.update(cx, |s, cx| {
                                 let _ = s.execute(Command::SetDestinationFormat { destination: id, format }, cx);
@@ -709,6 +1068,7 @@ impl Render for OutputsPanel {
                                 .build(w, cx)
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
                                 this.studio.update(cx, |s, cx| {
                                     let _ = s.execute(
                                         Command::SetDestinationEnabled { destination: id, enabled: !enabled },
@@ -763,13 +1123,15 @@ impl Render for OutputsPanel {
             .overflow_y_scroll()
             .pb_3()
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .pr_3()
-                    .child(section_label("RECORDING"))
-                    .child(div().pt_2().child(show_recordings)),
+                div().flex().items_center().justify_between().pr_3().child(section_label("RECORDING")).child(
+                    div().pt_2().flex().gap_0p5().child(show_recordings).child(
+                        ui::icon_button("recording-settings", "settings", tok::text_secondary())
+                            .tooltip(|w, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("Recording settings").build(w, cx)
+                            })
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenRecordingSettings))),
+                    ),
+                ),
             )
             .child(recordings)
             .child(
@@ -835,6 +1197,7 @@ impl gpui_kit::component::dock::Panel for OutputsPanel {
 
 impl EventEmitter<gpui_kit::component::dock::PanelEvent> for OutputsPanel {}
 impl EventEmitter<AddVerticalFormat> for OutputsPanel {}
+impl EventEmitter<OpenRecordingSettings> for OutputsPanel {}
 
 impl Focusable for OutputsPanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
