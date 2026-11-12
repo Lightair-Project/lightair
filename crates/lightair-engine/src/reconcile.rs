@@ -334,6 +334,17 @@ impl Reconciler {
         self.studio_query(input, c"face_present")
     }
 
+    /// Turns one of an input's effect filters on or off in libobs only, leaving the document
+    /// alone (the eyedropper shows the picture without the effect being picked for). `filter` is
+    /// the lowered chain's id: the effect's own, or `catalog::STUDIO_ID` for face effects.
+    pub fn set_filter_live(&self, input: Id, filter: Id, enabled: bool) {
+        if let Some(chain) = self.input_effects.get(&input)
+            && let Some((_, f)) = chain.iter().find(|(id, _)| *id == filter)
+        {
+            unsafe { sys::obs_source_set_enabled(f.as_ptr(), enabled) };
+        }
+    }
+
     /// Whether the input's Camera Studio sees a person (for the background effects' hint);
     /// `None` when it has no Camera Studio running.
     pub fn person_present(&self, input: Id) -> Option<bool> {

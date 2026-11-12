@@ -269,6 +269,8 @@ pub struct StudioWindow {
     presence: std::collections::HashMap<Id, effects::Presence>,
     /// Effect control groups toggled from their default (first open, the rest closed).
     fx_groups: std::collections::HashSet<String>,
+    /// Colour pickers of the selected object's effects, by "effect:key".
+    colour_pickers: std::collections::HashMap<String, effects::ColourPicker>,
     transition_menu: bool,
     /// The layer showing crop handles instead of resize handles.
     crop_mode: Option<Id>,
@@ -428,6 +430,7 @@ impl StudioWindow {
             effect_sheet: None,
             presence: Default::default(),
             fx_groups: Default::default(),
+            colour_pickers: Default::default(),
             transition_menu: false,
             crop_mode: None,
             crop_preview_sent: None,

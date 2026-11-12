@@ -3,6 +3,7 @@
 mod assets;
 mod camera_studio;
 mod encoding;
+mod eyedropper;
 mod geometry;
 mod hotkeys;
 mod mixer;
