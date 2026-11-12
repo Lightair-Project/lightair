@@ -311,6 +311,8 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
         sys::obs_post_load_modules();
         sys::obs_log_loaded_modules();
     }
+    // Lightair's own source types (the audio engine's mix outputs, a test tone)
+    crate::audio_host::register_types();
 }
 
 /// Loads every `<module>.plugin` in `dir` (subject to the safe-module allowlist).

@@ -34,54 +34,20 @@ fn meter_frac(db: f32) -> f32 {
     if !db.is_finite() { 0.0 } else { ((db + 60.0) / 60.0).clamp(0.0, 1.0) }
 }
 
-/// Built-in effect presets: (menu label, effects added in one undo step).
+/// Built-in effect presets: (menu label, effects added in one undo step) - the audio engine's
+/// effects with their catalog defaults.
 pub(crate) fn effect_presets() -> Vec<(&'static str, Vec<Effect>)> {
-    vec![
-        ("Voice Clarity", voice_clarity()),
-        (
-            "Noise suppression",
-            vec![Effect::new(
-                "Noise suppression",
-                "noise_suppress_filter_v2",
-                json!({"method": "rnnoise", "suppress_level": -30}),
-            )],
-        ),
-        (
-            "Noise gate",
-            vec![Effect::new(
-                "Noise gate",
-                "noise_gate_filter",
-                json!({"open_threshold": -26.0, "close_threshold": -32.0}),
-            )],
-        ),
-        (
-            "Compressor",
-            vec![Effect::new(
-                "Compressor",
-                "compressor_filter",
-                json!({"ratio": 3.0, "threshold": -18.0, "attack_time": 6, "release_time": 60, "output_gain": 0.0}),
-            )],
-        ),
-        ("Limiter", vec![Effect::new("Limiter", "limiter_filter", json!({"threshold": -1.0, "release_time": 60}))]),
-        ("Gain", vec![Effect::new("Gain", "gain_filter", json!({"db": 0.0}))]),
-    ]
+    ["audio.voice", "audio.noise", "audio.gate", "audio.compressor", "audio.eq", "audio.deesser", "audio.limiter", "audio.gain"]
+        .into_iter()
+        .filter_map(lightair_core::catalog::def)
+        .map(|d| (d.name, vec![d.create()]))
+        .collect()
 }
 
-/// The vocal chain new microphone tracks get (docs/10-audio.md, Voice Clarity).
+/// The vocal chain new microphone tracks get (docs/10-audio.md, Voice Clarity): the engine's
+/// one-knob chain (noise, expander, de-esser, EQ, compressor, limiter).
 pub fn voice_clarity() -> Vec<Effect> {
-    vec![
-        Effect::new(
-            "Noise suppression",
-            "noise_suppress_filter_v2",
-            json!({"method": "rnnoise", "suppress_level": -30}),
-        ),
-        Effect::new(
-            "Compressor",
-            "compressor_filter",
-            json!({"ratio": 3.0, "threshold": -18.0, "attack_time": 6, "release_time": 60, "output_gain": 2.0}),
-        ),
-        Effect::new("Limiter", "limiter_filter", json!({"threshold": -1.0, "release_time": 60})),
-    ]
+    lightair_core::catalog::def("audio.voice").map(|d| vec![d.create()]).unwrap_or_default()
 }
 
 pub struct MixerPanel {

@@ -5,6 +5,7 @@
 //! "Threading model"). Other threads send jobs with [`Engine::call`] / [`Engine::post`].
 
 pub mod audio;
+pub mod audio_host;
 pub mod displays;
 mod engine;
 mod log;

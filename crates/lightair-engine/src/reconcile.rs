@@ -49,6 +49,9 @@ pub struct Reconciler {
     primary_format: Option<Id>,
     program: Option<Id>,
     tracks: HashMap<Id, TrackState>,
+    /// The audio engine playing the mixer (docs/plans/audio-engine.md); started with the first
+    /// track. `LIGHTAIR_LEGACY_AUDIO=1` keeps libobs mixing the tracks instead.
+    audio: Option<crate::audio_host::AudioHost>,
     /// Each format's output channel goes through its own transition.
     transitions: HashMap<Id, Source>,
     transition_settings: TransitionSettings,
@@ -207,6 +210,66 @@ impl Reconciler {
                 Patch::AudioSetup => {}
             }
         }
+        let audio_changed = patches.iter().any(|p| {
+            matches!(
+                p,
+                Patch::TrackAdded(_)
+                    | Patch::TrackChanged { .. }
+                    | Patch::TrackRemoved(_)
+                    | Patch::AudioSetup
+                    | Patch::InputAdded(_)
+                    | Patch::InputRemoved(_)
+            )
+        });
+        if audio_changed {
+            self.sync_audio(project);
+        }
+    }
+
+    /// Whether the audio engine plays the mixer (rather than libobs mixing the tracks).
+    fn engine_audio() -> bool {
+        std::env::var("LIGHTAIR_LEGACY_AUDIO").map_or(true, |v| v != "1")
+    }
+
+    /// Brings the audio engine up to date: captures every track's input, releases inputs no
+    /// track uses, and plays the project's mixer.
+    fn sync_audio(&mut self, project: &Project) {
+        if !Self::engine_audio() || (project.tracks.is_empty() && self.audio.is_none()) {
+            return;
+        }
+        if self.audio.is_none() {
+            let mut info = sys::obs_audio_info::default();
+            let rate = if unsafe { sys::obs_get_audio_info(&mut info) } { info.samples_per_sec } else { 48_000 };
+            self.audio = crate::audio_host::AudioHost::start(rate);
+        }
+        let Some(host) = self.audio.as_mut() else { return };
+        let wanted: HashSet<Id> = project.tracks.iter().map(|t| t.input).collect();
+        let stale: Vec<Id> = host.captured().filter(|i| !wanted.contains(i)).collect();
+        for input in stale {
+            host.release(input);
+        }
+        for input in &wanted {
+            if let Some(src) = self.inputs.get(input) {
+                host.capture(*input, src);
+            }
+        }
+        host.set(crate::audio::spec(project));
+        let cells = project
+            .tracks
+            .iter()
+            .filter_map(|t| meters().get(t.id).map(|cell| (crate::audio::node(t.id), cell)))
+            .collect();
+        host.set_meter_cells(cells);
+    }
+
+    /// A track's, bus's, mix's or the program's meter from the audio engine.
+    pub fn audio_meter(&mut self, id: Id) -> Option<Arc<lightair_audio::meter::Meter>> {
+        Some(self.audio.as_mut()?.meter(crate::audio::node(id)))
+    }
+
+    /// The program's (master's) meter.
+    pub fn program_meter(&mut self) -> Option<Arc<lightair_audio::meter::Meter>> {
+        Some(self.audio.as_mut()?.meter(lightair_audio::PROGRAM))
     }
 
     // ------------------------------------------------------------ formats
@@ -840,7 +903,7 @@ impl Reconciler {
             return;
         };
         let used: std::collections::HashSet<u32> = self.tracks.values().map(|t| t.channel).collect();
-        let Some(channel) = (1..sys::MAX_CHANNELS).find(|c| !used.contains(c)) else {
+        let Some(channel) = (1..crate::audio_host::OUT_CHANNELS.start).find(|c| !used.contains(c)) else {
             tracing::error!("no free output channel for track");
             return;
         };
@@ -848,13 +911,24 @@ impl Reconciler {
         let meter = meters().insert(track.id);
         unsafe {
             sys::obs_set_output_source(channel, src);
-            let vm = sys::obs_volmeter_create(sys::OBS_FADER_LOG);
-            sys::obs_volmeter_attach_source(vm, src);
-            sys::obs_volmeter_add_callback(vm, Some(on_levels), Arc::as_ptr(&meter) as *mut _);
+            // with the engine, its post-fader meters fill the cell (sync_audio); otherwise libobs's
+            let vm = if Self::engine_audio() {
+                std::ptr::null_mut()
+            } else {
+                let vm = sys::obs_volmeter_create(sys::OBS_FADER_LOG);
+                sys::obs_volmeter_attach_source(vm, src);
+                sys::obs_volmeter_add_callback(vm, Some(on_levels), Arc::as_ptr(&meter) as *mut _);
+                vm
+            };
             let mut state =
                 TrackState { input: track.input, channel, volmeter: VolmeterPtr(vm), meter, filters: vec![] };
-            apply_track_levels(src, track);
-            state.filters = chain_build(src, &track.effects);
+            if Self::engine_audio() {
+                // levels, mute and the engine's effects are the engine's; plugin filters stay
+                state.filters = chain_build(src, &libobs_effects(&track.effects));
+            } else {
+                apply_track_levels(src, track);
+                state.filters = chain_build(src, &track.effects);
+            }
             self.tracks.insert(track.id, state);
         }
     }
@@ -869,15 +943,22 @@ impl Reconciler {
             return;
         };
         let src = source.as_ptr();
-        unsafe { apply_track_levels(src, after) };
-        unsafe { chain_update(src, &mut state.filters, &before.effects, &after.effects) };
+        if Self::engine_audio() {
+            let (b, a) = (libobs_effects(&before.effects), libobs_effects(&after.effects));
+            unsafe { chain_update(src, &mut state.filters, &b, &a) };
+        } else {
+            unsafe { apply_track_levels(src, after) };
+            unsafe { chain_update(src, &mut state.filters, &before.effects, &after.effects) };
+        }
     }
 
     fn remove_track(&mut self, id: Id) {
         let Some(mut state) = self.tracks.remove(&id) else { return };
         unsafe {
-            sys::obs_volmeter_remove_callback(state.volmeter.0, Some(on_levels), Arc::as_ptr(&state.meter) as *mut _);
-            sys::obs_volmeter_destroy(state.volmeter.0);
+            if !state.volmeter.0.is_null() {
+                sys::obs_volmeter_remove_callback(state.volmeter.0, Some(on_levels), Arc::as_ptr(&state.meter) as *mut _);
+                sys::obs_volmeter_destroy(state.volmeter.0);
+            }
             sys::obs_set_output_source(state.channel, std::ptr::null_mut());
             if let Some(source) = self.inputs.get(&state.input) {
                 chain_remove(source.as_ptr(), &mut state.filters);
@@ -944,6 +1025,7 @@ impl Reconciler {
         for id in ids {
             self.remove_track(id);
         }
+        self.audio = None; // stops the audio thread, releases the captures
         unsafe { sys::obs_set_output_source(0, std::ptr::null_mut()) };
         for canvas in self.canvases.values() {
             unsafe { sys::obs_canvas_set_channel(canvas.as_ptr(), 0, std::ptr::null_mut()) };
@@ -1127,6 +1209,11 @@ pub(crate) unsafe fn layout_item(item: *mut sys::obs_sceneitem_t, masked: Option
             sys::obs_source_set_enabled(t.as_ptr(), l.has_transform());
         }
     }
+}
+
+/// A track's effects that libobs runs (plugin filters): the engine runs its own (`audio.*`).
+fn libobs_effects(effects: &[Effect]) -> Vec<Effect> {
+    effects.iter().filter(|e| !e.kind.starts_with("audio.")).cloned().collect()
 }
 
 unsafe fn apply_track_levels(src: *mut sys::obs_source_t, track: &Track) {

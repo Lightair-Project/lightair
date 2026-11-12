@@ -11,6 +11,7 @@ libobs-sys.workspace = true
 lightair-core.workspace = true
 lightair-audio.workspace = true
 uuid.workspace = true
+rtrb = "0.3"
 serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

@@ -13,6 +13,9 @@ pub fn node(id: Id) -> la::NodeId {
     id.0.as_u128()
 }
 
+/// The cue mix: tracks with Cue on, heard on the monitoring device (headphones).
+pub const CUE: la::NodeId = 1;
+
 struct Reader<'a> {
     def: &'static EffectDef,
     s: &'a Value,
@@ -187,7 +190,13 @@ pub fn spec(project: &Project) -> la::GraphSpec {
                 mute: t.muted,
                 solo: false,
                 dest: dest(t.route),
-                sends: sends(&t.sends),
+                sends: {
+                    let mut s = sends(&t.sends);
+                    if t.cue {
+                        s.push(la::Send { mix: CUE, level_db: 0.0, pre_fader: false });
+                    }
+                    s
+                },
                 ..la::Strip::track(node(t.id), node(t.input), channels)
             }
         })
@@ -203,20 +212,24 @@ pub fn spec(project: &Project) -> la::GraphSpec {
         ..la::Strip::bus(node(b.id))
     }));
     let master = &project.audio.master;
+    let mut mixes: Vec<la::Mix> = project
+        .audio
+        .mixes
+        .iter()
+        .map(|m| la::Mix {
+            name: m.name.clone(),
+            inserts: inserts(&m.effects),
+            gain_db: fader(m.volume_db),
+            mute: m.muted,
+            ..la::Mix::new(node(m.id))
+        })
+        .collect();
+    if project.tracks.iter().any(|t| t.cue) {
+        mixes.push(la::Mix { name: "Cue".into(), ..la::Mix::new(CUE) });
+    }
     la::GraphSpec {
         strips,
-        mixes: project
-            .audio
-            .mixes
-            .iter()
-            .map(|m| la::Mix {
-                name: m.name.clone(),
-                inserts: inserts(&m.effects),
-                gain_db: fader(m.volume_db),
-                mute: m.muted,
-                ..la::Mix::new(node(m.id))
-            })
-            .collect(),
+        mixes,
         program: la::Master { inserts: inserts(&master.effects), gain_db: fader(master.volume_db), mute: master.muted },
     }
 }
