@@ -25,6 +25,8 @@ pub struct Studio {
     pub selected_layer: Option<Id>,
     /// Further selected layers (⇧-click); `selected_layer` is the one the Inspector edits.
     pub also_selected: Vec<Id>,
+    /// The mixer track the Inspector shows (instead of a layer).
+    pub selected_track: Option<Id>,
     /// Last user-visible problem, shown in the status bar.
     pub issue: Option<SharedString>,
     pub stats: Stats,
@@ -62,6 +64,7 @@ impl Studio {
             selected_scene,
             selected_layer: None,
             also_selected: Vec::new(),
+            selected_track: None,
             issue,
             stats: Stats::default(),
             clips_seen: 0,
@@ -602,6 +605,15 @@ impl Studio {
         self.selected_layer.into_iter().chain(self.also_selected.iter().copied()).collect()
     }
 
+    /// Selects a mixer track for the Inspector (and clears the layer selection).
+    pub fn select_track(&mut self, track: Option<Id>) {
+        self.selected_track = track;
+        if track.is_some() {
+            self.selected_layer = None;
+            self.also_selected.clear();
+        }
+    }
+
     /// ⇧-click: add a layer to the selection, or take it out.
     pub fn toggle_selected(&mut self, layer: Id) {
         if self.selected_layer == Some(layer) {
@@ -617,6 +629,9 @@ impl Studio {
 
     fn fix_selection(&mut self) {
         let p = self.doc.project();
+        if self.selected_track.is_some_and(|t| p.track(t).is_none()) {
+            self.selected_track = None;
+        }
         if self.selected_scene.is_none_or(|s| p.scene(s).is_none()) {
             self.selected_scene = p.program.or(p.scenes.first().map(|s| s.id));
         }

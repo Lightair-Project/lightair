@@ -15,8 +15,7 @@ use serde_json::json;
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 
-const STRIP_W: f32 = 132.0;
-const METER_H: f32 = 150.0;
+const STRIP_W: f32 = 92.0;
 const DB_MIN: f32 = -60.0;
 const DB_MAX: f32 = 12.0;
 
@@ -35,7 +34,7 @@ fn meter_frac(db: f32) -> f32 {
 }
 
 /// Built-in effect presets: (menu label, effects added in one undo step).
-fn effect_presets() -> Vec<(&'static str, Vec<Effect>)> {
+pub(crate) fn effect_presets() -> Vec<(&'static str, Vec<Effect>)> {
     vec![
         ("Voice Clarity", voice_clarity()),
         (
@@ -92,7 +91,6 @@ pub struct MixerPanel {
     display: HashMap<Id, [f32; 2]>,
     last_frame: Instant,
     add_track_menu: bool,
-    effect_menu: Option<Id>,
     focus: FocusHandle,
 }
 
@@ -106,7 +104,6 @@ impl MixerPanel {
             display: HashMap::new(),
             last_frame: Instant::now(),
             add_track_menu: false,
-            effect_menu: None,
             focus: cx.focus_handle(),
         }
     }
@@ -170,8 +167,7 @@ impl Render for MixerPanel {
                 *value = if target > fallen { target } else { fallen.max(-90.0) };
             }
             let shown = *shown;
-            let input_name = project.inputs.get(&track.input).map(|i| i.name.clone()).unwrap_or_default();
-            strips.push(self.strip(i, track, shown, input_name, cx).into_any_element());
+            strips.push(self.strip(i, track, shown, cx).into_any_element());
         }
         self.display.retain(|id, _| project.track(*id).is_some());
 
@@ -188,16 +184,25 @@ impl Render for MixerPanel {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
             .when(self.add_track_menu, |d| d.child(div().px_3().py_2().child(self.add_track_menu(cx))))
-            .child(div().id("strips").flex().flex_1().gap_2().px_3().pb_3().overflow_x_scroll().children(strips).when(
-                project.tracks.is_empty(),
-                |d| {
-                    d.child(
-                        div()
-                            .text_color(tok::text_tertiary())
-                            .child("No audio tracks. Add a microphone or desktop audio with +."),
-                    )
-                },
-            ))
+            .child(
+                div()
+                    .id("strips")
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .overflow_x_scroll()
+                    .children(strips)
+                    .when(project.tracks.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_color(tok::text_tertiary())
+                                .child("No audio tracks. Add a microphone or desktop audio with +."),
+                        )
+                    }),
+            )
     }
 }
 
@@ -238,99 +243,25 @@ impl MixerPanel {
             })))
     }
 
-    fn strip(
-        &self,
-        i: usize,
-        track: &Track,
-        shown: [f32; 2],
-        input_name: String,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn strip(&self, i: usize, track: &Track, shown: [f32; 2], cx: &mut Context<Self>) -> impl IntoElement {
         let id = track.id;
-        let muted = track.muted;
-        let cue = track.cue;
-        let volume = track.volume_db;
+        let (muted, cue, volume) = (track.muted, track.cue, track.volume_db);
+        let selected = self.studio.read(cx).selected_track == Some(id);
+        let active_fx = track.effects.iter().filter(|e| e.enabled).count();
 
-        // ---- effects
-        let effects = track.effects.iter().enumerate().map(|(j, e)| {
-            let (eid, enabled) = (e.id, e.enabled);
-            div()
-                .id(("fx", i * 100 + j))
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .h(px(22.))
-                .px_1()
-                .rounded(px(4.))
-                .text_size(px(11.))
-                .text_color(if enabled { tok::text() } else { tok::text_tertiary() })
-                .hover(|d| d.bg(tok::bg_selected()))
-                .child(
-                    div()
-                        .id(("fx-dot", i * 100 + j))
-                        .size(px(8.))
-                        .rounded_full()
-                        .cursor_pointer()
-                        .bg(if enabled { tok::ok() } else { tok::border_strong() })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.exec(Command::SetEffectEnabled { track: id, effect: eid, enabled: !enabled }, cx)
-                        })),
-                )
-                .child(div().flex_1().overflow_hidden().text_ellipsis().child(e.name.clone()))
-                .child(
-                    div()
-                        .id(("fx-del", i * 100 + j))
-                        .text_color(tok::text_tertiary())
-                        .cursor_pointer()
-                        .hover(|d| d.text_color(tok::text()))
-                        .child("×")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.exec(Command::RemoveEffect { track: id, effect: eid }, cx)
-                        })),
-                )
-        });
-        let effect_menu = if self.effect_menu == Some(id) {
-            let mut items = Vec::new();
-            for (k, (label, effects)) in effect_presets().into_iter().enumerate() {
-                items.push(
-                    div()
-                        .id(("fx-add", i * 100 + k))
-                        .px_1()
-                        .h(px(20.))
-                        .text_size(px(11.))
-                        .rounded(px(4.))
-                        .cursor_pointer()
-                        .hover(|d| d.bg(tok::bg_selected()))
-                        .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.effect_menu = None;
-                            let commands = effects
-                                .iter()
-                                .cloned()
-                                .map(|effect| Command::AddEffect { track: id, effect, index: None })
-                                .collect();
-                            this.exec(Command::Batch { label: format!("Add {label}"), commands }, cx);
-                        })),
-                );
-            }
-            Some(div().flex().flex_col().gap_0p5().p_1().rounded(px(6.)).bg(tok::bg_raised()).children(items))
-        } else {
-            None
-        };
-
-        // ---- meter + fader
+        // Meters and fader stretch to the strip's height: everything is in fractions of it.
         let meter_bar = |db: f32| {
             let frac = meter_frac(db);
             // Zones: green below −20, yellow −20…−9, red above −9 dBFS.
             let (g_end, y_end) = (meter_frac(-20.0), meter_frac(-9.0));
             let seg = |from: f32, to: f32, color: Hsla| {
-                let h = (frac.min(to) - from).max(0.0) * METER_H;
-                div().absolute().left_0().right_0().bottom(px(from * METER_H)).h(px(h)).bg(color)
+                let h = (frac.min(to) - from).max(0.0);
+                div().absolute().left_0().right_0().bottom(relative(from)).h(relative(h)).bg(color)
             };
             div()
                 .relative()
-                .w(px(6.))
-                .h(px(METER_H))
+                .w(px(5.))
+                .h_full()
                 .rounded(px(2.))
                 .bg(tok::bg_app())
                 .child(seg(0.0, g_end, tok::ok()))
@@ -338,12 +269,11 @@ impl MixerPanel {
                 .child(seg(y_end, 1.0, tok::error()))
         };
         let faders = self.faders.clone();
-        let thumb_y = (1.0 - db_to_pos(volume)) * METER_H;
         let fader = div()
             .id(("fader", i))
             .relative()
-            .w(px(28.))
-            .h(px(METER_H))
+            .w(px(26.))
+            .h_full()
             .cursor_pointer()
             .child(
                 canvas(
@@ -355,22 +285,23 @@ impl MixerPanel {
                 .absolute()
                 .size_full(),
             )
-            .child(div().absolute().left(px(13.)).top_0().bottom_0().w(px(2.)).bg(tok::border_strong()))
+            .child(div().absolute().left(px(12.)).top_0().bottom_0().w(px(2.)).rounded_full().bg(tok::border_strong()))
             // unity mark
             .child(
                 div()
                     .absolute()
-                    .left(px(6.))
+                    .left(px(5.))
                     .w(px(16.))
                     .h(px(1.))
-                    .top(px((1.0 - db_to_pos(0.0)) * METER_H))
+                    .top(relative(1.0 - db_to_pos(0.0)))
                     .bg(tok::text_tertiary()),
             )
             .child(
                 div()
                     .absolute()
-                    .left(px(2.))
-                    .top(px(thumb_y - 6.))
+                    .left(px(1.))
+                    .top(relative(1.0 - db_to_pos(volume)))
+                    .mt(px(-6.))
                     .w(px(24.))
                     .h(px(12.))
                     .rounded(px(3.))
@@ -391,88 +322,112 @@ impl MixerPanel {
                 }),
             );
 
-        let toggle = |key: &'static str, label: &'static str, on: bool, on_color: Hsla| {
+        let toggle = |key: &'static str, icon: &'static str, tip: &'static str, on: bool, on_color: Hsla| {
             div()
                 .id((key, i))
                 .flex()
                 .items_center()
                 .justify_center()
-                .h(px(22.))
-                .w(px(52.))
-                .rounded(px(4.))
-                .text_size(px(10.))
-                .font_weight(FontWeight::SEMIBOLD)
+                .size(px(26.))
+                .rounded(px(5.))
                 .cursor_pointer()
-                .border_1()
-                .border_color(if on { on_color } else { tok::border_strong() })
-                .bg(if on { on_color } else { tok::bg_raised() })
-                .text_color(if on { tok::text_inverse() } else { tok::text_secondary() })
-                .child(label)
+                .bg(if on { on_color } else { tok::bg_app() })
+                .hover(|d| d.opacity(0.85))
+                .child(ui::icon(icon).size(px(14.)).text_color(if on {
+                    tok::text_inverse()
+                } else {
+                    tok::text_secondary()
+                }))
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
         };
 
         div()
+            .id(("strip", i))
             .flex()
             .flex_col()
             .flex_none()
             .w(px(STRIP_W))
             .h_full()
             .p_2()
-            .gap_1()
-            .rounded(px(10.))
+            .gap_2()
+            .rounded(px(8.))
             .bg(tok::bg_raised())
-            .child(div().font_weight(FontWeight::SEMIBOLD).overflow_hidden().text_ellipsis().child(track.name.clone()))
-            .child(div().flex().flex_col().children(effects).children(effect_menu))
-            .child(
-                div()
-                    .id(("fx-plus", i))
-                    .text_color(tok::text_tertiary())
-                    .text_size(px(11.))
-                    .cursor_pointer()
-                    .hover(|d| d.text_color(tok::text()))
-                    .child("+ effect")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.effect_menu = if this.effect_menu == Some(id) { None } else { Some(id) };
-                        cx.notify();
-                    })),
-            )
-            .child(div().flex_1())
+            .border_1()
+            .border_color(if selected { tok::accent_primary() } else { tok::bg_raised() })
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.studio.update(cx, |s, cx| {
+                    s.select_track(Some(id));
+                    cx.notify();
+                })
+            }))
+            // Name, and how many effects are on (the Inspector edits them).
             .child(
                 div()
                     .flex()
-                    .items_end()
+                    .items_center()
                     .gap_1()
-                    .child(meter_bar(shown[0]))
-                    .child(meter_bar(shown[1]))
-                    .child(fader)
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .font_family("Menlo")
-                                    .text_color(tok::text_secondary())
-                                    .child(if volume.is_finite() { format!("{volume:+.1}") } else { "−∞".into() }),
-                            )
-                            .child(toggle("cue", "CUE", cue, tok::text()).on_click(cx.listener(
-                                move |this, _, _, cx| this.exec(Command::SetTrackCue { track: id, cue: !cue }, cx),
-                            )))
-                            .child(toggle("mute", "MUTE", muted, tok::live()).on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.exec(Command::SetTrackMuted { track: id, muted: !muted }, cx)
-                                },
-                            ))),
-                    ),
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(track.name.clone()),
+                    )
+                    .when(active_fx > 0, |d| {
+                        d.child(
+                            div()
+                                .px_1()
+                                .rounded(px(3.))
+                                .text_size(px(9.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .bg(tok::bg_selected())
+                                .text_color(tok::text_secondary())
+                                .child(format!("FX {active_fx}")),
+                        )
+                    }),
             )
             .child(
                 div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .justify_center()
+                    .gap_1()
+                    .child(meter_bar(shown[0]))
+                    .child(meter_bar(shown[1]))
+                    .child(div().w(px(6.)))
+                    .child(fader),
+            )
+            .child(
+                div()
+                    .text_center()
                     .text_size(px(10.))
-                    .text_color(tok::text_tertiary())
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(input_name),
+                    .font_family("Menlo")
+                    .text_color(tok::text_secondary())
+                    .child(if volume.is_finite() { format!("{volume:+.1} dB") } else { "−∞".into() }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_center()
+                    .gap_1()
+                    .child(toggle("cue", "headphones", "Listen (cue)", cue, tok::text()).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.exec(Command::SetTrackCue { track: id, cue: !cue }, cx)
+                        },
+                    )))
+                    .child(
+                        toggle("mute", if muted { "volume-x" } else { "volume-2" }, "Mute", muted, tok::live())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.exec(Command::SetTrackMuted { track: id, muted: !muted }, cx)
+                            })),
+                    ),
             )
     }
 }
