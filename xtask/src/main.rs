@@ -97,15 +97,19 @@ fn bundle() -> anyhow::Result<()> {
     // OBS's own signatures; nothing outside target/ is modified.
     //
     // Ad hoc signatures change with every build, so macOS asks for camera, microphone and screen
-    // permission again after each rebuild. Set LIGHTAIR_SIGN_IDENTITY to a code signing identity
-    // (e.g. "Apple Development") to keep one stable identity and keep the permissions.
-    let identity = std::env::var("LIGHTAIR_SIGN_IDENTITY").ok().filter(|s| !s.is_empty());
-    let identity = identity.as_deref().unwrap_or("-");
-    run(Command::new("codesign").args(["--force", "--sign", identity]).arg(app.parent().unwrap()))?;
+    // permission again after each rebuild. A real identity keeps them: the first "Apple
+    // Development" identity in the keychain is used by default; LIGHTAIR_SIGN_IDENTITY overrides
+    // it ("-" for ad hoc).
+    let identity = std::env::var("LIGHTAIR_SIGN_IDENTITY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(apple_development_identity)
+        .unwrap_or_else(|| "-".into());
+    run(Command::new("codesign").args(["--force", "--sign", &identity]).arg(app.parent().unwrap()))?;
     if identity == "-" {
-        eprintln!(
-            "signed ad hoc: macOS will ask for permissions again after rebuilds (set LIGHTAIR_SIGN_IDENTITY to keep them)"
-        );
+        eprintln!("signed ad hoc: macOS will ask for permissions again after rebuilds (set LIGHTAIR_SIGN_IDENTITY to keep them)");
+    } else {
+        eprintln!("signed with {identity}");
     }
     eprintln!("built {}", app.parent().unwrap().display());
     Ok(())
@@ -134,4 +138,15 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// The SHA-1 of the first valid "Apple Development" code signing identity, if any.
+fn apple_development_identity() -> Option<String> {
+    let out = Command::new("security").args(["find-identity", "-v", "-p", "codesigning"]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|l| l.contains("\"Apple Development:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .filter(|h| h.len() == 40)
+        .map(str::to_string)
 }
