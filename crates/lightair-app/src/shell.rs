@@ -1224,10 +1224,11 @@ impl StudioWindow {
                     this.exec(Command::SetTransition { settings }, cx)
                 }))
         });
-        let kinds: Vec<_> = self
-            .transition_menu
-            .then(|| TransitionKind::ALL.iter().enumerate().map(|(i, k)| item(i, *k)).collect())
-            .unwrap_or_default();
+        let kinds: Vec<_> = if self.transition_menu {
+            TransitionKind::ALL.iter().enumerate().map(|(i, k)| item(i, *k)).collect()
+        } else {
+            Vec::new()
+        };
         // Stinger: its video and when the scene changes underneath it.
         let stinger = (current.kind == TransitionKind::Stinger).then(|| {
             let st = project.stinger.clone();
