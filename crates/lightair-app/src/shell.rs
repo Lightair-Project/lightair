@@ -60,6 +60,10 @@ actions!(
         UngroupSelection,
         CreateEmpty,
         CreateEmptyChild,
+        CopySelection,
+        CutSelection,
+        PasteLayers,
+        DuplicateSelection,
         Scene1,
         Scene2,
         Scene3,
@@ -92,6 +96,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("e", ToggleRotateTool, Some("Studio")),
         KeyBinding::new("cmd-shift-m", ToggleMics, Some("Studio")),
         KeyBinding::new("cmd-g", GroupSelection, Some("Studio")),
+        KeyBinding::new("cmd-c", CopySelection, Some("Studio")),
+        KeyBinding::new("cmd-x", CutSelection, Some("Studio")),
+        KeyBinding::new("cmd-v", PasteLayers, Some("Studio")),
+        KeyBinding::new("cmd-d", DuplicateSelection, Some("Studio")),
         KeyBinding::new("cmd-shift-g", UngroupSelection, Some("Studio")),
         KeyBinding::new("cmd-shift-n", CreateEmpty, Some("Studio")),
         KeyBinding::new("alt-shift-n", CreateEmptyChild, Some("Studio")),
@@ -1056,8 +1064,14 @@ impl StudioWindow {
     fn delete_selection(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let Some(scene) = studio.selected_scene else { return };
-        let mut commands: Vec<Command> =
-            studio.selection().into_iter().map(|layer| Command::RemoveLayer { scene, layer }).collect();
+        let Some(sc) = studio.project().scene(scene) else { return };
+        // A layer inside another selected one goes with it.
+        let selection = studio.selection();
+        let mut commands: Vec<Command> = selection
+            .iter()
+            .filter(|l| !selection.iter().any(|a| sc.is_under(**l, *a)))
+            .map(|layer| Command::RemoveLayer { scene, layer: *layer })
+            .collect();
         match commands.len() {
             0 => {}
             1 => self.exec(commands.remove(0), cx),
@@ -1280,6 +1294,12 @@ impl Render for StudioWindow {
             }))
             .on_action(cx.listener(|this, _: &ToggleMics, _, cx| this.studio.update(cx, |s, cx| s.toggle_mics(cx))))
             .on_action(cx.listener(|this, _: &GroupSelection, window, cx| this.group_selection(window, cx)))
+            .on_action(cx.listener(|this, _: &CopySelection, _, cx| {
+                this.copy_selection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &CutSelection, _, cx| this.cut_selection(cx)))
+            .on_action(cx.listener(|this, _: &PasteLayers, _, cx| this.paste_layers(cx)))
+            .on_action(cx.listener(|this, _: &DuplicateSelection, _, cx| this.duplicate_selection(cx)))
             .on_action(cx.listener(|this, _: &UngroupSelection, _, cx| this.ungroup_selection(cx)))
             .on_action(cx.listener(|this, _: &CreateEmpty, window, cx| this.create_empty(None, window, cx)))
             .on_action(cx.listener(|this, _: &CreateEmptyChild, window, cx| {
