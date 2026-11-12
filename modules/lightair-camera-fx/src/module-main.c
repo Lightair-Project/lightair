@@ -51,6 +51,7 @@ static void set_runtime_path(void)
 }
 
 extern struct obs_source_info shape_mask_info;
+extern struct obs_source_info transform3d_info;
 
 bool obs_module_load(void)
 {
@@ -59,6 +60,7 @@ bool obs_module_load(void)
 	presets_load();
 	obs_register_source(&beauty_filter_info);
 	obs_register_source(&shape_mask_info);
+	obs_register_source(&transform3d_info);
 	blog(LOG_INFO, "[camera-studio] loaded");
 	return true;
 }

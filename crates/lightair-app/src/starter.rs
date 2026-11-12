@@ -94,6 +94,7 @@ pub fn plain_project() -> Project {
     let logo_box = Layout {
         shape: Some(lightair_core::Shape::new(lightair_core::ShapeKind::Circle)),
         crop: lightair_core::Crop { left: 64, top: 64, right: 64, bottom: 64 },
+        tilt_y: 20.0,
         ..Layout::boxed(1500.0, 640.0, 360.0, 360.0)
     };
     soon.layers.push(Layer::new("Logo", logo.id, [(f, logo_box)]));

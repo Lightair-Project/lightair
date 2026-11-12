@@ -60,6 +60,7 @@ add_library(lightair-camera-fx MODULE
   src/presets.c
   src/fx-layers.c
   src/shape-mask.c
+  src/transform3d.c
   src/tracker/tracker-core.cpp
   src/tracker/onnx-common.cpp
   src/tracker/segmenter.cpp

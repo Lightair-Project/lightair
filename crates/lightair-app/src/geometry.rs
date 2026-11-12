@@ -345,6 +345,31 @@ pub fn crop_handles(l: &Layout) -> CropHandles {
     (corners, edges)
 }
 
+/// A point in the layer's own frame (from its centre), as the 3D tilt shows it: the same
+/// rotation and perspective as Lightair's transform filter (positive X tilt: the bottom
+/// recedes; positive Y tilt: the left side recedes; the eye two box-sizes away).
+fn tilted(l: &Layout, (x, y): (f32, f32)) -> (f32, f32) {
+    let (sa, ca) = l.tilt_x.to_radians().sin_cos();
+    let (sb, cb) = l.tilt_y.to_radians().sin_cos();
+    // Around X, then around Y.
+    let (y1, z1) = (y * ca, y * sa);
+    let (x2, z2) = (x * cb + z1 * sb, -x * sb + z1 * cb);
+    let d = l.width.max(l.height) * 2.0;
+    let w = (1.0 + z2 / d).max(0.05);
+    (x2 / w, y1 / w)
+}
+
+/// The layer's outline as the viewer sees it, tilt included (clockwise from top-left).
+pub fn projected_outline(l: &Layout) -> [(f32, f32); 4] {
+    let (hw, hh) = (l.width / 2.0, l.height / 2.0);
+    [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)].map(|p| to_canvas(l, tilted(l, p)))
+}
+
+/// The 3D handle: `offset` canvas units below the middle of the bottom edge.
+pub fn tilt_handle(l: &Layout, offset: f32) -> (f32, f32) {
+    to_canvas(l, (0.0, l.height / 2.0 + offset))
+}
+
 /// An angle in (−180, 180].
 pub fn normalise_degrees(a: f32) -> f32 {
     let a = a.rem_euclid(360.0);
@@ -499,6 +524,21 @@ mod tests {
         let plain = Layout::boxed(0.0, 0.0, 200.0, 100.0);
         assert!(close(crop_handles(&plain).0[0].1, (0.0, 0.0)));
         assert_eq!(shape_outline(&plain).len(), 4);
+    }
+
+    #[test]
+    fn tilted_outline_matches_the_filter() {
+        let flat = Layout::boxed(0.0, 0.0, 320.0, 180.0);
+        assert!(projected_outline(&flat).iter().zip(outline(&flat)).all(|(a, b)| close(*a, b)));
+        // Positive Y tilt: the left edge recedes, so it's shorter than the right.
+        let y = Layout { tilt_y: 60.0, ..flat };
+        let o = projected_outline(&y);
+        let (left, right) = ((o[3].1 - o[0].1).abs(), (o[2].1 - o[1].1).abs());
+        assert!(left < right, "{left} vs {right}");
+        // Positive X tilt: the bottom recedes.
+        let x = Layout { tilt_x: 60.0, ..flat };
+        let o = projected_outline(&x);
+        assert!((o[2].0 - o[3].0).abs() < (o[1].0 - o[0].0).abs());
     }
 
     #[test]
