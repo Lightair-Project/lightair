@@ -80,6 +80,19 @@ pub mod tok {
     pub fn crop_dim() -> Hsla {
         rgba(0x0000_00A6).into()
     }
+    /// Rotate gizmo rings (the usual 3D-tool axis colours) and the ring in use.
+    pub fn gizmo_x() -> Hsla {
+        rgb(0xF0524F).into()
+    }
+    pub fn gizmo_y() -> Hsla {
+        rgb(0x5FD068).into()
+    }
+    pub fn gizmo_z() -> Hsla {
+        rgb(0x4F8BF0).into()
+    }
+    pub fn gizmo_active() -> Hsla {
+        rgb(0xF5D547).into()
+    }
     pub fn scrim() -> Hsla {
         rgba(0x00000066).into()
     }

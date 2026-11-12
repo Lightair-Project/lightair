@@ -194,6 +194,14 @@ impl StudioWindow {
                 self.select_layer(top, cx);
                 self.crop_mode = top;
             }
+            Ok("gizmo") => {
+                let top = {
+                    let s = self.studio.read(cx);
+                    s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                };
+                self.select_layer(top, cx);
+                self.rotate_tool = true;
+            }
             Ok("select") => {
                 let top = {
                     let s = self.studio.read(cx);
