@@ -91,7 +91,7 @@ fn entries(project: &Project, studio_mode: bool) -> Vec<Entry> {
         .collect();
     let fixed: &[(&str, &'static str, &'static str, PaletteAction)] = &[
         ("Take", "⌘↩", "play", Take),
-        (if studio_mode { "Stop cueing scenes" } else { "Cue scenes" }, "", "columns-2", StudioMode),
+        (if studio_mode { "Cue scenes: turn off" } else { "Cue scenes" }, "", "columns-2", StudioMode),
         ("Start or stop recording", "", "circle", Record),
         ("Pause or resume recording", "", "pause", PauseRecording),
         ("Add marker", "⌘M", "bookmark", Marker),
@@ -324,7 +324,7 @@ mod tests {
         p.scenes.push(std::sync::Arc::new(Scene::new("Be Right Back")));
         assert_eq!(matches(&p, false, "brb")[0].label, "Be Right Back");
         assert_eq!(matches(&p, false, "cue")[0].label, "Cue scenes");
-        assert_eq!(matches(&p, true, "cue")[0].label, "Stop cueing scenes");
+        assert_eq!(matches(&p, true, "cue")[0].label, "Cue scenes: turn off");
         assert!(matches(&p, false, "slide").iter().any(|e| e.label == "Transition: Slide"));
     }
 }
