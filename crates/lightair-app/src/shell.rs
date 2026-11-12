@@ -136,6 +136,9 @@ pub struct StudioWindow {
     /// A drag-to-select box on the canvas: format, start and current point (canvas units), and
     /// whether it adds to the selection (⇧).
     marquee: Option<Marquee>,
+    /// The Add format row, with its custom width and height fields.
+    format_menu:
+        Option<(Entity<gpui_kit::component::input::InputState>, Entity<gpui_kit::component::input::InputState>)>,
 }
 
 const HANDLE: f32 = 10.0;
@@ -176,6 +179,7 @@ impl StudioWindow {
             palette: None,
             go_live_sheet: None,
             marquee: None,
+            format_menu: None,
         }
     }
 
@@ -382,10 +386,16 @@ impl StudioWindow {
 
     /// Adds a vertical format with every layer auto-reframed (one undo step).
     fn add_vertical(&mut self, cx: &mut Context<Self>) {
+        self.add_format(Format::vertical(), cx)
+    }
+
+    /// Adds a format with every layer reframed into it (one undo step), and shows both.
+    fn add_format(&mut self, to: Format, cx: &mut Context<Self>) {
+        self.format_menu = None;
         let project = self.studio.read(cx).project().clone();
         let from = project.primary_format().clone();
-        let to = Format::vertical();
         let to_id = to.id;
+        let label = format!("Add {} format", to.name.to_lowercase());
         let mut commands = vec![Command::AddFormat { format: to.clone() }];
         for scene in &project.scenes {
             for layer in &scene.layers {
@@ -395,7 +405,7 @@ impl StudioWindow {
                 }
             }
         }
-        self.exec(Command::Batch { label: "Add vertical format".into(), commands }, cx);
+        self.exec(Command::Batch { label, commands }, cx);
         self.active_format = Some(to_id);
         self.side_by_side = true;
     }
@@ -1365,7 +1375,21 @@ impl StudioWindow {
                         this.active_format = Some(id);
                         this.side_by_side = false;
                         cx.notify();
-                    })),
+                    }))
+                    .when(i > 0, |d| {
+                        d.child(
+                            ui::icon_button(("format-remove", i), "x", tok::text_tertiary())
+                                .size(px(16.))
+                                .tooltip(|w, cx| Tooltip::new("Remove this format (undo brings it back)").build(w, cx))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if this.active_format == Some(id) {
+                                        this.active_format = None;
+                                    }
+                                    this.exec(Command::RemoveFormat { format: id }, cx);
+                                })),
+                        )
+                    }),
             );
         }
         if project.formats.len() > 1 {
@@ -1437,17 +1461,68 @@ impl StudioWindow {
                 .tooltip(|w, cx| Tooltip::new("Edit a scene off air, then Take it live").build(w, cx))
                 .on_click(cx.listener(|this, _, _, cx| this.set_studio_mode(!this.studio_mode, cx))),
         );
-        if !project.formats.iter().any(|f| f.height > f.width) {
-            bar = bar.child(
-                Button::new("add-vertical")
-                    .label("Add vertical")
+        bar = bar.child(
+            Button::new("add-format")
+                .label("Add format")
+                .xsmall()
+                .ghost()
+                .tooltip("Another shape for every scene (vertical, square, …)")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.format_menu = match this.format_menu.take() {
+                        Some(_) => None,
+                        None => {
+                            let w = cx
+                                .new(|cx| gpui_kit::component::input::InputState::new(window, cx).placeholder("Width"));
+                            let h = cx.new(|cx| {
+                                gpui_kit::component::input::InputState::new(window, cx).placeholder("Height")
+                            });
+                            Some((w, h))
+                        }
+                    };
+                    cx.notify();
+                })),
+        );
+        let Some((w_in, h_in)) = &self.format_menu else { return div().child(bar) };
+        let has = |w: u32, h: u32| project.formats.iter().any(|f| f.width == w && f.height == h);
+        let mut row =
+            div().flex().flex_wrap().items_center().gap_1().px_3().py_2().border_b_1().border_color(tok::border());
+        for (i, f) in [Format::vertical(), Format::square(), Format::portrait()].into_iter().enumerate() {
+            if has(f.width, f.height) {
+                continue;
+            }
+            let label = format!("{} {}×{}", f.name, f.width, f.height);
+            row = row.child(
+                Button::new(("format-preset", i))
+                    .label(label)
                     .xsmall()
-                    .ghost()
-                    .tooltip("Add a 9:16 format: every scene gets a vertical layout")
-                    .on_click(cx.listener(|this, _, _, cx| this.add_vertical(cx))),
+                    .outline()
+                    .on_click(cx.listener(move |this, _, _, cx| this.add_format(f.clone(), cx))),
             );
         }
-        bar
+        let (w_in, h_in) = (w_in.clone(), h_in.clone());
+        row = row
+            .child(div().w(px(8.)))
+            .child(div().w(px(72.)).child(gpui_kit::component::input::Input::new(&w_in).xsmall()))
+            .child("×")
+            .child(div().w(px(72.)).child(gpui_kit::component::input::Input::new(&h_in).xsmall()))
+            .child(Button::new("format-custom").label("Add custom").xsmall().ghost().on_click(cx.listener(
+                move |this, _, _, cx| {
+                    let read = |e: &Entity<gpui_kit::component::input::InputState>, cx: &App| {
+                        e.read(cx).value().trim().parse::<u32>().ok()
+                    };
+                    match (read(&w_in, cx), read(&h_in, cx)) {
+                        (Some(w), Some(h)) if w >= 16 && h >= 16 => {
+                            let f = Format::custom("Custom", w, h);
+                            this.add_format(f, cx)
+                        }
+                        _ => this.studio.update(cx, |s, cx| {
+                            s.issue = Some("Enter a width and height in pixels (16 or more).".into());
+                            cx.notify();
+                        }),
+                    }
+                },
+            )));
+        div().child(bar).child(row)
     }
 
     /// One format's stage: live preview plus selection overlay and guides.
