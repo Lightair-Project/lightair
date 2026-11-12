@@ -330,6 +330,17 @@ impl Reconciler {
 
     /// Whether the input's face effects see a face right now (`None`: it has none running).
     pub fn face_present(&self, input: Id) -> Option<bool> {
+        self.studio_query(input, c"face_present")
+    }
+
+    /// Whether the input's Camera Studio sees a person (for the background effects' hint);
+    /// `None` when it has no Camera Studio running.
+    pub fn person_present(&self, input: Id) -> Option<bool> {
+        self.studio_query(input, c"person_present")
+    }
+
+    /// Calls a `void name(out bool present)` proc on the input's enabled Camera Studio filter.
+    fn studio_query(&self, input: Id, name: &std::ffi::CStr) -> Option<bool> {
         let chain = self.input_effects.get(&input)?;
         chain.iter().find_map(|(_, filter)| unsafe {
             let id = std::ffi::CStr::from_ptr(sys::obs_source_get_id(filter.as_ptr()));
@@ -339,7 +350,7 @@ impl Reconciler {
             let ph = sys::obs_source_get_proc_handler(filter.as_ptr());
             let mut cd = sys::calldata_t::default();
             let mut present = false;
-            if sys::proc_handler_call(ph, c"face_present".as_ptr(), &mut cd) {
+            if sys::proc_handler_call(ph, name.as_ptr(), &mut cd) {
                 // calldata_get_bool is a header inline over calldata_get_data.
                 sys::calldata_get_data(
                     &cd,

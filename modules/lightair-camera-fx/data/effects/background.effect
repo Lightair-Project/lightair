@@ -1,0 +1,81 @@
+// Background stage for Camera Studio: blur, remove or replace what isn't the person.
+// The person mask is the segmentation's alpha (snapped to the frame's edges by Refine).
+
+uniform float4x4 ViewProj;
+uniform texture2d image;     // the processed frame (premultiplied alpha)
+uniform texture2d mask_tex;  // segmentation, A = person
+uniform texture2d bg_tex;    // Blur: background premultiplied by its weight; Image: the picture
+uniform int mode;            // 1 blur, 2 remove, 3 colour, 4 image
+uniform float4 bg_color;     // Colour (rgb, a = 1)
+uniform float feather;       // 0..1 edge softness
+uniform float shift;         // -1..1, positive grows the person
+uniform float2 bg_scale;     // Image: cover-fit mapping of the frame's uv into the picture's
+uniform float2 bg_offset;
+uniform float wrap;          // light wrap: how much background light spills over the edge
+
+sampler_state linearClamp {
+	Filter    = Linear;
+	AddressU  = Clamp;
+	AddressV  = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = v_in.uv;
+	return vert_out;
+}
+
+// 0 background .. 1 person, with the chosen edge position and softness.
+float person(float2 uv)
+{
+	float m = mask_tex.Sample(linearClamp, uv).a;
+	float c = 0.5 - shift * 0.35;
+	float w = 0.03 + feather * 0.42;
+	return smoothstep(c - w, c + w, m);
+}
+
+// What sits behind the person at uv (straight colour).
+float3 backdrop(float2 uv, float3 fallback)
+{
+	if (mode == 1) {
+		float4 b = bg_tex.Sample(linearClamp, uv);
+		// normalised convolution: the person's colours never bleed into the blur
+		float3 c = b.rgb / max(b.a, 0.0001);
+		return lerp(fallback, c, saturate(b.a * 12.0));
+	}
+	if (mode == 4)
+		return bg_tex.Sample(linearClamp, uv * bg_scale + bg_offset).rgb;
+	return bg_color.rgb;
+}
+
+float4 PSComposite(VertData v_in) : TARGET
+{
+	float4 c = image.Sample(linearClamp, v_in.uv);
+	float p = person(v_in.uv);
+	if (mode == 2)
+		return c * p; // premultiplied: the layers below show through
+
+	float3 fg = c.a > 0.0001 ? c.rgb / c.a : c.rgb;
+	float3 bg = backdrop(v_in.uv, fg);
+	// light wrap: a thin band inside the person's edge takes on the background's light, so a
+	// replaced background looks like it is lighting the person instead of pasted behind them
+	float edge = saturate(p * (1.0 - p) * 4.0);
+	fg = lerp(fg, fg * 0.6 + bg * 0.4, edge * wrap);
+	return float4(lerp(bg, fg, p), 1.0);
+}
+
+technique Composite
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSComposite(v_in);
+	}
+}

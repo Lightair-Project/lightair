@@ -121,7 +121,18 @@ struct beauty_filter {
 	uint64_t pm_serial;
 	uint8_t *pm_cpu; /* latest mask copy for thumbnails (snap_mutex) */
 	volatile uint64_t person_preview_until; /* dock is showing Light previews */
+
+	/* background (Lightair): 0 off, 1 blur, 2 remove, 3 colour, 4 image */
+	int bg_mode;
+	float bg_blur, bg_feather, bg_shift, bg_wrap;
+	struct vec4 bg_color;
+	char bg_path[512], bg_loaded[512];
+	gs_image_file_ex_t bg_image;
+	gs_effect_t *bg_effect;
+	gs_texrender_t *tr_bg_q, *tr_bg_t1, *tr_bg_t2, *tr_bg_out;
 };
+
+enum { BG_OFF, BG_BLUR, BG_REMOVE, BG_COLOR, BG_IMAGE };
 
 /* ---------------- settings table ---------------- */
 
@@ -220,6 +231,31 @@ static void beauty_update(void *data, obs_data_t *settings)
 	f->enhance_on = obs_data_get_bool(settings, "enhance_on");
 	if (f->fx)
 		fx_layers_update(f->fx, settings);
+
+	f->bg_mode = (int)obs_data_get_int(settings, "bg_mode");
+	f->bg_blur = (float)obs_data_get_int(settings, "bg_blur") / 100.0f;
+	f->bg_feather = (float)obs_data_get_int(settings, "bg_feather") / 100.0f;
+	f->bg_shift = (float)obs_data_get_int(settings, "bg_shift") / 100.0f;
+	f->bg_wrap = (float)obs_data_get_int(settings, "bg_wrap") / 100.0f;
+	uint32_t c = (uint32_t)obs_data_get_int(settings, "bg_color"); /* 0xAABBGGRR, as OBS stores colours */
+	vec4_set(&f->bg_color, (float)(c & 0xFF) / 255.0f, (float)((c >> 8) & 0xFF) / 255.0f,
+		 (float)((c >> 16) & 0xFF) / 255.0f, 1.0f);
+	const char *path = obs_data_get_string(settings, "bg_image");
+	snprintf(f->bg_path, sizeof(f->bg_path), "%s", path ? path : "");
+	if (strcmp(f->bg_path, f->bg_loaded) != 0) {
+		obs_enter_graphics();
+		gs_image_file_ex_free(&f->bg_image);
+		obs_leave_graphics();
+		if (f->bg_path[0]) {
+			gs_image_file_ex_init(&f->bg_image, f->bg_path, GS_IMAGE_ALPHA_STRAIGHT);
+			obs_enter_graphics();
+			gs_image_file_ex_init_texture(&f->bg_image);
+			obs_leave_graphics();
+			if (!f->bg_image.texture)
+				blog(LOG_WARNING, "[camera-studio] couldn't load background image %s", f->bg_path);
+		}
+		snprintf(f->bg_loaded, sizeof(f->bg_loaded), "%s", f->bg_path);
+	}
 }
 
 /* Compiled from source rather than gs_effect_create_from_file(): libobs caches effects by
@@ -253,11 +289,28 @@ static void proc_face_present(void *data, calldata_t *cd)
 	calldata_set_bool(cd, "present", f->face.present);
 }
 
+/* Lightair: "person_present" proc: whether the latest segmentation found someone (for the
+ * background effects' "No person" hint). */
+static void proc_person_present(void *data, calldata_t *cd)
+{
+	struct beauty_filter *f = data;
+	size_t hits = 0, n = 0;
+	pthread_mutex_lock(&f->snap_mutex);
+	if (f->pm_cpu && f->pm_w && f->pm_h)
+		for (uint32_t y = 0; y < f->pm_h; y += 4)
+			for (uint32_t x = 0; x < f->pm_w; x += 4, n++)
+				hits += f->pm_cpu[((size_t)y * f->pm_w + x) * 4 + 3] > 127;
+	pthread_mutex_unlock(&f->snap_mutex);
+	calldata_set_bool(cd, "present", n && hits * 100 > n); /* more than 1% of the frame */
+}
+
 static void *beauty_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct beauty_filter *f = bzalloc(sizeof(*f));
 	f->source = source;
 	proc_handler_add(obs_source_get_proc_handler(source), "void face_present(out bool present)", proc_face_present, f);
+	proc_handler_add(obs_source_get_proc_handler(source), "void person_present(out bool present)",
+			 proc_person_present, f);
 	f->fx = fx_layers_create();
 	f->start_ns = os_gettime_ns();
 	pthread_mutex_init(&f->snap_mutex, NULL);
@@ -265,6 +318,11 @@ static void *beauty_create(obs_data_t *settings, obs_source_t *source)
 	obs_enter_graphics();
 	f->blur_effect = load_effect("effects/beauty-blur.effect");
 	f->final_effect = load_effect("effects/beauty-final.effect");
+	f->bg_effect = load_effect("effects/background.effect");
+	f->tr_bg_q = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
+	f->tr_bg_t1 = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
+	f->tr_bg_t2 = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
+	f->tr_bg_out = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	for (int i = 0; i < RING_N; i++)
 		f->tr_ring[i] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	gs_texrender_t **trs[] = {&f->tr_half, &f->tr_tmp,   &f->tr_smooth, &f->tr_q,
@@ -301,6 +359,12 @@ static void beauty_destroy(void *data)
 	obs_enter_graphics();
 	gs_effect_destroy(f->blur_effect);
 	gs_effect_destroy(f->final_effect);
+	gs_effect_destroy(f->bg_effect);
+	gs_texrender_destroy(f->tr_bg_q);
+	gs_texrender_destroy(f->tr_bg_t1);
+	gs_texrender_destroy(f->tr_bg_t2);
+	gs_texrender_destroy(f->tr_bg_out);
+	gs_image_file_ex_free(&f->bg_image);
 	for (int i = 0; i < RING_N; i++)
 		gs_texrender_destroy(f->tr_ring[i]);
 	gs_texrender_t *trs[] = {f->tr_small, f->tr_half,   f->tr_tmp,  f->tr_smooth, f->tr_q,
@@ -356,6 +420,12 @@ static void beauty_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "light_amt", 60);
 	obs_data_set_default_int(settings, "atmo_amt", 70);
 	obs_data_set_default_int(settings, "motion_amt", 50);
+	obs_data_set_default_int(settings, "bg_mode", BG_OFF);
+	obs_data_set_default_int(settings, "bg_blur", 60);
+	obs_data_set_default_int(settings, "bg_feather", 30);
+	obs_data_set_default_int(settings, "bg_shift", 0);
+	obs_data_set_default_int(settings, "bg_wrap", 30);
+	obs_data_set_default_int(settings, "bg_color", 0xFF1A1A1A);
 }
 
 static bool reset_clicked(obs_properties_t *props, obs_property_t *p, void *data)
@@ -391,6 +461,23 @@ static obs_properties_t *beauty_properties(void *data)
 	}
 
 	makeup_add_properties(props);
+
+	obs_properties_t *bg = obs_properties_create();
+	obs_property_t *bm = obs_properties_add_list(bg, "bg_mode", obs_module_text("Background"), OBS_COMBO_TYPE_LIST,
+						     OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(bm, obs_module_text("Unchanged"), BG_OFF);
+	obs_property_list_add_int(bm, obs_module_text("Blur"), BG_BLUR);
+	obs_property_list_add_int(bm, obs_module_text("Remove"), BG_REMOVE);
+	obs_property_list_add_int(bm, obs_module_text("Colour"), BG_COLOR);
+	obs_property_list_add_int(bm, obs_module_text("Image"), BG_IMAGE);
+	obs_properties_add_int_slider(bg, "bg_blur", obs_module_text("Blur amount"), 0, 100, 1);
+	obs_properties_add_int_slider(bg, "bg_feather", obs_module_text("Edge softness"), 0, 100, 1);
+	obs_properties_add_int_slider(bg, "bg_shift", obs_module_text("Edge shift"), -100, 100, 1);
+	obs_properties_add_int_slider(bg, "bg_wrap", obs_module_text("Light wrap"), 0, 100, 1);
+	obs_properties_add_color(bg, "bg_color", obs_module_text("Colour"));
+	obs_properties_add_path(bg, "bg_image", obs_module_text("Image"), OBS_PATH_FILE,
+				"Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)", NULL);
+	obs_properties_add_group(props, "group_bg", obs_module_text("Background"), OBS_GROUP_NORMAL, bg);
 
 	obs_properties_t *adv = obs_properties_create();
 	obs_properties_add_bool(adv, "all_skin", obs_module_text("Smooth all visible skin (not just the face)"));
@@ -596,6 +683,76 @@ static void update_tracking(struct beauty_filter *f, gs_texture_t *src, uint32_t
 	}
 }
 
+/* ---------------- background ---------------- */
+
+/* Blur, remove or replace what isn't the person, using the segmentation's person mask (seg.a,
+ * snapped to this frame's edges). Blur is a normalised convolution of the background alone, so
+ * no halo of skin or hair spreads around the person. */
+static gs_texture_t *render_background(struct beauty_filter *f, gs_texture_t *in, gs_texture_t *seg, uint32_t w,
+				       uint32_t h)
+{
+	gs_effect_t *e = f->bg_effect;
+	if (!e)
+		return in;
+	int mode = f->bg_mode;
+	gs_texture_t *bgt = NULL;
+	struct vec2 scale, off;
+	vec2_set(&scale, 1.0f, 1.0f);
+	vec2_set(&off, 0.0f, 0.0f);
+	if (mode == BG_BLUR) {
+		uint32_t hw = w / 2 > 0 ? w / 2 : 1, hh = h / 2 > 0 ? h / 2 : 1;
+		uint32_t qw = w / 4 > 0 ? w / 4 : 1, qh = h / 4 > 0 ? h / 4 : 1;
+		gs_texture_t *half = blur_pass(f, f->tr_bg_t1, "Draw", in, w, h, hw, hh, 0, 0, 0, 0);
+		gs_texture_t *q = half ? guided_pass(f, f->tr_bg_q, "BgPremul", half, seg, 0, 0, qw, qh, 0) : NULL;
+		float step = 0.5f + f->bg_blur * 5.5f; /* quarter-res pixels per tap */
+		gs_texture_t *t = q;
+		for (int i = 0; t && i < 2; i++) {
+			float s = i == 0 ? step : step * 0.7f;
+			t = blur_pass(f, f->tr_bg_t1, "Gauss", t, qw, qh, qw, qh, 1, 0, s, 0);
+			t = t ? blur_pass(f, f->tr_bg_t2, "Gauss", t, qw, qh, qw, qh, 0, 1, s, 0) : NULL;
+		}
+		if (!t)
+			return in;
+		bgt = t;
+	} else if (mode == BG_IMAGE) {
+		bgt = f->bg_image.texture;
+		if (bgt) {
+			/* cover: fill the frame, cropping the picture's longer side */
+			float ia = (float)f->bg_image.cx / (float)(f->bg_image.cy ? f->bg_image.cy : 1);
+			float fa = (float)w / (float)h;
+			if (ia > fa)
+				vec2_set(&scale, fa / ia, 1.0f);
+			else
+				vec2_set(&scale, 1.0f, ia / fa);
+			vec2_set(&off, 0.5f - 0.5f * scale.x, 0.5f - 0.5f * scale.y);
+		} else {
+			mode = BG_COLOR; /* no picture yet: the colour */
+		}
+	}
+
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), in);
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "mask_tex"), seg);
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "bg_tex"), bgt ? bgt : in);
+	gs_effect_set_int(gs_effect_get_param_by_name(e, "mode"), mode);
+	gs_effect_set_vec4(gs_effect_get_param_by_name(e, "bg_color"), &f->bg_color);
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "feather"), f->bg_feather);
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "shift"), f->bg_shift);
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "wrap"), mode == BG_REMOVE ? 0.0f : f->bg_wrap);
+	gs_effect_set_vec2(gs_effect_get_param_by_name(e, "bg_scale"), &scale);
+	gs_effect_set_vec2(gs_effect_get_param_by_name(e, "bg_offset"), &off);
+	gs_texrender_reset(f->tr_bg_out);
+	if (!gs_texrender_begin(f->tr_bg_out, w, h))
+		return in;
+	struct vec4 clear;
+	vec4_zero(&clear);
+	gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
+	gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
+	while (gs_effect_loop(e, "Composite"))
+		gs_draw_sprite(in, 0, w, h);
+	gs_texrender_end(f->tr_bg_out);
+	return gs_texrender_get_texture(f->tr_bg_out);
+}
+
 static bool makeup_active(const struct beauty_filter *f)
 {
 	const struct makeup_params *m = &f->mk;
@@ -608,7 +765,7 @@ static bool makeup_active(const struct beauty_filter *f)
 
 static bool face_effects_active(const struct beauty_filter *f)
 {
-	if (makeup_active(f) || fx_layers_active(f->fx))
+	if (makeup_active(f) || fx_layers_active(f->fx) || f->bg_mode != BG_OFF)
 		return true;
 	if (f->pouch > 0 || f->teeth > 0 || f->eyelight > 0 || f->clarity > 0 || !f->all_skin ||
 	    f->show_landmarks || f->debug_view)
@@ -974,7 +1131,7 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 
 	/* --- learned segmentation: R skin, G face skin, B hair, A person --- */
 	face_tracker_set_segmentation(f->tracker, true);
-	face_tracker_set_segmentation_fast(f->tracker, fx_layers_light_active(f->fx));
+	face_tracker_set_segmentation_fast(f->tracker, fx_layers_light_active(f->fx) || f->bg_mode != BG_OFF);
 	uint32_t mw = 0, mh = 0;
 	uint8_t *segbuf = face_tracker_take_mask(f->tracker, &f->pm_serial, &mw, &mh);
 	if (segbuf) {
@@ -1171,6 +1328,10 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 			out = gs_texrender_get_texture(f->tr_fin);
 		}
 	}
+
+	/* background: behind the person, under stickers and atmosphere */
+	if (out && seg && f->bg_mode != BG_OFF && !f->debug_view)
+		out = render_background(f, out, seg, w, h);
 
 	/* stickers, motion and atmosphere */
 	float t = (float)fmod((double)(os_gettime_ns() - f->start_ns) / 1e9, 3600.0);

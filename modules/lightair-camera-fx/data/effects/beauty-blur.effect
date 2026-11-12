@@ -194,3 +194,22 @@ technique WithAlpha
 		pixel_shader  = PSWithAlpha(v_in);
 	}
 }
+
+// Background blur source: the frame weighted by "not person" (premultiplied), for normalised
+// convolution. The person is dilated a little so the soft edge of the mask doesn't leak skin
+// and hair into the blurred background.
+float4 PSBgPremul(VertData v_in) : TARGET
+{
+	float3 c = image.Sample(linearClamp, v_in.uv).rgb;
+	float w = 1.0 - smoothstep(0.12, 0.42, guide.Sample(linearClamp, v_in.uv).a);
+	return float4(c * w, w);
+}
+
+technique BgPremul
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSBgPremul(v_in);
+	}
+}
