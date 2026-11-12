@@ -19,6 +19,7 @@ use lightair_preview::Preview;
 use serde_json::json;
 
 mod add_layer;
+mod assets;
 mod docking;
 mod golive;
 mod hierarchy;
@@ -74,6 +75,7 @@ actions!(
         ToggleLayerLocked,
         MoveOutOfParent,
         FillCanvas,
+        SaveAsPrefab,
         Scene1,
         Scene2,
         Scene3,
@@ -273,6 +275,9 @@ pub struct StudioWindow {
     collapsed_layers: HashSet<Id>,
     /// Where a row being dragged in the Hierarchy would land.
     tree_drop: Option<(Id, hierarchy::TreeDrop)>,
+    /// The assets folder's files, and when they were read.
+    asset_cache: RefCell<(Option<Instant>, Vec<assets::Asset>)>,
+    selected_asset: Option<PathBuf>,
     /// Inputs' pixel sizes, refreshed a few times a second: frames and handles hug the picture.
     sizes: RefCell<SizeCache>,
     /// The source picker, and fetched source lists per (input, setting).
@@ -360,6 +365,8 @@ impl StudioWindow {
             grabs: 0,
             collapsed_layers: HashSet::new(),
             tree_drop: None,
+            asset_cache: RefCell::new((None, Vec::new())),
+            selected_asset: None,
             sizes: RefCell::default(),
             source_picker: None,
             source_cache: RefCell::default(),
@@ -1326,6 +1333,11 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &ToggleLayerLocked, _, cx| this.toggle_selection_locked(cx)))
             .on_action(cx.listener(|this, _: &MoveOutOfParent, _, cx| this.move_out_of_parent(cx)))
             .on_action(cx.listener(|this, _: &FillCanvas, _, cx| this.fill_canvas(cx)))
+            .on_action(cx.listener(|this, _: &SaveAsPrefab, _, cx| {
+                if let Some(layer) = this.studio.read(cx).selected_layer {
+                    this.save_prefab(layer, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &UngroupSelection, _, cx| this.ungroup_selection(cx)))
             .on_action(cx.listener(|this, _: &CreateEmpty, window, cx| this.create_empty(None, window, cx)))
             .on_action(cx.listener(|this, _: &CreateEmptyChild, window, cx| {
@@ -2501,27 +2513,36 @@ impl StudioWindow {
         let live = runtime().any_stream_running();
         let stages: Vec<AnyElement> =
             self.visible_formats(project).iter().map(|f| self.stage(project, f, cx).into_any_element()).collect();
-        let well = div().flex().flex_1().min_h_0().child(
-            div()
-                .id("canvas")
-                .relative()
-                .flex()
-                .flex_1()
-                .min_h_0()
-                .bg(tok::bg_canvas_well())
-                .when(live, |d| d.border_2().border_color(tok::live()))
-                .cursor(self.canvas_cursor(project, cx))
-                .on_mouse_down(MouseButton::Right, cx.listener(Self::canvas_right_down))
-                .on_mouse_down(MouseButton::Left, cx.listener(Self::canvas_down))
-                .on_mouse_move(cx.listener(Self::canvas_move))
-                .on_mouse_up(MouseButton::Left, cx.listener(Self::canvas_up))
-                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::canvas_up))
-                .children(stages)
-                .context_menu({
-                    let shell = cx.entity().downgrade();
-                    move |m, window, cx| menus::layer_menu(m, &shell, window, cx)
-                }),
-        );
+        let well =
+            div().flex().flex_1().min_h_0().child(
+                div()
+                    .id("canvas")
+                    .relative()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .bg(tok::bg_canvas_well())
+                    .when(live, |d| d.border_2().border_color(tok::live()))
+                    .cursor(self.canvas_cursor(project, cx))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::canvas_right_down))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::canvas_down))
+                    .on_mouse_move(cx.listener(Self::canvas_move))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::canvas_up))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::canvas_up))
+                    .children(stages)
+                    .drag_over::<assets::DraggedAsset>(|s, _, _, _| s.border_2().border_color(tok::accent_primary()))
+                    .drag_over::<ExternalPaths>(|s, _, _, _| s.border_2().border_color(tok::accent_primary()))
+                    .on_drop(cx.listener(|this, a: &assets::DraggedAsset, window, cx| {
+                        this.drop_asset_on_canvas(&a.0, window, cx)
+                    }))
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                        this.drop_files_on_canvas(paths.paths(), window, cx)
+                    }))
+                    .context_menu({
+                        let shell = cx.entity().downgrade();
+                        move |m, window, cx| menus::layer_menu(m, &shell, window, cx)
+                    }),
+            );
         let well = match self.studio_mode.then(|| self.program_column(project, cx)) {
             Some(column) => well.child(column),
             None => well,
@@ -2707,7 +2728,13 @@ impl StudioWindow {
         let layer = scene.as_ref().and_then(|s| studio.selected_layer.and_then(|l| s.layer(l))).cloned();
         let selection = studio.selection();
         let track = studio.selected_track.and_then(|t| project.track(t)).cloned();
-        let body = div().flex().flex_col().gap_3().px_3();
+        let mut body = div().flex().flex_col().gap_3().px_3();
+        if let (Some(sc), Some(l)) = (&scene, &layer)
+            && selection.len() == 1
+            && let Some(bar) = self.prefab_bar(sc.id, l, cx)
+        {
+            body = body.child(div().pt_2().child(bar));
+        }
         let content = match (scene, layer) {
             (_, None) if track.is_some() => self.track_inspector(project, track.as_deref().unwrap(), body, cx),
             (Some(scene), Some(_)) if selection.len() > 1 => {

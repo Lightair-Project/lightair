@@ -79,6 +79,14 @@ impl Studio {
         studio
     }
 
+    /// The project's `assets` folder (prefabs, images, video, sound), made if missing; `None`
+    /// for an unsaved project.
+    pub fn assets_dir(&self) -> Option<std::path::PathBuf> {
+        let dir = self.package.as_ref()?.dir().join("assets");
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    }
+
     pub fn engine(&self) -> &Arc<Engine> {
         &self.engine
     }

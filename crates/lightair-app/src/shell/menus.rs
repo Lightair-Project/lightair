@@ -275,6 +275,9 @@ pub(super) fn layer_menu(
     if !f.empty {
         menu = menu.separator().menu_with_icon("Fill canvas", ui::icon("maximize"), Box::new(FillCanvas));
     }
+    if f.count == 1 {
+        menu = menu.separator().menu_with_icon("Save as prefab", ui::icon("package-plus"), Box::new(SaveAsPrefab));
+    }
     menu
 }
 

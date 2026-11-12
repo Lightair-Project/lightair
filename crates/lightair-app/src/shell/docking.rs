@@ -18,6 +18,7 @@ pub(super) enum Region {
     Scenes,
     Canvas,
     Inspector,
+    Assets,
 }
 
 pub(super) struct ShellPanel {
@@ -40,6 +41,7 @@ impl BasePanel for ShellPanel {
             Region::Scenes => "scenes",
             Region::Canvas => "canvas",
             Region::Inspector => "inspector",
+            Region::Assets => "assets",
         }
     }
 }
@@ -52,6 +54,7 @@ impl Panel for ShellPanel {
                 Region::Scenes => "Scenes",
                 Region::Canvas => "Canvas",
                 Region::Inspector => "Inspector",
+                Region::Assets => "Assets",
             }
             .into(),
         )
@@ -97,6 +100,21 @@ impl Panel for ShellPanel {
                     }),
                 ])
             }
+            Region::Assets => {
+                let reveal = shell.clone();
+                Some(vec![
+                    button("reveal-assets", "folder-open", "Show in Finder").on_click(move |_, _, cx| {
+                        if let Some(s) = reveal.upgrade() {
+                            s.update(cx, |w, cx| w.reveal_assets(cx));
+                        }
+                    }),
+                    button("import-assets", "plus", "Import files…").on_click(move |_, window, cx| {
+                        if let Some(s) = shell.upgrade() {
+                            s.update(cx, |w, cx| w.import_assets(window, cx));
+                        }
+                    }),
+                ])
+            }
             Region::Canvas | Region::Inspector => None,
         }
     }
@@ -137,6 +155,7 @@ impl Render for ShellPanel {
                 Region::Scenes => w.scenes_panel(&project, cx).into_any_element(),
                 Region::Canvas => w.canvas(&project, cx).into_any_element(),
                 Region::Inspector => w.inspector(&project, cx).into_any_element(),
+                Region::Assets => w.assets_panel(&project, cx).into_any_element(),
             }
         })
     }
@@ -152,13 +171,18 @@ impl StudioWindow {
         let panel = |region: Region, cx: &mut Context<Self>| cx.new(|cx| ShellPanel::new(me.clone(), region, cx));
         let (layers, scenes) = (panel(Region::Layers, cx), panel(Region::Scenes, cx));
         let (canvas, inspector) = (panel(Region::Canvas, cx), panel(Region::Inspector, cx));
+        let assets = panel(Region::Assets, cx);
         let (mixer, outputs) = (self.mixer.clone(), self.outputs.clone());
         let dock = cx.new(|cx| DockArea::new("lightair-studio", Some(1), window, cx).with_renderer(DockSkin::new(cx)));
         dock.update(cx, |area, cx| {
             area.set_center(
-                DockLayout::v_split()
-                    .child(DockLayout::tabs().panel_view(panel_handle(canvas), cx), None)
-                    .child(DockLayout::tabs().panel_view(panel_handle(mixer), cx), Some(px(230.))),
+                DockLayout::v_split().child(DockLayout::tabs().panel_view(panel_handle(canvas), cx), None).child(
+                    DockLayout::tabs()
+                        .panel_view(panel_handle(mixer), cx)
+                        .panel_view(panel_handle(assets), cx)
+                        .active_index(usize::from(std::env::var("LIGHTAIR_OPEN").as_deref() == Ok("assets"))),
+                    Some(px(230.)),
+                ),
                 window,
                 cx,
             );
@@ -203,6 +227,28 @@ impl StudioWindow {
                 };
                 self.select_layer(top, cx);
                 self.crop_mode = top;
+            }
+            Ok("assets") => {
+                // A prefab from the top layer, and an instance of it.
+                let top = {
+                    let s = self.studio.read(cx);
+                    s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                };
+                if let Some(top) = top {
+                    self.select_layer(Some(top), cx);
+                    self.save_prefab(top, cx);
+                    let assets = self.assets(cx);
+                    if let Some(a) = assets.iter().find(|a| a.kind == super::assets::AssetKind::Prefab) {
+                        self.place_asset(
+                            &a.clone(),
+                            super::assets::Placement::At(
+                                self.format_id(&self.studio.read(cx).project().clone()),
+                                (400.0, 300.0),
+                            ),
+                            cx,
+                        );
+                    }
+                }
             }
             Ok("group") => {
                 // The top two layers into a group, then an empty inside it.

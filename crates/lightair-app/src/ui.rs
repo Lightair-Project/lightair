@@ -86,6 +86,10 @@ pub mod tok {
     pub fn gizmo_z() -> Hsla {
         rgb(0x4F8BF0).into()
     }
+    /// Prefab instances and assets.
+    pub fn prefab() -> Hsla {
+        rgb(0x5AA9FF).into()
+    }
     pub fn gizmo_active() -> Hsla {
         rgb(0xF5D547).into()
     }
