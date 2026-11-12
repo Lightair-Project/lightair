@@ -119,11 +119,11 @@ Text, shapes, counters/timers, browser layer (CEF), media, phone camera, NDI, sc
 
 Done:
 - Video layer (`ffmpeg_source`, loops and restarts when its scene goes on air) with transport in the Inspector: play/pause, restart, loop, position and duration. Transport is runtime state through the engine (`media_status`, `media_action`); a test plays, pauses, seeks and restarts a file.
-- Inspector content sections: text (content, size, colour swatches) and colour layers; edits are undoable input-settings changes.
+- Inspector content sections: text (content, size, font, bold/italic, outline, shadow, colour swatches) and colour layers; edits are undoable input-settings changes.
 - Timer layers: countdown (starts when its scene goes on air; start, pause, reset, +1 min; end text; "then go to" a scene), stopwatch and clock. The document holds the settings; a libobs tick rewrites a text source once a second from runtime state, so ticking never touches undo. A test covers autostart on air, pause, adding time, the end event and reset.
 
 Remaining:
-- Rich text styling (fonts, outline, shadow, background), shapes, counters, timer hotkeys, browser layer (CEF), phone camera, NDI, screen draw, templates, automations; playlists and media scrubbing.
+- Text backgrounds, gradients and any installed font, shapes, counters, timer hotkeys, browser layer (CEF), phone camera, NDI, screen draw, templates, automations; playlists and media scrubbing.
 
 ## M11 · Audience & control
 Platform sign-in, stream manager, unified chat, activity, alerts, widgets, captions, hotkeys, Stream Deck, MIDI/OSC, remote API ([12](docs/12-chat-alerts-integrations.md)).

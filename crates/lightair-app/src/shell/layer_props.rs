@@ -358,6 +358,7 @@ impl StudioWindow {
                             .on_click(cx.listener(move |this, _, _, cx| this.exec(bigger.clone(), cx))),
                     ),
             )
+            .child(self.text_style_rows(input, cx))
             .child(self.swatches(input, "color1", &["color1", "color2"], cx))
     }
 
@@ -488,6 +489,68 @@ impl StudioWindow {
             );
         }
         col
+    }
+
+    /// Font, bold/italic, outline and shadow for a FreeType text layer.
+    fn text_style_rows(&self, input: &Input, cx: &mut Context<Self>) -> impl IntoElement {
+        const FONTS: &[&str] = &[
+            "Helvetica Neue",
+            "Avenir Next",
+            "Futura",
+            "Gill Sans",
+            "Georgia",
+            "Didot",
+            "Menlo",
+            "Impact",
+            "Marker Felt",
+        ];
+        let id = input.id;
+        let settings = input.settings.clone();
+        let font = if settings["font"].is_object() {
+            settings["font"].clone()
+        } else {
+            json!({"face": "Helvetica Neue", "size": 128, "flags": 0})
+        };
+        let face = font["face"].as_str().unwrap_or("Helvetica Neue").to_string();
+        let flags = font["flags"].as_i64().unwrap_or(0);
+        let next_face = FONTS[(FONTS.iter().position(|f| *f == face).map_or(0, |i| i + 1)) % FONTS.len()];
+        let set_font = {
+            let (settings, font) = (settings.clone(), font.clone());
+            move |key: &str, value: Value| {
+                let mut f = font.clone();
+                f[key] = value;
+                Command::SetInputSettings { input: id, settings: with(&settings, "font", f) }
+            }
+        };
+        let cycle_face = set_font("face", json!(next_face));
+        let mut row = div().flex().flex_wrap().items_center().gap_1().child(
+            Button::new("text-font")
+                .label(face.clone())
+                .xsmall()
+                .outline()
+                .tooltip("Change font")
+                .on_click(cx.listener(move |this, _, _, cx| this.exec(cycle_face.clone(), cx))),
+        );
+        // FreeType flags: 1 bold, 2 italic.
+        for (i, (label, bit)) in [("B", 1i64), ("I", 2)].into_iter().enumerate() {
+            let on = flags & bit != 0;
+            let cmd = set_font("flags", json!(flags ^ bit));
+            let b = Button::new(("text-flag", i))
+                .label(label)
+                .xsmall()
+                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)));
+            row = row.child(if on { b.primary() } else { b.ghost() });
+        }
+        for (i, (label, key)) in [("Outline", "outline"), ("Shadow", "drop_shadow")].into_iter().enumerate() {
+            let on = settings[key].as_bool().unwrap_or(false);
+            let cmd = Command::SetInputSettings { input: id, settings: with(&settings, key, json!(!on)) };
+            let b = Button::new(("text-style", i))
+                .label(label)
+                .xsmall()
+                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)));
+            row = row.child(if on { b.primary() } else { b.ghost() });
+        }
+        row
     }
 
     fn colour_section(&self, input: &Input, cx: &mut Context<Self>) -> impl IntoElement {
