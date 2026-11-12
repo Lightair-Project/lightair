@@ -3627,6 +3627,7 @@ dependencies = [
  "crossbeam-channel",
  "libc",
  "libobs-sys",
+ "lightair-audio",
  "lightair-core",
  "lightair-store",
  "parking_lot",
@@ -3634,6 +3635,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
