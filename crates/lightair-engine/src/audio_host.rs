@@ -22,8 +22,11 @@ use crate::obs::Source;
 
 pub const OUT_SOURCE: &str = "lightair_audio_out";
 pub const TEST_TONE: &str = "lightair_test_tone";
-/// Frames per engine block (5.3 ms at 48 kHz).
+/// Frames per engine block by default (5.3 ms at 48 kHz); 128 for low latency, 512 for a
+/// lighter load ([`AudioHost::start`]).
 pub const BLOCK: usize = 256;
+/// The block sizes offered.
+pub const BLOCKS: [usize; 3] = [128, 256, 512];
 /// libobs mixes the engine fills: Program, then up to five mixes.
 pub const OUT_MIXES: usize = 6;
 /// libobs output channels the out sources sit on (kept active there): the cue out, then the
@@ -249,9 +252,13 @@ enum FromRt {
     Monitor(rtrb::Producer<f32>),
 }
 
-/// The most the monitor ring holds ahead of the device (frames): keeps its latency down when
-/// the engine's clock runs ahead of the device's.
+/// The most the monitor ring holds ahead of the device (frames, at least three blocks): keeps its
+/// latency down when the engine's clock runs ahead of the device's.
 const MONITOR_MOST: usize = 768;
+
+fn monitor_most(block: usize) -> usize {
+    MONITOR_MOST.max(block * 3)
+}
 
 /// Whether multitrack files are being recorded (for the UI's record state).
 pub static STEMS_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -270,6 +277,7 @@ fn rt_loop(
     mut garbage: rtrb::Producer<FromRt>,
     outs: OutPtr,
     sample_rate: u32,
+    block: usize,
     stop: Arc<AtomicBool>,
 ) {
     let mut inputs = RtInputs(Vec::with_capacity(128));
@@ -279,7 +287,7 @@ fn rt_loop(
     let mut monitor: Option<(la::NodeId, rtrb::Producer<f32>)> = None;
     let mut stems_paused = false;
     let mut stems_started = false;
-    let period = Duration::from_secs_f64(BLOCK as f64 / sample_rate as f64);
+    let period = Duration::from_secs_f64(block as f64 / sample_rate as f64);
     let start = Instant::now();
     let mut blocks = 0u64;
     let anchor = unsafe { sys::os_gettime_ns() };
@@ -341,8 +349,8 @@ fn rt_loop(
             }
             if input.has {
                 // a short ring plays what it has and pads the rest (a tiny gap, not a silence)
-                let take = avail.min(BLOCK);
-                if take < BLOCK {
+                let take = avail.min(block);
+                if take < block {
                     SHORTFALLS.fetch_add(1, Ordering::Relaxed);
                 }
                 if let Ok(chunk) = input.ring.read_chunk(take * nch) {
@@ -356,12 +364,12 @@ fn rt_loop(
                     chunk.commit_all();
                 }
                 for buf in input.bufs.iter_mut() {
-                    buf[take..BLOCK].fill(0.0);
+                    buf[take..block].fill(0.0);
                 }
             }
         }
-        let graph = renderer.process(&inputs, BLOCK);
-        let ts = anchor + (blocks as f64 * BLOCK as f64 * ns_per_frame) as u64 - latency_ns;
+        let graph = renderer.process(&inputs, block);
+        let ts = anchor + (blocks as f64 * block as f64 * ns_per_frame) as u64 - latency_ns;
         let push = |src: *mut sys::obs_source_t, (l, r): (&[f32], &[f32])| {
             let mut data = [std::ptr::null(); 8];
             data[0] = l.as_ptr() as *const u8;
@@ -389,11 +397,11 @@ fn rt_loop(
         if let Some((src, ring)) = &mut monitor {
             let out = if *src == la::PROGRAM { Some(graph.program()) } else { graph.mix(*src) };
             let ahead = (ring.buffer().capacity() - ring.slots()) / 2;
-            if ahead + BLOCK <= MONITOR_MOST
-                && let Ok(mut chunk) = ring.write_chunk_uninit(BLOCK * 2)
+            if ahead + block <= monitor_most(block)
+                && let Ok(mut chunk) = ring.write_chunk_uninit(block * 2)
             {
                 let (a, b) = chunk.as_mut_slices();
-                for k in 0..BLOCK {
+                for k in 0..block {
                     let (l, r) = out.map_or((0.0, 0.0), |(l, r)| (l[k], r[k]));
                     for (c, v) in [l, r].into_iter().enumerate() {
                         let i = k * 2 + c;
@@ -415,14 +423,14 @@ fn rt_loop(
             }
             for stem in &mut stems {
                 let src = if stem.id == la::PROGRAM { Some(graph.program()) } else { graph.tap(stem.id, stem.tap) };
-                let n = BLOCK * stem.channels as usize;
+                let n = block * stem.channels as usize;
                 let Ok(mut chunk) = stem.ring.write_chunk_uninit(n) else {
-                    STEM_OVERRUNS.fetch_add(BLOCK as u64, Ordering::Relaxed);
+                    STEM_OVERRUNS.fetch_add(block as u64, Ordering::Relaxed);
                     continue;
                 };
                 let (a, b) = chunk.as_mut_slices();
                 let mut i = 0usize;
-                for k in 0..BLOCK {
+                for k in 0..block {
                     let (l, r) = src.map_or((0.0, 0.0), |(l, r)| (l[k], r[k]));
                     let frame = [l, r];
                     for v in &frame[..stem.channels as usize] {
@@ -502,6 +510,8 @@ pub struct AudioHost {
     pump: Option<std::thread::JoinHandle<()>>,
     recorder: Option<Recorder>,
     sample_rate: u32,
+    /// Frames per block.
+    block: usize,
     /// Open interfaces: their device name and channel count, by input.
     devices: HashMap<lightair_core::Id, (String, u16)>,
     device_thread: Option<crate::devices::Devices>,
@@ -510,7 +520,9 @@ pub struct AudioHost {
 }
 
 impl AudioHost {
-    pub fn start(sample_rate: u32) -> Option<Self> {
+    /// Starts the engine at `sample_rate`, processing `block` frames at a time.
+    pub fn start(sample_rate: u32, block: usize) -> Option<Self> {
+        let block = block.clamp(64, la::MAX_BLOCK);
         register_types();
         let outs: Vec<Source> = (0..=OUT_MIXES)
             .map(|k| Source::create_private(OUT_SOURCE, &format!("Lightair mix {k}"), None))
@@ -532,11 +544,11 @@ impl AudioHost {
         let (rt_garbage, garbage) = rtrb::RingBuffer::new(256);
         let stop = Arc::new(AtomicBool::new(false));
         let ptrs = OutPtr(std::array::from_fn(|k| outs[k].as_ptr()));
-        tracing::info!(sample_rate, "audio engine running");
+        tracing::info!(sample_rate, block, "audio engine running");
         let s = stop.clone();
         let thread = std::thread::Builder::new()
             .name("lightair-audio".into())
-            .spawn(move || rt_loop(renderer, rt_commands, rt_garbage, ptrs, sample_rate, s))
+            .spawn(move || rt_loop(renderer, rt_commands, rt_garbage, ptrs, sample_rate, block, s))
             .ok()?;
         let cells: MeterCells = Default::default();
         let (c, s) = (cells.clone(), stop.clone());
@@ -565,10 +577,16 @@ impl AudioHost {
             pump,
             recorder: None,
             sample_rate,
+            block,
             devices: HashMap::new(),
             device_thread: None,
             monitor: None,
         })
+    }
+
+    /// Frames per block.
+    pub fn block(&self) -> usize {
+        self.block
     }
 
     /// Plays this mixer: compiles it, routes the first five mixes to libobs mixes 2–6 and the
@@ -646,7 +664,8 @@ impl AudioHost {
         let devices = self.device_thread.get_or_insert_with(crate::devices::Devices::start);
         let (producer, consumer) = rtrb::RingBuffer::new(RING_FRAMES * 32);
         let channels = devices.open(input, device, self.sample_rate, producer)?;
-        let rt = RtInput::new(crate::audio::node(input), consumer, channels as usize, 512, 2_048);
+        // two blocks primed: a device's latency is the engine's block, not libobs's packets
+        let rt = RtInput::new(crate::audio::node(input), consumer, channels as usize, self.block * 2, 2_048.max(self.block * 8));
         let _ = self.commands.push(ToRt::AddInput(rt));
         self.devices.insert(input, (device.to_string(), channels));
         Ok(channels)
@@ -790,7 +809,7 @@ impl AudioHost {
             unsafe { sys::obs_source_set_monitoring_enabled(cue_out, true) };
             return Ok(());
         };
-        let (producer, consumer) = rtrb::RingBuffer::new(MONITOR_MOST * 4);
+        let (producer, consumer) = rtrb::RingBuffer::new(monitor_most(self.block) * 4);
         let devices = self.device_thread.get_or_insert_with(crate::devices::Devices::start);
         match devices.open_output(&device, self.sample_rate, consumer) {
             Ok(()) => {
@@ -809,7 +828,7 @@ impl AudioHost {
 
     /// A monitor whose output the caller reads (tests).
     pub fn test_monitor(&mut self, source: la::NodeId) -> rtrb::Consumer<f32> {
-        let (producer, consumer) = rtrb::RingBuffer::new(MONITOR_MOST * 4);
+        let (producer, consumer) = rtrb::RingBuffer::new(monitor_most(self.block) * 4);
         let _ = self.commands.push(ToRt::Monitor(Some((source, producer))));
         consumer
     }

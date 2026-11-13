@@ -36,6 +36,26 @@ fn meter_frac(db: f32) -> f32 {
 
 /// The vocal chain new microphone tracks get (docs/10-audio.md, Voice Clarity): the engine's
 /// one-knob chain (noise, expander, de-esser, EQ, compressor, limiter).
+/// The commands that set the mixer up as a template. Podcasts take an interface's channels as
+/// mics when there's one with more than two (a stereo USB mic isn't two people); music takes a
+/// two-channel one too (vocal and instrument). Otherwise the default input.
+pub fn template_command(project: &lightair_core::Project, t: lightair_core::templates::Template) -> Command {
+    use lightair_core::templates::{Mics, Template};
+    let least = match t {
+        Template::Podcast => 3,
+        Template::Music => 2,
+        _ => u16::MAX,
+    };
+    let devices = lightair_engine::devices::input_devices();
+    let mics = devices
+        .iter()
+        .filter(|d| d.channels >= least)
+        .max_by_key(|d| d.channels)
+        .map(|d| Mics { kind: lightair_engine::devices::DEVICE_KIND.into(), device: d.name.clone(), channels: d.channels })
+        .unwrap_or(Mics { kind: lightair_engine::devices::DEVICE_KIND.into(), device: String::new(), channels: 1 });
+    lightair_core::templates::apply(project, t, &mics)
+}
+
 pub fn voice_clarity() -> Vec<Effect> {
     lightair_core::catalog::def("audio.voice").map(|d| vec![d.create()]).unwrap_or_default()
 }
@@ -279,6 +299,11 @@ impl MixerPanel {
                     s.select_track(Some(id));
                     cx.notify();
                 });
+            })))
+            .child(item("add-template", "layout-template", "Templates…").on_click(cx.listener(|this, _, window, cx| {
+                this.add_track_menu = false;
+                window.dispatch_action(Box::new(crate::shell::OpenAudioSettings), cx);
+                cx.notify();
             })))
             .children(self.interfaces.iter().enumerate().map(|(i, d)| {
                 let device = d.clone();

@@ -22,6 +22,8 @@ pub struct Preferences {
     pub monitor_program: bool,
     /// The loudness the LUFS readout aims for.
     pub loudness_target: i32,
+    /// Frames the audio engine processes at a time (128: low latency for music; 512: lighter).
+    pub audio_block: usize,
     /// Defaults for newly added cameras.
     pub camera: CameraDefaults,
     /// Shortcuts that work while Lightair isn't in front.
@@ -73,6 +75,7 @@ impl Default for Preferences {
             direct_monitor: true,
             monitor_program: false,
             loudness_target: -14,
+            audio_block: 256,
             camera: CameraDefaults::default(),
             global_hotkeys: Vec::new(),
         }
