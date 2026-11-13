@@ -511,13 +511,15 @@ impl MixerPanel {
                 .child(seg(y_end, 1.0, tok::error()))
         };
         let mut scale = div().relative().flex_1().h_full();
-        for db in [0, -6, -12, -18, -24, -30, -36, -42, -48, -54] {
+        // a label every 6 dB when the meter is tall enough to read them, every 12 when it's short
+        // (its height: the fader's, beside it, from the last frame)
+        let tall = self.faders.borrow().get(&id).is_none_or(|b| f32::from(b.size.height) >= 190.0);
+        for db in (0..10).map(|k| -6 * k).filter(|db| tall || db % 12 == 0) {
+            // each label centred on its level; the top one (0) sits inside the meter's edge
+            let label = div().absolute().right(px(2.));
+            let label = if db == 0 { label.top(px(-1.)) } else { label.bottom(relative(meter_frac(db as f32))).mb(px(-6.)) };
             scale = scale.child(
-                div()
-                    .absolute()
-                    .right(px(2.))
-                    .bottom(relative(meter_frac(db as f32)))
-                    .mb(px(-6.))
+                label
                     .text_size(px(8.5))
                     .font_family("Menlo")
                     .whitespace_nowrap()
