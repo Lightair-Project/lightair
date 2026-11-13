@@ -11,7 +11,7 @@ use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{AudioMix, Bus, Command, Effect, Id, Input, Master, MixerStrip, Project, Track};
+use lightair_core::{AudioMix, Bus, Command, Effect, Id, Input, Master, MixerStrip, Project, Route, Send, Track};
 use lightair_engine::meters::meters;
 use serde_json::json;
 
@@ -66,6 +66,9 @@ pub struct MixerPanel {
     studio: Entity<Studio>,
     faders: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     dragging: Option<Id>,
+    /// The small sliders (pan, trim, sends): where each is, and the one being dragged.
+    knobs: Rc<RefCell<HashMap<Knob, Bounds<Pixels>>>>,
+    knob_drag: Option<Knob>,
     /// Displayed (decaying) peak per track and channel, plus the time of the last frame.
     display: HashMap<Id, [f32; 2]>,
     last_frame: Instant,
@@ -82,6 +85,8 @@ impl MixerPanel {
             studio,
             faders: Rc::default(),
             dragging: None,
+            knobs: Rc::default(),
+            knob_drag: None,
             display: HashMap::new(),
             last_frame: Instant::now(),
             add_track_menu: false,
@@ -194,8 +199,14 @@ impl Render for MixerPanel {
             .flex_col()
             .size_full()
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
-                if let (Some(track), Some(MouseButton::Left)) = (this.dragging, ev.pressed_button) {
+                if ev.pressed_button != Some(MouseButton::Left) {
+                    return;
+                }
+                if let Some(track) = this.dragging {
                     this.fader_to(track, ev.position.y, cx);
+                }
+                if let Some(knob) = this.knob_drag {
+                    this.knob_to(knob, ev.position.x, cx);
                 }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
@@ -222,7 +233,8 @@ impl Render for MixerPanel {
 
 impl MixerPanel {
     fn end_drag(&mut self, cx: &mut Context<Self>) {
-        if self.dragging.take().is_some() {
+        let knob = self.knob_drag.take().is_some();
+        if self.dragging.take().is_some() || knob {
             self.studio.update(cx, |s, cx| {
                 s.end_gesture();
                 cx.notify();
@@ -353,6 +365,321 @@ impl MixerPanel {
         ))
     }
 
+    /// Sets a small slider from where the pointer is along it.
+    fn knob_to(&self, knob: Knob, x: Pixels, cx: &mut Context<Self>) {
+        let Some(b) = self.knobs.borrow().get(&knob).copied() else { return };
+        let frac = ((f32::from(x) - f32::from(b.origin.x)) / f32::from(b.size.width).max(1.0)).clamp(0.0, 1.0);
+        let (lo, hi) = knob.range();
+        let mut v = lo + frac * (hi - lo);
+        v = match knob {
+            // the centre catches
+            Knob::Pan(_) if v.abs() < 0.04 => 0.0,
+            Knob::Pan(_) => (v * 100.0).round() / 100.0,
+            _ => (v * 2.0).round() / 2.0,
+        };
+        let project = self.studio.read(cx).project().clone();
+        if let Some(cmd) = knob.set(&project, v) {
+            self.exec(cmd, cx);
+        }
+    }
+
+    /// A small horizontal slider: a thin track filled from its centre (or left end), a dot.
+    /// Drag or click to set; double-click resets.
+    fn mini(&self, id: usize, knob: Knob, value: f32, cx: &mut Context<Self>) -> Stateful<Div> {
+        let (lo, hi) = knob.range();
+        let frac = ((value - lo) / (hi - lo)).clamp(0.0, 1.0);
+        let origin = if knob.centred() { ((0.0 - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 0.0 };
+        let (from, to) = (origin.min(frac), origin.max(frac));
+        let knobs = self.knobs.clone();
+        div()
+            .id(("mini", id))
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h(px(16.))
+            .cursor_pointer()
+            .child(
+                canvas(
+                    move |b, _, _| {
+                        knobs.borrow_mut().insert(knob, b);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(div().absolute().left_0().right_0().top(px(6.5)).h(px(3.)).rounded_full().bg(tok::bg_app()))
+            .child(
+                div()
+                    .absolute()
+                    .left(relative(from))
+                    .w(relative(to - from))
+                    .top(px(6.5))
+                    .h(px(3.))
+                    .rounded_full()
+                    .bg(tok::text_secondary()),
+            )
+            .when(knob.centred(), |d| {
+                d.child(div().absolute().left(relative(origin)).top(px(4.)).w(px(1.)).h(px(8.)).bg(tok::text_tertiary()))
+            })
+            .child(
+                div()
+                    .absolute()
+                    .left(relative(frac))
+                    .ml(px(-5.))
+                    .top(px(3.))
+                    .size(px(10.))
+                    .rounded_full()
+                    .bg(tok::text())
+                    .border_1()
+                    .border_color(tok::bg_app()),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if ev.click_count >= 2 {
+                        let project = this.studio.read(cx).project().clone();
+                        if let Some(cmd) = knob.set(&project, knob.reset()) {
+                            this.exec(cmd, cx);
+                        }
+                        return;
+                    }
+                    this.studio.update(cx, |s, _| s.begin_gesture());
+                    this.knob_drag = Some(knob);
+                    this.knob_to(knob, ev.position.x, cx);
+                }),
+            )
+    }
+
+    /// A track's or bus's place in the mix, on the strip: output, pan, trim, polarity, mono,
+    /// recording, sends.
+    fn channel(&self, i: usize, view: &StripView, ch: &Channel, project: &Project, cx: &mut Context<Self>) -> Div {
+        let id = view.id;
+        let label = |text: &'static str| {
+            div()
+                .w(px(30.))
+                .flex_none()
+                .text_size(px(9.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(tok::text_tertiary())
+                .child(text)
+        };
+        let value = |text: String| {
+            div()
+                .w(px(34.))
+                .flex_none()
+                .text_right()
+                .text_size(px(10.))
+                .font_family("Menlo")
+                .text_color(tok::text_secondary())
+                .child(text)
+        };
+
+        // output
+        let route_name = match ch.route {
+            Route::Program => "Program".to_string(),
+            Route::Bus(b) => project.audio.bus(b).map_or("Bus".into(), |b| b.name.clone()),
+            Route::None => "Sends only".into(),
+        };
+        let mut routes = vec![(Route::Program, "Program".to_string())];
+        routes.extend(project.audio.buses.iter().filter(|b| b.id != id).map(|b| (Route::Bus(b.id), b.name.clone())));
+        routes.push((Route::None, "Sends only".into()));
+        let (me, current) = (cx.entity().downgrade(), ch.route);
+        let output = gpui_kit::component::button::Button::new(("strip-route", i))
+            .label(format!("→ {route_name}"))
+            .xsmall()
+            .outline()
+            .w_full()
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                for (r, name) in routes.clone() {
+                    let me = me.clone();
+                    menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(name).checked(r == current).on_click(
+                        move |_, _, cx| {
+                            if let Some(me) = me.upgrade() {
+                                me.update(cx, |this, cx| {
+                                    let p = this.studio.read(cx).project().clone();
+                                    if let Some(cmd) = strip_update(&p, id, |f| *f.route = r) {
+                                        this.exec(cmd, cx);
+                                    }
+                                });
+                            }
+                        },
+                    ));
+                }
+                menu
+            });
+
+        let pan_text = if ch.pan.abs() < 0.005 {
+            "C".to_string()
+        } else if ch.pan < 0.0 {
+            format!("L{:.0}", -ch.pan * 100.0)
+        } else {
+            format!("R{:.0}", ch.pan * 100.0)
+        };
+        let mut col = div()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .gap_1()
+            .px_2()
+            .py_1p5()
+            .border_b_1()
+            .border_color(tok::border())
+            .child(output)
+            .child(
+                div().flex().items_center().gap_1().child(label("PAN")).child(self.mini(i * 64, Knob::Pan(id), ch.pan, cx)).child(value(pan_text)),
+            );
+        if let Some(trim) = ch.trim_db {
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(label("TRIM"))
+                    .child(self.mini(i * 64 + 1, Knob::Trim(id), trim, cx))
+                    .child(value(format!("{trim:+.1}"))),
+            );
+        }
+
+        // switches
+        let chip = |key: &'static str, text: &'static str, tip: &'static str, on: bool, on_bg: Hsla| {
+            div()
+                .id((key, i))
+                .flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .h(px(20.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(if on { on_bg } else { tok::border_strong() })
+                .bg(if on { on_bg } else { tok::bg_app() })
+                .text_size(px(9.5))
+                .font_weight(FontWeight::BOLD)
+                .text_color(if on { tok::text_inverse() } else { tok::text_secondary() })
+                .cursor_pointer()
+                .child(text)
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
+        };
+        let toggle = move |f: fn(StripFields)| {
+            move |this: &mut MixerPanel, _: &ClickEvent, _: &mut Window, cx: &mut Context<MixerPanel>| {
+                cx.stop_propagation();
+                let p = this.studio.read(cx).project().clone();
+                if let Some(cmd) = strip_update(&p, id, f) {
+                    this.exec(cmd, cx);
+                }
+            }
+        };
+        let mut switches = div().flex().gap_1();
+        if let Some(invert) = ch.invert {
+            switches = switches.child(
+                chip("ch-invert", "Ø", "Polarity (flip the waveform)", invert, tok::accent_primary())
+                    .on_click(cx.listener(toggle(|f| if let Some(v) = f.invert { *v = !*v }))),
+            );
+        }
+        if let Some(mono) = ch.mono {
+            switches = switches.child(
+                chip("ch-mono", "MONO", "Sum to mono", mono, tok::accent_primary())
+                    .on_click(cx.listener(toggle(|f| if let Some(v) = f.mono { *v = !*v }))),
+            );
+        }
+        switches = switches.child(
+            chip("ch-rec", "REC", "Record to its own file (multitrack recordings)", ch.record, tok::error())
+                .on_click(cx.listener(toggle(|f| *f.record = !*f.record))),
+        );
+        col = col.child(switches);
+
+        // sends
+        if !project.audio.mixes.is_empty() {
+            col = col.child(label("SENDS").w_full().pt_0p5());
+            for (n, mix) in project.audio.mixes.iter().enumerate() {
+                let send = ch.sends.iter().find(|s| s.mix == mix.id).copied();
+                let mix_id = mix.id;
+                let mut row = div().flex().items_center().gap_1().h(px(18.)).child(
+                    div()
+                        .id(("send-dot", i * 64 + n))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(14.))
+                        .cursor_pointer()
+                        .child(div().size(px(7.)).rounded_full().bg(if send.is_some() { tok::ok() } else { tok::text_tertiary() }))
+                        .tooltip(move |w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(if send.is_some() { "Stop sending" } else { "Send to this mix" })
+                                .build(w, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            let p = this.studio.read(cx).project().clone();
+                            let cmd = strip_update(&p, id, |f| {
+                                if f.sends.iter().any(|s| s.mix == mix_id) {
+                                    f.sends.retain(|s| s.mix != mix_id);
+                                } else {
+                                    f.sends.push(Send { mix: mix_id, level_db: 0.0, pre_fader: false });
+                                }
+                            });
+                            if let Some(cmd) = cmd {
+                                this.exec(cmd, cx);
+                            }
+                        })),
+                );
+                row = row.child(
+                    div()
+                        .w(px(40.))
+                        .flex_none()
+                        .truncate()
+                        .text_size(px(10.5))
+                        .text_color(if send.is_some() { tok::text() } else { tok::text_tertiary() })
+                        .child(mix.name.clone()),
+                );
+                match send {
+                    Some(s) => {
+                        let pre = s.pre_fader;
+                        row = row
+                            .child(self.mini(i * 64 + 8 + n, Knob::Send(id, mix_id), s.level_db, cx))
+                            .child(
+                                div()
+                                    .id(("send-pre", i * 64 + n))
+                                    .flex_none()
+                                    .px_1()
+                                    .rounded(px(3.))
+                                    .text_size(px(8.5))
+                                    .font_weight(FontWeight::BOLD)
+                                    .cursor_pointer()
+                                    .bg(if pre { tok::bg_selected() } else { tok::bg_app() })
+                                    .text_color(if pre { tok::text() } else { tok::text_tertiary() })
+                                    .child(if pre { "PRE" } else { "POST" })
+                                    .tooltip(|w, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(
+                                            "Before the fader (a monitor mix the fader doesn't change) or after it",
+                                        )
+                                        .build(w, cx)
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        let p = this.studio.read(cx).project().clone();
+                                        let cmd = strip_update(&p, id, |f| {
+                                            for x in f.sends.iter_mut().filter(|x| x.mix == mix_id) {
+                                                x.pre_fader = !x.pre_fader;
+                                            }
+                                        });
+                                        if let Some(cmd) = cmd {
+                                            this.exec(cmd, cx);
+                                        }
+                                    })),
+                            );
+                    }
+                    None => row = row.child(div().flex_1()),
+                }
+                col = col.child(row);
+            }
+        }
+        col
+    }
+
     fn strip(&self, i: usize, view: &StripView, shown: [f32; 2], cx: &mut Context<Self>) -> impl IntoElement {
         let id = view.id;
         let kind = view.kind;
@@ -383,8 +710,15 @@ impl MixerPanel {
             .gap_1()
             .border_b_1()
             .border_color(tok::border())
-            .child(div().w(px(18.)).flex_none().when_some(view.badge, |d, b| {
-                d.child(div().text_size(px(8.5)).font_weight(FontWeight::BOLD).text_color(tok::text_tertiary()).child(b))
+            .child(div().w(px(24.)).flex_none().when_some(view.badge, |d, b| {
+                d.child(
+                    div()
+                        .text_size(px(8.5))
+                        .font_weight(FontWeight::BOLD)
+                        .whitespace_nowrap()
+                        .text_color(tok::text_tertiary())
+                        .child(b),
+                )
             }))
             .child(
                 div()
@@ -410,7 +744,7 @@ impl MixerPanel {
             .id(("strip-fx", i))
             .flex()
             .flex_col()
-            .flex_basis(px(92.))
+            .flex_basis(px(if view.channel.is_some() { 72. } else { 92. }))
             .flex_shrink(1.0)
             .min_h(px(50.))
             .overflow_y_scroll()
@@ -686,7 +1020,7 @@ impl MixerPanel {
             .flex_none()
             .w(px(STRIP_W))
             .h_full()
-            .min_h(px(266.))
+            .min_h(px(if view.channel.is_some() { 400. } else { 266. }))
             .rounded(px(8.))
             .overflow_hidden()
             .bg(tok::bg_raised())
@@ -701,6 +1035,7 @@ impl MixerPanel {
             }))
             .child(header)
             .child(fx)
+            .when_some(view.channel.as_ref(), |d, ch| d.child(self.channel(i, view, ch, &project, cx)))
             .child(levels)
             .child(div().flex_none().px_2().pb_2().child(self.strip_source(i, view, cx)))
     }
@@ -972,6 +1307,103 @@ struct StripView {
     badge: Option<&'static str>,
     /// A track's input (buses, mixes and the master have none).
     source: Option<StripSource>,
+    /// Where a track or bus goes and what it sends (mixes and the master have none).
+    channel: Option<Channel>,
+}
+
+/// A track's or bus's routing, as the strip shows it.
+struct Channel {
+    route: Route,
+    pan: f32,
+    /// Tracks only.
+    trim_db: Option<f32>,
+    invert: Option<bool>,
+    mono: Option<bool>,
+    record: bool,
+    sends: Vec<Send>,
+}
+
+/// A small slider on a strip.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Knob {
+    Pan(Id),
+    Trim(Id),
+    /// A strip's send to a mix.
+    Send(Id, Id),
+}
+
+impl Knob {
+    fn range(self) -> (f32, f32) {
+        match self {
+            Knob::Pan(_) => (-1.0, 1.0),
+            Knob::Trim(_) => (-24.0, 24.0),
+            Knob::Send(..) => (-60.0, 6.0),
+        }
+    }
+
+    /// Filled from the middle (pan, trim) rather than the left end (a send's level).
+    fn centred(self) -> bool {
+        !matches!(self, Knob::Send(..))
+    }
+
+    fn reset(self) -> f32 {
+        0.0
+    }
+
+    fn set(self, p: &Project, v: f32) -> Option<Command> {
+        match self {
+            Knob::Pan(id) => strip_update(p, id, |f| *f.pan = v),
+            Knob::Trim(id) => strip_update(p, id, |f| {
+                if let Some(t) = f.trim_db {
+                    *t = v
+                }
+            }),
+            Knob::Send(id, mix) => strip_update(p, id, |f| {
+                for s in f.sends.iter_mut().filter(|s| s.mix == mix) {
+                    s.level_db = v;
+                }
+            }),
+        }
+    }
+}
+
+/// The fields a track and a bus share, to change either the same way.
+struct StripFields<'a> {
+    route: &'a mut Route,
+    pan: &'a mut f32,
+    record: &'a mut bool,
+    sends: &'a mut Vec<Send>,
+    trim_db: Option<&'a mut f32>,
+    invert: Option<&'a mut bool>,
+    mono: Option<&'a mut bool>,
+}
+
+/// The command that changes a track or bus through `f`.
+fn strip_update(p: &Project, id: Id, f: impl FnOnce(StripFields)) -> Option<Command> {
+    if let Some(t) = p.track(id) {
+        let mut t = (**t).clone();
+        f(StripFields {
+            route: &mut t.route,
+            pan: &mut t.pan,
+            record: &mut t.record,
+            sends: &mut t.sends,
+            trim_db: Some(&mut t.trim_db),
+            invert: Some(&mut t.invert),
+            mono: Some(&mut t.mono),
+        });
+        return Some(Command::UpdateTrack { track: t });
+    }
+    let mut b = p.audio.bus(id)?.clone();
+    f(StripFields {
+        route: &mut b.route,
+        pan: &mut b.pan,
+        record: &mut b.record,
+        sends: &mut b.sends,
+        trim_db: None,
+        invert: None,
+        mono: None,
+    });
+    Some(Command::UpdateBus { bus: b })
 }
 
 /// What a track listens to, for the strip's foot.
@@ -1152,6 +1584,15 @@ fn strip_views(p: &Project) -> Vec<StripView> {
             effects: on(&t.effects),
             badge: None,
             source: source(t),
+            channel: Some(Channel {
+                route: t.route,
+                pan: t.pan,
+                trim_db: Some(t.trim_db),
+                invert: Some(t.invert),
+                mono: Some(t.mono),
+                record: t.record,
+                sends: t.sends.clone(),
+            }),
         })
         .collect();
     v.extend(p.audio.buses.iter().map(|b| StripView {
@@ -1164,6 +1605,15 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         effects: on(&b.effects),
         badge: Some("BUS"),
         source: None,
+        channel: Some(Channel {
+            route: b.route,
+            pan: b.pan,
+            trim_db: None,
+            invert: None,
+            mono: None,
+            record: b.record,
+            sends: b.sends.clone(),
+        }),
     }));
     let m = &p.audio.master;
     v.push(StripView {
@@ -1176,6 +1626,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         effects: on(&m.effects),
         badge: None, // "Program" says it
         source: None,
+        channel: None,
     });
     v.extend(p.audio.mixes.iter().map(|x| StripView {
         id: x.id,
@@ -1187,6 +1638,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         effects: on(&x.effects),
         badge: Some("MIX"),
         source: None,
+        channel: None,
     }));
     v
 }
