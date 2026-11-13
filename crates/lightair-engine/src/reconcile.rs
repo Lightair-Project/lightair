@@ -52,6 +52,9 @@ pub struct Reconciler {
     /// The audio engine playing the mixer (docs/plans/audio-engine.md); started with the first
     /// track. `LIGHTAIR_LEGACY_AUDIO=1` keeps libobs mixing the tracks instead.
     audio: Option<crate::audio_host::AudioHost>,
+    /// The direct monitor wanted: output device ("" default) and whether it plays the program
+    /// (else the cue mix). Applied whenever the audio engine runs.
+    monitor: Option<(String, bool)>,
     /// Each format's output channel goes through its own transition.
     transitions: HashMap<Id, Source>,
     transition_settings: TransitionSettings,
@@ -243,6 +246,10 @@ impl Reconciler {
             self.audio = crate::audio_host::AudioHost::start(rate);
         }
         let Some(host) = self.audio.as_mut() else { return };
+        let monitor = self.monitor.clone().map(|(d, program)| (d, if program { lightair_audio::PROGRAM } else { crate::audio::CUE }));
+        if let Err(e) = host.set_monitor(monitor) {
+            tracing::warn!(%e, "direct monitoring unavailable; libobs monitors the cue");
+        }
         let wanted: HashSet<Id> = project.tracks.iter().map(|t| t.input).collect();
         let is_device = |id: &Id| project.inputs.get(id).is_some_and(|i| i.kind == crate::devices::DEVICE_KIND);
         let stale: Vec<Id> = host.captured().filter(|i| !wanted.contains(i) || is_device(i)).collect();
@@ -332,6 +339,24 @@ impl Reconciler {
         let files = specs.iter().map(|s| s.path.clone()).collect();
         host.start_stems(specs)?;
         Ok(files)
+    }
+
+    /// Monitoring straight from the audio engine to an output device (`None`: libobs's own,
+    /// slower monitoring of the cue). `program`: hear the stream mix rather than the cue.
+    pub fn set_monitor(&mut self, device: Option<String>, program: bool) {
+        self.monitor = device.map(|d| (if d == "default" { String::new() } else { d }, program));
+        if let Some(host) = self.audio.as_mut() {
+            let m = self.monitor.clone().map(|(d, p)| (d, if p { lightair_audio::PROGRAM } else { crate::audio::CUE }));
+            if let Err(e) = host.set_monitor(m) {
+                tracing::warn!(%e, "direct monitoring unavailable; libobs monitors the cue");
+            }
+        }
+    }
+
+    /// A monitor the caller reads (tests): stereo, interleaved.
+    pub fn audio_test_monitor(&mut self, program: bool) -> Option<rtrb::Consumer<f32>> {
+        let src = if program { lightair_audio::PROGRAM } else { crate::audio::CUE };
+        Some(self.audio.as_mut()?.test_monitor(src))
     }
 
     /// An input the caller feeds (tests): `channels` interleaved frames, like an interface.

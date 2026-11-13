@@ -70,6 +70,9 @@ fn main() {
     if let Some((name, id)) = prefs.monitor_device.clone() {
         engine.call(move |_| lightair_engine::monitoring::set(&name, &id));
     }
+    let monitor = prefs.direct_monitor.then(|| prefs.monitor_device.clone().map_or(String::new(), |(name, _)| name));
+    let program = prefs.monitor_program;
+    engine.call(move |s| s.reconciler.set_monitor(monitor, program));
     if let Ok(what) = std::env::var("LIGHTAIR_SELFTEST") {
         selftest::run(&engine, &what);
         return;

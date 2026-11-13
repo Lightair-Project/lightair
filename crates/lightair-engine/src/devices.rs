@@ -87,7 +87,18 @@ enum Cmd {
         reply: mpsc::Sender<Result<u16, String>>,
     },
     Close(lightair_core::Id),
+    /// The monitor: plays `ring` (stereo, interleaved) on an output device.
+    OpenOutput {
+        device: String,
+        sample_rate: u32,
+        ring: rtrb::Consumer<f32>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    CloseOutput,
 }
+
+/// Times the monitor ran short (a gap in what's heard), for diagnostics.
+pub static MONITOR_SHORTFALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The device thread: owns the open streams.
 pub(crate) struct Devices {
@@ -102,6 +113,8 @@ impl Devices {
             .name("lightair-devices".into())
             .spawn(move || {
                 let mut streams: HashMap<lightair_core::Id, cpal::Stream> = HashMap::new();
+                // the monitor's stream, held open (at most one)
+                let mut output: Vec<cpal::Stream> = Vec::new();
                 while let Ok(cmd) = rx.recv() {
                     match cmd {
                         Cmd::Open { input, device, sample_rate, ring, reply } => {
@@ -119,6 +132,19 @@ impl Devices {
                         Cmd::Close(input) => {
                             streams.remove(&input);
                         }
+                        Cmd::OpenOutput { device, sample_rate, ring, reply } => {
+                            output.clear();
+                                match open_output(&device, sample_rate, ring) {
+                                Ok(stream) => {
+                                    output.push(stream);
+                                    let _ = reply.send(Ok(()));
+                                }
+                                Err(e) => {
+                                    let _ = reply.send(Err(e));
+                                }
+                            }
+                        }
+                        Cmd::CloseOutput => output.clear(),
                     }
                 }
             })
@@ -144,6 +170,20 @@ impl Devices {
 
     pub fn close(&self, input: lightair_core::Id) {
         let _ = self.tx.send(Cmd::Close(input));
+    }
+
+    /// Plays `ring` (stereo, interleaved, at `sample_rate`) on output `device` ("" for the
+    /// default output).
+    pub fn open_output(&self, device: &str, sample_rate: u32, ring: rtrb::Consumer<f32>) -> Result<(), String> {
+        let (reply, answer) = mpsc::channel();
+        self.tx
+            .send(Cmd::OpenOutput { device: device.into(), sample_rate, ring, reply })
+            .map_err(|_| "the device thread stopped".to_string())?;
+        answer.recv_timeout(std::time::Duration::from_secs(5)).map_err(|_| "the output didn't open".to_string())?
+    }
+
+    pub fn close_output(&self) {
+        let _ = self.tx.send(Cmd::CloseOutput);
     }
 }
 
@@ -212,6 +252,57 @@ fn open(name: &str, sample_rate: u32, mut ring: rtrb::Producer<f32>) -> Result<(
     stream.play().map_err(|e| e.to_string())?;
     tracing::info!(device = name, channels, rate, "audio input open");
     Ok((stream, channels))
+}
+
+fn open_output(name: &str, sample_rate: u32, mut ring: rtrb::Consumer<f32>) -> Result<cpal::Stream, String> {
+    let host = cpal::default_host();
+    let device = if name.is_empty() || name == "default" {
+        host.default_output_device()
+    } else {
+        host.output_devices().map_err(|e| e.to_string())?.find(|d| d.name().is_ok_and(|n| n == name))
+    }
+    .ok_or_else(|| format!("no audio output called \"{name}\""))?;
+    // the engine's rate, as few channels as it takes (at least two), small buffers
+    let config = device
+        .supported_output_configs()
+        .map_err(|e| e.to_string())?
+        .filter(|c| c.min_sample_rate().0 <= sample_rate && c.max_sample_rate().0 >= sample_rate && c.channels() >= 2)
+        .min_by_key(|c| c.channels())
+        .ok_or("the output can't play at the engine's rate")?;
+    let channels = config.channels() as usize;
+    let buffer = match config.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } => cpal::BufferSize::Fixed(128.clamp(*min, *max)),
+        cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Default,
+    };
+    let stream_config = cpal::StreamConfig { channels: channels as u16, sample_rate: cpal::SampleRate(sample_rate), buffer_size: buffer };
+    let stream = device
+        .build_output_stream(
+            &stream_config,
+            move |data: &mut [f32], _| {
+                let frames = data.len() / channels;
+                let have = (ring.slots() / 2).min(frames);
+                if have < frames {
+                    MONITOR_SHORTFALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                data.fill(0.0);
+                if let Ok(chunk) = ring.read_chunk(have * 2) {
+                    let (a, b) = chunk.as_slices();
+                    for k in 0..have {
+                        for c in 0..2 {
+                            let i = k * 2 + c;
+                            data[k * channels + c] = if i < a.len() { a[i] } else { b[i - a.len()] };
+                        }
+                    }
+                    chunk.commit_all();
+                }
+            },
+            |e| tracing::warn!(%e, "monitor output"),
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    stream.play().map_err(|e| e.to_string())?;
+    tracing::info!(device = name, "monitor output open");
+    Ok(stream)
 }
 
 #[cfg(test)]
