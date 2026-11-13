@@ -216,6 +216,9 @@ pub struct RecordingConfig {
     pub split_minutes: Option<u32>,
     pub container: Container,
     pub encoders: EncoderConfig,
+    /// libobs mixes recorded as extra audio tracks after the program (the audio engine's mixes,
+    /// 1-5).
+    pub extra_mixes: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -286,6 +289,8 @@ struct Running {
     signals: &'static [(&'static str, SignalCb)],
     /// What its encoders were made for; outputs with the same key share them.
     share: (usize, EncoderConfig),
+    /// Audio encoders of the extra tracks (recordings carrying mixes).
+    extra: Vec<*mut sys::obs_encoder_t>,
 }
 
 unsafe impl Send for Running {}
@@ -304,6 +309,9 @@ impl Running {
             sys::obs_output_release(self.output);
             sys::obs_encoder_release(self.video);
             sys::obs_encoder_release(self.audio);
+            for e in self.extra {
+                sys::obs_encoder_release(e);
+            }
             if !self.service.is_null() {
                 sys::obs_service_release(self.service);
             }
@@ -514,6 +522,7 @@ unsafe fn create_encoders(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // each output kind sets a different few
 unsafe fn start(
     key: OutputKey,
     output_type: &str,
@@ -522,6 +531,7 @@ unsafe fn start(
     service: *mut sys::obs_service_t,
     video_output: *mut sys::video_t,
     shared: Option<(*mut sys::obs_encoder_t, *mut sys::obs_encoder_t)>,
+    extra_mixes: &[usize],
 ) -> Result<Running, String> {
     let name = match key {
         OutputKey::Recording(canvas) => format!("Recording {canvas}"),
@@ -560,6 +570,25 @@ unsafe fn start(
         }
         sys::obs_output_set_video_encoder(output, video);
         sys::obs_output_set_audio_encoder(output, audio, 0);
+        // more audio tracks: one encoder per libobs mix, in order after the program
+        let mut extra = Vec::new();
+        for (track, &mix) in extra_mixes.iter().enumerate().take(5) {
+            let mut a = Data::new();
+            a.set_int("bitrate", encoders.audio_bitrate_kbps as i64);
+            let enc = sys::obs_audio_encoder_create(
+                c(&encoders.audio_encoder).as_ptr(),
+                c(&format!("{name} audio {}", track + 2)).as_ptr(),
+                a.as_ptr(),
+                mix,
+                std::ptr::null_mut(),
+            );
+            if enc.is_null() {
+                continue;
+            }
+            sys::obs_encoder_set_audio(enc, sys::obs_get_audio());
+            sys::obs_output_set_audio_encoder(output, enc, track + 1);
+            extra.push(enc);
+        }
         if !service.is_null() {
             sys::obs_output_set_service(output, service);
         }
@@ -570,7 +599,7 @@ unsafe fn start(
             sys::signal_handler_connect(handler, c(sig).as_ptr(), Some(*cb), signal_param as *mut c_void);
         }
         let share = (video_output as usize, encoders.clone());
-        let running = Running { output, video, audio, service, signal_param, signals, share };
+        let running = Running { output, video, audio, service, signal_param, signals, share, extra };
         runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
         if !sys::obs_output_start(output) {
             let err = last_error(output).unwrap_or_else(|| "The output couldn't start.".into());
@@ -620,7 +649,7 @@ impl Outputs {
         settings.set_str("extension", cfg.container.extension());
         settings.set_bool("allow_spaces", true);
         let running =
-            unsafe { start(key, output_type, &settings, &cfg.encoders, std::ptr::null_mut(), video_output, None)? };
+            unsafe { start(key, output_type, &settings, &cfg.encoders, std::ptr::null_mut(), video_output, None, &cfg.extra_mixes)? };
         runtime().update(key, |s| {
             s.path = Some(cfg.path.clone());
             s.files = 1;
@@ -754,7 +783,7 @@ impl Outputs {
             .find(|r| r.share == share_key)
             .map(|r| unsafe { (sys::obs_encoder_get_ref(r.video), sys::obs_encoder_get_ref(r.audio)) });
         let shared = shared.filter(|(v, a)| !v.is_null() && !a.is_null());
-        let running = unsafe { start(key, output_type, &output_settings, &encoders, service, video_output, shared)? };
+        let running = unsafe { start(key, output_type, &output_settings, &encoders, service, video_output, shared, &[])? };
         if let Some((retries, delay)) = cfg.reconnect {
             unsafe { sys::obs_output_set_reconnect_settings(running.output, retries as i32, delay as i32) };
         }
@@ -817,6 +846,7 @@ impl Outputs {
                 std::ptr::null_mut(),
                 video_output,
                 None,
+                &[],
             )?
         };
         *CLIPS_OUTPUT.lock() = Some(OutputPtr(running.output));

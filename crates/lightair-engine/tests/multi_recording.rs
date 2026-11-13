@@ -76,6 +76,7 @@ fn two_canvases_record_together() {
         .map(|(canvas, label)| {
             let path = dir.join(format!("take {label}.mp4"));
             let cfg = RecordingConfig {
+                extra_mixes: vec![],
                 canvas,
                 path: path.clone(),
                 label: Some(label.into()),

@@ -126,6 +126,7 @@ fn record_and_stream() {
     let file = dir.join("take.mp4");
     let canvas = lightair_core::Id::new();
     let cfg = RecordingConfig {
+        extra_mixes: vec![],
         canvas,
         path: file.clone(),
         label: None,

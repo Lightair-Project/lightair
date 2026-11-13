@@ -728,7 +728,31 @@ impl StudioWindow {
                 .into_iter()
                 .map(|(p, l)| (l.to_string(), rec.stem_point == p, multi || only, set(RecordingSettings { stem_point: p, ..rec.clone() })))
                 .collect();
+        let project = self.studio.read(cx).project().clone();
+        let mixes: Vec<(String, bool, bool, Command)> = project
+            .audio
+            .mixes
+            .iter()
+            .take(5)
+            .map(|m| {
+                let on = rec.file_mixes.contains(&m.id);
+                let mut file_mixes = rec.file_mixes.clone();
+                if on {
+                    file_mixes.retain(|x| *x != m.id);
+                } else {
+                    file_mixes.push(m.id);
+                }
+                (m.name.clone(), on, true, set(RecordingSettings { file_mixes, ..rec.clone() }))
+            })
+            .collect();
         group("Multitrack audio")
+            .when(!mixes.is_empty(), |g| {
+                g.child(row(
+                    "Mixes in the video file",
+                    Some("Extra audio tracks after the program (MOV or MKV keep them all)."),
+                    chips("rec-file-mixes", mixes, cx),
+                ))
+            })
             .child(row(
                 "Each track to its own file",
                 Some("WAV files beside the video, lined up to the sample. Tracks marked Record, or all of them."),
