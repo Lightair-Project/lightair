@@ -49,14 +49,32 @@ fn each_track_takes_its_channels() {
         }
     });
     std::thread::sleep(Duration::from_millis(800));
+    // A meter's read starts a new peak window, and the mixer's meter pump reads them too (30
+    // times a second): sample often over the window and keep the loudest.
     let read = |id| engine.call(move |s| s.reconciler.audio_meter(id).map(|m| m.read())).unwrap();
-    let _ = (read(vox_id), read(keys_id)); // start new peak windows
-    std::thread::sleep(Duration::from_millis(300));
-    let (v, k) = (read(vox_id), read(keys_id));
+    let (mut v, mut k) = (read(vox_id), read(keys_id));
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(10));
+        let (a, b) = (read(vox_id), read(keys_id));
+        for c in 0..2 {
+            v.peak_db[c] = v.peak_db[c].max(a.peak_db[c]);
+            k.peak_db[c] = k.peak_db[c].max(b.peak_db[c]);
+        }
+    }
     stop.store(true, Ordering::Relaxed);
     feeder.join().unwrap();
     let lin = |db: f32| 10f32.powf(db / 20.0);
     eprintln!("vox {:?}, keys {:?}", v.peak_db, k.peak_db);
+    {
+        use lightair_engine::audio_host as h;
+        eprintln!(
+            "audio thread: {} inputs, {} playing, {} blocks, {} shortfalls",
+            h::RT_INPUTS.load(Ordering::Relaxed),
+            h::RT_INPUTS_PLAYING.load(Ordering::Relaxed),
+            h::RT_BLOCKS.load(Ordering::Relaxed),
+            h::SHORTFALLS.load(Ordering::Relaxed)
+        );
+    }
     assert!((lin(v.peak_db[0]) - 0.30).abs() < 0.005 && (lin(v.peak_db[1]) - 0.30).abs() < 0.005, "vox: channel 6 on both sides");
     assert!((lin(k.peak_db[0]) - 0.15).abs() < 0.005, "keys left: channel 3");
     assert!((lin(k.peak_db[1]) - 0.40).abs() < 0.005, "keys right: channel 8");
