@@ -432,6 +432,23 @@ impl StudioWindow {
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(track.name.clone())),
         )
         .children(project.inputs.get(&track.input).and_then(|i| self.source_section(&i.clone(), cx)))
+        .child({
+            let rec = track.record;
+            let cmd = Command::UpdateTrack { track: lightair_core::Track { record: !rec, ..track.clone() } };
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .py_1()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(div().text_size(px(12.)).child("Record to its own file"))
+                        .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("In multitrack recordings")),
+                )
+                .child(super::settings::switch("track-record", rec).on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))))
+        })
         .child(self.track_effects_section(track, cx))
         .child(
             div().pt_2().child(

@@ -194,18 +194,38 @@ impl la::Inputs for RtInputs {
     }
 }
 
+/// A multitrack file being recorded, on the audio thread: what to take and where it goes.
+struct StemRt {
+    id: la::NodeId,
+    tap: la::Tap,
+    channels: u16,
+    ring: rtrb::Producer<f32>,
+}
+
 enum ToRt {
     AddInput(RtInput),
     RemoveInput(la::NodeId),
+    /// Start these files on the next block (all on the same one: sample-aligned).
+    StartStems(Vec<StemRt>),
+    StopStems,
+    PauseStems(bool),
     /// Which mix each out source after Program carries, and the cue mix.
     Mixes([Option<la::NodeId>; OUT_MIXES - 1], Option<la::NodeId>),
 }
 
 /// Running state handed back from the audio thread to be freed.
+#[allow(dead_code)] // held only so they're freed on the main side, never on the audio thread
 enum FromRt {
-    #[allow(dead_code)] // held only so it's freed on the main side, never on the audio thread
     Input(RtInput),
+    Stems(Vec<StemRt>),
 }
+
+/// Whether multitrack files are being recorded (for the UI's record state).
+pub static STEMS_RUNNING: AtomicBool = AtomicBool::new(false);
+/// When the first sample of the current multitrack files was played (libobs ns; 0: not yet).
+static STEMS_START_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Samples dropped because a file's writer fell behind (never expected).
+pub static STEM_OVERRUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Program, the mixes, then the cue (monitor-only) out.
 struct OutPtr([*mut sys::obs_source_t; OUT_MIXES + 1]);
@@ -222,6 +242,9 @@ fn rt_loop(
     let mut inputs = RtInputs(Vec::with_capacity(128));
     let mut mixes: [Option<la::NodeId>; OUT_MIXES - 1] = [None; OUT_MIXES - 1];
     let mut cue: Option<la::NodeId> = None;
+    let mut stems: Vec<StemRt> = Vec::new();
+    let mut stems_paused = false;
+    let mut stems_started = false;
     let period = Duration::from_secs_f64(BLOCK as f64 / sample_rate as f64);
     let start = Instant::now();
     let mut blocks = 0u64;
@@ -246,6 +269,16 @@ fn rt_loop(
                     }
                 }
                 ToRt::Mixes(m, c) => (mixes, cue) = (m, c),
+                ToRt::StartStems(new) => {
+                    let old = std::mem::replace(&mut stems, new);
+                    let _ = garbage.push(FromRt::Stems(old));
+                    (stems_paused, stems_started) = (false, false);
+                }
+                ToRt::StopStems => {
+                    let old = std::mem::take(&mut stems);
+                    let _ = garbage.push(FromRt::Stems(old));
+                }
+                ToRt::PauseStems(p) => stems_paused = p,
             }
         }
         // a block from each input
@@ -310,6 +343,36 @@ fn rt_loop(
         if let Some(out) = cue.and_then(|m| graph.mix(m)) {
             push(outs.0[OUT_MIXES], out);
         }
+        // multitrack files: this block of each, interleaved
+        if !stems.is_empty() && !stems_paused {
+            if !stems_started {
+                STEMS_START_NS.store(ts, Ordering::Relaxed);
+                stems_started = true;
+            }
+            for stem in &mut stems {
+                let src = if stem.id == la::PROGRAM { Some(graph.program()) } else { graph.tap(stem.id, stem.tap) };
+                let n = BLOCK * stem.channels as usize;
+                let Ok(mut chunk) = stem.ring.write_chunk_uninit(n) else {
+                    STEM_OVERRUNS.fetch_add(BLOCK as u64, Ordering::Relaxed);
+                    continue;
+                };
+                let (a, b) = chunk.as_mut_slices();
+                let mut i = 0usize;
+                for k in 0..BLOCK {
+                    let (l, r) = src.map_or((0.0, 0.0), |(l, r)| (l[k], r[k]));
+                    let frame = [l, r];
+                    for v in &frame[..stem.channels as usize] {
+                        if i < a.len() {
+                            a[i].write(*v);
+                        } else {
+                            b[i - a.len()].write(*v);
+                        }
+                        i += 1;
+                    }
+                }
+                unsafe { chunk.commit_all() };
+            }
+        }
         blocks += 1;
         let due = start + period * blocks as u32;
         let now = Instant::now();
@@ -323,6 +386,38 @@ fn rt_loop(
 }
 
 // ---------------------------------------------------------------- the main side
+
+/// A multitrack file to record.
+#[derive(Debug, Clone)]
+pub struct StemSpec {
+    /// The strip (track or bus), or [`la::PROGRAM`] for the program mix.
+    pub id: la::NodeId,
+    pub path: std::path::PathBuf,
+    /// 1 (a mono track) or 2.
+    pub channels: u16,
+    pub tap: la::Tap,
+    /// 32-bit float rather than 24-bit integer.
+    pub float: bool,
+}
+
+/// What a finished multitrack recording wrote.
+#[derive(Debug, Clone)]
+pub struct StemReport {
+    pub files: Vec<std::path::PathBuf>,
+    /// Frames in each file.
+    pub frames: u64,
+    /// When their first sample played (libobs ns): lines them up with the video file.
+    pub start_ns: u64,
+    pub sample_rate: u32,
+}
+
+/// A multitrack file's writer, its ring from the audio thread, and whether it's float.
+type StemWriter = (hound::WavWriter<std::io::BufWriter<std::fs::File>>, rtrb::Consumer<f32>, bool);
+
+struct Recorder {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<Result<StemReport, String>>,
+}
 
 /// Engine meters paired with the mixer UI's meter cells they fill.
 type MeterCells = Arc<Mutex<Vec<(Arc<la::meter::Meter>, Arc<crate::meters::MeterCell>)>>>;
@@ -341,6 +436,8 @@ pub struct AudioHost {
     /// The mixer UI's meter cells, filled from the engine's meters ~30 times a second.
     cells: MeterCells,
     pump: Option<std::thread::JoinHandle<()>>,
+    recorder: Option<Recorder>,
+    sample_rate: u32,
 }
 
 impl AudioHost {
@@ -354,9 +451,9 @@ impl AudioHost {
                 if k < OUT_MIXES {
                     sys::obs_source_set_audio_mixers(out.as_ptr(), 1 << k);
                 } else {
-                    // the cue: heard on the monitoring device only
+                    // the cue: heard on the monitoring device only (in no mix)
                     sys::obs_source_set_audio_mixers(out.as_ptr(), 0);
-                    sys::obs_source_set_monitoring_type(out.as_ptr(), sys::OBS_MONITORING_TYPE_MONITOR_ONLY);
+                    sys::obs_source_set_monitoring_enabled(out.as_ptr(), true);
                 }
                 sys::obs_set_output_source(OUT_CHANNELS.start + k as u32, out.as_ptr());
             }
@@ -397,6 +494,8 @@ impl AudioHost {
             thread: Some(thread),
             cells,
             pump,
+            recorder: None,
+            sample_rate,
         })
     }
 
@@ -432,7 +531,7 @@ impl AudioHost {
             sys::obs_source_set_audio_mixers(source.as_ptr(), 0);
             sys::obs_source_set_volume(source.as_ptr(), 1.0);
             sys::obs_source_set_muted(source.as_ptr(), false);
-            sys::obs_source_set_monitoring_type(source.as_ptr(), sys::OBS_MONITORING_TYPE_NONE);
+            sys::obs_source_set_monitoring_enabled(source.as_ptr(), false);
             sys::obs_source_add_audio_capture_callback(
                 source.as_ptr(),
                 Some(on_capture),
@@ -471,6 +570,106 @@ impl AudioHost {
         self.captures.keys().copied()
     }
 
+    /// Starts recording these multitrack files, sample-aligned, until [`Self::stop_stems`].
+    pub fn start_stems(&mut self, specs: Vec<StemSpec>) -> Result<(), String> {
+        if self.recorder.is_some() {
+            self.stop_stems();
+        }
+        let sample_rate = self.sample_rate;
+        let mut writers = Vec::new();
+        let mut rts = Vec::new();
+        let mut files = Vec::new();
+        for spec in &specs {
+            let wav = hound::WavSpec {
+                channels: spec.channels,
+                sample_rate,
+                bits_per_sample: if spec.float { 32 } else { 24 },
+                sample_format: if spec.float { hound::SampleFormat::Float } else { hound::SampleFormat::Int },
+            };
+            let writer = hound::WavWriter::create(&spec.path, wav).map_err(|e| format!("{}: {e}", spec.path.display()))?;
+            // ten seconds of slack for the writer
+            let (producer, consumer) = rtrb::RingBuffer::new(sample_rate as usize * 10 * spec.channels as usize);
+            writers.push((writer, consumer, spec.float));
+            rts.push(StemRt { id: spec.id, tap: spec.tap, channels: spec.channels, ring: producer });
+            files.push(spec.path.clone());
+        }
+        STEMS_START_NS.store(0, Ordering::Relaxed);
+        if self.commands.push(ToRt::StartStems(rts)).is_err() {
+            return Err("the audio engine is busy".into());
+        }
+        STEMS_RUNNING.store(true, Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("lightair-stems".into())
+            .spawn(move || {
+                let mut frames = 0u64;
+                let drain = |writers: &mut Vec<StemWriter>, frames: &mut u64|
+                 -> Result<(), String> {
+                    for (k, (w, ring, float)) in writers.iter_mut().enumerate() {
+                        let n = ring.slots();
+                        if n == 0 {
+                            continue;
+                        }
+                        let chunk = ring.read_chunk(n).map_err(|e| e.to_string())?;
+                        let (a, b) = chunk.as_slices();
+                        for &v in a.iter().chain(b) {
+                            if *float {
+                                w.write_sample(v).map_err(|e| e.to_string())?;
+                            } else {
+                                w.write_sample((v.clamp(-1.0, 1.0) * 8_388_607.0) as i32).map_err(|e| e.to_string())?;
+                            }
+                        }
+                        if k == 0 {
+                            *frames += (n / w.spec().channels as usize) as u64;
+                        }
+                        chunk.commit_all();
+                    }
+                    Ok(())
+                };
+                let mut writers = writers;
+                while !s.load(Ordering::Relaxed) {
+                    drain(&mut writers, &mut frames)?;
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+                // the audio thread has stopped feeding: take the rest
+                drain(&mut writers, &mut frames)?;
+                for (w, _, _) in writers {
+                    w.finalize().map_err(|e| e.to_string())?;
+                }
+                Ok(StemReport { files, frames, start_ns: STEMS_START_NS.load(Ordering::Relaxed), sample_rate })
+            })
+            .map_err(|e| e.to_string())?;
+        self.recorder = Some(Recorder { stop, thread });
+        Ok(())
+    }
+
+    /// Pauses or resumes the multitrack files (no gap: the files just don't get those blocks).
+    pub fn pause_stems(&mut self, pause: bool) {
+        if self.recorder.is_some() {
+            let _ = self.commands.push(ToRt::PauseStems(pause));
+        }
+    }
+
+    /// Stops the multitrack files and finishes writing them.
+    pub fn stop_stems(&mut self) -> Option<StemReport> {
+        let rec = self.recorder.take()?;
+        let _ = self.commands.push(ToRt::StopStems);
+        // let the audio thread see it (two blocks), then the writer takes the rest
+        std::thread::sleep(Duration::from_millis(15));
+        rec.stop.store(true, Ordering::Relaxed);
+        STEMS_RUNNING.store(false, Ordering::Relaxed);
+        while self.garbage.pop().is_ok() {}
+        match rec.thread.join() {
+            Ok(Ok(report)) => Some(report),
+            Ok(Err(e)) => {
+                tracing::error!(%e, "multitrack recording failed");
+                None
+            }
+            Err(_) => None,
+        }
+    }
+
     /// Which tracks' meter cells (the mixer UI's) show which engine strips.
     pub fn set_meter_cells(&mut self, cells: Vec<(la::NodeId, Arc<crate::meters::MeterCell>)>) {
         let pairs = cells.into_iter().map(|(id, cell)| (self.engine.meter(id), cell)).collect();
@@ -485,6 +684,7 @@ impl AudioHost {
 
 impl Drop for AudioHost {
     fn drop(&mut self) {
+        self.stop_stems();
         let inputs: Vec<_> = self.captures.keys().copied().collect();
         for i in inputs {
             self.release(i);

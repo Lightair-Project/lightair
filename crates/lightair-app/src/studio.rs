@@ -41,6 +41,8 @@ pub struct Studio {
     mic_history: std::collections::HashMap<Id, std::collections::VecDeque<f32>>,
     /// Imported layers whose size was guessed, waiting for their sources to report a size.
     refit: Option<(Vec<lightair_store::EstimatedLayer>, std::time::Instant)>,
+    /// Multitrack audio files being recorded: their base name and paths.
+    stems: Option<(String, Vec<std::path::PathBuf>)>,
 }
 
 impl Studio {
@@ -70,6 +72,7 @@ impl Studio {
             clips_seen: 0,
             recent_lagged: 0,
             refit: None,
+            stems: None,
             mic_history: Default::default(),
             last_clip: None,
             replays: Vec::new(),
@@ -407,12 +410,13 @@ impl Studio {
     }
 
     pub fn is_recording(&self) -> bool {
-        runtime().any_recording_running()
+        runtime().any_recording_running() || lightair_engine::audio_host::STEMS_RUNNING.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn toggle_recording(&mut self, cx: &mut Context<Self>) {
         if self.is_recording() {
             self.engine.post(|s| s.outputs.stop_recording());
+            self.finish_stems(cx);
             return;
         }
         let project = self.project().clone();
@@ -429,6 +433,19 @@ impl Studio {
         let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string();
         // Make the journal durable before outputs start (docs/14, "Saving, autosave & recovery").
         self.flush();
+        // Multitrack audio files (and, audio only, the program) beside the video.
+        if settings.multitrack || settings.audio_only {
+            let (p, folder, base) = (project.clone(), self.recording_folder(), format!("Lightair {stamp}"));
+            let program = settings.audio_only;
+            match self.engine.call(move |s| s.reconciler.start_stems(&p, &folder, &base, program)) {
+                Ok(files) => self.stems = Some((format!("Lightair {stamp}"), files)),
+                Err(e) => self.issue = Some(format!("Multitrack audio didn't start: {e}").into()),
+            }
+        }
+        if settings.audio_only {
+            cx.notify();
+            return;
+        }
         for canvas in targets {
             let label = several.then(|| project.format(canvas).map(|f| f.name.clone()).unwrap_or_default());
             let name = match &label {
@@ -458,7 +475,34 @@ impl Studio {
         let pause = !runtime().recording().paused;
         self.engine.post(move |s| {
             s.outputs.pause_recording(pause);
+            s.reconciler.pause_stems(pause);
         });
+        cx.notify();
+    }
+
+    /// Stops the multitrack audio files and writes what they hold beside them
+    /// ("<name>.multitrack.json": the files, their rate and length, and when they started).
+    fn finish_stems(&mut self, cx: &mut Context<Self>) {
+        let Some((base, _)) = self.stems.take() else { return };
+        let Some(report) = self.engine.call(|s| s.reconciler.stop_stems()) else {
+            self.issue = Some("Multitrack audio couldn't be finished.".into());
+            cx.notify();
+            return;
+        };
+        let names: Vec<String> =
+            report.files.iter().filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
+        let sidecar = serde_json::json!({
+            "files": names,
+            "sample_rate": report.sample_rate,
+            "frames": report.frames,
+            "seconds": report.frames as f64 / report.sample_rate as f64,
+            "start_ns": report.start_ns,
+        });
+        let path = self.recording_folder().join(format!("{base}.multitrack.json"));
+        if let Ok(text) = serde_json::to_string_pretty(&sidecar) {
+            let _ = std::fs::write(path, text);
+        }
+        self.issue = Some(format!("Recorded {} audio files", report.files.len()).into());
         cx.notify();
     }
 
