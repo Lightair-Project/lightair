@@ -271,6 +271,8 @@ pub struct StudioWindow {
     fx_groups: std::collections::HashSet<String>,
     /// Colour pickers of the selected object's effects, by "effect:key".
     colour_pickers: std::collections::HashMap<String, effects::ColourPicker>,
+    /// Audio interfaces (for track channel pickers), and when they were read.
+    interfaces: RefCell<(std::time::Instant, Vec<lightair_engine::devices::DeviceInfo>)>,
     transition_menu: bool,
     /// The layer showing crop handles instead of resize handles.
     crop_mode: Option<Id>,
@@ -431,6 +433,7 @@ impl StudioWindow {
             presence: Default::default(),
             fx_groups: Default::default(),
             colour_pickers: Default::default(),
+            interfaces: RefCell::new((std::time::Instant::now(), Vec::new())),
             transition_menu: false,
             crop_mode: None,
             crop_preview_sent: None,

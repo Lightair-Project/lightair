@@ -244,12 +244,24 @@ impl Reconciler {
         }
         let Some(host) = self.audio.as_mut() else { return };
         let wanted: HashSet<Id> = project.tracks.iter().map(|t| t.input).collect();
-        let stale: Vec<Id> = host.captured().filter(|i| !wanted.contains(i)).collect();
+        let is_device = |id: &Id| project.inputs.get(id).is_some_and(|i| i.kind == crate::devices::DEVICE_KIND);
+        let stale: Vec<Id> = host.captured().filter(|i| !wanted.contains(i) || is_device(i)).collect();
         for input in stale {
             host.release(input);
         }
+        let stale: Vec<Id> = host.open_devices().filter(|i| !wanted.contains(i)).collect();
+        for input in stale {
+            host.close_device(input);
+        }
         for input in &wanted {
-            if let Some(src) = self.inputs.get(input) {
+            let Some(i) = project.inputs.get(input) else { continue };
+            if i.kind == crate::devices::DEVICE_KIND {
+                // an interface: the engine opens it itself, every channel
+                let device = i.settings["device"].as_str().unwrap_or("");
+                if let Err(e) = host.open_device(*input, device) {
+                    tracing::warn!(%e, device, "couldn't open the audio input");
+                }
+            } else if let Some(src) = self.inputs.get(input) {
                 host.capture(*input, src);
             }
         }
@@ -320,6 +332,11 @@ impl Reconciler {
         let files = specs.iter().map(|s| s.path.clone()).collect();
         host.start_stems(specs)?;
         Ok(files)
+    }
+
+    /// An input the caller feeds (tests): `channels` interleaved frames, like an interface.
+    pub fn audio_test_input(&mut self, input: Id, channels: u16) -> Option<rtrb::Producer<f32>> {
+        Some(self.audio.as_mut()?.test_input(input, channels))
     }
 
     /// Stops the multitrack files; what they hold.

@@ -48,6 +48,8 @@ pub struct MixerPanel {
     display: HashMap<Id, [f32; 2]>,
     last_frame: Instant,
     add_track_menu: bool,
+    /// Audio inputs offered in the add menu (read when it opens).
+    interfaces: Vec<lightair_engine::devices::DeviceInfo>,
     focus: FocusHandle,
 }
 
@@ -61,13 +63,40 @@ impl MixerPanel {
             display: HashMap::new(),
             last_frame: Instant::now(),
             add_track_menu: false,
+            interfaces: Vec::new(),
             focus: cx.focus_handle(),
         }
     }
 
     fn toggle_add_track(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.add_track_menu = !self.add_track_menu;
+        if self.add_track_menu {
+            self.interfaces = lightair_engine::devices::input_devices();
+        }
         cx.notify();
+    }
+
+    /// An interface: one input, and a track per channel (one track when it has one or two).
+    fn add_interface(&mut self, device: &lightair_engine::devices::DeviceInfo, cx: &mut Context<Self>) {
+        self.add_track_menu = false;
+        let input = Input::new(device.name.clone(), lightair_engine::devices::DEVICE_KIND, json!({"device": device.name}));
+        let mut commands = vec![];
+        let tracks: Vec<Track> = if device.channels <= 2 {
+            let mut t = Track::new(device.name.clone(), input.id);
+            t.effects = voice_clarity();
+            vec![t]
+        } else {
+            (0..device.channels)
+                .map(|c| {
+                    let mut t = Track::new(format!("Input {}", c + 1), input.id);
+                    t.channels = lightair_core::TrackChannels::Mono(c);
+                    t
+                })
+                .collect()
+        };
+        commands.push(Command::AddInput { input });
+        commands.extend(tracks.into_iter().map(|track| Command::AddTrack { track, index: None }));
+        self.exec(Command::Batch { label: format!("Add {}", device.name), commands }, cx);
     }
 
     fn exec(&self, cmd: Command, cx: &mut Context<Self>) {
@@ -209,12 +238,32 @@ impl MixerPanel {
         div()
             .flex()
             .gap_1()
+            .flex_wrap()
             .child(item("add-mic", "mic", "Microphone").on_click(cx.listener(|this, _, _, cx| {
-                this.add_track("Mic", "coreaudio_input_capture", json!({"device_id": "default"}), voice_clarity(), cx)
+                // the default input, captured by the engine directly (low latency)
+                this.add_track("Mic", lightair_engine::devices::DEVICE_KIND, json!({"device": ""}), voice_clarity(), cx)
             })))
             .child(item("add-desktop", "volume-2", "Desktop audio").on_click(cx.listener(|this, _, _, cx| {
                 this.add_track("Desktop audio", "sck_audio_capture", json!({"type": 0}), vec![], cx)
             })))
+            .children(self.interfaces.iter().enumerate().map(|(i, d)| {
+                let device = d.clone();
+                let label = if d.channels > 2 { format!("{} · {} inputs", d.name, d.channels) } else { d.name.clone() };
+                div()
+                    .id(("add-iface", i))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .h(px(26.))
+                    .px_2()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .bg(tok::bg_raised())
+                    .hover(|d| d.bg(tok::bg_selected()))
+                    .child(ui::icon("audio-lines").size(px(13.)).text_color(tok::text_secondary()))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| this.add_interface(&device, cx)))
+            }))
     }
 
     fn strip(&self, i: usize, track: &Track, shown: [f32; 2], cx: &mut Context<Self>) -> impl IntoElement {

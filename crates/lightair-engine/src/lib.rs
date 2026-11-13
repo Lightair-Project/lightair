@@ -6,6 +6,7 @@
 
 pub mod audio;
 pub mod audio_host;
+pub mod devices;
 pub mod displays;
 mod engine;
 mod log;
