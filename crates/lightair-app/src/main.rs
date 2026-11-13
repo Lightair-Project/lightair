@@ -137,7 +137,11 @@ fn main() {
         .detach();
         cx.on_window_closed(|cx, _| cx.quit()).detach();
 
+        // A copy started by a test or screenshot hook stays in the background: it must never take
+        // the keyboard from the app someone is typing in.
+        let background = std::env::var_os("LIGHTAIR_OPEN").is_some();
         let options = WindowOptions {
+            focus: !background,
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1440.), px(900.)), cx))),
             titlebar: Some(TitlebarOptions {
                 title: Some("Lightair".into()),
@@ -149,6 +153,8 @@ fn main() {
         let preview = preview.clone();
         gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| StudioWindow::new(studio, preview, window, cx)))
             .expect("open window");
-        cx.activate(true);
+        if !background {
+            cx.activate(true);
+        }
     });
 }
