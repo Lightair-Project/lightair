@@ -21,8 +21,10 @@ crossbeam-channel.workspace = true
 libc = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parking_lot.workspace = true
+cpal = "0.16"
 
 [dev-dependencies]
+rtrb = "0.3"
 hound = "3"
 tracing-subscriber.workspace = true
 lightair-store.workspace = true

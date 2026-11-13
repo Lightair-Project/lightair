@@ -53,6 +53,10 @@ unsafe extern "C" fn out_destroy(data: *mut c_void) {
     drop(unsafe { Box::from_raw(data as *mut u8) });
 }
 
+unsafe extern "C" fn device_name(_: *mut c_void) -> *const c_char {
+    c"Audio interface".as_ptr()
+}
+
 struct Tone {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -124,6 +128,15 @@ pub fn register_types() {
         out.create = Some(out_create);
         out.destroy = Some(out_destroy);
         sys::obs_register_source_s(&out, std::mem::size_of::<sys::obs_source_info>());
+        // device inputs are captured by the engine itself; libobs just holds a placeholder
+        let mut dev: sys::obs_source_info = std::mem::zeroed();
+        dev.id = c"lightair_audio_device".as_ptr();
+        dev.type_ = sys::OBS_SOURCE_TYPE_INPUT;
+        dev.output_flags = sys::OBS_SOURCE_AUDIO;
+        dev.get_name = Some(device_name);
+        dev.create = Some(out_create);
+        dev.destroy = Some(out_destroy);
+        sys::obs_register_source_s(&dev, std::mem::size_of::<sys::obs_source_info>());
         let mut tone: sys::obs_source_info = std::mem::zeroed();
         tone.id = c"lightair_test_tone".as_ptr();
         tone.type_ = sys::OBS_SOURCE_TYPE_INPUT;
@@ -179,10 +192,22 @@ unsafe extern "C" fn on_capture(param: *mut c_void, _: *mut sys::obs_source_t, d
 
 struct RtInput {
     id: la::NodeId,
+    /// Interleaved frames of `bufs.len()` channels.
     ring: rtrb::Consumer<f32>,
-    bufs: [Box<[f32]>; 2],
+    /// This block, one buffer per channel.
+    bufs: Vec<Box<[f32]>>,
+    /// Frames buffered before it plays, and the most kept.
+    prime: usize,
+    most: usize,
     primed: bool,
     has: bool,
+}
+
+impl RtInput {
+    fn new(id: la::NodeId, ring: rtrb::Consumer<f32>, channels: usize, prime: usize, most: usize) -> Self {
+        let bufs = (0..channels.max(1)).map(|_| vec![0.0; la::MAX_BLOCK].into_boxed_slice()).collect();
+        Self { id, ring, bufs, prime, most, primed: false, has: false }
+    }
 }
 
 struct RtInputs(Vec<RtInput>);
@@ -190,7 +215,8 @@ struct RtInputs(Vec<RtInput>);
 impl la::Inputs for RtInputs {
     fn channel(&self, input: la::NodeId, ch: u16) -> Option<&[f32]> {
         let i = self.0.iter().find(|i| i.id == input && i.has)?;
-        Some(&i.bufs[(ch as usize).min(1)][..])
+        // a mono input is heard on both sides
+        Some(&i.bufs[(ch as usize).min(i.bufs.len() - 1)][..])
     }
 }
 
@@ -283,18 +309,19 @@ fn rt_loop(
         }
         // a block from each input
         for input in &mut inputs.0 {
-            let avail = input.ring.slots() / 2;
-            if !input.primed && avail >= PRIME {
+            let nch = input.bufs.len();
+            let avail = input.ring.slots() / nch;
+            if !input.primed && avail >= input.prime {
                 input.primed = true;
             }
-            if avail > MOST {
+            if avail > input.most {
                 // drifted ahead (a faster device clock): drop back to the target
-                let drop = (avail - PRIME) * 2;
+                let drop = (avail - input.prime) * nch;
                 if let Ok(c) = input.ring.read_chunk(drop) {
                     c.commit_all();
                 }
             }
-            let avail = input.ring.slots() / 2;
+            let avail = input.ring.slots() / nch;
             input.has = input.primed && avail > 0;
             if input.primed && avail == 0 {
                 input.primed = false; // empty: the source stopped; buffer up again when it's back
@@ -305,17 +332,19 @@ fn rt_loop(
                 if take < BLOCK {
                     SHORTFALLS.fetch_add(1, Ordering::Relaxed);
                 }
-                if let Ok(chunk) = input.ring.read_chunk(take * 2) {
+                if let Ok(chunk) = input.ring.read_chunk(take * nch) {
                     let (a, b) = chunk.as_slices();
                     for k in 0..take {
-                        let at = |i: usize| if i < a.len() { a[i] } else { b[i - a.len()] };
-                        input.bufs[0][k] = at(k * 2);
-                        input.bufs[1][k] = at(k * 2 + 1);
+                        for (c, buf) in input.bufs.iter_mut().enumerate() {
+                            let i = k * nch + c;
+                            buf[k] = if i < a.len() { a[i] } else { b[i - a.len()] };
+                        }
                     }
                     chunk.commit_all();
                 }
-                input.bufs[0][take..BLOCK].fill(0.0);
-                input.bufs[1][take..BLOCK].fill(0.0);
+                for buf in input.bufs.iter_mut() {
+                    buf[take..BLOCK].fill(0.0);
+                }
             }
         }
         let graph = renderer.process(&inputs, BLOCK);
@@ -438,6 +467,9 @@ pub struct AudioHost {
     pump: Option<std::thread::JoinHandle<()>>,
     recorder: Option<Recorder>,
     sample_rate: u32,
+    /// Open interfaces: their device name and channel count, by input.
+    devices: HashMap<lightair_core::Id, (String, u16)>,
+    device_thread: Option<crate::devices::Devices>,
 }
 
 impl AudioHost {
@@ -496,6 +528,8 @@ impl AudioHost {
             pump,
             recorder: None,
             sample_rate,
+            devices: HashMap::new(),
+            device_thread: None,
         })
     }
 
@@ -538,13 +572,7 @@ impl AudioHost {
                 &*cap as *const Capture as *mut c_void,
             );
         }
-        let rt = RtInput {
-            id: crate::audio::node(input),
-            ring: consumer,
-            bufs: [vec![0.0; la::MAX_BLOCK].into_boxed_slice(), vec![0.0; la::MAX_BLOCK].into_boxed_slice()],
-            primed: false,
-            has: false,
-        };
+        let rt = RtInput::new(crate::audio::node(input), consumer, 2, PRIME, MOST);
         let _ = self.commands.push(ToRt::AddInput(rt));
         let Some(held) = (unsafe { Source::from_borrowed(source.as_ptr()) }) else { return };
         self.captures.insert(input, (held, cap));
@@ -568,6 +596,43 @@ impl AudioHost {
 
     pub fn captured(&self) -> impl Iterator<Item = lightair_core::Id> + '_ {
         self.captures.keys().copied()
+    }
+
+    /// Opens an audio interface for `input`, every channel ("" for the default input). A
+    /// device delivers small, regular buffers: it needs much less buffering than libobs.
+    pub fn open_device(&mut self, input: lightair_core::Id, device: &str) -> Result<u16, String> {
+        if self.devices.get(&input).is_some_and(|(d, _)| d == device) {
+            return Ok(self.devices[&input].1);
+        }
+        self.close_device(input);
+        let devices = self.device_thread.get_or_insert_with(crate::devices::Devices::start);
+        let (producer, consumer) = rtrb::RingBuffer::new(RING_FRAMES * 32);
+        let channels = devices.open(input, device, self.sample_rate, producer)?;
+        let rt = RtInput::new(crate::audio::node(input), consumer, channels as usize, 512, 2_048);
+        let _ = self.commands.push(ToRt::AddInput(rt));
+        self.devices.insert(input, (device.to_string(), channels));
+        Ok(channels)
+    }
+
+    pub fn close_device(&mut self, input: lightair_core::Id) {
+        if self.devices.remove(&input).is_some() {
+            if let Some(d) = &self.device_thread {
+                d.close(input);
+            }
+            let _ = self.commands.push(ToRt::RemoveInput(crate::audio::node(input)));
+        }
+    }
+
+    pub fn open_devices(&self) -> impl Iterator<Item = lightair_core::Id> + '_ {
+        self.devices.keys().copied()
+    }
+
+    /// An input fed by the caller (tests): `channels` interleaved, as a device would.
+    pub fn test_input(&mut self, input: lightair_core::Id, channels: u16) -> rtrb::Producer<f32> {
+        let (producer, consumer) = rtrb::RingBuffer::new(RING_FRAMES * channels as usize);
+        let rt = RtInput::new(crate::audio::node(input), consumer, channels as usize, 512, RING_FRAMES / 2);
+        let _ = self.commands.push(ToRt::AddInput(rt));
+        producer
     }
 
     /// Starts recording these multitrack files, sample-aligned, until [`Self::stop_stems`].
@@ -685,6 +750,7 @@ impl AudioHost {
 impl Drop for AudioHost {
     fn drop(&mut self) {
         self.stop_stems();
+        self.device_thread = None; // closes the device streams
         let inputs: Vec<_> = self.captures.keys().copied().collect();
         for i in inputs {
             self.release(i);

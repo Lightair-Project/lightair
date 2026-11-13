@@ -414,6 +414,63 @@ impl StudioWindow {
         col
     }
 
+    /// Which of an interface's channels a track takes: all, one (mono) or a pair (stereo).
+    fn track_channels(
+        &self,
+        project: &lightair_core::Project,
+        track: &lightair_core::Track,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use lightair_core::TrackChannels;
+        let input = project.inputs.get(&track.input)?;
+        if input.kind != lightair_engine::devices::DEVICE_KIND {
+            return None;
+        }
+        let device = input.settings["device"].as_str().unwrap_or("").to_string();
+        let channels = {
+            let mut cache = self.interfaces.borrow_mut();
+            if cache.0.elapsed() > std::time::Duration::from_secs(5) || cache.1.is_empty() {
+                *cache = (std::time::Instant::now(), lightair_engine::devices::input_devices());
+            }
+            cache.1.iter().find(|d| if device.is_empty() { d.default } else { d.name == device }).map_or(2, |d| d.channels)
+        };
+        let set = |c: TrackChannels| Command::UpdateTrack { track: lightair_core::Track { channels: c, ..track.clone() } };
+        let mut options = vec![("All".to_string(), TrackChannels::All)];
+        options.extend((0..channels).map(|c| (format!("{}", c + 1), TrackChannels::Mono(c))));
+        options.extend((0..channels / 2).map(|p| (format!("{}–{}", p * 2 + 1, p * 2 + 2), TrackChannels::Stereo(p * 2, p * 2 + 1))));
+        let mut row = div().flex().flex_wrap().gap_1();
+        for (n, (label, c)) in options.into_iter().enumerate() {
+            let on = track.channels == c;
+            let cmd = set(c);
+            row = row.child(
+                div()
+                    .id(("track-ch", n))
+                    .px_2()
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(5.))
+                    .text_size(px(11.))
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                    .when(!on, |d| d.text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
+            );
+        }
+        Some(
+            self.section("Input", None, cx)
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(tok::text_tertiary())
+                        .child(format!("{} · {channels} channels", if device.is_empty() { "Default input" } else { &device })),
+                )
+                .child(row)
+                .into_any_element(),
+        )
+    }
+
     /// A mixer track: level, mute, and its effect chain (the mixer strip stays compact).
     pub(super) fn track_inspector(
         &self,
@@ -432,6 +489,7 @@ impl StudioWindow {
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(track.name.clone())),
         )
         .children(project.inputs.get(&track.input).and_then(|i| self.source_section(&i.clone(), cx)))
+        .children(self.track_channels(project, track, cx))
         .child({
             let rec = track.record;
             let cmd = Command::UpdateTrack { track: lightair_core::Track { record: !rec, ..track.clone() } };
