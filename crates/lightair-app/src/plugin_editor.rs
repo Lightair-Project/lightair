@@ -165,7 +165,12 @@ unsafe fn window(title: &str, size: NSSize, resizable: bool) -> Option<Retained<
 unsafe fn show(window: &AnyObject) {
     unsafe {
         let _: () = msg_send![window, center];
-        let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+        // a background copy (tests, screenshots) shows it without taking the keyboard
+        if std::env::var_os("LIGHTAIR_OPEN").is_some() {
+            let _: () = msg_send![window, orderFront: std::ptr::null::<AnyObject>()];
+        } else {
+            let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+        }
     }
 }
 
