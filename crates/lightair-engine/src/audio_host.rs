@@ -235,6 +235,8 @@ enum ToRt {
     StartStems(Vec<StemRt>),
     StopStems,
     PauseStems(bool),
+    /// What the monitor plays (a mix, or the program), and its ring; `None`: no direct monitor.
+    Monitor(Option<(la::NodeId, rtrb::Producer<f32>)>),
     /// Which mix each out source after Program carries, and the cue mix.
     Mixes([Option<la::NodeId>; OUT_MIXES - 1], Option<la::NodeId>),
 }
@@ -244,7 +246,12 @@ enum ToRt {
 enum FromRt {
     Input(RtInput),
     Stems(Vec<StemRt>),
+    Monitor(rtrb::Producer<f32>),
 }
+
+/// The most the monitor ring holds ahead of the device (frames): keeps its latency down when
+/// the engine's clock runs ahead of the device's.
+const MONITOR_MOST: usize = 768;
 
 /// Whether multitrack files are being recorded (for the UI's record state).
 pub static STEMS_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -269,6 +276,7 @@ fn rt_loop(
     let mut mixes: [Option<la::NodeId>; OUT_MIXES - 1] = [None; OUT_MIXES - 1];
     let mut cue: Option<la::NodeId> = None;
     let mut stems: Vec<StemRt> = Vec::new();
+    let mut monitor: Option<(la::NodeId, rtrb::Producer<f32>)> = None;
     let mut stems_paused = false;
     let mut stems_started = false;
     let period = Duration::from_secs_f64(BLOCK as f64 / sample_rate as f64);
@@ -305,6 +313,11 @@ fn rt_loop(
                     let _ = garbage.push(FromRt::Stems(old));
                 }
                 ToRt::PauseStems(p) => stems_paused = p,
+                ToRt::Monitor(m) => {
+                    if let Some((_, old)) = std::mem::replace(&mut monitor, m) {
+                        let _ = garbage.push(FromRt::Monitor(old));
+                    }
+                }
             }
         }
         // a block from each input
@@ -371,6 +384,28 @@ fn rt_loop(
         }
         if let Some(out) = cue.and_then(|m| graph.mix(m)) {
             push(outs.0[OUT_MIXES], out);
+        }
+        // the direct monitor: this block of the cue mix (or the program)
+        if let Some((src, ring)) = &mut monitor {
+            let out = if *src == la::PROGRAM { Some(graph.program()) } else { graph.mix(*src) };
+            let ahead = (ring.buffer().capacity() - ring.slots()) / 2;
+            if ahead + BLOCK <= MONITOR_MOST
+                && let Ok(mut chunk) = ring.write_chunk_uninit(BLOCK * 2)
+            {
+                let (a, b) = chunk.as_mut_slices();
+                for k in 0..BLOCK {
+                    let (l, r) = out.map_or((0.0, 0.0), |(l, r)| (l[k], r[k]));
+                    for (c, v) in [l, r].into_iter().enumerate() {
+                        let i = k * 2 + c;
+                        if i < a.len() {
+                            a[i].write(v);
+                        } else {
+                            b[i - a.len()].write(v);
+                        }
+                    }
+                }
+                unsafe { chunk.commit_all() };
+            }
         }
         // multitrack files: this block of each, interleaved
         if !stems.is_empty() && !stems_paused {
@@ -470,6 +505,8 @@ pub struct AudioHost {
     /// Open interfaces: their device name and channel count, by input.
     devices: HashMap<lightair_core::Id, (String, u16)>,
     device_thread: Option<crate::devices::Devices>,
+    /// The direct monitor: its output device and what it plays.
+    monitor: Option<(String, la::NodeId)>,
 }
 
 impl AudioHost {
@@ -530,6 +567,7 @@ impl AudioHost {
             sample_rate,
             devices: HashMap::new(),
             device_thread: None,
+            monitor: None,
         })
     }
 
@@ -733,6 +771,47 @@ impl AudioHost {
             }
             Err(_) => None,
         }
+    }
+
+    /// Plays `source` (the cue mix, or [`la::PROGRAM`]) straight to output `device` ("" for
+    /// the default), with a few milliseconds of buffering; `None` stops it. While it plays,
+    /// libobs's own (slower) cue monitoring is off, so nothing is heard twice.
+    pub fn set_monitor(&mut self, monitor: Option<(String, la::NodeId)>) -> Result<(), String> {
+        if monitor == self.monitor {
+            return Ok(());
+        }
+        let _ = self.commands.push(ToRt::Monitor(None));
+        if let Some(d) = &self.device_thread {
+            d.close_output();
+        }
+        self.monitor = None;
+        let cue_out = self._outs[OUT_MIXES].as_ptr();
+        let Some((device, source)) = monitor else {
+            unsafe { sys::obs_source_set_monitoring_enabled(cue_out, true) };
+            return Ok(());
+        };
+        let (producer, consumer) = rtrb::RingBuffer::new(MONITOR_MOST * 4);
+        let devices = self.device_thread.get_or_insert_with(crate::devices::Devices::start);
+        match devices.open_output(&device, self.sample_rate, consumer) {
+            Ok(()) => {
+                let _ = self.commands.push(ToRt::Monitor(Some((source, producer))));
+                unsafe { sys::obs_source_set_monitoring_enabled(cue_out, false) };
+                self.monitor = Some((device, source));
+                Ok(())
+            }
+            Err(e) => {
+                // libobs's cue monitoring keeps working
+                unsafe { sys::obs_source_set_monitoring_enabled(cue_out, true) };
+                Err(e)
+            }
+        }
+    }
+
+    /// A monitor whose output the caller reads (tests).
+    pub fn test_monitor(&mut self, source: la::NodeId) -> rtrb::Consumer<f32> {
+        let (producer, consumer) = rtrb::RingBuffer::new(MONITOR_MOST * 4);
+        let _ = self.commands.push(ToRt::Monitor(Some((source, producer))));
+        consumer
     }
 
     /// Which tracks' meter cells (the mixer UI's) show which engine strips.

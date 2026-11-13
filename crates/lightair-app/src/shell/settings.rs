@@ -235,6 +235,14 @@ impl StudioWindow {
         self.set_pref(|p| p.global_hotkeys = list, cx);
     }
 
+    /// Tells the audio engine where and what to monitor, from the preferences.
+    fn apply_monitor(&self, cx: &mut Context<Self>) {
+        let p = &self.prefs;
+        let device = p.direct_monitor.then(|| p.monitor_device.clone().map_or(String::new(), |(name, _)| name));
+        let program = p.monitor_program;
+        self.studio.read(cx).engine().call(move |s| s.reconciler.set_monitor(device, program));
+    }
+
     fn set_pref(&mut self, f: impl FnOnce(&mut crate::prefs::Preferences), cx: &mut Context<Self>) {
         f(&mut self.prefs);
         if let Err(e) = crate::prefs::save_to(&crate::prefs::path(), &self.prefs) {
@@ -437,6 +445,7 @@ impl StudioWindow {
                                         .engine()
                                         .call(move |_| lightair_engine::monitoring::set(&n2, &i2));
                                     this.set_pref(|p| p.monitor_device = (i != "default").then_some((n, i)), cx);
+                                    this.apply_monitor(cx);
                                 });
                             }
                         },
@@ -445,6 +454,16 @@ impl StudioWindow {
                 menu
             },
         );
+        let (direct, program) = (prefs.direct_monitor, prefs.monitor_program);
+        let mut hear = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
+        for (i, (p, label)) in [(false, "Cued tracks"), (true, "The stream")].into_iter().enumerate() {
+            hear = hear.child(pref_chip(("monitor-hear", i), label.to_string(), program == p).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    this.set_pref(|pr| pr.monitor_program = p, cx);
+                    this.apply_monitor(cx);
+                },
+            )));
+        }
         let rate = prefs.sample_rate;
         let running = crate::prefs::RUNNING_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
         let rates: Vec<(String, bool, bool, Option<u32>)> = [(48_000, "48 kHz"), (44_100, "44.1 kHz")]
@@ -474,7 +493,19 @@ impl StudioWindow {
             ));
         }
         pages()
-            .child(group("Listening").child(row("Headphones", Some("Where Listen in headphones plays."), device)))
+            .child(
+                group("Listening")
+                    .child(row("Headphones", Some("Where Listen in headphones plays."), device))
+                    .child(row(
+                        "Low-latency monitoring",
+                        Some("Straight from the mixer: a few milliseconds, for singing and playing along."),
+                        switch("direct-monitor", direct).on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_pref(|p| p.direct_monitor = !direct, cx);
+                            this.apply_monitor(cx);
+                        })),
+                    ))
+                    .child(row("Hear", Some("The tracks you cue, or exactly what viewers hear."), hear)),
+            )
             .child(
                 group("Loudness")
                     .child(row("Target", Some("The mixer's LUFS readout turns green on it."), targets))

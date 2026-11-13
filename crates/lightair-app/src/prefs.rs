@@ -16,6 +16,10 @@ pub struct Preferences {
     pub sample_rate: u32,
     /// "Listen in headphones" device: (name, id); `None`: the system default.
     pub monitor_device: Option<(String, String)>,
+    /// Monitor straight from the audio engine (a few ms) rather than through libobs (~100 ms).
+    pub direct_monitor: bool,
+    /// The monitor plays the stream mix rather than the cued tracks.
+    pub monitor_program: bool,
     /// The loudness the LUFS readout aims for.
     pub loudness_target: i32,
     /// Defaults for newly added cameras.
@@ -66,6 +70,8 @@ impl Default for Preferences {
             confirm_end_stream: true,
             sample_rate: 48_000,
             monitor_device: None,
+            direct_monitor: true,
+            monitor_program: false,
             loudness_target: -14,
             camera: CameraDefaults::default(),
             global_hotkeys: Vec::new(),
