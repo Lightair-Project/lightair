@@ -16,8 +16,9 @@ Inputs ──► Tracks (effect chain, gain, mute, pan) ──► Mixes ──�
 |---|---|
 | **Input** | Where sound comes from: microphone/interface channel, system audio, an application's audio, a media or browser layer's audio, a phone camera's mic, NDI/SRT input audio |
 | **Track** | One channel strip in the mixer. Has one input, an effect chain, gain, pan/balance, mute, solo-in-cue, sync offset, and mix routing. Users name tracks ("Mic", "Game") |
-| **Mix** | A summed bus that feeds outputs: **Stream**, **Recording**, optional **Recording 2…n** (multitrack), **Cue** (monitoring). Implemented on libobs audio mixes (up to 6) |
-| **Master** | Each mix has a master section with its own effect chain (typically a limiter) and meter |
+| **Bus** | A strip fed by the tracks routed to it (a group: "Guests") or by sends (an effects return: a shared reverb). Routes to Program or another bus, never in a loop |
+| **Program** | The master: what the stream and the recording's main track carry. Its own effects (typically a limiter) and meter |
+| **Mix** | An extra output mix built from per-track **sends** (pre or post fader): headphones, a VOD mix without the music, a mix-minus for a remote guest. Up to five reach libobs as extra recording/stream tracks; **Cue** is the monitoring mix |
 
 ### Track sources
 
@@ -95,17 +96,30 @@ All effects are native (the `lightair-audio-fx` module), real-time safe, and sha
 | **Delay** | Time (ms or tempo-synced), feedback, mix; also used as a sync tool |
 | **Pitch / voice changer** | Pitch shift and formant, presets (deeper, robot, radio, telephone) |
 | **Channel tools** | Mono, swap L/R, downmix, channel select, stereo width |
-| **Audio plugins (VST3 / AU)** | Lightair's plugin host: scans installed plugins, shows native plugin editors in a floating window, saves state in the project. Optional per-plugin isolated process |
+| **Audio plugins (AU / VST3)** | Lightair's plugin host: Audio Units (v2 and v3; AUv3 load out of process) and VST3, listed under **Plugins** in the effect sheet. The plugin's own editor opens in its own window (an AU without one gets Apple's generic view); its state is saved in the project when the editor closes. VST3 bundles without a `moduleinfo.json` are probed in a helper process, so a plugin that crashes on load is only skipped |
 
 Video-related audio features:
 
 - **Sync offset** per track and **auto-sync**: a clap test (visual + audio) measures camera/mic offset and sets it automatically.
 - **Audio-reactive** effects and layers (Audio Visualiser layer, Beat Pulse camera motion) subscribe to any track's levels.
 
+## Templates
+
+**Settings → Audio → Start from a template** (or **Templates…** in the mixer's **+** menu) sets the mixer up in one undoable step, replacing its tracks, buses and mixes (scenes stay):
+
+| Template | Sets up |
+|---|---|
+| **Streaming** | Mic (Voice Clarity), Desktop audio, Music (an app, ducked under the mic, −12 dB), a limiter at −1 dB on Program, a **VOD (no music)** mix |
+| **Podcast** | A track per mic (an interface's channels when it has more than two), Voice Clarity on each, a **Guests** bus, a Remote guest (an app) with a **Mix-minus**, a gentle compressor and limiter on Program, every voice recorded to its own file; loudness target −16 LUFS |
+| **Music** | Vocal and Instrument (an interface's first two channels), cued for live monitoring, a **Reverb** bus fed by sends, 24-bit files of each track, the 128-frame buffer |
+| **Gaming** | Mic, Game and Chat apps as tracks (chat also in headphones), a **No chat** mix for recordings |
+
 ## Monitoring
 
 - **Cue mix** goes to a chosen monitoring device (headphones) with its own level control and an optional "Stream mix" mode to hear exactly what viewers hear.
 - **Per-track monitoring mode**: off / cue only / always monitor (useful for instruments).
+- **Low-latency monitoring** (on by default): the cue (or the stream mix) goes straight from the engine to the device, a few milliseconds behind, for singing and playing along. Off, libobs monitors it (~100 ms).
+- **Buffer** (Settings → Audio): the engine's block, 128, 256 or 512 frames (2.7, 5.3 or 10.7 ms at 48 kHz). Changes restart the engine at once (not while multitrack files record).
 - **Talkback** (later): a dedicated mic track that only reaches the cue mix of remote guests.
 
 ## Output routing
@@ -134,8 +148,10 @@ BEACN, Elgato Wave Link and GoXLR integrations expose the hardware/software mixe
 
 ## Engine mapping
 
-- Each track = the input's `obs_source_t` (or a Lightair wrapper source for app/channel captures) + its audio filters (Lightair effects are filters).
-- Fader = `obs_source_set_volume`; mute = `obs_source_set_muted`; balance = `obs_source_set_balance_value`; sync = `obs_source_set_sync_offset`; routing = `obs_source_set_audio_mixers` bitmask, where Lightair allocates mix indices.
-- Master chains are implemented by a per-mix Lightair audio output processor (patch candidate upstream: per-mix filters), or, without the patch, by applying master processing inside the output's audio encoder pipeline.
-- Meters use one `obs_volmeter` per track and per master.
-- Monitoring uses libobs audio monitoring with the selected device; cue is a Lightair-managed set of monitored sources.
+The mixer runs in Lightair's own real-time engine, `lightair-audio` ([plan](plans/audio-engine.md)):
+
+- **Inputs**: interfaces are opened directly (CoreAudio), every channel available to tracks. Sources only libobs can capture (app and system audio, media and browser layers) are pulled in through libobs audio-capture callbacks and kept out of libobs's own mixes.
+- **Graph**: compiled from the project's tracks, buses, mixes and master; swapped in without a click, keeping effect state; no allocation or locks on the audio thread. Effects are the engine's processors; plugins are hosted inserts.
+- **Outputs**: Program goes back to libobs as an audio source in mix 1, the extra mixes in mixes 2–6, which the stream and recording encoders take. Multitrack files are written by the engine (WAV, sample-aligned).
+- **Meters**: the engine's (peak, RMS, gain reduction; LUFS on mixes), read by the UI 30 times a second.
+- `LIGHTAIR_LEGACY_AUDIO=1` runs the first cut instead (libobs mixing, effects as libobs filters), for comparison.

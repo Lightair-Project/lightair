@@ -1,8 +1,11 @@
 # Audio engine: a real mixer
 
-Status: in progress. Done: engine core, built-in effects, model, real-time engine playing the
-mixer through libobs, track effects in the Inspector. Next: multitrack recording, direct device
-channels and low-latency monitoring, mixer UI for buses/mixes/sends, plugins, templates. Builds [10 · Audio](../10-audio.md) properly; replaces the
+Status: built (steps 1–8). The engine plays the mixer: tracks, buses, mixes, sends, master,
+the built-in effects, AU and VST3 plugins, multitrack WAV recording, interface channels,
+low-latency monitoring, templates and the buffer setting. Not yet: true-peak metering, the pitch
+and tuner/analyser effects, CAF files and WAV cue markers, effect presets and A/B, drift
+compensation between devices (each device is resampled to the engine rate, not clock-matched),
+and a VST3 editor that resizes with its window. Builds [10 · Audio](../10-audio.md) properly; replaces the
 "each track is a libobs source with libobs filters, everything in one mix" first cut.
 
 ## Why our own engine
