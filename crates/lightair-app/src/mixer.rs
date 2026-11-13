@@ -68,8 +68,8 @@ pub struct MixerPanel {
     display: HashMap<Id, [f32; 2]>,
     last_frame: Instant,
     add_track_menu: bool,
-    /// Audio inputs offered in the add menu (read when it opens).
-    interfaces: Vec<lightair_engine::devices::DeviceInfo>,
+    /// When a click outside last closed the add menu (that click on + mustn't reopen it).
+    menu_closed: Option<Instant>,
     focus: FocusHandle,
 }
 
@@ -83,40 +83,17 @@ impl MixerPanel {
             display: HashMap::new(),
             last_frame: Instant::now(),
             add_track_menu: false,
-            interfaces: Vec::new(),
+            menu_closed: None,
             focus: cx.focus_handle(),
         }
     }
 
-    fn toggle_add_track(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.add_track_menu = !self.add_track_menu;
-        if self.add_track_menu {
-            self.interfaces = lightair_engine::devices::input_devices();
+    pub fn toggle_add_track(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.menu_closed.take().is_some_and(|t| t.elapsed().as_millis() < 300) {
+            return;
         }
+        self.add_track_menu = !self.add_track_menu;
         cx.notify();
-    }
-
-    /// An interface: one input, and a track per channel (one track when it has one or two).
-    fn add_interface(&mut self, device: &lightair_engine::devices::DeviceInfo, cx: &mut Context<Self>) {
-        self.add_track_menu = false;
-        let input = Input::new(device.name.clone(), lightair_engine::devices::DEVICE_KIND, json!({"device": device.name}));
-        let mut commands = vec![];
-        let tracks: Vec<Track> = if device.channels <= 2 {
-            let mut t = Track::new(device.name.clone(), input.id);
-            t.effects = voice_clarity();
-            vec![t]
-        } else {
-            (0..device.channels)
-                .map(|c| {
-                    let mut t = Track::new(format!("Input {}", c + 1), input.id);
-                    t.channels = lightair_core::TrackChannels::Mono(c);
-                    t
-                })
-                .collect()
-        };
-        commands.push(Command::AddInput { input });
-        commands.extend(tracks.into_iter().map(|track| Command::AddTrack { track, index: None }));
-        self.exec(Command::Batch { label: format!("Add {}", device.name), commands }, cx);
     }
 
     fn exec(&self, cmd: Command, cx: &mut Context<Self>) {
@@ -224,7 +201,7 @@ impl Render for MixerPanel {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
-            .when(self.add_track_menu, |d| d.child(div().px_3().py_2().child(self.add_track_menu(cx))))
+            .relative()
             .child(
                 div()
                     .id("strips")
@@ -240,6 +217,7 @@ impl Render for MixerPanel {
                         d.child(div().text_color(tok::text_tertiary()).child("No tracks"))
                     }),
             )
+            .when(self.add_track_menu, |d| d.child(self.add_menu(cx)))
     }
 }
 
@@ -253,76 +231,127 @@ impl MixerPanel {
         }
     }
 
-    fn add_track_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let item = |id: &'static str, icon: &'static str, label: &'static str| {
+    /// The add menu: a card under the panel's + button, in two columns (what a track listens to,
+    /// and the mixer's own strips and templates). Any click outside closes it.
+    fn add_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        fn heading(label: &'static str) -> Div {
+            div()
+                .px_2()
+                .pt_1()
+                .pb_1()
+                .text_size(px(10.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(tok::text_tertiary())
+                .child(label.to_uppercase())
+        }
+        fn entry(id: impl Into<ElementId>, icon: &str, title: impl Into<SharedString>, detail: impl Into<SharedString>) -> Stateful<Div> {
             div()
                 .id(id)
                 .flex()
                 .items_center()
-                .gap_1()
-                .h(px(26.))
+                .gap_2p5()
                 .px_2()
-                .rounded(px(6.))
+                .py_1p5()
+                .rounded(px(7.))
                 .cursor_pointer()
-                .bg(tok::bg_raised())
                 .hover(|d| d.bg(tok::bg_selected()))
-                .child(ui::icon(icon).size(px(13.)).text_color(tok::text_secondary()))
-                .child(label)
-        };
-        div()
-            .flex()
-            .gap_1()
-            .flex_wrap()
-            .child(item("add-mic", "mic", "Microphone").on_click(cx.listener(|this, _, _, cx| {
-                // the default input, captured by the engine directly (low latency)
-                this.add_track("Mic", lightair_engine::devices::DEVICE_KIND, json!({"device": ""}), voice_clarity(), cx)
-            })))
-            .child(item("add-desktop", "volume-2", "Desktop audio").on_click(cx.listener(|this, _, _, cx| {
-                this.add_track("Desktop audio", "sck_audio_capture", json!({"type": 0}), vec![], cx)
-            })))
-            .child(item("add-bus", "group", "Bus").on_click(cx.listener(|this, _, _, cx| {
-                this.add_track_menu = false;
-                let bus = crate::shell::mixer_props::new_bus(this.studio.read(cx).project());
-                let id = bus.id;
-                this.exec(Command::AddBus { bus, index: None }, cx);
-                this.studio.update(cx, |s, cx| {
-                    s.select_track(Some(id));
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(28.))
+                        .rounded(px(7.))
+                        .bg(tok::bg_raised())
+                        .child(ui::icon(icon).size(px(14.)).text_color(tok::text_secondary())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().text_size(px(12.)).text_color(tok::text()).truncate().child(title.into()))
+                        .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).truncate().child(detail.into())),
+                )
+        }
+        let column = || div().flex().flex_col().gap_0p5().flex_1().min_w_0();
+
+        let sources = column()
+            .child(heading("Sources"))
+            .child(entry("add-mic", "mic", "Audio input", "Any mic or audio interface").on_click(cx.listener(
+                |this, _, _, cx| {
+                    // captured by the engine directly (low latency)
+                    this.add_track("Mic", lightair_engine::devices::DEVICE_KIND, json!({"device": ""}), voice_clarity(), cx)
+                },
+            )))
+            .child(entry("add-desktop", "volume-2", "Desktop audio", "Everything the Mac plays").on_click(cx.listener(
+                |this, _, _, cx| this.add_track("Desktop audio", "sck_audio_capture", json!({"type": 0}), vec![], cx),
+            )))
+            .child(entry("add-app", "app-window", "App audio", "One app: a game, music, a call").on_click(cx.listener(
+                |this, _, _, cx| this.add_track("App audio", "sck_audio_capture", json!({"type": 1}), vec![], cx),
+            )));
+
+        let mixer = column()
+            .child(heading("Mixer"))
+            .child(entry("add-bus", "group", "Bus", "Group tracks, or share a reverb").on_click(cx.listener(
+                |this, _, _, cx| {
+                    this.add_track_menu = false;
+                    let bus = crate::shell::mixer_props::new_bus(this.studio.read(cx).project());
+                    let id = bus.id;
+                    this.exec(Command::AddBus { bus, index: None }, cx);
+                    this.studio.update(cx, |s, cx| {
+                        s.select_track(Some(id));
+                        cx.notify();
+                    });
+                },
+            )))
+            .child(entry("add-mix", "split", "Mix", "Headphones, VOD, a mix-minus").on_click(cx.listener(
+                |this, _, _, cx| {
+                    this.add_track_menu = false;
+                    let mix = crate::shell::mixer_props::new_mix(this.studio.read(cx).project());
+                    let id = mix.id;
+                    this.exec(Command::AddMix { mix }, cx);
+                    this.studio.update(cx, |s, cx| {
+                        s.select_track(Some(id));
+                        cx.notify();
+                    });
+                },
+            )))
+            .child(div().mx_2().my_1().h(px(1.)).bg(tok::border()))
+            .child(entry("add-template", "layout-template", "Templates…", "A mixer set up for your show").on_click(
+                cx.listener(|this, _, window, cx| {
+                    this.add_track_menu = false;
+                    window.dispatch_action(Box::new(crate::shell::OpenAudioSettings), cx);
                     cx.notify();
-                });
-            })))
-            .child(item("add-mix", "split", "Mix").on_click(cx.listener(|this, _, _, cx| {
-                this.add_track_menu = false;
-                let mix = crate::shell::mixer_props::new_mix(this.studio.read(cx).project());
-                let id = mix.id;
-                this.exec(Command::AddMix { mix }, cx);
-                this.studio.update(cx, |s, cx| {
-                    s.select_track(Some(id));
-                    cx.notify();
-                });
-            })))
-            .child(item("add-template", "layout-template", "Templates…").on_click(cx.listener(|this, _, window, cx| {
-                this.add_track_menu = false;
-                window.dispatch_action(Box::new(crate::shell::OpenAudioSettings), cx);
-                cx.notify();
-            })))
-            .children(self.interfaces.iter().enumerate().map(|(i, d)| {
-                let device = d.clone();
-                let label = if d.channels > 2 { format!("{} · {} inputs", d.name, d.channels) } else { d.name.clone() };
-                div()
-                    .id(("add-iface", i))
+                }),
+            ));
+
+        // pinned under the + button, above everything, kept inside the window
+        let card = div()
+                    .id("add-menu")
+                    .w(px(500.))
                     .flex()
-                    .items_center()
                     .gap_1()
-                    .h(px(26.))
-                    .px_2()
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .bg(tok::bg_raised())
-                    .hover(|d| d.bg(tok::bg_selected()))
-                    .child(ui::icon("audio-lines").size(px(13.)).text_color(tok::text_secondary()))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| this.add_interface(&device, cx)))
-            }))
+                    .p_1p5()
+                    .rounded(px(12.))
+                    .bg(tok::bg_panel())
+                    .border_1()
+                    .border_color(tok::border_strong())
+                    .shadow_lg()
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.add_track_menu = false;
+                        this.menu_closed = Some(Instant::now());
+                        cx.notify();
+                    }))
+                    .child(sources)
+                    .child(div().w(px(1.)).my_1().bg(tok::border()))
+                    .child(mixer);
+        div().absolute().top(px(4.)).right(px(10.)).size_0().child(deferred(
+            anchored().anchor(Anchor::TopRight).snap_to_window_with_margin(px(8.)).child(card),
+        ))
     }
 
     fn strip(&self, i: usize, view: &StripView, shown: [f32; 2], cx: &mut Context<Self>) -> impl IntoElement {
@@ -611,7 +640,7 @@ impl gpui_kit::component::dock::Panel for MixerPanel {
                 .icon(ui::icon("plus"))
                 .ghost()
                 .xsmall()
-                .tooltip("Add track")
+                .tooltip("Add a track, bus or mix")
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_add_track(window, cx))),
         ])
     }
