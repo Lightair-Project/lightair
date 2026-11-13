@@ -243,6 +243,7 @@ impl Reconciler {
         if self.audio.is_none() {
             let mut info = sys::obs_audio_info::default();
             let rate = if unsafe { sys::obs_get_audio_info(&mut info) } { info.samples_per_sec } else { 48_000 };
+            crate::plugins::set_sample_rate(rate);
             self.audio = crate::audio_host::AudioHost::start(rate);
         }
         let Some(host) = self.audio.as_mut() else { return };
@@ -273,6 +274,7 @@ impl Reconciler {
             }
         }
         host.set(crate::audio::spec(project));
+        crate::plugins::retain(&crate::plugins::inserts(project));
         let mut cells: Vec<_> = project
             .tracks
             .iter()
@@ -291,6 +293,11 @@ impl Reconciler {
     /// Starts recording multitrack files into `folder`, named "<base> - <strip>.wav": the
     /// tracks and buses marked Record (every track when none is), and the program mix when
     /// `program` (audio-only recordings). Returns the files.
+    /// Plays the mixer again (a plugin insert finished loading: [`crate::plugins::changed`]).
+    pub fn refresh_audio(&mut self, project: &Project) {
+        self.sync_audio(project);
+    }
+
     pub fn start_stems(
         &mut self,
         project: &Project,

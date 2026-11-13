@@ -16,6 +16,7 @@ pub mod meters;
 pub mod monitoring;
 pub mod obs;
 pub mod outputs;
+pub mod plugins;
 mod reconcile;
 mod runtime;
 pub mod timers;

@@ -76,6 +76,23 @@ impl Owner {
     fn audio(self) -> bool {
         !matches!(self, Owner::Input(_))
     }
+
+    /// Whose effect `effect` is (a mixer strip's: the audio inserts).
+    fn of_audio_effect(project: &lightair_core::Project, effect: Id) -> Option<(Owner, Effect)> {
+        let has = |effects: &[Effect]| effects.iter().find(|e| e.id == effect).cloned();
+        let a = &project.audio;
+        project
+            .tracks
+            .iter()
+            .find_map(|t| has(&t.effects).map(|e| (Owner::Track(t.id), e)))
+            .or_else(|| {
+                a.buses.iter().find_map(|b| has(&b.effects).map(|e| (Owner::Strip(lightair_core::MixerStrip::Bus(b.id)), e)))
+            })
+            .or_else(|| {
+                a.mixes.iter().find_map(|m| has(&m.effects).map(|e| (Owner::Strip(lightair_core::MixerStrip::Mix(m.id)), e)))
+            })
+            .or_else(|| has(&a.master.effects).map(|e| (Owner::Strip(lightair_core::MixerStrip::Master), e)))
+    }
 }
 
 /// A page of the catalog sheet.
@@ -83,6 +100,8 @@ impl Owner {
 pub(super) enum Page {
     All,
     Of(Category),
+    /// Installed plugins (Audio Units), for the audio catalog.
+    Plugins,
 }
 
 pub(super) struct EffectSheet {
@@ -209,9 +228,14 @@ impl StudioWindow {
             Some(d) => d.summary(&e.settings),
             None => "Plugin effect".into(),
         };
-        let warning = def.filter(|_| on && !system).and_then(|d| match d.needs {
-            Needs::Face if presence.face == Some(false) => Some("No face in view"),
-            Needs::Person if presence.person == Some(false) => Some("No person in view"),
+        let warning: Option<SharedString> = def.filter(|_| on && !system).and_then(|d| match d.needs {
+            _ if d.kind == catalog::PLUGIN_KIND => match lightair_engine::plugins::status(eid) {
+                lightair_engine::plugins::Status::Failed(why) => Some(format!("Plugin unavailable: {why}").into()),
+                lightair_engine::plugins::Status::Loading => Some("Loading the plugin…".into()),
+                _ => None,
+            },
+            Needs::Face if presence.face == Some(false) => Some("No face in view".into()),
+            Needs::Person if presence.person == Some(false) => Some("No person in view".into()),
             _ => None,
         });
         let header = div()
@@ -321,7 +345,7 @@ impl StudioWindow {
     ) -> Div {
         let eid = e.id;
         let mut row = div().flex().items_center().gap_1().px_2().pb_2();
-        if let Some(d) = def {
+        if let Some(d) = def.filter(|d| d.kind != catalog::PLUGIN_KIND) {
             let defaults = Value::Object(d.defaults());
             let is_default = defaults == e.settings;
             row = row.child(
@@ -363,6 +387,9 @@ impl StudioWindow {
         let mut col = div().flex().flex_col().gap_1p5().px_2().pb_2().pt_0p5();
         if d.kind == "audio.eq" {
             col = col.child(eq_curve(e));
+        }
+        if d.kind == catalog::PLUGIN_KIND {
+            return col.child(self.plugin_panel(e, cx));
         }
         let mut group_open = true;
         let mut first_heading = true;
@@ -916,6 +943,10 @@ impl StudioWindow {
     // ------------------------------------------------------------ the catalog sheet
 
     pub(super) fn open_effect_catalog(&mut self, owner: Owner, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        if owner.audio() {
+            // fresh each time: a plugin installed meanwhile shows up (the scan is quick)
+            self.plugin_list = Some(std::sync::Arc::new(lightair_engine::plugins::scan_audio_units()));
+        }
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search effects"));
         search.update(cx, |s, cx| s.focus(window, cx));
         let events = cx.subscribe_in(&search, window, |_, _, ev: &InputEvent, _, cx| {
@@ -952,6 +983,154 @@ impl StudioWindow {
         self.close_effect_catalog(window, cx);
     }
 
+    /// Adds an installed plugin as an insert; its editor opens once it has loaded.
+    pub(super) fn add_plugin(
+        &mut self,
+        owner: Owner,
+        info: &lightair_engine::plugins::PluginInfo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let effect = catalog::plugin_effect(info.format, &info.id, &info.name, &info.vendor);
+        let eid = effect.id;
+        self.props.open_effect = Some(eid);
+        self.exec(owner.add(effect, None), cx);
+        self.close_effect_catalog(window, cx);
+        // wait for it to load (a few seconds at most), then show its editor
+        cx.spawn(async move |this, cx| {
+            for _ in 0..100 {
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                match lightair_engine::plugins::status(eid) {
+                    lightair_engine::plugins::Status::Ready { .. } => {
+                        let _ = this.update(cx, |this, cx| this.open_plugin_editor(eid, cx));
+                        return;
+                    }
+                    lightair_engine::plugins::Status::Failed(_) | lightair_engine::plugins::Status::None => {
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                        return;
+                    }
+                    lightair_engine::plugins::Status::Loading => {}
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// A plugin insert's card: its editor, latency and where it stands.
+    fn plugin_panel(&self, e: &Effect, cx: &mut Context<Self>) -> Div {
+        use lightair_engine::plugins::Status;
+        let eid = e.id;
+        let status = lightair_engine::plugins::status(eid);
+        let note: SharedString = match &status {
+            Status::Ready { latency } if *latency > 0 => {
+                format!("Adds {:.1} ms of delay, compensated in recordings", *latency as f32 / 48.0).into()
+            }
+            Status::Ready { .. } => "Runs inside Lightair's mixer, in real time".into(),
+            Status::Loading => "Loading…".into(),
+            Status::Failed(why) => format!("Couldn't run it: {why}").into(),
+            Status::None => "Starts when the mixer plays".into(),
+        };
+        let open = self.plugin_editors.get(&eid).is_some_and(|ed| ed.is_open());
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                Button::new(("plugin-editor", eid.0.as_u128() as u64))
+                    .icon(ui::icon("app-window"))
+                    .label(if open { "Show editor" } else { "Open editor" })
+                    .small()
+                    .disabled(!matches!(status, Status::Ready { .. }))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_plugin_editor(eid, cx))),
+            )
+            .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(tok::text_tertiary()).child(note))
+    }
+
+    /// Shows a plugin insert's own editor (in front, if it's open already). While it's open its
+    /// state is watched; closing it saves the state in the project (one undo step).
+    pub(super) fn open_plugin_editor(&mut self, effect: Id, cx: &mut Context<Self>) {
+        if let Some(ed) = self.plugin_editors.get(&effect).filter(|ed| ed.is_open()) {
+            ed.front();
+            return;
+        }
+        let Some(unit) = lightair_engine::plugins::unit(effect) else { return };
+        let project = self.studio.read(cx).project().clone();
+        let Some((owner, e)) = Owner::of_audio_effect(&project, effect) else { return };
+        let strip = owner.find(&project).map(|(n, _)| n).unwrap_or_default();
+        let title = format!("{} — {}", e.name, strip);
+        let made = crate::plugin_editor::request(&unit);
+        cx.spawn(async move |this, cx| {
+            // an AUv3 answers on its own time
+            let mut got = None;
+            for _ in 0..100 {
+                if let Ok(m) = made.try_recv() {
+                    got = Some(m);
+                    break;
+                }
+                cx.background_executor().timer(std::time::Duration::from_millis(30)).await;
+            }
+            let made = got.unwrap_or(crate::plugin_editor::Made::Generic);
+            let opened = this.update(cx, |this, cx| {
+                match crate::plugin_editor::Editor::open(unit, made, &title) {
+                    Some(ed) => {
+                        this.plugin_editors.insert(effect, ed);
+                        cx.notify();
+                        true
+                    }
+                    None => false,
+                }
+            });
+            if !matches!(opened, Ok(true)) {
+                return;
+            }
+            // until it closes
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+                let done = this.update(cx, |this, cx| {
+                    let open = this.plugin_editors.get(&effect).is_some_and(|ed| ed.is_open());
+                    if !open {
+                        this.plugin_editors.remove(&effect);
+                        this.save_plugin_state(effect, cx);
+                    }
+                    !open
+                });
+                if !matches!(done, Ok(false)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Writes a plugin insert's current state into the project, if it changed.
+    pub(super) fn save_plugin_state(&mut self, effect: Id, cx: &mut Context<Self>) {
+        let Some(state) = lightair_engine::plugins::take_state(effect) else { return };
+        let project = self.studio.read(cx).project().clone();
+        let Some((owner, e)) = Owner::of_audio_effect(&project, effect) else { return };
+        if e.settings.get("state").and_then(Value::as_str) == Some(state.as_str()) {
+            return;
+        }
+        let mut settings = e.settings.clone();
+        settings["state"] = Value::String(state);
+        self.exec(owner.settings(effect, settings), cx);
+    }
+
+    /// Closes editors whose inserts are gone (removed, undone).
+    pub(super) fn prune_plugin_editors(&mut self, cx: &mut Context<Self>) {
+        if self.plugin_editors.is_empty() {
+            return;
+        }
+        let project = self.studio.read(cx).project().clone();
+        let present = lightair_engine::plugins::inserts(&project);
+        self.plugin_editors.retain(|id, ed| {
+            let keep = present.contains(id);
+            if !keep {
+                ed.close();
+            }
+            keep
+        });
+    }
+
     pub(super) fn effect_catalog_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let sheet = self.effect_sheet.as_ref()?;
         let (iid, page) = (sheet.owner, sheet.page);
@@ -968,6 +1147,10 @@ impl StudioWindow {
         let mut pages = vec![(Page::All, "All effects", "layout-grid")];
         for &c in categories {
             pages.push((Page::Of(c), c.name(), category_icon(c)));
+        }
+        let plugins = self.plugin_list.clone().filter(|_| iid.audio()).unwrap_or_default();
+        if iid.audio() {
+            pages.push((Page::Plugins, "Plugins", "plug"));
         }
         for (n, (p, label, icon)) in pages.into_iter().enumerate() {
             let on = p == page && !searching;
@@ -1010,9 +1193,18 @@ impl StudioWindow {
                 }
                 Page::Of(c) => d.category == c,
                 Page::All => true,
+                Page::Plugins => false,
             })
             .collect();
-        if defs.is_empty() {
+        let shown_plugins: Vec<&lightair_engine::plugins::PluginInfo> = plugins
+            .iter()
+            .filter(|p| match page {
+                _ if searching => p.name.to_lowercase().contains(&q) || p.vendor.to_lowercase().contains(&q),
+                Page::Plugins => true,
+                _ => false,
+            })
+            .collect();
+        if defs.is_empty() && shown_plugins.is_empty() {
             body = body.child(div().p_4().text_color(tok::text_tertiary()).child("No effects match"));
         }
         for &c in categories {
@@ -1038,6 +1230,42 @@ impl StudioWindow {
                 body = body.child(group_heading(c.name()));
             }
             body = body.child(grid);
+        }
+        if !shown_plugins.is_empty() {
+            let in_stack: Vec<&str> = owner_effects
+                .iter()
+                .filter(|e| e.kind == catalog::PLUGIN_KIND)
+                .filter_map(|e| e.settings.get("id").and_then(Value::as_str))
+                .collect();
+            // by vendor, three across
+            let mut vendor = None;
+            let mut grid = div().grid().grid_cols(3).gap_2();
+            for (n, p) in shown_plugins.into_iter().enumerate() {
+                if vendor != Some(p.vendor.as_str()) {
+                    if vendor.is_some() {
+                        body = body.child(grid);
+                        grid = div().grid().grid_cols(3).gap_2();
+                    }
+                    vendor = Some(p.vendor.as_str());
+                    body = body.child(group_heading(if p.vendor.is_empty() { "Other" } else { &p.vendor }));
+                }
+                let added = in_stack.contains(&p.id.as_str());
+                let what = if p.v3 { "Audio Unit v3" } else { "Audio Unit" };
+                let info = p.clone();
+                grid = grid.child(
+                    tile(("fx-plugin", n).into(), "plug", &p.name, what, None, added)
+                        .on_click(cx.listener(move |this, _, window, cx| this.add_plugin(iid, &info, window, cx))),
+                );
+            }
+            body = body.child(grid);
+        } else if page == Page::Plugins {
+            body = body.child(
+                div()
+                    .p_4()
+                    .text_size(px(12.))
+                    .text_color(tok::text_tertiary())
+                    .child("No Audio Unit effects are installed. Install one (or a VST3 plugin) and it shows here."),
+            );
         }
 
         Some(

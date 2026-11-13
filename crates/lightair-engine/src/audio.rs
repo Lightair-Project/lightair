@@ -140,6 +140,7 @@ pub fn params(e: &Effect) -> Option<Params> {
             compress: r.flag("compress"),
             limit: r.flag("limit"),
         }),
+        lightair_core::catalog::PLUGIN_KIND => Params::Plugin(PluginParams { plugin: crate::plugins::instance(e) }),
         _ => return None,
     })
 }

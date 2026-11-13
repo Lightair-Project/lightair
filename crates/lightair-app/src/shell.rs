@@ -272,6 +272,10 @@ pub struct StudioWindow {
     fx_groups: std::collections::HashSet<String>,
     /// Colour pickers of the selected object's effects, by "effect:key".
     colour_pickers: std::collections::HashMap<String, effects::ColourPicker>,
+    /// Open plugin editor windows, by effect.
+    plugin_editors: std::collections::HashMap<Id, crate::plugin_editor::Editor>,
+    /// The installed plugins (scanned when the audio catalog first opens).
+    plugin_list: Option<std::sync::Arc<Vec<lightair_engine::plugins::PluginInfo>>>,
     /// Audio interfaces (for track channel pickers), and when they were read.
     interfaces: RefCell<(std::time::Instant, Vec<lightair_engine::devices::DeviceInfo>)>,
     transition_menu: bool,
@@ -365,6 +369,7 @@ impl StudioWindow {
     pub fn new(studio: Entity<Studio>, preview: Preview, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&studio, |this, _, cx| {
             this.sync_studio_preview(cx);
+            this.prune_plugin_editors(cx);
             cx.notify()
         })
         .detach();
@@ -434,6 +439,8 @@ impl StudioWindow {
             presence: Default::default(),
             fx_groups: Default::default(),
             colour_pickers: Default::default(),
+            plugin_editors: Default::default(),
+            plugin_list: None,
             interfaces: RefCell::new((std::time::Instant::now(), Vec::new())),
             transition_menu: false,
             crop_mode: None,

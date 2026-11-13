@@ -7,6 +7,7 @@ mod eyedropper;
 mod geometry;
 mod hotkeys;
 mod mixer;
+mod plugin_editor;
 mod outputs_panel;
 mod platforms;
 mod preflight;
@@ -101,6 +102,7 @@ fn main() {
                     s.refresh_stats();
                     s.refit_imported(cx);
                     s.run_timer_ends(cx);
+                    s.refresh_plugins();
                     s.end_replays(cx);
                     s.flush();
                     if ticks.is_multiple_of(60) {
