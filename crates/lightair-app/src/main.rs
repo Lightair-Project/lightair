@@ -8,6 +8,7 @@ mod geometry;
 mod hotkeys;
 mod mixer;
 mod plugin_editor;
+mod plugin_scan;
 mod outputs_panel;
 mod platforms;
 mod preflight;
@@ -40,6 +41,10 @@ fn projects_dir() -> PathBuf {
 }
 
 fn main() {
+    // a helper process listing a VST3 bundle's effects (plugin_scan)
+    if let Some(code) = plugin_scan::probe_main() {
+        std::process::exit(code);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("LIGHTAIR_LOG").unwrap_or_else(|_| "info,libobs=warn".into()))
         .init();
@@ -82,6 +87,8 @@ fn main() {
 
     gpui_kit::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         gpui_kit::init(cx);
+        // VST3 plugins are made, edited and torn down on this thread
+        lightair_engine::plugins::set_main_thread(|job| dispatch2::DispatchQueue::main().exec_async(job));
         ui::apply_theme(cx);
         shell::bind_keys(cx);
 

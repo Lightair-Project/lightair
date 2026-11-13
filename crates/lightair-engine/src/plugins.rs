@@ -1,6 +1,6 @@
 //! Plugin hosting (docs/plans/audio-engine.md, Plugins): Audio Units (v2 and v3) through the
-//! AudioToolbox C API. AUv3 units load out of process when the system chooses to, so a crashing
-//! one is reported rather than fatal.
+//! AudioToolbox C API, and VST3 ([`vst3`]). AUv3 units load out of process when the system
+//! chooses to, so a crashing one is reported rather than fatal.
 //!
 //! A plugin insert in the project ("audio.plugin": format, id, name, vendor, state) gets its
 //! instance here, keyed by the effect's id. Loading is asynchronous: until it's ready the insert
@@ -17,11 +17,13 @@ use lightair_audio::dsp::Plugin;
 use lightair_core::{Effect, Id};
 use parking_lot::Mutex;
 
+pub mod vst3;
+
 /// An installed plugin.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PluginInfo {
-    /// "au" (VST3 later: "vst3").
-    pub format: &'static str,
+    /// "au" or "vst3".
+    pub format: String,
     /// The format's identifier ("au:<type>:<subtype>:<manufacturer>", hex).
     pub id: String,
     pub name: String,
@@ -29,6 +31,9 @@ pub struct PluginInfo {
     pub version: String,
     /// An AUv3 app extension (out of process).
     pub v3: bool,
+    /// A VST3's bundle (empty for Audio Units, which the system finds).
+    #[serde(default)]
+    pub path: String,
 }
 
 // ------------------------------------------------------------------ AudioToolbox
@@ -230,7 +235,15 @@ pub fn scan_audio_units() -> Vec<PluginInfo> {
             if name.is_empty() || out.iter().any(|p| p.id == id) {
                 continue;
             }
-            out.push(PluginInfo { format: "au", id, name, vendor, version, v3: d.flags & FLAG_V3 != 0 });
+            out.push(PluginInfo {
+                format: "au".into(),
+                id,
+                name,
+                vendor,
+                version,
+                v3: d.flags & FLAG_V3 != 0,
+                path: String::new(),
+            });
         }
     }
     out.sort_by_key(|p| (p.vendor.to_lowercase(), p.name.to_lowercase()));
@@ -518,7 +531,7 @@ pub fn load_audio_unit(
     {
         return done(Err("not installed".into()));
     }
-    let info = info.clone();
+    let info = PluginInfo { v3: found.flags & FLAG_V3 != 0, ..info.clone() };
     let done = Mutex::new(Some(done));
     let block = block2::RcBlock::new(move |unit: *mut c_void, status: i32| {
         let Some(done) = done.lock().take() else { return };
@@ -534,7 +547,88 @@ pub fn load_audio_unit(
     unsafe { AudioComponentInstantiate(c, 0, &block) };
 }
 
+// ------------------------------------------------------------------ the main thread
+
+type Job = Box<dyn FnOnce() + Send>;
+
+static MAIN: std::sync::OnceLock<Box<dyn Fn(Job) + Send + Sync>> = std::sync::OnceLock::new();
+
+/// How work reaches the main thread (the app's run loop). Without one, it runs where it's asked
+/// (tests, which run on the main thread).
+pub fn set_main_thread(run: impl Fn(Job) + Send + Sync + 'static) {
+    let _ = MAIN.set(Box::new(run));
+}
+
+pub(crate) fn on_main(job: Job) {
+    match MAIN.get() {
+        Some(run) => run(job),
+        None => job(),
+    }
+}
+
 // ------------------------------------------------------------------ the project's inserts
+
+/// A running plugin of either format.
+#[derive(Clone)]
+pub enum Hosted {
+    Au(Arc<AudioUnitPlugin>),
+    Vst3(Arc<vst3::Vst3Plugin>),
+}
+
+impl Hosted {
+    fn plugin(&self) -> Arc<dyn Plugin> {
+        match self {
+            Hosted::Au(p) => p.clone(),
+            Hosted::Vst3(p) => p.clone(),
+        }
+    }
+
+    fn failed(&self) -> bool {
+        match self {
+            Hosted::Au(p) => p.crashed(),
+            Hosted::Vst3(p) => p.failed(),
+        }
+    }
+
+    fn latency(&self) -> usize {
+        match self {
+            Hosted::Au(p) => p.latency(),
+            Hosted::Vst3(p) => {
+                p.refresh_latency();
+                p.latency()
+            }
+        }
+    }
+
+    /// Its state, base64 (VST3: main thread).
+    pub fn state(&self) -> Option<String> {
+        match self {
+            Hosted::Au(p) => p.state(),
+            Hosted::Vst3(p) => p.state(),
+        }
+    }
+
+    fn set_state(&self, s: &str) {
+        match self {
+            Hosted::Au(p) => {
+                p.set_state(s);
+            }
+            Hosted::Vst3(p) => {
+                let (p, s) = (p.clone(), s.to_string());
+                on_main(Box::new(move || {
+                    p.set_state(&s);
+                }));
+            }
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Hosted::Au(p) => &p.info.name,
+            Hosted::Vst3(p) => &p.info.name,
+        }
+    }
+}
 
 /// Where a plugin insert stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -548,7 +642,7 @@ pub enum Status {
 
 enum Slot {
     Loading,
-    Ready(Arc<AudioUnitPlugin>),
+    Ready(Hosted),
     Failed(String),
 }
 
@@ -580,11 +674,22 @@ fn setting<'a>(e: &'a Effect, key: &str) -> Option<&'a str> {
     e.settings.get(key).and_then(serde_json::Value::as_str)
 }
 
+/// The installed VST3 bundle that has the class `id` (after a move or reinstall).
+fn find_vst3(id: &str) -> Option<String> {
+    vst3::bundles().into_iter().find_map(|b| {
+        vst3::from_module_info(&b)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|p| p.id == id)
+            .map(|p| p.path)
+    })
+}
+
 /// The running instance for a plugin insert, starting it if needed (`None` until it's ready).
 /// A changed "state" setting (undo, a preset) is given to the running instance.
 pub fn instance(e: &Effect) -> Option<Arc<dyn Plugin>> {
     let (format, id) = (setting(e, "format")?, setting(e, "id")?);
-    if format != "au" {
+    if format != "au" && format != "vst3" {
         return None;
     }
     let state = setting(e, "state").map(str::to_string);
@@ -601,26 +706,27 @@ pub fn instance(e: &Effect) -> Option<Arc<dyn Plugin>> {
                         p.set_state(s);
                         entry.applied = Some(s.clone());
                     }
-                    Some(p.clone() as Arc<dyn Plugin>)
+                    Some(p.plugin())
                 }
                 Slot::Loading | Slot::Failed(_) => None,
             };
         }
         entries.insert(e.id, Entry { id: id.to_string(), slot: Slot::Loading, applied: None });
     }
-    // outside the lock: the unit may finish loading right inside this call
-    let info = PluginInfo {
-        format: "au",
+    // outside the lock: a plugin may finish loading right inside this call
+    let mut info = PluginInfo {
+        format: format.to_string(),
         id: id.to_string(),
         name: setting(e, "name").unwrap_or("Plugin").to_string(),
         vendor: setting(e, "vendor").unwrap_or("").to_string(),
         version: String::new(),
         v3: false,
+        path: setting(e, "path").unwrap_or("").to_string(),
     };
     let effect = e.id;
     let rate = SAMPLE_RATE.load(Ordering::Relaxed) as f64;
     let (pid, pname) = (info.id.clone(), info.name.clone());
-    load_audio_unit(&info, rate, move |result| {
+    let finish = move |result: Result<Hosted, String>| {
         let mut entries = ENTRIES.lock();
         let Some(entry) = entries.get_mut(&effect).filter(|en| en.id == pid) else { return };
         match result {
@@ -638,7 +744,19 @@ pub fn instance(e: &Effect) -> Option<Arc<dyn Plugin>> {
             }
         }
         GENERATION.fetch_add(1, Ordering::AcqRel);
-    });
+    };
+    if format == "au" {
+        load_audio_unit(&info, rate, move |r| finish(r.map(Hosted::Au)));
+    } else {
+        on_main(Box::new(move || {
+            if !std::path::Path::new(&info.path).exists()
+                && let Some(path) = find_vst3(&info.id)
+            {
+                info.path = path;
+            }
+            finish(vst3::Vst3Plugin::load(&info, rate).map(Hosted::Vst3))
+        }));
+    }
     None
 }
 
@@ -646,15 +764,15 @@ pub fn instance(e: &Effect) -> Option<Arc<dyn Plugin>> {
 pub fn status(effect: Id) -> Status {
     match ENTRIES.lock().get(&effect).map(|e| &e.slot) {
         Some(Slot::Loading) => Status::Loading,
-        Some(Slot::Ready(p)) if p.crashed() => Status::Failed("it stopped working".into()),
+        Some(Slot::Ready(p)) if p.failed() => Status::Failed("it stopped working".into()),
         Some(Slot::Ready(p)) => Status::Ready { latency: p.latency() },
         Some(Slot::Failed(why)) => Status::Failed(why.clone()),
         None => Status::None,
     }
 }
 
-/// An insert's loaded unit (its editor, its state).
-pub fn unit(effect: Id) -> Option<Arc<AudioUnitPlugin>> {
+/// An insert's running plugin (its editor, its state).
+pub fn hosted(effect: Id) -> Option<Hosted> {
     match ENTRIES.lock().get(&effect).map(|e| &e.slot) {
         Some(Slot::Ready(p)) => Some(p.clone()),
         _ => None,
@@ -662,13 +780,13 @@ pub fn unit(effect: Id) -> Option<Arc<AudioUnitPlugin>> {
 }
 
 /// Reads an insert's current state from its instance (what its editor changed). Remembered as
-/// applied, so writing it into the project doesn't give it back to the instance.
+/// applied, so writing it into the project doesn't give it back to the instance. Main thread.
 pub fn take_state(effect: Id) -> Option<String> {
-    let mut entries = ENTRIES.lock();
-    let entry = entries.get_mut(&effect)?;
-    let Slot::Ready(p) = &entry.slot else { return None };
+    let p = hosted(effect)?;
     let s = p.state()?;
-    entry.applied = Some(s.clone());
+    if let Some(entry) = ENTRIES.lock().get_mut(&effect) {
+        entry.applied = Some(s.clone());
+    }
     Some(s)
 }
 
@@ -676,11 +794,7 @@ pub fn take_state(effect: Id) -> Option<String> {
 pub fn retain(keep: &HashSet<Id>) {
     let gone: Vec<Entry> = {
         let mut entries = ENTRIES.lock();
-        let ids: Vec<Id> = entries
-            .keys()
-            .filter(|id| !keep.contains(id))
-            .copied()
-            .collect();
+        let ids: Vec<Id> = entries.keys().filter(|id| !keep.contains(id)).copied().collect();
         ids.into_iter().filter_map(|id| entries.remove(&id)).collect()
     };
     // disposed outside the lock

@@ -424,7 +424,7 @@ impl StudioWindow {
                     }
                 }
             }
-            Ok(hook @ ("audio-plugin" | "audio-plugins")) => {
+            Ok(hook @ ("audio-plugin" | "audio-plugins" | "audio-vst3")) => {
                 // the first track: Apple's AUDelay added (its editor opens), or the plugins page
                 let track = self.studio.read(cx).project().tracks.first().map(|t| t.id);
                 if let Some(t) = track {
@@ -436,10 +436,13 @@ impl StudioWindow {
                     let owner = super::effects::Owner::Track(t);
                     if hook == "audio-plugins" {
                         self.open_effect_catalog(owner, super::effects::Page::Plugins, window, cx);
-                    } else if let Some(info) = lightair_engine::plugins::scan_audio_units()
-                        .into_iter()
-                        .find(|p| p.vendor == "Apple" && p.name == "AUDelay")
-                    {
+                    } else if let Some(info) = if hook == "audio-vst3" {
+                        crate::plugin_scan::vst3().into_iter().find(|p| p.name.contains("Surge"))
+                    } else {
+                        lightair_engine::plugins::scan_audio_units()
+                            .into_iter()
+                            .find(|p| p.vendor == "Apple" && p.name == "AUDelay")
+                    } {
                         self.add_plugin(owner, &info, window, cx);
                     }
                 }
