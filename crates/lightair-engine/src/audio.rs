@@ -222,6 +222,7 @@ pub fn spec(project: &Project) -> la::GraphSpec {
             inserts: inserts(&m.effects),
             gain_db: fader(m.volume_db),
             mute: m.muted,
+            to_program: m.to_program,
             ..la::Mix::new(node(m.id))
         })
         .collect();

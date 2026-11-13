@@ -282,6 +282,31 @@ impl StudioWindow {
                         if fed == 1 { "" } else { "s" },
                         if fed == 1 { "s" } else { "" }
                     )))
+                    .child({
+                        let on = m.to_program;
+                        let cmd = Command::UpdateMix { mix: AudioMix { to_program: !on, ..m.clone() } };
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .py_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().text_size(px(12.)).child("Into Program too"))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(tok::text_tertiary())
+                                            .child("An effects return (a shared reverb), heard on the stream"),
+                                    ),
+                            )
+                            .child(
+                                super::settings::switch("mix-to-program", on)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
+                            )
+                    })
                     .child(self.strip_effects_section(strip, &m.effects, cx))
                     .child(div().pt_2().child(
                         Button::new("remove-mix").label("Remove mix").small().danger().on_click(

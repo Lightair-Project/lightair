@@ -18,7 +18,7 @@ Inputs ──► Tracks (effect chain, gain, mute, pan) ──► Mixes ──�
 | **Track** | One channel strip in the mixer. Has one input, an effect chain, gain, pan/balance, mute, solo-in-cue, sync offset, and mix routing. Users name tracks ("Mic", "Game") |
 | **Bus** | A strip fed by the tracks routed to it (a group: "Guests") or by sends (an effects return: a shared reverb). Routes to Program or another bus, never in a loop |
 | **Program** | The master: what the stream and the recording's main track carry. Its own effects (typically a limiter) and meter |
-| **Mix** | An extra output mix built from per-track **sends** (pre or post fader): headphones, a VOD mix without the music, a mix-minus for a remote guest. Up to five reach libobs as extra recording/stream tracks; **Cue** is the monitoring mix |
+| **Mix** | An extra output mix built from per-track **sends** (pre or post fader): headphones, a VOD mix without the music, a mix-minus for a remote guest. Up to five reach libobs as extra recording/stream tracks; a mix can also feed Program (an effects return, such as a shared reverb). **Cue** is the monitoring mix |
 
 ### Track sources
 
