@@ -283,6 +283,13 @@ impl StudioWindow {
                         if fed == 1 { "s" } else { "" }
                     )))
                     .child({
+                        let mm = m.clone();
+                        let pan = self.slider(format!("mixpan:{id}"), (-1.0, 1.0, 0.01), m.pan, move |v| {
+                            Command::UpdateMix { mix: AudioMix { pan: v, ..mm.clone() } }
+                        }, cx);
+                        labelled("Balance", pan)
+                    })
+                    .child({
                         let on = m.to_program;
                         let cmd = Command::UpdateMix { mix: AudioMix { to_program: !on, ..m.clone() } };
                         div()
