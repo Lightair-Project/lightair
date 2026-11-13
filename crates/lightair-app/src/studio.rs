@@ -738,7 +738,8 @@ impl Studio {
 
     fn fix_selection(&mut self) {
         let p = self.doc.project();
-        if self.selected_track.is_some_and(|t| p.track(t).is_none()) {
+        // a mixer strip: a track, bus, mix or the master
+        if self.selected_track.is_some_and(|t| lightair_core::MixerStrip::find(p, t).is_none()) {
             self.selected_track = None;
         }
         if self.selected_scene.is_none_or(|s| p.scene(s).is_none()) {

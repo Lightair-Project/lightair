@@ -27,6 +27,7 @@ mod hierarchy;
 mod inspector;
 mod layer_props;
 mod menus;
+pub(crate) mod mixer_props;
 mod palette;
 mod settings;
 mod source;
@@ -3059,6 +3060,7 @@ impl StudioWindow {
         let layer = scene.as_ref().and_then(|s| studio.selected_layer.and_then(|l| s.layer(l))).cloned();
         let selection = studio.selection();
         let track = studio.selected_track.and_then(|t| project.track(t)).cloned();
+        let strip = studio.selected_track.and_then(|t| lightair_core::MixerStrip::find(project, t));
         let mut body = div().flex().flex_col().gap_3().px_3();
         if let (Some(sc), Some(l)) = (&scene, &layer)
             && selection.len() == 1
@@ -3068,6 +3070,7 @@ impl StudioWindow {
         }
         let content = match (scene, layer) {
             (_, None) if track.is_some() => self.track_inspector(project, track.as_deref().unwrap(), body, cx),
+            (_, None) if strip.is_some() => self.strip_inspector(project, strip.unwrap(), body, cx),
             (Some(scene), Some(_)) if selection.len() > 1 => {
                 self.multi_inspector(&scene, &format, &selection, body, cx)
             }

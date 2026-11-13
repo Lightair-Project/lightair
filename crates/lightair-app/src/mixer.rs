@@ -9,7 +9,7 @@ use std::time::Instant;
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Effect, Id, Input, Track};
+use lightair_core::{AudioMix, Bus, Command, Effect, Id, Input, Master, MixerStrip, Project, Track};
 use lightair_engine::meters::meters;
 use serde_json::json;
 
@@ -111,7 +111,10 @@ impl MixerPanel {
         let h = f32::from(b.size.height).max(1.0);
         let pos = 1.0 - ((f32::from(y) - top) / h).clamp(0.0, 1.0);
         let db = (pos_to_db(pos) * 2.0).round() / 2.0;
-        self.exec(Command::SetTrackVolume { track, volume_db: db }, cx);
+        let project = self.studio.read(cx).project().clone();
+        if let Some(cmd) = MixerStrip::find(&project, track).and_then(|k| volume_cmd(&project, k, db)) {
+            self.exec(cmd, cx);
+        }
     }
 
     fn add_track(
@@ -143,18 +146,23 @@ impl Render for MixerPanel {
 
         let project = self.studio.read(cx).project().clone();
         let mut strips = Vec::new();
-        for (i, track) in project.tracks.iter().enumerate() {
+        let views = strip_views(&project);
+        for (i, view) in views.iter().enumerate() {
             // Meter ballistics: rise instantly, fall at 24 dB/s.
-            let levels = meters().get(track.id).map(|c| c.levels());
-            let shown = self.display.entry(track.id).or_insert([f32::NEG_INFINITY; 2]);
+            let levels = meters().get(view.id).map(|c| c.levels());
+            let shown = self.display.entry(view.id).or_insert([f32::NEG_INFINITY; 2]);
             for (c, value) in shown.iter_mut().enumerate() {
                 let target = levels.map_or(f32::NEG_INFINITY, |l| l.peak[c]);
                 let fallen = if value.is_finite() { *value - 24.0 * dt } else { f32::NEG_INFINITY };
                 *value = if target > fallen { target } else { fallen.max(-90.0) };
             }
             let shown = *shown;
-            let strip = self.strip(i, track, shown, cx);
-            let menu = strip_menu(self.studio.downgrade(), track);
+            let strip = self.strip(i, view, shown, cx);
+            let track = project.track(view.id).cloned();
+            if i > 0 && views[i - 1].kind_order() != view.kind_order() {
+                // buses, the master and mixes each start a group
+                strips.push(div().flex_none().w(px(1.)).h_full().bg(tok::border()).into_any_element());
+            }
             strips.push(
                 div()
                     .id(("strip-menu", i))
@@ -162,7 +170,7 @@ impl Render for MixerPanel {
                     .h_full()
                     .child(strip)
                     .on_mouse_down(MouseButton::Right, {
-                        let (studio, id) = (self.studio.downgrade(), track.id);
+                        let (studio, id) = (self.studio.downgrade(), view.id);
                         move |_, _, cx| {
                             if let Some(s) = studio.upgrade() {
                                 s.update(cx, |s, cx| {
@@ -172,11 +180,17 @@ impl Render for MixerPanel {
                             }
                         }
                     })
-                    .context_menu(move |m, _, _| menu(m))
+                    .context_menu({
+                        let studio = self.studio.downgrade();
+                        move |m, _, _| match &track {
+                            Some(t) => strip_menu(studio.clone(), t)(m),
+                            None => m,
+                        }
+                    })
                     .into_any_element(),
             );
         }
-        self.display.retain(|id, _| project.track(*id).is_some());
+        self.display.retain(|id, _| MixerStrip::find(&project, *id).is_some());
 
         div()
             .id("mixer")
@@ -246,6 +260,26 @@ impl MixerPanel {
             .child(item("add-desktop", "volume-2", "Desktop audio").on_click(cx.listener(|this, _, _, cx| {
                 this.add_track("Desktop audio", "sck_audio_capture", json!({"type": 0}), vec![], cx)
             })))
+            .child(item("add-bus", "group", "Bus").on_click(cx.listener(|this, _, _, cx| {
+                this.add_track_menu = false;
+                let bus = crate::shell::mixer_props::new_bus(this.studio.read(cx).project());
+                let id = bus.id;
+                this.exec(Command::AddBus { bus, index: None }, cx);
+                this.studio.update(cx, |s, cx| {
+                    s.select_track(Some(id));
+                    cx.notify();
+                });
+            })))
+            .child(item("add-mix", "split", "Mix").on_click(cx.listener(|this, _, _, cx| {
+                this.add_track_menu = false;
+                let mix = crate::shell::mixer_props::new_mix(this.studio.read(cx).project());
+                let id = mix.id;
+                this.exec(Command::AddMix { mix }, cx);
+                this.studio.update(cx, |s, cx| {
+                    s.select_track(Some(id));
+                    cx.notify();
+                });
+            })))
             .children(self.interfaces.iter().enumerate().map(|(i, d)| {
                 let device = d.clone();
                 let label = if d.channels > 2 { format!("{} · {} inputs", d.name, d.channels) } else { d.name.clone() };
@@ -266,11 +300,14 @@ impl MixerPanel {
             }))
     }
 
-    fn strip(&self, i: usize, track: &Track, shown: [f32; 2], cx: &mut Context<Self>) -> impl IntoElement {
-        let id = track.id;
-        let (muted, cue, volume) = (track.muted, track.cue, track.volume_db);
+    fn strip(&self, i: usize, view: &StripView, shown: [f32; 2], cx: &mut Context<Self>) -> impl IntoElement {
+        let id = view.id;
+        let (muted, cue, volume) = (view.muted, view.cue, view.volume_db);
         let selected = self.studio.read(cx).selected_track == Some(id);
-        let active_fx = track.effects.iter().filter(|e| e.enabled).count();
+        let active_fx = view.fx;
+        let project = self.studio.read(cx).project().clone();
+        let unity = volume_cmd(&project, view.kind, 0.0);
+        let mute = mute_cmd(&project, view.kind, !muted);
 
         // Meters and fader stretch to the strip's height: everything is in fractions of it.
         let meter_bar = |db: f32| {
@@ -336,7 +373,9 @@ impl MixerPanel {
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                     if ev.click_count >= 2 {
-                        this.exec(Command::SetTrackVolume { track: id, volume_db: 0.0 }, cx);
+                        if let Some(cmd) = unity.clone() {
+                            this.exec(cmd, cx);
+                        }
                         return;
                     }
                     this.studio.update(cx, |s, _| s.begin_gesture());
@@ -398,8 +437,20 @@ impl MixerPanel {
                             .font_weight(FontWeight::SEMIBOLD)
                             .overflow_hidden()
                             .text_ellipsis()
-                            .child(track.name.clone()),
+                            .child(view.name.clone()),
                     )
+                    .when_some(view.badge, |d, b| {
+                        d.child(
+                            div()
+                                .px_1()
+                                .rounded(px(3.))
+                                .text_size(px(9.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .bg(tok::bg_app())
+                                .text_color(tok::text_tertiary())
+                                .child(b),
+                        )
+                    })
                     .when(active_fx > 0, |d| {
                         d.child(
                             div()
@@ -438,17 +489,21 @@ impl MixerPanel {
                     .flex()
                     .justify_center()
                     .gap_1()
-                    .child(toggle("cue", "headphones", "Listen in headphones", cue, tok::text()).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.exec(Command::SetTrackCue { track: id, cue: !cue }, cx)
-                        },
-                    )))
+                    .when_some(cue, |d, cue| {
+                        d.child(toggle("cue", "headphones", "Listen in headphones", cue, tok::text()).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.exec(Command::SetTrackCue { track: id, cue: !cue }, cx)
+                            }),
+                        ))
+                    })
                     .child(
                         toggle("mute", if muted { "volume-x" } else { "volume-2" }, "Mute", muted, tok::live())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.exec(Command::SetTrackMuted { track: id, muted: !muted }, cx)
+                                if let Some(cmd) = mute.clone() {
+                                    this.exec(cmd, cx);
+                                }
                             })),
                     ),
             )
@@ -598,4 +653,99 @@ fn strip_menu(
                 .on_click(run(Command::RemoveTrack { track: id })),
         )
     }
+}
+
+/// What a mixer strip shows: a track, a bus, the master or a mix.
+struct StripView {
+    id: Id,
+    kind: MixerStrip,
+    name: String,
+    volume_db: f32,
+    muted: bool,
+    /// Tracks have a cue button.
+    cue: Option<bool>,
+    fx: usize,
+    badge: Option<&'static str>,
+}
+
+impl StripView {
+    fn kind_order(&self) -> u8 {
+        match self.kind {
+            MixerStrip::Track(_) => 0,
+            MixerStrip::Bus(_) => 1,
+            MixerStrip::Master => 2,
+            MixerStrip::Mix(_) => 3,
+        }
+    }
+}
+
+/// Tracks, then buses, the master, and the mixes.
+fn strip_views(p: &Project) -> Vec<StripView> {
+    let on = |e: &[Effect]| e.iter().filter(|e| e.enabled).count();
+    let mut v: Vec<StripView> = p
+        .tracks
+        .iter()
+        .map(|t| StripView {
+            id: t.id,
+            kind: MixerStrip::Track(t.id),
+            name: t.name.clone(),
+            volume_db: t.volume_db,
+            muted: t.muted,
+            cue: Some(t.cue),
+            fx: on(&t.effects),
+            badge: None,
+        })
+        .collect();
+    v.extend(p.audio.buses.iter().map(|b| StripView {
+        id: b.id,
+        kind: MixerStrip::Bus(b.id),
+        name: b.name.clone(),
+        volume_db: b.volume_db,
+        muted: b.muted,
+        cue: None,
+        fx: on(&b.effects),
+        badge: Some("BUS"),
+    }));
+    let m = &p.audio.master;
+    v.push(StripView {
+        id: lightair_core::MASTER_ID,
+        kind: MixerStrip::Master,
+        name: "Program".into(),
+        volume_db: m.volume_db,
+        muted: m.muted,
+        cue: None,
+        fx: on(&m.effects),
+        badge: None, // "Program" says it
+    });
+    v.extend(p.audio.mixes.iter().map(|x| StripView {
+        id: x.id,
+        kind: MixerStrip::Mix(x.id),
+        name: x.name.clone(),
+        volume_db: x.volume_db,
+        muted: x.muted,
+        cue: None,
+        fx: on(&x.effects),
+        badge: Some("MIX"),
+    }));
+    v
+}
+
+/// The command that sets a strip's fader.
+fn volume_cmd(p: &Project, kind: MixerStrip, db: f32) -> Option<Command> {
+    Some(match kind {
+        MixerStrip::Track(track) => Command::SetTrackVolume { track, volume_db: db },
+        MixerStrip::Bus(id) => Command::UpdateBus { bus: Bus { volume_db: db, ..p.audio.bus(id)?.clone() } },
+        MixerStrip::Mix(id) => Command::UpdateMix { mix: AudioMix { volume_db: db, ..p.audio.mix(id)?.clone() } },
+        MixerStrip::Master => Command::UpdateMaster { master: Master { volume_db: db, ..p.audio.master.clone() } },
+    })
+}
+
+/// The command that mutes or unmutes a strip.
+fn mute_cmd(p: &Project, kind: MixerStrip, muted: bool) -> Option<Command> {
+    Some(match kind {
+        MixerStrip::Track(track) => Command::SetTrackMuted { track, muted },
+        MixerStrip::Bus(id) => Command::UpdateBus { bus: Bus { muted, ..p.audio.bus(id)?.clone() } },
+        MixerStrip::Mix(id) => Command::UpdateMix { mix: AudioMix { muted, ..p.audio.mix(id)?.clone() } },
+        MixerStrip::Master => Command::UpdateMaster { master: Master { muted, ..p.audio.master.clone() } },
+    })
 }

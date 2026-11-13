@@ -424,6 +424,60 @@ impl StudioWindow {
                     }
                 }
             }
+            Ok("audio-eq") => {
+                // an EQ on the master, its card open: the response curve in view
+                if let Some(d) = lightair_core::catalog::def("audio.eq") {
+                    let mut effect = d.create();
+                    effect.settings["b1_on"] = serde_json::json!(true);
+                    effect.settings["b5_on"] = serde_json::json!(true);
+                    effect.settings["b5_gain"] = serde_json::json!(4.0);
+                    effect.settings["b8_on"] = serde_json::json!(true);
+                    self.props.open_effect = Some(effect.id);
+                    self.exec(
+                        lightair_core::Command::AddStripEffect { strip: lightair_core::MixerStrip::Master, effect, index: None },
+                        cx,
+                    );
+                    self.studio.update(cx, |s, cx| {
+                        s.selected_layer = None;
+                        s.select_track(Some(lightair_core::MASTER_ID));
+                        cx.notify();
+                    });
+                }
+            }
+            Ok(hook @ ("audio-mixer" | "audio-bus")) => {
+                // a Guests bus, a Headphones mix, the mic routed to the bus and sent to the mix
+                let project = self.studio.read(cx).project().clone();
+                if let Some(t) = project.tracks.first().map(|t| (**t).clone()) {
+                    let bus = lightair_core::Bus::new("Guests");
+                    let mix = lightair_core::AudioMix::new("Headphones");
+                    let (bid, _mid) = (bus.id, mix.id);
+                    self.exec(lightair_core::Command::AddBus { bus, index: None }, cx);
+                    self.exec(lightair_core::Command::AddMix { mix: mix.clone() }, cx);
+                    let track = lightair_core::Track {
+                        route: lightair_core::Route::Bus(bid),
+                        sends: vec![lightair_core::Send { mix: mix.id, level_db: -3.0, pre_fader: true }],
+                        pan: -0.3,
+                        ..t.clone()
+                    };
+                    self.exec(lightair_core::Command::UpdateTrack { track }, cx);
+                    if let Some(d) = lightair_core::catalog::def("audio.limiter") {
+                        self.exec(
+                            lightair_core::Command::AddStripEffect {
+                                strip: lightair_core::MixerStrip::Master,
+                                effect: d.create(),
+                                index: None,
+                            },
+                            cx,
+                        );
+                    }
+                    let sel = if hook == "audio-bus" { bid } else { t.id };
+                    self.studio.update(cx, |s, cx| {
+                        s.selected_layer = None;
+                        s.select_track(Some(sel));
+                        cx.notify();
+                    });
+                }
+            }
             Ok(hook @ ("audio-track" | "audio-sheet")) => {
                 // the first track, its effects open (or the audio catalog over it)
                 let track = self.studio.read(cx).project().tracks.first().map(|t| (**t).clone());
