@@ -68,7 +68,7 @@ pub struct MixerPanel {
     dragging: Option<Id>,
     /// The small sliders (pan, trim, sends): where each is, and the one being dragged.
     knobs: Rc<RefCell<HashMap<Knob, Bounds<Pixels>>>>,
-    knob_drag: Option<Knob>,
+    knob_drag: Option<KnobDrag>,
     /// Displayed (decaying) peak per track and channel, plus the time of the last frame.
     display: HashMap<Id, [f32; 2]>,
     last_frame: Instant,
@@ -205,8 +205,15 @@ impl Render for MixerPanel {
                 if let Some(track) = this.dragging {
                     this.fader_to(track, ev.position.y, cx);
                 }
-                if let Some(knob) = this.knob_drag {
-                    this.knob_to(knob, ev.position.x, cx);
+                match this.knob_drag {
+                    Some(KnobDrag::Slide(knob)) => this.knob_to(knob, ev.position.x, cx),
+                    Some(KnobDrag::Turn { knob, y0, v0 }) => {
+                        // a full sweep over 160 px of travel, up to turn right
+                        let (lo, hi) = knob.range();
+                        let v = (v0 + (y0 - f32::from(ev.position.y)) / 160.0 * (hi - lo)).clamp(lo, hi);
+                        this.knob_value(knob, v, cx);
+                    }
+                    None => {}
                 }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
@@ -370,8 +377,12 @@ impl MixerPanel {
         let Some(b) = self.knobs.borrow().get(&knob).copied() else { return };
         let frac = ((f32::from(x) - f32::from(b.origin.x)) / f32::from(b.size.width).max(1.0)).clamp(0.0, 1.0);
         let (lo, hi) = knob.range();
-        let mut v = lo + frac * (hi - lo);
-        v = match knob {
+        self.knob_value(knob, lo + frac * (hi - lo), cx);
+    }
+
+    /// Sets a knob or slider to `v` (rounded to its step; pan catches the centre).
+    fn knob_value(&self, knob: Knob, v: f32, cx: &mut Context<Self>) {
+        let v = match knob {
             // the centre catches
             Knob::Pan(_) if v.abs() < 0.04 => 0.0,
             Knob::Pan(_) => (v * 100.0).round() / 100.0,
@@ -446,14 +457,99 @@ impl MixerPanel {
                         return;
                     }
                     this.studio.update(cx, |s, _| s.begin_gesture());
-                    this.knob_drag = Some(knob);
+                    this.knob_drag = Some(KnobDrag::Slide(knob));
                     this.knob_to(knob, ev.position.x, cx);
                 }),
             )
     }
 
-    /// A track's or bus's place in the mix, on the strip: output, pan, trim, polarity, mono,
-    /// recording, sends.
+    /// A rotary knob: its name, the knob (an arc from its centre or left end to the value, and
+    /// a pointer), and the value. Drag up or down to turn; double-click resets.
+    fn rotary(&self, id: usize, knob: Knob, value: f32, name: &'static str, text: String, cx: &mut Context<Self>) -> Div {
+        let (lo, hi) = knob.range();
+        let frac = ((value - lo) / (hi - lo)).clamp(0.0, 1.0);
+        let origin = if knob.centred() { ((0.0 - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 0.0 };
+        let (track, fill, pointer) = (tok::bg_app(), tok::accent_primary(), tok::text());
+        let sweep = 135f32.to_radians();
+        let angle = move |f: f32| -sweep + f * 2.0 * sweep;
+        let dial = div()
+            .id(("knob", id))
+            .relative()
+            .size(px(32.))
+            .cursor(CursorStyle::ResizeUpDown)
+            .child(
+                div()
+                    .absolute()
+                    .top(px(5.))
+                    .left(px(5.))
+                    .size(px(22.))
+                    .rounded_full()
+                    .bg(tok::bg_panel())
+                    .border_1()
+                    .border_color(tok::border_strong()),
+            )
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |b, _, window, _| {
+                        let (cx0, cy0) = (
+                            f32::from(b.origin.x) + f32::from(b.size.width) / 2.0,
+                            f32::from(b.origin.y) + f32::from(b.size.height) / 2.0,
+                        );
+                        let at = |a: f32, r: f32| point(px(cx0 + r * a.sin()), px(cy0 - r * a.cos()));
+                        let arc = |from: f32, to: f32, colour: Hsla, window: &mut Window| {
+                            let (a, z) = (angle(from.min(to)), angle(from.max(to)));
+                            let steps = (((z - a) / 0.08).ceil() as usize).max(1);
+                            let mut path = PathBuilder::stroke(px(2.5));
+                            path.move_to(at(a, 14.5));
+                            for k in 1..=steps {
+                                path.line_to(at(a + (z - a) * k as f32 / steps as f32, 14.5));
+                            }
+                            if let Ok(path) = path.build() {
+                                window.paint_path(path, colour);
+                            }
+                        };
+                        arc(0.0, 1.0, track, window);
+                        if (frac - origin).abs() > 0.002 {
+                            arc(origin, frac, fill, window);
+                        }
+                        let mut path = PathBuilder::stroke(px(2.));
+                        path.move_to(at(angle(frac), 3.0));
+                        path.line_to(at(angle(frac), 10.0));
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, pointer);
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if ev.click_count >= 2 {
+                        this.knob_value(knob, knob.reset(), cx);
+                        return;
+                    }
+                    this.studio.update(cx, |s, _| s.begin_gesture());
+                    this.knob_drag = Some(KnobDrag::Turn { knob, y0: f32::from(ev.position.y), v0: value });
+                }),
+            )
+            .tooltip(move |w, cx| {
+                gpui_kit::component::tooltip::Tooltip::new("Drag up or down; double-click resets").build(w, cx)
+            });
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(div().text_size(px(8.5)).font_weight(FontWeight::BOLD).text_color(tok::text_tertiary()).child(name))
+            .child(dial)
+            .child(div().text_size(px(9.5)).font_family("Menlo").text_color(tok::text_secondary()).child(text))
+    }
+
+    /// A track's or bus's place in the mix, on the strip: output, polarity, mono, recording,
+    /// sends (pan and trim are knobs by the fader).
     fn channel(&self, i: usize, view: &StripView, ch: &Channel, project: &Project, cx: &mut Context<Self>) -> Div {
         let id = view.id;
         let label = |text: &'static str| {
@@ -463,16 +559,6 @@ impl MixerPanel {
                 .text_size(px(9.5))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(tok::text_tertiary())
-                .child(text)
-        };
-        let value = |text: String| {
-            div()
-                .w(px(34.))
-                .flex_none()
-                .text_right()
-                .text_size(px(10.))
-                .font_family("Menlo")
-                .text_color(tok::text_secondary())
                 .child(text)
         };
 
@@ -511,13 +597,6 @@ impl MixerPanel {
                 menu
             });
 
-        let pan_text = if ch.pan.abs() < 0.005 {
-            "C".to_string()
-        } else if ch.pan < 0.0 {
-            format!("L{:.0}", -ch.pan * 100.0)
-        } else {
-            format!("R{:.0}", ch.pan * 100.0)
-        };
         let mut col = div()
             .flex()
             .flex_none()
@@ -527,21 +606,7 @@ impl MixerPanel {
             .py_1p5()
             .border_b_1()
             .border_color(tok::border())
-            .child(output)
-            .child(
-                div().flex().items_center().gap_1().child(label("PAN")).child(self.mini(i * 64, Knob::Pan(id), ch.pan, cx)).child(value(pan_text)),
-            );
-        if let Some(trim) = ch.trim_db {
-            col = col.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(label("TRIM"))
-                    .child(self.mini(i * 64 + 1, Knob::Trim(id), trim, cx))
-                    .child(value(format!("{trim:+.1}"))),
-            );
-        }
+            .child(output);
 
         // switches
         let chip = |key: &'static str, text: &'static str, tip: &'static str, on: bool, on_bg: Hsla| {
@@ -982,11 +1047,26 @@ impl MixerPanel {
                 .hover(|d| d.opacity(0.85))
                 .child(label)
         };
+        let pan_text = |pan: f32| {
+            if pan.abs() < 0.005 {
+                "C".to_string()
+            } else if pan < 0.0 {
+                format!("L{:.0}", -pan * 100.0)
+            } else {
+                format!("R{:.0}", pan * 100.0)
+            }
+        };
         let buttons = div()
             .flex()
             .flex_col()
+            .items_center()
             .gap_1p5()
             .h_full()
+            .when_some(view.channel.as_ref(), |d, ch| {
+                d.child(self.rotary(i * 4, Knob::Pan(id), ch.pan, "PAN", pan_text(ch.pan), cx)).when_some(ch.trim_db, |d, t| {
+                    d.child(self.rotary(i * 4 + 1, Knob::Trim(id), t, "TRIM", format!("{t:+.1}"), cx))
+                })
+            })
             .child(div().flex_1())
             .when_some(cue, |d, cue| {
                 d.child(button("cue", "CUE", cue, tok::text()).on_click(cx.listener(move |this, _, _, cx| {
@@ -1004,7 +1084,7 @@ impl MixerPanel {
         let levels = div()
             .flex()
             .flex_1()
-            .min_h(px(132.))
+            .min_h(px(if view.channel.is_some() { 196. } else { 132. }))
             .gap_2()
             .px_2()
             .py_2()
@@ -1321,6 +1401,13 @@ struct Channel {
     mono: Option<bool>,
     record: bool,
     sends: Vec<Send>,
+}
+
+/// What's being dragged: a slider along, or a knob up and down from where it started.
+#[derive(Clone, Copy)]
+enum KnobDrag {
+    Slide(Knob),
+    Turn { knob: Knob, y0: f32, v0: f32 },
 }
 
 /// A small slider on a strip.
