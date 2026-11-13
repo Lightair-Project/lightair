@@ -150,6 +150,8 @@ impl Render for MixerPanel {
 
         let project = self.studio.read(cx).project().clone();
         let mut strips = Vec::new();
+        // Program, pinned to the right edge (the others scroll beside it)
+        let mut master = None;
         let views = strip_views(&project);
         for (i, view) in views.iter().enumerate() {
             // Meter ballistics: rise instantly, fall at 24 dB/s.
@@ -163,12 +165,12 @@ impl Render for MixerPanel {
             let shown = *shown;
             let strip = self.strip(i, view, shown, cx);
             let menu = StripMenu::of(&project, view);
-            if i > 0 && views[i - 1].kind_order() != view.kind_order() {
-                // buses, the master and mixes each start a group
+            let is_master = view.kind == MixerStrip::Master;
+            if i > 0 && !is_master && views[i - 1].kind_order() != view.kind_order() {
+                // buses and mixes each start a group
                 strips.push(div().flex_none().w(px(1.)).h_full().bg(tok::border()).into_any_element());
             }
-            strips.push(
-                div()
+            let el = div()
                     .id(("strip-menu", i))
                     .flex_none()
                     .h_full()
@@ -188,8 +190,12 @@ impl Render for MixerPanel {
                         let f = strip_menu(self.studio.downgrade(), menu);
                         move |m, _, _| f(m)
                     })
-                    .into_any_element(),
-            );
+                    .into_any_element();
+            if is_master {
+                master = Some(el);
+            } else {
+                strips.push(el);
+            }
         }
         self.display.retain(|id, _| MixerStrip::find(&project, *id).is_some());
 
@@ -221,17 +227,37 @@ impl Render for MixerPanel {
             .relative()
             .child(
                 div()
-                    .id("strips")
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .overflow_scroll()
-                    .children(strips)
-                    .when(project.tracks.is_empty(), |d| {
-                        d.child(div().text_color(tok::text_tertiary()).child("No tracks"))
+                    .child(
+                        div()
+                            .id("strips")
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .overflow_scroll()
+                            .children(strips)
+                            .when(project.tracks.is_empty(), |d| {
+                                d.child(div().text_color(tok::text_tertiary()).child("No tracks"))
+                            }),
+                    )
+                    .when_some(master, |d, m| {
+                        d.child(
+                            div()
+                                .id("master-strip")
+                                .flex()
+                                .flex_none()
+                                .px_3()
+                                .py_2()
+                                .border_l_1()
+                                .border_color(tok::border())
+                                .overflow_y_scroll()
+                                .child(m),
+                        )
                     }),
             )
             .when(self.add_track_menu, |d| d.child(self.add_menu(cx)))
@@ -461,6 +487,37 @@ impl MixerPanel {
                     this.knob_to(knob, ev.position.x, cx);
                 }),
             )
+    }
+
+    /// A mix's output: its own only, or into Program too (an effects return).
+    fn mix_output(&self, i: usize, id: Id, on: bool, cx: &mut Context<Self>) -> Div {
+        let me = cx.entity().downgrade();
+        let button = gpui_kit::component::button::Button::new(("mix-out", i))
+            .label(if on { "→ Program + own output" } else { "→ Own output" })
+            .xsmall()
+            .outline()
+            .w_full()
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                for (to, label) in [(false, "Its own output only"), (true, "Into Program too")] {
+                    let me = me.clone();
+                    menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(label).checked(to == on).on_click(
+                        move |_, _, cx| {
+                            if let Some(me) = me.upgrade() {
+                                me.update(cx, |this, cx| {
+                                    let p = this.studio.read(cx).project().clone();
+                                    if let Some(m) = p.audio.mix(id) {
+                                        let mix = AudioMix { to_program: to, ..m.clone() };
+                                        this.exec(Command::UpdateMix { mix }, cx);
+                                    }
+                                });
+                            }
+                        },
+                    ));
+                }
+                menu
+            });
+        div().flex_none().px_2().py_1p5().border_b_1().border_color(tok::border()).child(button)
     }
 
     /// A rotary knob: its name, the knob (an arc from its centre or left end to the value, and
@@ -1116,6 +1173,7 @@ impl MixerPanel {
             .child(header)
             .child(fx)
             .when_some(view.channel.as_ref(), |d, ch| d.child(self.channel(i, view, ch, &project, cx)))
+            .when_some(view.mix_to_program, |d, on| d.child(self.mix_output(i, id, on, cx)))
             .child(levels)
             .child(div().flex_none().px_2().pb_2().child(self.strip_source(i, view, cx)))
     }
@@ -1389,6 +1447,8 @@ struct StripView {
     source: Option<StripSource>,
     /// Where a track or bus goes and what it sends (mixes and the master have none).
     channel: Option<Channel>,
+    /// A mix: whether it's also part of Program.
+    mix_to_program: Option<bool>,
 }
 
 /// A track's or bus's routing, as the strip shows it.
@@ -1637,8 +1697,8 @@ impl StripView {
         match self.kind {
             MixerStrip::Track(_) => 0,
             MixerStrip::Bus(_) => 1,
-            MixerStrip::Master => 2,
-            MixerStrip::Mix(_) => 3,
+            MixerStrip::Mix(_) => 2,
+            MixerStrip::Master => 3,
         }
     }
 }
@@ -1680,6 +1740,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
                 record: t.record,
                 sends: t.sends.clone(),
             }),
+            mix_to_program: None,
         })
         .collect();
     v.extend(p.audio.buses.iter().map(|b| StripView {
@@ -1701,7 +1762,22 @@ fn strip_views(p: &Project) -> Vec<StripView> {
             record: b.record,
             sends: b.sends.clone(),
         }),
+        mix_to_program: None,
     }));
+    v.extend(p.audio.mixes.iter().map(|x| StripView {
+        id: x.id,
+        kind: MixerStrip::Mix(x.id),
+        name: x.name.clone(),
+        volume_db: x.volume_db,
+        muted: x.muted,
+        cue: None,
+        effects: on(&x.effects),
+        badge: Some("MIX"),
+        source: None,
+        channel: None,
+        mix_to_program: Some(x.to_program),
+    }));
+    // Program last: always the right-most strip
     let m = &p.audio.master;
     v.push(StripView {
         id: lightair_core::MASTER_ID,
@@ -1714,19 +1790,8 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         badge: None, // "Program" says it
         source: None,
         channel: None,
+        mix_to_program: None,
     });
-    v.extend(p.audio.mixes.iter().map(|x| StripView {
-        id: x.id,
-        kind: MixerStrip::Mix(x.id),
-        name: x.name.clone(),
-        volume_db: x.volume_db,
-        muted: x.muted,
-        cue: None,
-        effects: on(&x.effects),
-        badge: Some("MIX"),
-        source: None,
-        channel: None,
-    }));
     v
 }
 
