@@ -173,6 +173,9 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
     use std::time::{Duration, Instant};
 
     let started = Instant::now();
+    // Polite: the build and the tests run at a lower priority, so the Mac stays responsive
+    // (typing elsewhere keeps up) while they run.
+    unsafe { setpriority(0, 0, 10) };
     let mut build = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .args(["test", "--workspace", "--no-run", "--message-format=json-render-diagnostics"])
         .current_dir(root())
@@ -236,7 +239,8 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
     let (alone, together): (Vec<TestBin>, Vec<TestBin>) =
         bins.into_iter().partition(|b| ALONE.contains(&b.name.as_str()));
 
-    let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+    // half the cores: each program runs libobs and real-time audio threads of its own
+    let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8).div_ceil(2).max(2);
     let results = Arc::new(Mutex::new(Vec::new()));
     run_tests(together, jobs, &args, &results);
     run_tests(alone, 1, &args, &results);
@@ -328,4 +332,9 @@ fn run_tests(
     for w in workers {
         let _ = w.join();
     }
+}
+
+unsafe extern "C" {
+    /// POSIX: (PRIO_PROCESS = 0, this process = 0, niceness). Children inherit it.
+    fn setpriority(which: i32, who: u32, prio: i32) -> i32;
 }
