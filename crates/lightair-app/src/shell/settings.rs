@@ -710,6 +710,52 @@ impl StudioWindow {
                     )),
             )
             .child(group("Audio").child(row("Quality", None, chips("rec-audio", audio, cx))))
+            .child(self.multitrack_group(&rec, cx))
+    }
+
+    /// Multitrack audio: each track (or those marked Record) to its own file.
+    fn multitrack_group(&self, rec: &RecordingSettings, cx: &mut Context<Self>) -> Div {
+        use lightair_core::{StemFormat, StemPoint};
+        let set = |r: RecordingSettings| Command::SetRecordingSettings { settings: r };
+        let (multi, only) = (rec.multitrack, rec.audio_only);
+        let (m, o) = (set(RecordingSettings { multitrack: !multi, ..rec.clone() }), set(RecordingSettings { audio_only: !only, ..rec.clone() }));
+        let formats: Vec<(String, bool, bool, Command)> = [(StemFormat::Pcm24, "24-bit"), (StemFormat::Float32, "32-bit float")]
+            .into_iter()
+            .map(|(f, l)| (l.to_string(), rec.stem_format == f, multi || only, set(RecordingSettings { stem_format: f, ..rec.clone() })))
+            .collect();
+        let points: Vec<(String, bool, bool, Command)> =
+            [(StemPoint::Raw, "Before effects"), (StemPoint::PreFader, "After effects"), (StemPoint::PostFader, "As mixed")]
+                .into_iter()
+                .map(|(p, l)| (l.to_string(), rec.stem_point == p, multi || only, set(RecordingSettings { stem_point: p, ..rec.clone() })))
+                .collect();
+        group("Multitrack audio")
+            .child(row(
+                "Each track to its own file",
+                Some("WAV files beside the video, lined up to the sample. Tracks marked Record, or all of them."),
+                switch("rec-multi", multi).on_click(cx.listener(move |this, _, _, cx| this.exec(m.clone(), cx))),
+            ))
+            .child(row(
+                "Audio only",
+                Some("Podcasts and music: the track files and the mix, no video."),
+                switch("rec-audio-only", only).on_click(cx.listener(move |this, _, _, cx| this.exec(o.clone(), cx))),
+            ))
+            .child(row(
+                "Format",
+                Some(match rec.stem_format {
+                    StemFormat::Pcm24 => "Opens in every editor and DAW.",
+                    StemFormat::Float32 => "Can't clip: for music.",
+                }),
+                chips("rec-stem-format", formats, cx),
+            ))
+            .child(row(
+                "Record",
+                Some(match rec.stem_point {
+                    StemPoint::Raw => "The clean sources, to process later.",
+                    StemPoint::PreFader => "With each track's effects, at full level.",
+                    StemPoint::PostFader => "As the mix has them: faders and pan.",
+                }),
+                chips("rec-stem-point", points, cx),
+            ))
     }
 
     fn streaming_page(&self, cx: &mut Context<Self>) -> Div {

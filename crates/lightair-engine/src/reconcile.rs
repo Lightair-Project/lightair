@@ -262,6 +262,77 @@ impl Reconciler {
         host.set_meter_cells(cells);
     }
 
+    /// Starts recording multitrack files into `folder`, named "<base> - <strip>.wav": the
+    /// tracks and buses marked Record (every track when none is), and the program mix when
+    /// `program` (audio-only recordings). Returns the files.
+    pub fn start_stems(
+        &mut self,
+        project: &Project,
+        folder: &std::path::Path,
+        base: &str,
+        program: bool,
+    ) -> Result<Vec<std::path::PathBuf>, String> {
+        let settings = &project.outputs.recording;
+        let host = self.audio.as_mut().ok_or("the audio engine isn't running")?;
+        let tap = match settings.stem_point {
+            lightair_core::StemPoint::Raw => lightair_audio::Tap::Input,
+            lightair_core::StemPoint::PreFader => lightair_audio::Tap::PreFader,
+            lightair_core::StemPoint::PostFader => lightair_audio::Tap::PostFader,
+        };
+        let float = settings.stem_format == lightair_core::StemFormat::Float32;
+        let marked = project.tracks.iter().any(|t| t.record) || project.audio.buses.iter().any(|b| b.record);
+        let mut strips: Vec<(lightair_audio::NodeId, String, u16)> = project
+            .tracks
+            .iter()
+            .filter(|t| t.record || !marked)
+            .map(|t| {
+                // a mono channel records as mono (before the pan it's the same on both sides)
+                let ch = if matches!(t.channels, lightair_core::TrackChannels::Mono(_)) && tap != lightair_audio::Tap::PostFader {
+                    1
+                } else {
+                    2
+                };
+                (crate::audio::node(t.id), t.name.clone(), ch)
+            })
+            .collect();
+        strips.extend(project.audio.buses.iter().filter(|b| b.record).map(|b| (crate::audio::node(b.id), b.name.clone(), 2)));
+        if program {
+            strips.push((lightair_audio::PROGRAM, "Program".into(), 2));
+        }
+        if strips.is_empty() {
+            return Err("no tracks to record".into());
+        }
+        std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
+        let clean = |n: &str| n.chars().map(|c| if "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect::<String>();
+        let mut used = HashSet::new();
+        let specs = strips
+            .into_iter()
+            .map(|(id, name, channels)| {
+                let mut file = format!("{base} - {}.wav", clean(&name));
+                let mut n = 2;
+                while !used.insert(file.clone()) {
+                    file = format!("{base} - {} {n}.wav", clean(&name));
+                    n += 1;
+                }
+                crate::audio_host::StemSpec { id, path: folder.join(file), channels, tap, float }
+            })
+            .collect::<Vec<_>>();
+        let files = specs.iter().map(|s| s.path.clone()).collect();
+        host.start_stems(specs)?;
+        Ok(files)
+    }
+
+    /// Stops the multitrack files; what they hold.
+    pub fn stop_stems(&mut self) -> Option<crate::audio_host::StemReport> {
+        self.audio.as_mut()?.stop_stems()
+    }
+
+    pub fn pause_stems(&mut self, pause: bool) {
+        if let Some(h) = self.audio.as_mut() {
+            h.pause_stems(pause);
+        }
+    }
+
     /// A track's, bus's, mix's or the program's meter from the audio engine.
     pub fn audio_meter(&mut self, id: Id) -> Option<Arc<lightair_audio::meter::Meter>> {
         Some(self.audio.as_mut()?.meter(crate::audio::node(id)))
