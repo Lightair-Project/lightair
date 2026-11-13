@@ -273,11 +273,18 @@ impl Reconciler {
             }
         }
         host.set(crate::audio::spec(project));
-        let cells = project
+        let mut cells: Vec<_> = project
             .tracks
             .iter()
             .filter_map(|t| meters().get(t.id).map(|cell| (crate::audio::node(t.id), cell)))
             .collect();
+        // buses, mixes and the master show in the mixer too
+        for id in project.audio.buses.iter().map(|b| b.id).chain(project.audio.mixes.iter().map(|m| m.id)) {
+            let cell = meters().get(id).unwrap_or_else(|| meters().insert(id));
+            cells.push((crate::audio::node(id), cell));
+        }
+        let master = meters().get(lightair_core::MASTER_ID).unwrap_or_else(|| meters().insert(lightair_core::MASTER_ID));
+        cells.push((lightair_audio::PROGRAM, master));
         host.set_meter_cells(cells);
     }
 

@@ -490,6 +490,7 @@ impl StudioWindow {
         )
         .children(project.inputs.get(&track.input).and_then(|i| self.source_section(&i.clone(), cx)))
         .children(self.track_channels(project, track, cx))
+        .child(self.track_routing(project, track, cx))
         .child({
             let rec = track.record;
             let cmd = Command::UpdateTrack { track: lightair_core::Track { record: !rec, ..track.clone() } };

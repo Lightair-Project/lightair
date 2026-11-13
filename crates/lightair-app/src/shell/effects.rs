@@ -25,6 +25,8 @@ use crate::ui::{self, tok};
 pub(super) enum Owner {
     Input(Id),
     Track(Id),
+    /// A bus, mix or the master.
+    Strip(lightair_core::MixerStrip),
 }
 
 impl Owner {
@@ -32,24 +34,28 @@ impl Owner {
         match self {
             Owner::Input(input) => Command::AddInputEffect { input, effect, index },
             Owner::Track(track) => Command::AddEffect { track, effect, index },
+            Owner::Strip(strip) => Command::AddStripEffect { strip, effect, index },
         }
     }
     fn remove(self, effect: Id) -> Command {
         match self {
             Owner::Input(input) => Command::RemoveInputEffect { input, effect },
             Owner::Track(track) => Command::RemoveEffect { track, effect },
+            Owner::Strip(strip) => Command::RemoveStripEffect { strip, effect },
         }
     }
     fn enable(self, effect: Id, enabled: bool) -> Command {
         match self {
             Owner::Input(input) => Command::SetInputEffectEnabled { input, effect, enabled },
             Owner::Track(track) => Command::SetEffectEnabled { track, effect, enabled },
+            Owner::Strip(strip) => Command::SetStripEffectEnabled { strip, effect, enabled },
         }
     }
     fn settings(self, effect: Id, settings: Value) -> Command {
         match self {
             Owner::Input(input) => Command::SetInputEffectSettings { input, effect, settings },
             Owner::Track(track) => Command::SetEffectSettings { track, effect, settings },
+            Owner::Strip(strip) => Command::SetStripEffectSettings { strip, effect, settings },
         }
     }
     /// Its effects and name.
@@ -57,10 +63,18 @@ impl Owner {
         match self {
             Owner::Input(id) => project.inputs.get(&id).map(|i| (i.name.clone(), i.effects.clone())),
             Owner::Track(id) => project.track(id).map(|t| (t.name.clone(), t.effects.clone())),
+            Owner::Strip(lightair_core::MixerStrip::Bus(id)) => {
+                project.audio.bus(id).map(|b| (b.name.clone(), b.effects.clone()))
+            }
+            Owner::Strip(lightair_core::MixerStrip::Mix(id)) => {
+                project.audio.mix(id).map(|m| (m.name.clone(), m.effects.clone()))
+            }
+            Owner::Strip(lightair_core::MixerStrip::Master) => Some(("Program".into(), project.audio.master.effects.clone())),
+            Owner::Strip(lightair_core::MixerStrip::Track(id)) => project.track(id).map(|t| (t.name.clone(), t.effects.clone())),
         }
     }
     fn audio(self) -> bool {
-        matches!(self, Owner::Track(_))
+        !matches!(self, Owner::Input(_))
     }
 }
 
@@ -116,6 +130,16 @@ impl StudioWindow {
         self.effect_stack(Owner::Input(input.id), &input.effects, cx)
     }
 
+    /// A bus's, mix's or the master's effects.
+    pub(super) fn strip_effects_section(
+        &self,
+        strip: lightair_core::MixerStrip,
+        effects: &[Effect],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.effect_stack(Owner::Strip(strip), effects, cx)
+    }
+
     /// A mixer track's effects: the same cards, from the audio catalog.
     pub(super) fn track_effects_section(&self, track: &lightair_core::Track, cx: &mut Context<Self>) -> AnyElement {
         self.effect_stack(Owner::Track(track.id), &track.effects, cx)
@@ -159,7 +183,7 @@ impl StudioWindow {
         }
         let presence = match iid {
             Owner::Input(id) => self.presence.get(&id).copied().unwrap_or_default(),
-            Owner::Track(_) => Presence::default(),
+            Owner::Track(_) | Owner::Strip(_) => Presence::default(),
         };
         for (i, e) in effects.iter().enumerate() {
             col = col.child(self.effect_card(iid, effects.len(), i, e, presence, cx));
@@ -337,6 +361,9 @@ impl StudioWindow {
         let eid = e.id;
         let set = move |settings: Value| iid.settings(eid, settings);
         let mut col = div().flex().flex_col().gap_1p5().px_2().pb_2().pt_0p5();
+        if d.kind == "audio.eq" {
+            col = col.child(eq_curve(e));
+        }
         let mut group_open = true;
         let mut first_heading = true;
         let system = e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM);
@@ -1139,6 +1166,62 @@ fn system_effect_panel(kind: &str, cx: &mut Context<StudioWindow>) -> Div {
                     cx.notify();
                 })),
         )
+}
+
+/// The EQ's response, drawn: 20 Hz to 20 kHz across, ±18 dB up and down, with the engine's
+/// own filters (what's drawn is what's heard).
+fn eq_curve(e: &Effect) -> impl IntoElement {
+    let Some(lightair_audio::dsp::Params::Eq(p)) = lightair_engine::audio::params(e) else {
+        return div().into_any_element();
+    };
+    const N: usize = 120;
+    let (lo, hi) = (20f32.log10(), 20_000f32.log10());
+    let x_of = move |f: f32| (f.log10() - lo) / (hi - lo);
+    let curve: Vec<(f32, f32)> = (0..N)
+        .map(|i| {
+            let t = i as f32 / (N - 1) as f32;
+            let f = 10f32.powf(lo + t * (hi - lo));
+            let db = p.response_db(f, 48_000.0).clamp(-18.0, 18.0);
+            (t, 0.5 - db / 36.0)
+        })
+        .collect();
+    let (line, grid, accent) = (tok::border(), tok::border_strong(), tok::accent_primary());
+    div()
+        .h(px(84.))
+        .w_full()
+        .rounded(px(6.))
+        .bg(tok::bg_app())
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let (o, w, h) = (bounds.origin, f32::from(bounds.size.width), f32::from(bounds.size.height));
+                    let at = |x: f32, y: f32| point(o.x + px(x * w), o.y + px(y * h));
+                    let mut stroke = |pts: &[(f32, f32)], width: f32, colour: Hsla| {
+                        let mut path = PathBuilder::stroke(px(width));
+                        path.move_to(at(pts[0].0, pts[0].1));
+                        for p in &pts[1..] {
+                            path.line_to(at(p.0, p.1));
+                        }
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, colour);
+                        }
+                    };
+                    for db in [-12.0f32, 12.0] {
+                        let y = 0.5 - db / 36.0;
+                        stroke(&[(0.0, y), (1.0, y)], 1.0, line);
+                    }
+                    stroke(&[(0.0, 0.5), (1.0, 0.5)], 1.0, grid);
+                    for f in [100.0, 1000.0, 10_000.0] {
+                        let x = x_of(f);
+                        stroke(&[(x, 0.0), (x, 1.0)], 1.0, line);
+                    }
+                    stroke(&curve, 2.0, accent);
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
 }
 
 fn control_row(label: &'static str, control: impl IntoElement) -> Div {
