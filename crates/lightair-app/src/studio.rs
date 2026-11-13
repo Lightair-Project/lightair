@@ -16,6 +16,15 @@ use lightair_engine::outputs::{
 use lightair_engine::{Engine, Stats};
 use lightair_store::Package;
 
+/// What a panel (the mixer) asks the window to show.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UiRequest {
+    /// A strip's effect, open in the Inspector.
+    OpenEffect(lightair_core::MixerStrip, Id),
+    /// The effect catalog for a strip.
+    AddEffect(lightair_core::MixerStrip),
+}
+
 pub struct Studio {
     doc: Document,
     package: Option<Package>,
@@ -29,6 +38,8 @@ pub struct Studio {
     pub selected_track: Option<Id>,
     /// Last user-visible problem, shown in the status bar.
     pub issue: Option<SharedString>,
+    /// Something a panel asks the window to show (the window takes it when it sees it).
+    pub ui_request: Option<UiRequest>,
     pub stats: Stats,
     /// Clips announced so far (to report each new one once).
     clips_seen: u32,
@@ -67,6 +78,7 @@ impl Studio {
             selected_layer: None,
             also_selected: Vec::new(),
             selected_track: None,
+            ui_request: None,
             issue,
             stats: Stats::default(),
             clips_seen: 0,

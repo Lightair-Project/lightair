@@ -1048,6 +1048,28 @@ impl StudioWindow {
             .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(tok::text_tertiary()).child(note))
     }
 
+    /// What the mixer asked for: a strip's effect open in the Inspector, or its catalog.
+    pub(crate) fn take_ui_request(&mut self, req: crate::studio::UiRequest, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::studio::UiRequest;
+        let strip = match req {
+            UiRequest::OpenEffect(s, _) | UiRequest::AddEffect(s) => s,
+        };
+        let id = strip.id();
+        self.studio.update(cx, |s, _| {
+            s.selected_layer = None;
+            s.select_track(Some(id));
+        });
+        let owner = match strip {
+            lightair_core::MixerStrip::Track(t) => Owner::Track(t),
+            other => Owner::Strip(other),
+        };
+        match req {
+            UiRequest::OpenEffect(_, e) => self.props.open_effect = Some(e),
+            UiRequest::AddEffect(_) => self.open_effect_catalog(owner, Page::All, window, cx),
+        }
+        cx.notify();
+    }
+
     /// The installed plugins, fresh each time the audio catalog opens (one installed meanwhile
     /// shows up): Audio Units at once, VST3 when its scan is done (new bundles are probed in a
     /// helper process, then remembered).

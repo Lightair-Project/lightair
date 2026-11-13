@@ -184,7 +184,8 @@ impl StudioWindow {
                         .panel_view(panel_handle(mixer), cx)
                         .panel_view(panel_handle(assets), cx)
                         .active_index(usize::from(std::env::var("LIGHTAIR_OPEN").as_deref() == Ok("assets"))),
-                    Some(px(230.)),
+                    // tall enough for a full channel strip
+                    Some(px(340.)),
                 ),
                 window,
                 cx,

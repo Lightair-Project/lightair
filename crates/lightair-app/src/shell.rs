@@ -368,9 +368,12 @@ const SNAP_PX: f32 = 8.0;
 
 impl StudioWindow {
     pub fn new(studio: Entity<Studio>, preview: Preview, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe(&studio, |this, _, cx| {
+        cx.observe_in(&studio, window, |this, studio, window, cx| {
             this.sync_studio_preview(cx);
             this.prune_plugin_editors(cx);
+            if let Some(req) = studio.update(cx, |s, _| s.ui_request.take()) {
+                this.take_ui_request(req, window, cx);
+            }
             cx.notify()
         })
         .detach();
