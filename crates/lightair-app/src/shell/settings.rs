@@ -235,6 +235,31 @@ impl StudioWindow {
         self.set_pref(|p| p.global_hotkeys = list, cx);
     }
 
+    /// The audio engine's buffer (frames), now and from now on.
+    fn set_audio_block(&mut self, frames: usize, cx: &mut Context<Self>) {
+        let project = self.studio.read(cx).project().clone();
+        let done = self.studio.read(cx).engine().call(move |s| s.reconciler.set_audio_block(frames, &project));
+        if done {
+            self.set_pref(|p| p.audio_block = frames, cx);
+        } else {
+            self.studio.update(cx, |s, _| s.issue = Some("Change the buffer after the recording ends.".into()));
+        }
+    }
+
+    /// Sets the mixer up as a template (one undo step), with the settings it wants.
+    pub(super) fn use_audio_template(&mut self, t: lightair_core::templates::Template, cx: &mut Context<Self>) {
+        let project = self.studio.read(cx).project().clone();
+        self.exec(crate::mixer::template_command(&project, t), cx);
+        if let Some(frames) = t.block() {
+            self.set_audio_block(frames, cx);
+        }
+        if t == lightair_core::templates::Template::Podcast {
+            crate::prefs::LOUDNESS_TARGET.store(-16, std::sync::atomic::Ordering::Relaxed);
+            self.set_pref(|p| p.loudness_target = -16, cx);
+        }
+        cx.notify();
+    }
+
     /// Tells the audio engine where and what to monitor, from the preferences.
     fn apply_monitor(&self, cx: &mut Context<Self>) {
         let p = &self.prefs;
@@ -480,6 +505,26 @@ impl StudioWindow {
                 },
             )));
         }
+        let block = prefs.audio_block;
+        let mut blocks = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
+        for (i, frames) in lightair_engine::audio_host::BLOCKS.into_iter().enumerate() {
+            let ms = frames as f32 * 1000.0 / running.max(1) as f32;
+            blocks = blocks.child(
+                pref_chip(("audio-block", i), format!("{frames} · {ms:.1} ms"), block == frames)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_audio_block(frames, cx))),
+            );
+        }
+        let mut templates = group("Start from a template");
+        for (i, t) in lightair_core::templates::Template::ALL.into_iter().enumerate() {
+            templates = templates.child(row(
+                t.name(),
+                Some(t.description()),
+                Button::new(("audio-template", i)).label("Use").small().outline().on_click(
+                    cx.listener(move |this, _, _, cx| this.use_audio_template(t, cx)),
+                ),
+            ));
+        }
+        templates = templates.child(note("Replaces the mixer's tracks, buses and mixes. Undo brings them back."));
         let target = prefs.loudness_target;
         let mut targets = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
         for (i, (t, label)) in
@@ -506,6 +551,7 @@ impl StudioWindow {
                     ))
                     .child(row("Hear", Some("The tracks you cue, or exactly what viewers hear."), hear)),
             )
+            .child(templates)
             .child(
                 group("Loudness")
                     .child(row("Target", Some("The mixer's LUFS readout turns green on it."), targets))
@@ -514,6 +560,11 @@ impl StudioWindow {
             .child(
                 group("Engine")
                     .child(row("Sample rate", Some("48 kHz suits video; 44.1 kHz matches music files."), rate_chips))
+                    .child(row(
+                        "Buffer",
+                        Some("Smaller: less delay when you monitor yourself. Larger: lighter on the Mac."),
+                        blocks,
+                    ))
                     .when(rate != running, |g| {
                         g.child(
                             div()

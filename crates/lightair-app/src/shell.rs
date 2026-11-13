@@ -59,6 +59,7 @@ actions!(
         AddMarker,
         SelectAll,
         OpenSettings,
+        OpenAudioSettings,
         ToggleRotateTool,
         ToggleMics,
         GroupSelection,
@@ -1549,6 +1550,7 @@ impl Render for StudioWindow {
             }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
+            .on_action(cx.listener(|this, _: &OpenAudioSettings, _, cx| this.open_settings(settings::Page::Audio, cx)))
             .on_action(cx.listener(|this, _: &ToggleRotateTool, _, cx| {
                 this.rotate_tool = !this.rotate_tool;
                 this.gizmo_hover = None;

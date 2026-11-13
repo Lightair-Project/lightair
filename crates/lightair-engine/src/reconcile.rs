@@ -55,6 +55,8 @@ pub struct Reconciler {
     /// The direct monitor wanted: output device ("" default) and whether it plays the program
     /// (else the cue mix). Applied whenever the audio engine runs.
     monitor: Option<(String, bool)>,
+    /// Frames per audio block (`None`: the default).
+    audio_block: Option<usize>,
     /// Each format's output channel goes through its own transition.
     transitions: HashMap<Id, Source>,
     transition_settings: TransitionSettings,
@@ -244,7 +246,8 @@ impl Reconciler {
             let mut info = sys::obs_audio_info::default();
             let rate = if unsafe { sys::obs_get_audio_info(&mut info) } { info.samples_per_sec } else { 48_000 };
             crate::plugins::set_sample_rate(rate);
-            self.audio = crate::audio_host::AudioHost::start(rate);
+            let block = self.audio_block.unwrap_or(crate::audio_host::BLOCK);
+            self.audio = crate::audio_host::AudioHost::start(rate, block);
         }
         let Some(host) = self.audio.as_mut() else { return };
         let monitor = self.monitor.clone().map(|(d, program)| (d, if program { lightair_audio::PROGRAM } else { crate::audio::CUE }));
@@ -293,6 +296,23 @@ impl Reconciler {
     /// Starts recording multitrack files into `folder`, named "<base> - <strip>.wav": the
     /// tracks and buses marked Record (every track when none is), and the program mix when
     /// `program` (audio-only recordings). Returns the files.
+    /// Sets the audio engine's block size (frames): smaller is lower latency, larger a lighter
+    /// load. Restarts the engine if it's running (not while multitrack files record: false).
+    pub fn set_audio_block(&mut self, frames: usize, project: &Project) -> bool {
+        if self.audio_block == Some(frames) {
+            return true;
+        }
+        if crate::audio_host::STEMS_RUNNING.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        self.audio_block = Some(frames);
+        if self.audio.as_ref().is_some_and(|a| a.block() != frames) {
+            self.audio = None;
+            self.sync_audio(project);
+        }
+        true
+    }
+
     /// Plays the mixer again (a plugin insert finished loading: [`crate::plugins::changed`]).
     pub fn refresh_audio(&mut self, project: &Project) {
         self.sync_audio(project);

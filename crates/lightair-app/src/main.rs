@@ -78,7 +78,12 @@ fn main() {
     }
     let monitor = prefs.direct_monitor.then(|| prefs.monitor_device.clone().map_or(String::new(), |(name, _)| name));
     let program = prefs.monitor_program;
-    engine.call(move |s| s.reconciler.set_monitor(monitor, program));
+    let block = prefs.audio_block;
+    engine.call(move |s| {
+        s.reconciler.set_monitor(monitor, program);
+        // before the engine starts: nothing to restart
+        s.reconciler.set_audio_block(block, &lightair_core::Project::new(""));
+    });
     if let Ok(what) = std::env::var("LIGHTAIR_SELFTEST") {
         selftest::run(&engine, &what);
         return;

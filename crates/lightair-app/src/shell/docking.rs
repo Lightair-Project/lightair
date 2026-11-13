@@ -447,6 +447,16 @@ impl StudioWindow {
                     }
                 }
             }
+            Ok("audio-template") => {
+                // the Streaming template (it changes no preferences), the mic selected
+                self.use_audio_template(lightair_core::templates::Template::Streaming, cx);
+                let first = self.studio.read(cx).project().tracks.first().map(|t| t.id);
+                self.studio.update(cx, |s, cx| {
+                    s.selected_layer = None;
+                    s.select_track(first);
+                    cx.notify();
+                });
+            }
             Ok("audio-eq") => {
                 // an EQ on the master, its card open: the response curve in view
                 if let Some(d) = lightair_core::catalog::def("audio.eq") {
