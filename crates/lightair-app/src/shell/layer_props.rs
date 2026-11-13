@@ -5,6 +5,7 @@
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
@@ -427,12 +428,58 @@ impl StudioWindow {
             return None;
         }
         let device = input.settings["device"].as_str().unwrap_or("").to_string();
-        let channels = {
+        let devices = {
             let mut cache = self.interfaces.borrow_mut();
             if cache.0.elapsed() > std::time::Duration::from_secs(5) || cache.1.is_empty() {
                 *cache = (std::time::Instant::now(), lightair_engine::devices::input_devices());
             }
-            cache.1.iter().find(|d| if device.is_empty() { d.default } else { d.name == device }).map_or(2, |d| d.channels)
+            cache.1.clone()
+        };
+        let channels = devices
+            .iter()
+            .find(|d| if device.is_empty() { d.default } else { d.name == device })
+            .map_or(2, |d| d.channels);
+        // the device: the system default, or any input the Mac has
+        let picker = {
+            let me = cx.entity().downgrade();
+            let (input_id, track) = (input.id, track.clone());
+            let base = input.settings.clone();
+            let current = device.clone();
+            Button::new("track-device")
+                .label(if device.is_empty() { "System default".to_string() } else { device.clone() })
+                .small()
+                .outline()
+                .dropdown_menu(move |mut menu, _, _| {
+                    let mut choices = vec![(String::new(), "System default".to_string())];
+                    choices.extend(devices.iter().map(|d| {
+                        let n = if d.channels == 1 { "1 input".to_string() } else { format!("{} inputs", d.channels) };
+                        (d.name.clone(), format!("{} · {n}", d.name))
+                    }));
+                    for (value, label) in choices {
+                        let (me, track) = (me.clone(), track.clone());
+                        let mut settings = base.clone();
+                        settings["device"] = serde_json::Value::String(value.clone());
+                        let on = value == current;
+                        menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(label).checked(on).on_click(
+                            move |_, _, cx| {
+                                // another device has other channels: start from all of them
+                                let cmd = Command::Batch {
+                                    label: "Change input device".into(),
+                                    commands: vec![
+                                        Command::SetInputSettings { input: input_id, settings: settings.clone() },
+                                        Command::UpdateTrack {
+                                            track: lightair_core::Track { channels: TrackChannels::All, ..track.clone() },
+                                        },
+                                    ],
+                                };
+                                if let Some(me) = me.upgrade() {
+                                    me.update(cx, |this, cx| this.exec(cmd, cx));
+                                }
+                            },
+                        ));
+                    }
+                    menu
+                })
         };
         let set = |c: TrackChannels| Command::UpdateTrack { track: lightair_core::Track { channels: c, ..track.clone() } };
         let mut options = vec![("All".to_string(), TrackChannels::All)];
@@ -462,11 +509,20 @@ impl StudioWindow {
             self.section("Input", None, cx)
                 .child(
                     div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(div().text_size(px(12.)).child("Device"))
+                        .child(picker),
+                )
+                .child(
+                    div()
                         .text_size(px(11.))
                         .text_color(tok::text_tertiary())
-                        .child(format!("{} · {channels} channels", if device.is_empty() { "Default input" } else { &device })),
+                        .child(if channels == 1 { "1 channel".to_string() } else { format!("{channels} channels: all, one, or a pair") }),
                 )
-                .child(row)
+                .when(channels > 1, |d| d.child(row))
                 .into_any_element(),
         )
     }

@@ -224,7 +224,7 @@ impl Reconciler {
                     | Patch::AudioSetup
                     | Patch::InputAdded(_)
                     | Patch::InputRemoved(_)
-            )
+            ) || matches!(p, Patch::InputChanged { after, .. } if after.kind == crate::devices::DEVICE_KIND)
         });
         if audio_changed {
             self.sync_audio(project);

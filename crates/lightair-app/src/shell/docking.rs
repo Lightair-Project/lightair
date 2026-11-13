@@ -447,6 +447,10 @@ impl StudioWindow {
                     }
                 }
             }
+            Ok("audio-add") => {
+                // the mixer's add menu, open
+                self.mixer.update(cx, |m, cx| m.toggle_add_track(window, cx));
+            }
             Ok("audio-template") => {
                 // the Streaming template (it changes no preferences), the mic selected
                 self.use_audio_template(lightair_core::templates::Template::Streaming, cx);
