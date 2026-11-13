@@ -872,11 +872,28 @@ impl MixerPanel {
             .overflow_y_scroll()
             .border_b_1()
             .border_color(tok::border());
+        let home = crate::effect_drag::Home::Strip(kind);
+        let drop_at = move |before: Option<Id>| {
+            move |this: &mut MixerPanel, d: &crate::effect_drag::DraggedEffect, _: &mut Window, cx: &mut Context<MixerPanel>| {
+                let p = this.studio.read(cx).project().clone();
+                if let Some(cmd) = crate::effect_drag::move_cmd(&p, d, home, before) {
+                    this.exec(cmd, cx);
+                }
+            }
+        };
         for (n, (eid, name, on)) in view.effects.iter().cloned().enumerate() {
             let cmd = Command::SetStripEffectEnabled { strip: kind, effect: eid, enabled: !on };
             let open = request.clone();
+            let dragged = crate::effect_drag::DraggedEffect { home, effect: eid, name: name.clone().into() };
             fx = fx.child(
                 div()
+                    .id(("fx-row", i * 64 + n))
+                    // drag to reorder (or onto another strip); dropped here, it goes before this one
+                    .on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone()))
+                    .drag_over::<crate::effect_drag::DraggedEffect>(|s, _, _, _| {
+                        s.border_t_2().border_color(tok::accent_primary())
+                    })
+                    .on_drop(cx.listener(drop_at(Some(eid))))
                     .flex()
                     .flex_none()
                     .items_center()
@@ -934,6 +951,10 @@ impl MixerPanel {
         fx = fx.child(
             div()
                 .id(("fx-add", i))
+                .drag_over::<crate::effect_drag::DraggedEffect>(|s, _, _, _| {
+                    s.border_t_2().border_color(tok::accent_primary())
+                })
+                .on_drop(cx.listener(drop_at(None)))
                 .flex()
                 .flex_1()
                 .min_h(px(24.))

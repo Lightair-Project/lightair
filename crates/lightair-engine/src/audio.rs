@@ -291,4 +291,37 @@ mod tests {
         assert_eq!(d.source, node(src));
         assert!((d.amount_db - 12.0).abs() < 1e-6);
     }
+
+    #[test]
+    fn the_engine_chain_follows_the_project_order() {
+        use lightair_core::{Command, Document, MixerStrip};
+        let mut doc = Document::new(Project::new("Order"));
+        let mic = Input::new("Mic", "lightair_audio_device", json!({}));
+        let mut t = Track::new("Host", mic.id);
+        let names = ["audio.gate", "audio.eq", "audio.compressor", "audio.limiter"];
+        t.effects = names.iter().map(|k| Effect::new(*k, *k, json!({}))).collect();
+        let (tid, ids): (Id, Vec<Id>) = (t.id, t.effects.iter().map(|e| e.id).collect());
+        doc.apply(&Command::AddInput { input: mic }).unwrap();
+        doc.apply(&Command::AddTrack { track: t, index: None }).unwrap();
+        let order = |doc: &Document| -> Vec<&'static str> {
+            let g = spec(doc.project());
+            g.strips.iter().find(|s| s.id == node(tid)).unwrap().inserts.iter().map(|e| e.params.kind()).collect()
+        };
+        assert_eq!(order(&doc), names);
+        // the limiter dragged to the top: removed, put back first (as the UI does)
+        let limiter = doc.project().track(tid).unwrap().effects[3].clone();
+        let strip = MixerStrip::Track(tid);
+        doc.apply(&Command::Batch {
+            label: "Move".into(),
+            commands: vec![
+                Command::RemoveStripEffect { strip, effect: ids[3] },
+                Command::AddStripEffect { strip, effect: limiter, index: Some(0) },
+            ],
+        })
+        .unwrap();
+        assert_eq!(order(&doc), ["audio.limiter", "audio.gate", "audio.eq", "audio.compressor"]);
+        let g = spec(doc.project());
+        let first = &g.strips.iter().find(|s| s.id == node(tid)).unwrap().inserts[0];
+        assert_eq!(first.id, node(ids[3]), "the same effect (its id keeps its state in the engine)");
+    }
 }

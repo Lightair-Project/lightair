@@ -77,6 +77,16 @@ impl Owner {
         !matches!(self, Owner::Input(_))
     }
 
+    /// Where its effects live, for dragging them.
+    fn home(self) -> crate::effect_drag::Home {
+        use crate::effect_drag::Home;
+        match self {
+            Owner::Input(id) => Home::Input(id),
+            Owner::Track(id) => Home::Strip(lightair_core::MixerStrip::Track(id)),
+            Owner::Strip(s) => Home::Strip(s),
+        }
+    }
+
     /// Whose effect `effect` is (a mixer strip's: the audio inserts).
     fn of_audio_effect(project: &lightair_core::Project, effect: Id) -> Option<(Owner, Effect)> {
         let has = |effects: &[Effect]| effects.iter().find(|e| e.id == effect).cloned();
@@ -207,6 +217,19 @@ impl StudioWindow {
         for (i, e) in effects.iter().enumerate() {
             col = col.child(self.effect_card(iid, effects.len(), i, e, presence, cx));
         }
+        if effects.len() > 1 {
+            // dropped here, an effect goes last
+            col = col.child(
+                div()
+                    .id("fx-drop-end")
+                    .h(px(10.))
+                    .rounded(px(3.))
+                    .drag_over::<crate::effect_drag::DraggedEffect>(|s, _, _, _| s.bg(tok::accent_primary()))
+                    .on_drop(cx.listener(move |this, d: &crate::effect_drag::DraggedEffect, _, cx| {
+                        this.drop_effect(d, iid, None, cx)
+                    })),
+            );
+        }
         col.into_any_element()
     }
 
@@ -238,8 +261,11 @@ impl StudioWindow {
             Needs::Person if presence.person == Some(false) => Some("No person in view".into()),
             _ => None,
         });
+        let dragged = crate::effect_drag::DraggedEffect { home: iid.home(), effect: eid, name: e.name.clone().into() };
         let header = div()
             .id(("fx-head", i))
+            // drag the header to reorder; dropped on a card, it goes before that one
+            .on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone()))
             .flex()
             .items_center()
             .gap_2()
@@ -299,6 +325,10 @@ impl StudioWindow {
             .border_color(if open { tok::border_strong() } else { tok::border() })
             .bg(if open { tok::bg_raised() } else { tok::bg_panel() })
             .hover(|d| d.border_color(tok::border_strong()))
+            .drag_over::<crate::effect_drag::DraggedEffect>(|s, _, _, _| s.border_t_2().border_color(tok::accent_primary()))
+            .on_drop(cx.listener(move |this, d: &crate::effect_drag::DraggedEffect, _, cx| {
+                this.drop_effect(d, iid, Some(eid), cx)
+            }))
             .child(header)
             .context_menu(move |m, _, _| effect_menu(m, &shell, iid, eid, i, count));
         if let Some(w) = warning {
@@ -897,6 +927,14 @@ impl StudioWindow {
             iid.add(effect, Some(to as usize)),
         ];
         self.exec(Command::Batch { label, commands }, cx);
+    }
+
+    /// An effect dropped on this chain: before `before`, or last.
+    fn drop_effect(&mut self, d: &crate::effect_drag::DraggedEffect, to: Owner, before: Option<Id>, cx: &mut Context<Self>) {
+        let project = self.studio.read(cx).project().clone();
+        if let Some(cmd) = crate::effect_drag::move_cmd(&project, d, to.home(), before) {
+            self.exec(cmd, cx);
+        }
     }
 
     pub(super) fn duplicate_effect(&mut self, iid: Owner, eid: Id, cx: &mut Context<Self>) {
