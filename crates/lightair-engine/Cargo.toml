@@ -14,6 +14,7 @@ uuid.workspace = true
 rtrb = "0.3"
 hound = "3"
 serde_json.workspace = true
+serde.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -24,9 +25,15 @@ parking_lot.workspace = true
 cpal = "0.16"
 base64 = "0.22"
 block2 = "0.6"
+vst3 = "0.3"
 
 [dev-dependencies]
 rtrb = "0.3"
 hound = "3"
 tracing-subscriber.workspace = true
 lightair-store.workspace = true
+
+# VST3 plugins expect the main thread: this test runs on it (no harness).
+[[test]]
+name = "vst3"
+harness = false

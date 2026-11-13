@@ -944,8 +944,7 @@ impl StudioWindow {
 
     pub(super) fn open_effect_catalog(&mut self, owner: Owner, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         if owner.audio() {
-            // fresh each time: a plugin installed meanwhile shows up (the scan is quick)
-            self.plugin_list = Some(std::sync::Arc::new(lightair_engine::plugins::scan_audio_units()));
+            self.scan_plugins(cx);
         }
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search effects"));
         search.update(cx, |s, cx| s.focus(window, cx));
@@ -991,7 +990,10 @@ impl StudioWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let effect = catalog::plugin_effect(info.format, &info.id, &info.name, &info.vendor);
+        let mut effect = catalog::plugin_effect(&info.format, &info.id, &info.name, &info.vendor);
+        if !info.path.is_empty() {
+            effect.settings["path"] = Value::String(info.path.clone());
+        }
         let eid = effect.id;
         self.props.open_effect = Some(eid);
         self.exec(owner.add(effect, None), cx);
@@ -1046,44 +1048,80 @@ impl StudioWindow {
             .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(tok::text_tertiary()).child(note))
     }
 
-    /// Shows a plugin insert's own editor (in front, if it's open already). While it's open its
-    /// state is watched; closing it saves the state in the project (one undo step).
+    /// The installed plugins, fresh each time the audio catalog opens (one installed meanwhile
+    /// shows up): Audio Units at once, VST3 when its scan is done (new bundles are probed in a
+    /// helper process, then remembered).
+    fn scan_plugins(&mut self, cx: &mut Context<Self>) {
+        use lightair_engine::plugins::PluginInfo;
+        fn merged(au: Vec<PluginInfo>, vst3: Vec<PluginInfo>) -> std::sync::Arc<Vec<PluginInfo>> {
+            let mut all: Vec<PluginInfo> = au.into_iter().chain(vst3).collect();
+            all.sort_by_key(|p| (p.vendor.to_lowercase(), p.name.to_lowercase(), p.format.clone()));
+            std::sync::Arc::new(all)
+        }
+        let vst3_known: Vec<PluginInfo> =
+            self.plugin_list.iter().flat_map(|l| l.iter()).filter(|p| p.format == "vst3").cloned().collect();
+        self.plugin_list = Some(merged(lightair_engine::plugins::scan_audio_units(), vst3_known));
+        cx.spawn(async move |this, cx| {
+            let vst3 = cx.background_executor().spawn(async { crate::plugin_scan::vst3() }).await;
+            let _ = this.update(cx, |this, cx| {
+                let au: Vec<PluginInfo> =
+                    this.plugin_list.iter().flat_map(|l| l.iter()).filter(|p| p.format != "vst3").cloned().collect();
+                this.plugin_list = Some(merged(au, vst3));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Shows a plugin insert's own editor (in front, if it's open already). Closing it saves the
+    /// plugin's state in the project (one undo step).
     pub(super) fn open_plugin_editor(&mut self, effect: Id, cx: &mut Context<Self>) {
+        use lightair_engine::plugins::Hosted;
         if let Some(ed) = self.plugin_editors.get(&effect).filter(|ed| ed.is_open()) {
             ed.front();
             return;
         }
-        let Some(unit) = lightair_engine::plugins::unit(effect) else { return };
+        let Some(hosted) = lightair_engine::plugins::hosted(effect) else { return };
         let project = self.studio.read(cx).project().clone();
         let Some((owner, e)) = Owner::of_audio_effect(&project, effect) else { return };
         let strip = owner.find(&project).map(|(n, _)| n).unwrap_or_default();
         let title = format!("{} — {}", e.name, strip);
-        let made = crate::plugin_editor::request(&unit);
-        cx.spawn(async move |this, cx| {
-            // an AUv3 answers on its own time
-            let mut got = None;
-            for _ in 0..100 {
-                if let Ok(m) = made.try_recv() {
-                    got = Some(m);
-                    break;
+        match hosted {
+            Hosted::Vst3(p) => {
+                if let Some(ed) = crate::plugin_editor::Editor::open_vst3(p, &title) {
+                    self.plugin_editors.insert(effect, ed);
+                    self.watch_plugin_editor(effect, cx);
                 }
-                cx.background_executor().timer(std::time::Duration::from_millis(30)).await;
             }
-            let made = got.unwrap_or(crate::plugin_editor::Made::Generic);
-            let opened = this.update(cx, |this, cx| {
-                match crate::plugin_editor::Editor::open(unit, made, &title) {
-                    Some(ed) => {
-                        this.plugin_editors.insert(effect, ed);
-                        cx.notify();
-                        true
+            Hosted::Au(unit) => {
+                let made = crate::plugin_editor::request(&unit);
+                cx.spawn(async move |this, cx| {
+                    // an AUv3 answers on its own time
+                    let mut got = None;
+                    for _ in 0..100 {
+                        if let Ok(m) = made.try_recv() {
+                            got = Some(m);
+                            break;
+                        }
+                        cx.background_executor().timer(std::time::Duration::from_millis(30)).await;
                     }
-                    None => false,
-                }
-            });
-            if !matches!(opened, Ok(true)) {
-                return;
+                    let made = got.unwrap_or(crate::plugin_editor::Made::Generic);
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(ed) = crate::plugin_editor::Editor::open_au(unit, made, &title) {
+                            this.plugin_editors.insert(effect, ed);
+                            this.watch_plugin_editor(effect, cx);
+                        }
+                    });
+                })
+                .detach();
             }
-            // until it closes
+        }
+        cx.notify();
+    }
+
+    /// Waits for an editor to close, then saves its plugin's state.
+    fn watch_plugin_editor(&mut self, effect: Id, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
                 let done = this.update(cx, |this, cx| {
@@ -1091,6 +1129,7 @@ impl StudioWindow {
                     if !open {
                         this.plugin_editors.remove(&effect);
                         this.save_plugin_state(effect, cx);
+                        cx.notify();
                     }
                     !open
                 });
@@ -1250,7 +1289,11 @@ impl StudioWindow {
                     body = body.child(group_heading(if p.vendor.is_empty() { "Other" } else { &p.vendor }));
                 }
                 let added = in_stack.contains(&p.id.as_str());
-                let what = if p.v3 { "Audio Unit v3" } else { "Audio Unit" };
+                let what = match (p.format.as_str(), p.v3) {
+                    ("vst3", _) => "VST3",
+                    (_, true) => "Audio Unit v3",
+                    _ => "Audio Unit",
+                };
                 let info = p.clone();
                 grid = grid.child(
                     tile(("fx-plugin", n).into(), "plug", &p.name, what, None, added)
@@ -1264,7 +1307,7 @@ impl StudioWindow {
                     .p_4()
                     .text_size(px(12.))
                     .text_color(tok::text_tertiary())
-                    .child("No Audio Unit effects are installed. Install one (or a VST3 plugin) and it shows here."),
+                    .child("No Audio Unit or VST3 effects are installed. Install one and it shows here."),
             );
         }
 

@@ -1,5 +1,5 @@
-//! A plugin's own editor, in a window of its own: an AUv3's view controller, an Audio
-//! Unit v2's Cocoa view, or (for units without one) Apple's generic view of its parameters.
+//! A plugin's own editor, in a window of its own: a VST3's view, an AUv3's view controller, an
+//! Audio Unit v2's Cocoa view, or (for units without one) Apple's generic view of its parameters.
 //! Main thread only, except where noted.
 
 use std::ffi::c_void;
@@ -7,6 +7,7 @@ use std::sync::{Arc, mpsc};
 
 use block2::RcBlock;
 use lightair_engine::plugins::AudioUnitPlugin;
+use lightair_engine::plugins::vst3::Vst3Plugin;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{msg_send, sel};
@@ -129,16 +130,48 @@ unsafe fn generic_view(unit: *mut c_void) -> Option<Retained<AnyObject>> {
     }
 }
 
+/// What an editor window shows (dropped before the window: a VST3 view detaches first).
+enum Content {
+    Au(#[allow(dead_code)] Arc<AudioUnitPlugin>),
+    Vst3(#[allow(dead_code)] lightair_engine::plugins::vst3::Vst3View, #[allow(dead_code)] Arc<Vst3Plugin>),
+}
+
 /// An open editor window.
 pub struct Editor {
+    /// Keeps the plugin (and a VST3's attached view) alive while it shows.
+    _content: Content,
     window: Retained<AnyObject>,
-    /// Keeps the unit alive while its view shows.
-    _unit: Arc<AudioUnitPlugin>,
+}
+
+/// A titled window with a content area of `size`.
+unsafe fn window(title: &str, size: NSSize, resizable: bool) -> Option<Retained<AnyObject>> {
+    unsafe {
+        // titled, closable, miniaturizable (+ resizable)
+        let style: usize = 1 | 2 | 4 | if resizable { 8 } else { 0 };
+        let alloc: Allocated<AnyObject> = msg_send![AnyClass::get(c"NSWindow")?, alloc];
+        let window: Retained<AnyObject> = msg_send![
+            alloc,
+            initWithContentRect: NSRect::new(NSPoint::new(0.0, 0.0), size),
+            styleMask: style,
+            backing: 2usize,
+            defer: false
+        ];
+        let _: () = msg_send![&*window, setReleasedWhenClosed: false];
+        let _: () = msg_send![&*window, setTitle: &*NSString::from_str(title)];
+        Some(window)
+    }
+}
+
+unsafe fn show(window: &AnyObject) {
+    unsafe {
+        let _: () = msg_send![window, center];
+        let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+    }
 }
 
 impl Editor {
-    /// Puts what the unit made in a window titled `title`, and shows it.
-    pub fn open(unit: Arc<AudioUnitPlugin>, made: Made, title: &str) -> Option<Editor> {
+    /// Puts what an Audio Unit made in a window titled `title`, and shows it.
+    pub fn open_au(unit: Arc<AudioUnitPlugin>, made: Made, title: &str) -> Option<Editor> {
         unsafe {
             let (controller, view): (Option<Retained<AnyObject>>, Option<Retained<AnyObject>>) = match made {
                 Made::Controller(p) => (Retained::from_raw(p as *mut AnyObject), None),
@@ -163,27 +196,37 @@ impl Editor {
             if size.width < 1.0 || size.height < 1.0 {
                 size = NSSize::new(640.0, 400.0);
             }
-            // titled, closable, miniaturizable (+ resizable for AUv3 views, which follow the window)
-            let style: usize = 1 | 2 | 4 | if controller.is_some() { 8 } else { 0 };
-            let alloc: Allocated<AnyObject> = msg_send![AnyClass::get(c"NSWindow")?, alloc];
-            let window: Retained<AnyObject> = msg_send![
-                alloc,
-                initWithContentRect: NSRect::new(NSPoint::new(0.0, 0.0), size),
-                styleMask: style,
-                backing: 2usize,
-                defer: false
-            ];
-            let _: () = msg_send![&*window, setReleasedWhenClosed: false];
-            let _: () = msg_send![&*window, setTitle: &*NSString::from_str(title)];
+            // AUv3 views follow the window
+            let window = window(title, size, controller.is_some())?;
             if let Some(vc) = &controller {
                 let _: () = msg_send![&*window, setContentViewController: &**vc];
                 let _: () = msg_send![&*window, setContentSize: size];
             } else if let Some(v) = &view {
                 let _: () = msg_send![&*window, setContentView: &**v];
             }
-            let _: () = msg_send![&*window, center];
-            let _: () = msg_send![&*window, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
-            Some(Editor { window, _unit: unit })
+            show(&window);
+            Some(Editor { _content: Content::Au(unit), window })
+        }
+    }
+
+    /// A VST3's own editor in a window titled `title`, shown.
+    pub fn open_vst3(plugin: Arc<Vst3Plugin>, title: &str) -> Option<Editor> {
+        let (view, (w, h)) = plugin.create_view()?;
+        let size = NSSize::new(w.max(200) as f64, h.max(100) as f64);
+        unsafe {
+            let window = window(title, size, false)?;
+            let content: Retained<AnyObject> = msg_send![&*window, contentView];
+            // the plugin asks for new sizes; the window lives as long as the view (see Content)
+            let win = Retained::as_ptr(&window) as usize;
+            let resize = move |w: i32, h: i32| {
+                let win = win as *const AnyObject;
+                let _: () = msg_send![&*win, setContentSize: NSSize::new(w as f64, h as f64)];
+            };
+            // the content view lives as long as the window, which outlives the view (Content)
+            let attached =
+                lightair_engine::plugins::vst3::Vst3View::attach(view, Retained::as_ptr(&content) as *mut c_void, resize)?;
+            show(&window);
+            Some(Editor { _content: Content::Vst3(attached, plugin), window })
         }
     }
 
