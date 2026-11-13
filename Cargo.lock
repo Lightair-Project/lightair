@@ -3692,6 +3692,7 @@ dependencies = [
  "lightair-store",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "parking_lot",
  "serde",
  "serde_json",
@@ -3724,6 +3725,8 @@ name = "lightair-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "block2 0.6.2",
  "chrono",
  "cpal",
  "crossbeam-channel",

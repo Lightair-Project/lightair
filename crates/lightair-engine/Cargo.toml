@@ -22,6 +22,8 @@ libc = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parking_lot.workspace = true
 cpal = "0.16"
+base64 = "0.22"
+block2 = "0.6"
 
 [dev-dependencies]
 rtrb = "0.3"

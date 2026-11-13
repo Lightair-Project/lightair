@@ -249,6 +249,14 @@ impl Studio {
         }
     }
 
+    /// Plays the mixer again once a plugin insert has loaded (it passes audio through until then).
+    pub fn refresh_plugins(&mut self) {
+        if lightair_engine::plugins::changed() {
+            let project = self.project().clone();
+            self.engine.post(move |s| s.reconciler.refresh_audio(&project));
+        }
+    }
+
     /// Runs the end action of countdowns that just ended ("Then go to" a scene).
     pub fn run_timer_ends(&mut self, cx: &mut Context<Self>) {
         let ended = self.engine.call(|s| s.reconciler.take_ended_timers());
