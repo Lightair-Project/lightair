@@ -730,7 +730,7 @@ impl MixerPanel {
         };
         match &view.source {
             Some(StripSource::Device { input, device, settings, track }) => {
-                let (input, settings, track) = (*input, settings.clone(), track.clone());
+                let (input, settings, track) = (*input, settings.clone(), (**track).clone());
                 let current = device.clone();
                 let me = cx.entity().downgrade();
                 gpui_kit::component::button::Button::new(("strip-device", i))
@@ -980,7 +980,7 @@ struct StripView {
 /// What a track listens to, for the strip's foot.
 enum StripSource {
     /// An audio interface the engine opens ("" for the system default).
-    Device { input: Id, device: String, settings: serde_json::Value, track: Track },
+    Device { input: Id, device: String, settings: serde_json::Value, track: Box<Track> },
     /// Desktop or app audio, a media layer…: shown, changed in the Inspector.
     Other { icon: &'static str, name: String },
 }
@@ -1006,7 +1006,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
                 input: i.id,
                 device: i.settings["device"].as_str().unwrap_or("").to_string(),
                 settings: i.settings.clone(),
-                track: t.clone(),
+                track: Box::new(t.clone()),
             }
         } else {
             let icon = match (i.kind.as_str(), i.settings["type"].as_i64()) {
