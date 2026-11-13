@@ -223,6 +223,7 @@ pub fn spec(project: &Project) -> la::GraphSpec {
             gain_db: fader(m.volume_db),
             mute: m.muted,
             to_program: m.to_program,
+            pan: m.pan,
             ..la::Mix::new(node(m.id))
         })
         .collect();

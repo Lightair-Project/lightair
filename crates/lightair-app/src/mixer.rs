@@ -1140,10 +1140,9 @@ impl MixerPanel {
             .items_center()
             .gap_1p5()
             .h_full()
-            .when_some(view.channel.as_ref(), |d, ch| {
-                d.child(self.rotary(i * 4, Knob::Pan(id), ch.pan, "PAN", pan_text(ch.pan), cx)).when_some(ch.trim_db, |d, t| {
-                    d.child(self.rotary(i * 4 + 1, Knob::Trim(id), t, "TRIM", format!("{t:+.1}"), cx))
-                })
+            .when_some(view.pan, |d, pan| d.child(self.rotary(i * 4, Knob::Pan(id), pan, "PAN", pan_text(pan), cx)))
+            .when_some(view.channel.as_ref().and_then(|ch| ch.trim_db), |d, t| {
+                d.child(self.rotary(i * 4 + 1, Knob::Trim(id), t, "TRIM", format!("{t:+.1}"), cx))
             })
             .child(div().flex_1())
             .when_some(cue, |d, cue| {
@@ -1470,12 +1469,13 @@ struct StripView {
     channel: Option<Channel>,
     /// A mix: whether it's also part of Program.
     mix_to_program: Option<bool>,
+    /// Pan (balance, for a mix); none for the master.
+    pan: Option<f32>,
 }
 
 /// A track's or bus's routing, as the strip shows it.
 struct Channel {
     route: Route,
-    pan: f32,
     /// Tracks only.
     trim_db: Option<f32>,
     invert: Option<bool>,
@@ -1520,7 +1520,10 @@ impl Knob {
 
     fn set(self, p: &Project, v: f32) -> Option<Command> {
         match self {
-            Knob::Pan(id) => strip_update(p, id, |f| *f.pan = v),
+            Knob::Pan(id) => strip_update(p, id, |f| *f.pan = v).or_else(|| {
+                let m = p.audio.mix(id)?;
+                Some(Command::UpdateMix { mix: AudioMix { pan: v, ..m.clone() } })
+            }),
             Knob::Trim(id) => strip_update(p, id, |f| {
                 if let Some(t) = f.trim_db {
                     *t = v
@@ -1754,7 +1757,6 @@ fn strip_views(p: &Project) -> Vec<StripView> {
             source: source(t),
             channel: Some(Channel {
                 route: t.route,
-                pan: t.pan,
                 trim_db: Some(t.trim_db),
                 invert: Some(t.invert),
                 mono: Some(t.mono),
@@ -1762,6 +1764,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
                 sends: t.sends.clone(),
             }),
             mix_to_program: None,
+            pan: Some(t.pan),
         })
         .collect();
     v.extend(p.audio.buses.iter().map(|b| StripView {
@@ -1776,7 +1779,6 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         source: None,
         channel: Some(Channel {
             route: b.route,
-            pan: b.pan,
             trim_db: None,
             invert: None,
             mono: None,
@@ -1784,6 +1786,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
             sends: b.sends.clone(),
         }),
         mix_to_program: None,
+        pan: Some(b.pan),
     }));
     v.extend(p.audio.mixes.iter().map(|x| StripView {
         id: x.id,
@@ -1797,6 +1800,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         source: None,
         channel: None,
         mix_to_program: Some(x.to_program),
+        pan: Some(x.pan),
     }));
     // Program last: always the right-most strip
     let m = &p.audio.master;
@@ -1812,6 +1816,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         source: None,
         channel: None,
         mix_to_program: None,
+        pan: None,
     });
     v
 }
