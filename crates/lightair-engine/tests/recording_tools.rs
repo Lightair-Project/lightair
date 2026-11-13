@@ -63,6 +63,7 @@ fn pause_marker_split() {
 
     let first = dir.join("take.mp4");
     let cfg = RecordingConfig {
+        extra_mixes: vec![],
         canvas: lightair_core::Id::new(),
         label: None,
         split_minutes: None,

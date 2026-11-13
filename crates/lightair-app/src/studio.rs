@@ -460,6 +460,14 @@ impl Studio {
                 split_minutes: settings.split_minutes,
                 container,
                 encoders: crate::encoding::for_recording(&self.engine.capabilities.encoders, &settings, format),
+                // the engine plays the first five mixes into libobs mixes 1-5, in mixer order
+                extra_mixes: settings
+                    .file_mixes
+                    .iter()
+                    .filter_map(|m| project.audio.mixes.iter().position(|x| x.id == *m))
+                    .filter(|&k| k < 5)
+                    .map(|k| k + 1)
+                    .collect(),
             };
             self.engine.post(move |s| {
                 let video = s.reconciler.format_video(canvas);

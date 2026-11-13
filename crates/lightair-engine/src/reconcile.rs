@@ -1033,7 +1033,7 @@ impl Reconciler {
             sys::obs_set_output_source(state.channel, std::ptr::null_mut());
             if let Some(source) = self.inputs.get(&state.input) {
                 chain_remove(source.as_ptr(), &mut state.filters);
-                sys::obs_source_set_monitoring_type(source.as_ptr(), sys::OBS_MONITORING_TYPE_NONE);
+                sys::obs_source_set_monitoring_enabled(source.as_ptr(), false);
             }
         }
         meters().remove(id);

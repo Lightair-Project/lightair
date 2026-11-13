@@ -58,6 +58,7 @@ fn hevc_scaled_with_keyframes() {
     encoders.scaled = Some((320, 180));
     let file = dir.join("hevc.mp4");
     let cfg = RecordingConfig {
+        extra_mixes: vec![],
         canvas: f,
         path: file.clone(),
         label: None,
