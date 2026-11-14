@@ -25,6 +25,9 @@ use lightair_store::recordings::{self, Index, Item, Kind};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 
+mod inside;
+pub(crate) use inside::part_icon;
+
 /// A project in the side list.
 #[derive(Clone)]
 pub(crate) struct ProjectEntry {
@@ -58,6 +61,11 @@ pub struct Library {
     note: Option<SharedString>,
     /// Asked for by "Open in Editor": the window switches to the Editor.
     pub open_in_editor: Option<(PathBuf, Id)>,
+    /// Parts of a take asked for in the Editor (the window takes them there).
+    pub open_parts: Option<Vec<lightair_render::sequence::TakePart>>,
+    /// Takes opened to show their parts, and their parts (`None`: being read).
+    inside_open: std::collections::HashSet<Id>,
+    inside: HashMap<Id, Option<Vec<lightair_render::sequence::TakePart>>>,
     /// Asked for: open this project / make one with this name (the window does it).
     pub open_project: Option<PathBuf>,
     pub new_project: Option<String>,
@@ -168,6 +176,9 @@ impl Library {
             playing: None,
             note: None,
             open_in_editor: None,
+            open_parts: None,
+            inside_open: Default::default(),
+            inside: HashMap::new(),
             open_project: None,
             new_project: None,
             naming: None,
@@ -756,6 +767,32 @@ impl Library {
                         None => detail.join(" · "),
                     }),
             )
+            .when(item.kind == Kind::Take, |d| {
+                let open = self.inside_open.contains(&item.id);
+                let it = item.clone();
+                d.child(
+                    div()
+                        .id(("lib-inside", n))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_0p5()
+                        .text_size(px(12.))
+                        .text_color(tok::text_secondary())
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(tok::text()))
+                        .child(ui::icon(if open { "chevron-down" } else { "chevron-right" }).size(px(12.)))
+                        .child(match self.inside.get(&item.id).and_then(Option::as_ref) {
+                            Some(p) => format!("{} parts", p.len()),
+                            None => "What's inside".to_string(),
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_inside(&it, cx)
+                        })),
+                )
+                .children(self.inside_list(item, n, cx))
+            })
             .context_menu(menu)
             .into_any_element()
     }

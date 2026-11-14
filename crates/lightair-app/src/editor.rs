@@ -19,7 +19,7 @@ use lightair_core::Id;
 use lightair_render::edit::Edit;
 use lightair_render::media::Codec;
 use lightair_render::seqrender::SequenceRenderer;
-use lightair_render::sequence::{EditProject, Media, MediaKind, Sequence, TrackKind, Transform};
+use lightair_render::sequence::{EditProject, Media, MediaKind, Sequence, TakePart, TrackKind, Transform};
 use lightair_render::zoom;
 use lightair_store::recordings::{File as ItemFile, Index, Item, Kind};
 
@@ -46,7 +46,7 @@ enum Done {
     Exported(Result<PathBuf, String>),
     /// Media made from Library items or files (probing takes a moment): placed at the time, or
     /// (`None`) at the main track's end, or (`Some(u64::MAX)`) only kept in the project.
-    Media(Vec<Media>, Option<u64>, Option<usize>),
+    Media(Vec<TakePart>, Option<u64>, Option<usize>),
     /// Caption lines heard in the project's sound.
     Captions(Result<Vec<(u64, u64, String)>, String>),
     Downloaded(Result<(), String>),
@@ -56,6 +56,8 @@ enum Done {
     Peaks(PathBuf, Option<Arc<Vec<f32>>>),
     /// Voices cleaned up.
     Cleaned(Result<(), String>),
+    /// What's inside a take (its Library item's id).
+    TakeParts(Id, Vec<TakePart>),
     /// A medium's words.
     Transcript(Id, Result<lightair_render::speech::Transcript, String>),
     /// A proxy being made, and made (its original file).
@@ -136,6 +138,8 @@ enum MediaSource {
     Media(Id),
     /// Text or a shape (where it goes in the frame).
     Content(Content, Transform),
+    /// One part of a take (where it was in the take's scene).
+    Part(Box<TakePart>),
 }
 
 /// A drag on the timeline.
@@ -216,6 +220,9 @@ pub struct Editor {
     marked: Vec<(Id, u64, u64)>,
     /// A voice-over being recorded.
     recorder: Option<voiceover::Recorder>,
+    /// The take opened in the media panel (its parts shown), and takes' parts read so far.
+    opened_take: Option<Item>,
+    take_parts: std::collections::HashMap<Id, Option<Vec<TakePart>>>,
     /// Sound while scrubbing: on, and the snippet playing (when it began).
     scrub_audio: bool,
     scrub: Option<(speaker::Speaker, std::time::Instant)>,
@@ -330,15 +337,21 @@ fn short(ms: u64) -> String {
 }
 
 /// The media a Library item gives (probing its files): one per video or sound.
-fn media_of(item: &Item) -> Vec<Media> {
+/// A take item's folder.
+fn take_folder(item: &Item) -> Option<PathBuf> {
+    item.files.iter().find_map(|f| f.path.parent().filter(|p| p.extension().is_some_and(|e| e == "lightair-take")).map(Path::to_path_buf))
+}
+
+/// A Library item as what goes on the timeline: a take as its layers (the screen with its
+/// look, the scene's other layers where they were, each recorded mixer track's sound).
+fn media_of(item: &Item) -> Vec<TakePart> {
     if item.kind == Kind::Take {
-        let folder = item.files.iter().find_map(|f| f.path.parent().filter(|p| p.extension().is_some_and(|e| e == "lightair-take")));
-        // its parts: the picture with its look, the camera beside a screen, each recorded
-        // mixer track's sound
-        let mut parts = folder.map(Media::take_parts).unwrap_or_default();
-        for (n, m) in parts.iter_mut().enumerate() {
-            m.name = if n == 0 { item.title.clone() } else { format!("{} · {}", item.title, m.name) };
-            m.item = Some(item.id);
+        let mut parts = take_folder(item).map(|f| Media::take_layout(&f)).unwrap_or_default();
+        for p in parts.iter_mut() {
+            if let Some(m) = &mut p.media {
+                m.name = if m.take.is_some() { item.title.clone() } else { format!("{} · {}", item.title, p.name) };
+                m.item = Some(item.id);
+            }
         }
         return parts;
     }
@@ -358,7 +371,7 @@ fn media_of(item: &Item) -> Vec<Media> {
             if item.kind != Kind::Multitrack {
                 m.name = item.title.clone();
             }
-            Some(m)
+            Some(TakePart::of(m))
         })
         .collect()
 }
@@ -400,6 +413,8 @@ impl Editor {
             transcribing: None,
             marked: Vec::new(),
             recorder: None,
+            opened_take: None,
+            take_parts: Default::default(),
             scrub_audio: true,
             scrub: None,
             ghost: None,
@@ -467,6 +482,29 @@ impl Editor {
         }
     }
 
+    /// Opens a take in the media panel: its parts (read on a thread the first time).
+    fn open_take(&mut self, item: Item, cx: &mut Context<Self>) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.take_parts.entry(item.id) {
+            e.insert(None);
+            let (tx, it) = (self.tx.clone(), item.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(Done::TakeParts(it.id, media_of(&it)));
+            });
+        }
+        self.opened_take = Some(item);
+        cx.notify();
+    }
+
+    /// Parts of a take (from the Library), at the end of the open project (a new one if none
+    /// is open), each where it was in the take's scene.
+    pub fn add_parts(&mut self, parts: Vec<TakePart>, cx: &mut Context<Self>) {
+        self.show(cx);
+        if self.project.is_none() {
+            self.new_project("Untitled", cx);
+        }
+        self.take_media(parts, None, None, cx);
+    }
+
     /// Takes what the threads send.
     fn watch(&mut self, cx: &mut Context<Self>) {
         if self.watching {
@@ -518,6 +556,9 @@ impl Editor {
                             }
                             Done::Cleaned(r) => this.take_cleaned(r, cx),
                             Done::Transcript(m, r) => this.take_transcript(m, r, cx),
+                            Done::TakeParts(id, parts) => {
+                                this.take_parts.insert(id, Some(parts));
+                            }
                             Done::ProxyProgress(f) => {
                                 if let Some(p) = &mut this.proxying {
                                     p.1 = f;
@@ -735,6 +776,7 @@ impl Editor {
                 },
                 cx,
             ),
+            MediaSource::Part(part) => self.take_media(vec![*part], at, track, cx),
             MediaSource::Content(content, place) => {
                 let at = at.unwrap_or(self.playhead);
                 let mut made = None;
@@ -764,8 +806,8 @@ impl Editor {
         }
     }
 
-    fn take_media(&mut self, media: Vec<Media>, at: Option<u64>, track: Option<usize>, cx: &mut Context<Self>) {
-        if media.is_empty() {
+    fn take_media(&mut self, parts: Vec<TakePart>, at: Option<u64>, track: Option<usize>, cx: &mut Context<Self>) {
+        if parts.is_empty() {
             self.note = Some("Its files couldn't be read (moved? Locate them in the Library).".into());
             return;
         }
@@ -773,30 +815,55 @@ impl Editor {
         let ws = self.workspace.clone();
         self.change(
             |s| {
-                // the parts of one item (a take's picture, camera and sounds) start together
-                let mut first: Option<(u64, Option<Id>)> = None;
+                // made layers (text, colours) last as long as the longest part
+                let len = parts.iter().filter_map(|p| p.media.as_ref()).map(|m| m.duration_ms).max().unwrap_or(5_000);
+                // the parts of one thing (a take's picture, layers and sounds) start together
+                let mut start: Option<u64> = None;
                 let mut pictures = 0;
-                for mut m in media {
+                for mut part in parts {
                     // a take's look lives in the workspace (the screen recording look)
-                    if m.take.is_some()
+                    if let Some(m) = &mut part.media
+                        && m.take.is_some()
                         && let (Some(ws), Some(item)) = (&ws, m.item)
                     {
                         m.look = Some(ws.join("recordings").join("edits").join(format!("{item}.json")));
                     }
-                    let (item, video) = (m.item, m.kind == MediaKind::Video);
-                    let id = s.add_media(m);
-                    let placed = match (at, first) {
-                        (Some(u64::MAX), _) => None,
-                        (_, Some((start, of))) if of.is_some() && of == item => s.place(id, start, None),
-                        (Some(t), _) => s.place(id, t, track),
-                        (None, _) => s.append(id),
+                    let video = part.media.as_ref().is_some_and(|m| m.kind == MediaKind::Video);
+                    let unplaced = part.place.is_none();
+                    let placed = match (at, start) {
+                        (Some(u64::MAX), _) => {
+                            if let Some(m) = part.media {
+                                s.add_media(m);
+                            }
+                            None
+                        }
+                        (_, Some(t)) => s.place_part(part, t, len, None),
+                        // the first: where it was dropped (or the main track's end)
+                        (_, None) => match (part.media.take(), at) {
+                            (Some(m), at) => {
+                                let id = s.add_media(m);
+                                let c = match at {
+                                    Some(t) => s.place(id, t, track),
+                                    None => s.append(id),
+                                };
+                                if let (Some(c), Some(p)) = (c, part.place) {
+                                    let tr = s.transform_for(s.media(id), None, p);
+                                    if let Some(cl) = s.clip_mut(c) {
+                                        cl.transform = tr;
+                                    }
+                                }
+                                c
+                            }
+                            (None, at) => s.place_part(part, at.unwrap_or(0), len, track),
+                        },
                     };
                     let Some(c) = placed else { continue };
-                    if first.is_none() {
-                        first = s.clip(c).map(|c| (c.start_ms, item));
+                    if start.is_none() {
+                        start = s.clip(c).map(|c| c.start_ms);
                     }
-                    // a second picture (the camera beside the screen): small, bottom right
-                    if video {
+                    // a take without a scene: its second picture (the camera beside the
+                    // screen) small, bottom right
+                    if video && unplaced {
                         pictures += 1;
                         if pictures > 1 {
                             let (w, h) = (s.size.0 as f32, s.size.1 as f32);
@@ -820,7 +887,7 @@ impl Editor {
         cx.spawn_in(window, async move |_, _| {
             let Ok(Ok(Some(paths))) = picked.await else { return };
             std::thread::spawn(move || {
-                let media: Vec<Media> = paths.iter().filter_map(|p| Media::from_file(p).ok()).collect();
+                let media: Vec<TakePart> = paths.iter().filter_map(|p| Media::from_file(p).ok()).map(TakePart::of).collect();
                 let _ = tx.send(Done::Media(media, Some(u64::MAX), None));
             });
         })
@@ -1405,18 +1472,67 @@ impl Editor {
                 .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone()))
         };
         let mut grid = div().flex().flex_wrap().gap_2();
-        for (n, item) in self.library.iter().enumerate() {
-            let detail = format!("{} · {}", item.kind.label(), item.duration_ms.map_or("—".into(), short));
-            let thumb = item.thumbnail.clone().filter(|t| t.exists());
-            grid = grid.child(card(
-                SharedString::from(format!("ed-lib-{n}")),
-                item.title.clone(),
-                detail,
-                kind_icon(item.kind),
-                thumb,
-                MediaSource::Item(item.clone()),
-                cx,
-            ));
+        if let Some(take) = self.opened_take.clone() {
+            // a take opened: its parts, each on its own
+            let parts = self.take_parts.get(&take.id).cloned().flatten();
+            match parts {
+                None => grid = grid.child(hint("Reading the take…")),
+                Some(parts) => {
+                    for (n, p) in parts.into_iter().enumerate() {
+                        let detail = match &p.media {
+                            Some(m) if m.kind != MediaKind::Image => format!("{} · {}", p.what(), short(m.duration_ms)),
+                            _ => p.what().to_string(),
+                        };
+                        let thumb = match (&p.media, p.what()) {
+                            (Some(m), "Picture") => Some(m.path.clone()),
+                            (_, "Screen") => take.thumbnail.clone().filter(|t| t.exists()),
+                            _ => None,
+                        };
+                        let icon = crate::library::part_icon(&p);
+                        grid = grid.child(card(SharedString::from(format!("ed-part-{n}")), p.name.clone(), detail, icon, thumb, MediaSource::Part(Box::new(p)), cx));
+                    }
+                }
+            }
+        } else {
+            for (n, item) in self.library.iter().enumerate() {
+                let detail = format!("{} · {}", item.kind.label(), item.duration_ms.map_or("—".into(), short));
+                let thumb = item.thumbnail.clone().filter(|t| t.exists());
+                let take = (item.kind == Kind::Take).then(|| item.clone());
+                grid = grid.child(
+                    div()
+                        .relative()
+                        .child(card(SharedString::from(format!("ed-lib-{n}")), item.title.clone(), detail, kind_icon(item.kind), thumb, MediaSource::Item(item.clone()), cx))
+                        .when_some(take, |d, take| {
+                            // a take opens like a folder: its parts
+                            d.child(
+                                div()
+                                    .id(("ed-open-take", n))
+                                    .absolute()
+                                    .left(px(4.))
+                                    .top(px(44.))
+                                    .h(px(20.))
+                                    .px_1p5()
+                                    .rounded(px(10.))
+                                    .bg(rgba(0x000000c0))
+                                    .border_1()
+                                    .border_color(rgba(0xffffff60))
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(rgba(0x000000ff)))
+                                    .text_size(px(10.))
+                                    .text_color(rgb(0xFFFFFF))
+                                    .child(ui::icon("layers").size(px(11.)))
+                                    .child("Parts")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.open_take(take.clone(), cx)
+                                    })),
+                            )
+                        }),
+                );
+            }
         }
         let imported: Vec<Media> = self.seq().map(|s| s.media.iter().filter(|m| m.item.is_none()).cloned().collect()).unwrap_or_default();
         let mut own = div().flex().flex_wrap().gap_2();
@@ -1463,16 +1579,37 @@ impl Editor {
             );
         }
         let body = match self.left {
-            LeftTab::Media => div()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .child(div().flex_1().child(heading("THIS WORKSPACE")))
-                        .child(Button::new("ed-import").label("Import").icon(ui::icon("plus")).xsmall().outline().on_click(cx.listener(|this, _, w, cx| this.import(w, cx)))),
-                )
-                .child(if self.library.is_empty() { hint("Recordings, takes and clips appear here.") } else { grid })
-                .when(!imported.is_empty(), |d| d.child(heading("IMPORTED")).child(own)),
+            LeftTab::Media => match self.opened_take.clone() {
+                Some(take) => div()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .pt_2()
+                            .pb_1()
+                            .child(ui::icon_button("ed-take-back", "arrow-left", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| {
+                                this.opened_take = None;
+                                cx.notify();
+                            })))
+                            .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(take.title.clone()))
+                            .child(Button::new("ed-take-all").label("Add all").icon(ui::icon("plus")).xsmall().outline().on_click(cx.listener(move |this, _, _, cx| {
+                                this.add(MediaSource::Item(take.clone()), None, None, cx)
+                            }))),
+                    )
+                    .child(hint("Its parts: drag one onto a track, or add it with +. Each keeps its place in the take's scene."))
+                    .child(div().pt_2().child(grid)),
+                None => div()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(div().flex_1().child(heading("THIS WORKSPACE")))
+                            .child(Button::new("ed-import").label("Import").icon(ui::icon("plus")).xsmall().outline().on_click(cx.listener(|this, _, w, cx| this.import(w, cx)))),
+                    )
+                    .child(if self.library.is_empty() { hint("Recordings, takes and clips appear here.") } else { grid })
+                    .when(!imported.is_empty(), |d| d.child(heading("IMPORTED")).child(own)),
+            },
             LeftTab::Audio => self.audio_tab(cx),
             LeftTab::Text => self.text_tab(cx),
             LeftTab::Shapes => self.shapes_tab(cx),

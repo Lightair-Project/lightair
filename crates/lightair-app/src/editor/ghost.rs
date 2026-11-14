@@ -34,6 +34,10 @@ impl Editor {
         let placed = match &drag.source {
             MediaSource::Media(id) => s.place(*id, t, track)?,
             MediaSource::Content(content, _) => s.place_content_on(content.clone(), t, 3_000, track),
+            MediaSource::Part(part) => {
+                let len = part.media.as_ref().map_or(3_000, |m| m.duration_ms.max(1));
+                s.place_part((**part).clone(), t, len, track)?
+            }
             MediaSource::Item(item) => {
                 let ext = item.files.first().and_then(|f| f.path.extension()).map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
                 let kind = if SOUND.contains(&ext.as_str()) {
@@ -183,5 +187,17 @@ impl Editor {
             });
         })
         .detach();
+    }
+}
+
+impl Editor {
+    /// For the screenshot hook: the newest take opened in the media panel.
+    pub fn hook_open_take(&mut self, cx: &mut Context<Self>) {
+        self.show(cx);
+        self.library = self.workspace.as_ref().map(|ws| Index::load(ws).newest_first().into_iter().cloned().collect()).unwrap_or_default();
+        if let Some(item) = self.library.iter().find(|i| i.kind == Kind::Take).cloned() {
+            self.left = LeftTab::Media;
+            self.open_take(item, cx);
+        }
     }
 }
