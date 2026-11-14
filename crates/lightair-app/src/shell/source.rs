@@ -386,8 +386,10 @@ impl StudioWindow {
             let m = input.settings["mode"].as_i64().unwrap_or(kinds::DISPLAY);
             self.segmented(
                 "capture-mode",
-                [(kinds::DISPLAY, "Display"), (kinds::WINDOW, "Window"), (kinds::APP, "App")]
+                [(kinds::DISPLAY, "Display"), (kinds::WINDOW, "Window"), (kinds::APP, "App"), (kinds::GAME, "Game")]
                     .into_iter()
+                    // game capture is Windows's
+                    .filter(|(v, _)| *v != kinds::GAME || cfg!(windows))
                     .map(|(v, label)| {
                         (
                             label,
@@ -463,6 +465,7 @@ fn source_icon(kind: &str, settings: &Value) -> &'static str {
     match kind {
         kinds::SCREEN => match settings["mode"].as_i64().unwrap_or(kinds::DISPLAY) {
             kinds::WINDOW => "app-window",
+            kinds::GAME => "gamepad-2",
             kinds::APP => "layout-grid",
             _ => "monitor",
         },

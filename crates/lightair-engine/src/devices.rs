@@ -1,4 +1,4 @@
-//! Audio interfaces, captured directly (CoreAudio through cpal): every channel of a device, so
+//! Audio interfaces, captured directly (CoreAudio on macOS, WASAPI on Windows, through cpal): every channel of a device, so
 //! an 8-input interface is eight mics (docs/plans/audio-engine.md, "Inputs and outputs").
 //! libobs's own device capture mixes a device down to stereo; this doesn't.
 //!

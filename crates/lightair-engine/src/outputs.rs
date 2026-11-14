@@ -476,9 +476,12 @@ unsafe fn create_encoders(
     let prores = cfg.video_encoder.contains("prores");
     let hevc = cfg.video_encoder.contains("hevc");
     v.set_int("keyint_sec", cfg.keyint_sec.max(1) as i64);
+    let apple = cfg.video_encoder.contains("videotoolbox");
     if !prores {
+        // VideoToolbox and x264 average over the file; the Windows encoders call it VBR
+        let variable = if apple || cfg.video_encoder == "obs_x264" { "ABR" } else { "VBR" };
         v.set_int("bitrate", cfg.video_bitrate_kbps as i64)
-            .set_str("rate_control", if cfg.constant_bitrate { "CBR" } else { "ABR" })
+            .set_str("rate_control", if cfg.constant_bitrate { "CBR" } else { variable })
             .set_str("profile", if hevc { "main" } else { "high" });
     }
     if cfg.video_encoder == "obs_x264" {
@@ -486,8 +489,13 @@ unsafe fn create_encoders(
         if !cfg.bframes {
             v.set_str("x264opts", "bframes=0");
         }
-    } else {
+    } else if apple {
         v.set_bool("bframes", cfg.bframes);
+    } else if cfg.video_encoder.contains("qsv") {
+        v.set_int("bframes", if cfg.bframes { 3 } else { 0 });
+    } else {
+        // NVENC and AMF: B-frames between references
+        v.set_int("bf", if cfg.bframes { 2 } else { 0 });
     }
     let mut a = Data::new();
     a.set_int("bitrate", cfg.audio_bitrate_kbps as i64);
@@ -929,18 +937,66 @@ impl Outputs {
     }
 }
 
-/// Picks the best available encoders: Apple's hardware H.264 when present.
+/// H.264 encoders, best first: Apple's (macOS); NVIDIA, AMD and Intel hardware (Windows); x264.
+pub const H264_ENCODERS: &[&str] = &[
+    "com.apple.videotoolbox.videoencoder.ave.avc",
+    "com.apple.videotoolbox.videoencoder.h264",
+    "obs_nvenc_h264_tex",
+    "jim_nvenc",
+    "h264_texture_amf",
+    "obs_qsv11_v2",
+    "obs_x264",
+];
+
+/// HEVC encoders, best first.
+pub const HEVC_ENCODERS: &[&str] = &[
+    "com.apple.videotoolbox.videoencoder.ave.hevc",
+    "com.apple.videotoolbox.videoencoder.hevc.vcp",
+    "obs_nvenc_hevc_tex",
+    "jim_hevc_nvenc",
+    "h265_texture_amf",
+    "obs_qsv11_hevc",
+];
+
+/// ProRes encoders (Apple's; Windows has none in libobs).
+pub const PRORES_ENCODERS: &[&str] =
+    &["com.apple.videotoolbox.videoencoder.appleproreshw.422", "com.apple.videotoolbox.videoencoder.prores-422"];
+
+/// The first of `ids` that's available.
+pub fn first_available(available: &[String], ids: &[&str]) -> Option<String> {
+    ids.iter().find(|id| available.iter().any(|e| e == *id)).map(|id| id.to_string())
+}
+
+/// The AAC encoder: Apple's on macOS, FFmpeg's elsewhere.
+pub fn aac_encoder(available: &[String]) -> String {
+    first_available(available, &["CoreAudio_AAC"]).unwrap_or_else(|| "ffmpeg_aac".into())
+}
+
+/// Who makes an encoder, for people: "Apple hardware", "NVIDIA NVENC", "x264 (software)".
+pub fn encoder_maker(id: &str) -> &'static str {
+    if id.contains("videotoolbox") {
+        "Apple hardware"
+    } else if id.contains("nvenc") {
+        "NVIDIA NVENC"
+    } else if id.contains("amf") {
+        "AMD AMF"
+    } else if id.contains("qsv") {
+        "Intel Quick Sync"
+    } else if id == "obs_x264" {
+        "x264 (software)"
+    } else {
+        "Encoder"
+    }
+}
+
+/// Picks the best available encoders: hardware H.264 when present.
 pub fn default_encoders(available: &[String], video_bitrate_kbps: u32, constant_bitrate: bool) -> EncoderConfig {
-    let has = |id: &str| available.iter().any(|e| e == id);
-    let video = ["com.apple.videotoolbox.videoencoder.ave.avc", "com.apple.videotoolbox.videoencoder.h264", "obs_x264"]
-        .into_iter()
-        .find(|id| has(id))
-        .unwrap_or("obs_x264");
-    let audio = if has("CoreAudio_AAC") { "CoreAudio_AAC" } else { "ffmpeg_aac" };
+    let video = first_available(available, H264_ENCODERS).unwrap_or_else(|| "obs_x264".into());
+    let audio = aac_encoder(available);
     EncoderConfig {
-        video_encoder: video.into(),
+        video_encoder: video,
         video_bitrate_kbps,
-        audio_encoder: audio.into(),
+        audio_encoder: audio,
         audio_bitrate_kbps: 160,
         constant_bitrate,
         bframes: true,

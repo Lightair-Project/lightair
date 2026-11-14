@@ -6,6 +6,7 @@
 //! | screen: display | `screen_capture` (type 0) | `monitor_capture` |
 //! | screen: window | `screen_capture` (type 1) | `window_capture` |
 //! | screen: app | `screen_capture` (type 2) | `window_capture` (by executable) |
+//! | screen: game | `screen_capture` (type 1) | `game_capture` (a window, or any full-screen game) |
 //! | camera | `macos-avcapture` | `dshow_input` |
 //! | mic | `coreaudio_input_capture` | `wasapi_input_capture` |
 //! | desktop audio | `sck_audio_capture` (type 0); a loopback device: `coreaudio_output_capture` | `wasapi_output_capture` |
@@ -13,7 +14,7 @@
 //!
 //! Settings that aren't Lightair's own (a camera's preset, say) pass through as they are.
 
-use lightair_core::kinds::{APP, APP_AUDIO, CAMERA, DESKTOP_AUDIO, DISPLAY, MIC, SCREEN};
+use lightair_core::kinds::{APP, APP_AUDIO, CAMERA, DESKTOP_AUDIO, DISPLAY, GAME, MIC, SCREEN, WINDOW};
 use serde_json::{Value, json};
 
 /// The libobs source type and settings for an input, or `None` when its kind is libobs's own.
@@ -39,6 +40,17 @@ pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
                 set("monitor_id", display);
                 set("capture_cursor", Some(cursor));
                 "monitor_capture"
+            }
+            SCREEN if mode == GAME => {
+                set("capture_cursor", Some(cursor));
+                let mode = if window.as_ref().is_some_and(|w| w.as_str().is_some_and(|s| !s.is_empty())) {
+                    "window"
+                } else {
+                    "any_fullscreen"
+                };
+                set("capture_mode", Some(json!(mode)));
+                set("window", window);
+                "game_capture"
             }
             SCREEN => {
                 set("cursor", Some(cursor));
@@ -78,7 +90,8 @@ pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
     } else {
         match kind {
             SCREEN => {
-                set("type", Some(json!(mode.clamp(DISPLAY, APP))));
+                // a game is a window here
+                set("type", Some(json!(if mode == GAME { WINDOW } else { mode.clamp(DISPLAY, APP) })));
                 let display = display
                     .filter(|d| d.as_str().is_some_and(|s| !s.is_empty()))
                     .or_else(|| crate::displays::main_display_uuid().map(Value::from));
@@ -209,6 +222,7 @@ mod tests {
     #[test]
     fn portable_kinds_play_as_windows_sources() {
         assert_eq!(resolve(SCREEN, &json!({"mode": 0})).unwrap().0, "monitor_capture");
+        assert_eq!(resolve(SCREEN, &json!({"mode": 3})).unwrap().1["capture_mode"], "any_fullscreen");
         let (id, s) = resolve(SCREEN, &json!({"mode": 2, "app": "a:b:c.exe"})).unwrap();
         assert_eq!((id, &s["window"], &s["priority"]), ("window_capture", &json!("a:b:c.exe"), &json!(2)));
         assert_eq!(resolve(MIC, &json!({})).unwrap(), ("wasapi_input_capture", json!({"device_id": "default"})));
