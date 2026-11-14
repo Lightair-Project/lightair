@@ -4,8 +4,9 @@
 //! scene (`lightair_engine::cursor`).
 
 use gpui_kit::component::Sizable;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::slider::Slider;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{Command, Project, Scene, ScreenLook};
 
@@ -59,7 +60,7 @@ impl StudioWindow {
             body = body.child(note("Add a screen to this scene: it zooms and draws the pointer there."));
         }
         // clicks (for the zoom and their effects) need the OS to let Lightair see them
-        let wants_clicks = look.zoom == ScreenLook::ZOOM_CLICKS || (look.cursor && look.clicks > 0);
+        let wants_clicks = look.zoom == ScreenLook::ZOOM_CLICKS || (look.cursor && !look.cursor_hidden && look.clicks > 0);
         if wants_clicks && !lightair_platform::input::can_listen() {
             body = body.child(
                 div()
@@ -137,18 +138,66 @@ impl StudioWindow {
                 "Always zoomed in, the view following the pointer."
             }));
         }
+        // ---- following on a key: always in, following the pointer, until pressed again
+        {
+            let keys = self.prefs.global_hotkeys.iter().find(|h| h.action == crate::hotkeys::GlobalAction::FollowZoom).map(|h| crate::hotkeys::display(&h.keys));
+            let following = lightair_engine::cursor::following();
+            let control = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .min_w_0()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded(px(4.))
+                        .bg(tok::bg_raised())
+                        .text_size(px(11.))
+                        .font_family("Menlo")
+                        .text_color(if keys.is_some() { tok::text() } else { tok::text_tertiary() })
+                        .child(keys.clone().unwrap_or_else(|| "No key".into())),
+                )
+                .child(
+                    Button::new("screen-follow-key")
+                        .label(if keys.is_some() { "Change…" } else { "Set a key…" })
+                        .xsmall()
+                        .ghost()
+                        .on_click(cx.listener(|this, _, _, cx| this.open_settings(super::settings::Page::Shortcuts, cx))),
+                )
+                .child(div().flex_1())
+                .when(following, |d| {
+                    d.child(
+                        Button::new("screen-follow-stop")
+                            .label("Following · Stop")
+                            .xsmall()
+                            .outline()
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                lightair_engine::cursor::toggle_follow();
+                                cx.notify();
+                            })),
+                    )
+                });
+            body = body.child(row("Follow key", control)).child(note(
+                "Press it to zoom in and follow the pointer, whatever the zoom above says; press it again to go back.",
+            ));
+        }
         // ---- pointer
         body = body
             .child(div().pt_2().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child("POINTER"))
             .child(self.segmented(
                 "screen-cursor",
                 vec![
-                    ("As captured", set(ScreenLook { cursor: false, ..look }), !look.cursor),
-                    ("Drawn by Lightair", set(ScreenLook { cursor: true, ..look }), look.cursor),
+                    ("As captured", set(ScreenLook { cursor: false, cursor_hidden: false, ..look }), !look.cursor && !look.cursor_hidden),
+                    ("Drawn", set(ScreenLook { cursor: true, cursor_hidden: false, ..look }), look.cursor && !look.cursor_hidden),
+                    ("Hidden", set(ScreenLook { cursor_hidden: true, ..look }), look.cursor_hidden),
                 ],
                 cx,
             ));
-        if look.cursor {
+        if look.cursor_hidden {
+            body = body.child(note("No pointer on the screen (and no clicks drawn)."));
+        }
+        if look.cursor && !look.cursor_hidden {
             let style = self.segmented(
                 "screen-cursor-style",
                 vec![

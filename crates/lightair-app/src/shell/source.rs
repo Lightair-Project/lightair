@@ -215,12 +215,35 @@ impl StudioWindow {
         }
         let (title, detail) = self.current_source(input, cx)?;
         let icon = source_icon(&input.kind, &input.settings);
+        // a whole display: Lightair's own windows in it or not (in, for a tutorial on Lightair)
+        let display = input.kind == kinds::SCREEN && input.settings["mode"].as_i64().unwrap_or(kinds::DISPLAY) == kinds::DISPLAY;
+        let shows_lightair = !input.settings["hide_obs"].as_bool().unwrap_or(false);
+        let toggle = display.then(|| {
+            let mut settings = input.settings.clone();
+            settings["hide_obs"] = (shows_lightair).into();
+            let cmd = lightair_core::Command::SetInputSettings { input: id, settings };
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().text_size(px(12.)).child("Show Lightair's windows"))
+                        .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("On to show Lightair itself (a tutorial on Lightair). Off keeps its windows out of the picture.")),
+                )
+                .child(super::settings::switch("source-show-lightair", shows_lightair).on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))))
+        });
         Some(
             self.section("Source", None, cx)
                 .child(
                     self.source_chip("source-device", icon, title, detail, "Change")
                         .on_click(cx.listener(move |this, _, window, cx| this.open_source_picker(id, window, cx))),
                 )
+                .children(toggle)
                 .into_any_element(),
         )
     }

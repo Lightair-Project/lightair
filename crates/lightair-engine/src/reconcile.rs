@@ -142,7 +142,7 @@ impl Reconciler {
                         recreated = true;
                     } else if let Some(src) = self.inputs.get(&after.id) {
                         if before.settings != after.settings || draws_pointer(before) != draws_pointer(after) {
-                            let drawn = self.screen_looks.get(&after.id).is_some_and(|(_, s)| s["draw"] == true);
+                            let drawn = self.screen_looks.get(&after.id).is_some_and(|(_, s)| s["hide_capture"] == true);
                             src.update(&data_from_json(&input_settings(after, drawn)));
                             if after.kind == TIMER_KIND {
                                 self.timers.configure(after.id, &after.settings);
@@ -251,7 +251,7 @@ impl Reconciler {
             if let (Some((filter, was)), Some(src)) = (self.screen_looks.remove(&id), self.inputs.get(&id)) {
                 unsafe { sys::obs_source_filter_remove(src.as_ptr(), filter.as_ptr()) };
                 if let Some(input) = project.inputs.get(&id).filter(|i| !draws_pointer(i))
-                    && was["draw"] == true
+                    && was["hide_capture"] == true
                 {
                     src.update(&data_from_json(&input_settings(input, false)));
                 }
@@ -261,7 +261,7 @@ impl Reconciler {
             let (Some(src), Some(input)) = (self.inputs.get(&id), project.inputs.get(&id)) else { continue };
             let settings = screen_look_settings(&look);
             // drawn before (a new filter: as the capture was made, with its own pointer)
-            let drew = self.screen_looks.get(&id).map_or(draws_pointer(input), |(_, s)| s["draw"] == true || draws_pointer(input));
+            let hid = self.screen_looks.get(&id).map_or(draws_pointer(input), |(_, s)| s["hide_capture"] == true || draws_pointer(input));
             match self.screen_looks.get_mut(&id) {
                 Some((_, was)) if *was == settings => {}
                 Some((filter, was)) => {
@@ -279,8 +279,9 @@ impl Reconciler {
             }
             // the capture's own pointer, hidden while Lightair draws one (only when that changes:
             // a capture given new settings may start again)
-            if drew != (look.cursor || draws_pointer(input)) {
-                src.update(&data_from_json(&input_settings(input, look.cursor)));
+            let hide = look.cursor || look.cursor_hidden;
+            if hid != (hide || draws_pointer(input)) {
+                src.update(&data_from_json(&input_settings(input, hide)));
             }
             // last, so it zooms what the input's effects made
             if let Some((filter, _)) = self.screen_looks.get(&id) {
@@ -1694,14 +1695,16 @@ fn is_screen(input: &lightair_core::Input) -> bool {
 /// A `ScreenLook` as the pointer filter's settings.
 fn screen_look_settings(l: &lightair_core::ScreenLook) -> serde_json::Value {
     serde_json::json!({
-        "draw": l.cursor,
+        "draw": l.cursor && !l.cursor_hidden,
+        // the capture's own pointer goes when Lightair draws one, or when there's to be none
+        "hide_capture": l.cursor || l.cursor_hidden,
         "style": l.cursor_style,
         "size": l.cursor_size,
         "smoothing": l.cursor_smoothing,
         "tilt": l.cursor_tilt,
         "idle_s": l.cursor_idle_s,
         // clicks are drawn with the pointer
-        "clicks": if l.cursor { l.clicks } else { 0 },
+        "clicks": if l.cursor && !l.cursor_hidden { l.clicks } else { 0 },
         "arrow_only": false,
         "color": l.cursor_color,
         "zoom": l.zoom,
