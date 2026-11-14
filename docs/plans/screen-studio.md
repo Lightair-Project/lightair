@@ -434,7 +434,12 @@ These follow from Lightair being a live, multi-format studio rather than a recor
 Settled 14 November 2026 (the recommendations, accepted):
 
 - **Renderer:** a dedicated offline renderer, `lightair-render`: `wgpu` (Metal on macOS, Direct3D
-  12 on Windows), FFmpeg decoding and encoding with each platform's hardware codecs. libobs stays
+  12 on Windows), FFmpeg decoding and encoding with each platform's hardware codecs. Revised 14
+  November 2026: FFmpeg runs as a helper program (frames over pipes) rather than linked as
+  libraries. The bindings need FFmpeg's development files at build time on every machine and
+  can't be checked for Windows from a Mac; the program is the same on both platforms and keeps
+  the hardware codecs (`h264_videotoolbox`, `h264_nvenc`, `h264_amf`, `h264_qsv`), and gives
+  ProRes on Windows too (`prores_ks`). Lightair ships an LGPL FFmpeg build beside itself. libobs stays
   the live compositor. Shared
   effects exist in both, kept identical by golden-frame tests (section 4.2).
 - **Editor scope:** a focused screen-recording editor (Screen Studio's scope): one Library item

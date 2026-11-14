@@ -3749,6 +3749,7 @@ dependencies = [
  "lightair-audio",
  "lightair-core",
  "lightair-platform",
+ "lightair-render",
  "lightair-store",
  "parking_lot",
  "rtrb",
@@ -3790,6 +3791,21 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "lightair-render"
+version = "0.1.0"
+dependencies = [
+ "lightair-core",
+ "lightair-store",
+ "pollster",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "wgpu",
 ]
 
 [[package]]
