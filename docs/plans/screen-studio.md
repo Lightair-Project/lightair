@@ -442,6 +442,15 @@ Each phase ships with tests and screenshots, like the audio plan.
    - super-resolution zoom (FSR 1, both platforms);
    - multi-take projects.
 
+   Done (14 November 2026): hidden areas in the Editor (Hide area: drag over the preview; the
+   area is kept in screen coordinates, so it stays put through zooms, for 1 s, 3 s, 10 s or to
+   the end) drawn as blocks; sharper zooms with contrast-adaptive sharpening (AMD's CAS) on
+   the screen while zoomed in, on both platforms.
+
+   Still open from this phase: finding sensitive text and faces by themselves (on-device text
+   recognition and face detection, then masks made from them); FSR 1's edge-adaptive upscaling
+   (EASU) beside the sharpening; multi-take projects.
+
 ## 6. Where Lightair goes further
 
 These follow from Lightair being a live, multi-format studio rather than a recorder:
