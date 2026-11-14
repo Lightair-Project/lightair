@@ -9,6 +9,12 @@ use lightair_render::sequence::{Clip, Content, Filter, Keyframe, ShapeKind, Shap
 /// Colours offered for words and shapes.
 const PALETTE: [u32; 9] = [0xFFFFFF, 0x111111, 0xFACC15, 0xF97316, 0xF43F5E, 0xA855F7, 0x3B82F6, 0x22C55E, 0x67E8F9];
 
+/// Stickers offered (emoji, in the system's colour emoji font).
+const STICKERS: [&str; 40] = [
+    "😀", "😂", "😍", "🥳", "😎", "🤯", "😱", "🤔", "👍", "👎", "👏", "🙌", "🙏", "💪", "👀", "🔥", "✨", "⭐", "💯", "❤️", "💡", "✅", "❌", "⚠️",
+    "❓", "❗", "➡️", "⬅️", "⬆️", "⬇️", "🎉", "🎯", "🚀", "📌", "📣", "🔔", "💬", "🎬", "📸", "🏆",
+];
+
 /// Where the speech model is kept.
 pub(super) fn model() -> PathBuf {
     lightair_render::speech::model_path(&lightair_platform::paths::data_dir())
@@ -126,6 +132,29 @@ impl Editor {
 
     pub(super) fn shapes_tab(&self, cx: &mut Context<Self>) -> Div {
         let size = self.seq().map_or((1920, 1080), |s| s.size);
+        let k = size.1 as f32 / 1080.0;
+        // emoji stickers: big, with a white edge
+        let mut stickers = div().flex().flex_wrap().gap_1();
+        for (n, e) in STICKERS.iter().enumerate() {
+            let style = TextStyle { text: (*e).into(), size: 220.0 * k, color: 0xFFFFFF, bold: false, align: 1, background: None, outline: Some(0xFFFFFF), width: size.0 as f32 };
+            let source = MediaSource::Content(Content::Text(style), Transform::default());
+            let drag = DraggedMedia { label: (*e).into(), source: source.clone() };
+            stickers = stickers.child(
+                div()
+                    .id(("ed-stk", n))
+                    .size(px(38.))
+                    .rounded(px(6.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(24.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(tok::bg_selected()))
+                    .child(*e)
+                    .on_click(cx.listener(move |this, _, _, cx| this.add(source.clone(), None, None, cx)))
+                    .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone())),
+            );
+        }
         let mut grid = div().flex().flex_wrap().gap_2();
         for (n, (name, style)) in shape_presets(size).into_iter().enumerate() {
             let (w, h) = if style.width >= style.height { (44.0, 44.0 * style.height / style.width) } else { (44.0 * style.width / style.height, 44.0) };
@@ -142,7 +171,15 @@ impl Editor {
             };
             grid = grid.child(self.look_card(SharedString::from(format!("ed-shape-{n}")), name, sample, MediaSource::Content(Content::Shape(style), Transform::default()), cx));
         }
-        div().flex().flex_col().gap_2().child(heading("SHAPES")).child(grid).child(hint("Click to add at the playhead, or drag onto a track."))
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(heading("STICKERS"))
+            .child(stickers)
+            .child(heading("SHAPES"))
+            .child(grid)
+            .child(hint("Click to add at the playhead, or drag onto a track. A sticker is text: its size and edge are in the inspector."))
     }
 
     pub(super) fn captions_tab(&self, cx: &mut Context<Self>) -> Div {
@@ -206,7 +243,7 @@ impl Editor {
 
     // ------------------------------------------------------------ captions
 
-    fn download_model(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn download_model(&mut self, cx: &mut Context<Self>) {
         if self.downloading {
             return;
         }
@@ -532,6 +569,7 @@ impl Editor {
                 (0, _) => "Add a keyframe, move the playhead, then change the transform: it moves between them.".to_string(),
                 (n, _) => format!("{n} keyframes: changes above set the one at the playhead."),
             }))
+            .map(|b| self.fades_section(c, b, cx))
     }
 
     fn toggle_keyframe(&mut self, clip: Id, cx: &mut Context<Self>) {

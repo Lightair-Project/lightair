@@ -170,18 +170,6 @@ impl Editor {
         let here = c.volume_keys.iter().any(|k| k.at_ms.abs_diff(rel) < 40);
         let prev = c.volume_keys.iter().rev().find(|k| k.at_ms + 40 < rel).map(|k| c.start_ms + k.at_ms);
         let next = c.volume_keys.iter().find(|k| k.at_ms > rel + 40).map(|k| c.start_ms + k.at_ms);
-        let len = c.len_ms();
-        let fade = move |this: &mut Self, out: bool, d: f32, cx: &mut Context<Self>| {
-            this.change(
-                |s| {
-                    if let Some(c) = s.clip_mut(cid) {
-                        let f = if out { &mut c.fade_out_ms } else { &mut c.fade_in_ms };
-                        *f = ((*f as f32 + d * 250.0).max(0.0) as u64).min(len / 2);
-                    }
-                },
-                cx,
-            )
-        };
         let keys = div()
             .flex()
             .items_center()
@@ -228,9 +216,12 @@ impl Editor {
                 (0, _) => "Volume keys make the sound rise and fall: add one, move, change the volume.".to_string(),
                 (n, _) => format!("{n} volume keys: the volume above sets the one at the playhead."),
             }))
-            .child(label("FADES"))
-            .child(self.stepper("ed-fin", "Fade in", format!("{:.2} s", c.fade_in_ms as f32 / 1000.0), move |this, d, cx| fade(this, false, d, cx), cx))
-            .child(self.stepper("ed-fout", "Fade out", format!("{:.2} s", c.fade_out_ms as f32 / 1000.0), move |this, d, cx| fade(this, true, d, cx), cx))
+            .map(|b| self.fades_section(c, b, cx))
+            .child(label("UNDER VOICES"))
+            .child(self.chips("ed-duck", &[("As it is", false), ("Turned down", true)], c.duck, move |this, v, cx| {
+                this.change(|s| if let Some(c) = s.clip_mut(cid) { c.duck = v }, cx)
+            }, cx))
+            .child(hint("Music: turned down while the other clips' sound plays, back up after."))
             .child(label("CLEAN UP VOICE"))
             .child(self.chips("ed-voice", &VOICE, voice, move |this, v, cx| {
                 this.change(
@@ -268,6 +259,26 @@ impl Editor {
                     })),
                 ))
             })
+    }
+
+    /// Fade in and out: the picture and the sound together.
+    pub(super) fn fades_section(&self, c: &Clip, body: Div, cx: &mut Context<Self>) -> Div {
+        let (cid, len) = (c.id, c.len_ms());
+        let fade = move |this: &mut Self, out: bool, d: f32, cx: &mut Context<Self>| {
+            this.change(
+                |s| {
+                    if let Some(c) = s.clip_mut(cid) {
+                        let f = if out { &mut c.fade_out_ms } else { &mut c.fade_in_ms };
+                        *f = ((*f as f32 + d * 250.0).max(0.0) as u64).min(len / 2);
+                    }
+                },
+                cx,
+            )
+        };
+        body.child(label("FADES"))
+            .child(self.stepper("ed-fin", "Fade in", format!("{:.2} s", c.fade_in_ms as f32 / 1000.0), move |this, d, cx| fade(this, false, d, cx), cx))
+            .child(self.stepper("ed-fout", "Fade out", format!("{:.2} s", c.fade_out_ms as f32 / 1000.0), move |this, d, cx| fade(this, true, d, cx), cx))
+            .child(hint("From and to black and silence: the picture and its sound together."))
     }
 
     fn toggle_volume_key(&mut self, clip: Id, cx: &mut Context<Self>) {

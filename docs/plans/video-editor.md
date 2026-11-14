@@ -62,8 +62,8 @@ A project is a document: every change is a step to undo, and it's saved as it ch
    project's size and frame rate); the timeline (ruler, tracks with show, mute and lock, clips
    moved in time and between tracks, trimmed by their edges, snapping, split, delete, zoom and
    scroll), undo and redo; export as MP4, ProRes or GIF into the Library.
-   Not carried over yet from the earlier single-take Editor: its transcript, captions and hidden
-   areas (phases 3 and 4). 
+   The earlier single-take Editor's transcript, captions and hidden areas came back in phase 3
+   and the round after phase 5 (below).
 3. **Words and looks:** text clips with styles, transitions between clips, filters and effects
    (the effect catalog's video effects), keyframes for transforms, stickers; captions as a track.
 
@@ -77,8 +77,11 @@ A project is a document: every change is a step to undo, and it's saved as it ch
    removed at the playhead, eased between, kept in place by splits and trims), marked on clips.
    Captions: the project's sound mixed and transcribed on the computer (whisper), the lines made
    into text clips on a captions track (made again in place, restyled together).
-   Not yet: the effect catalog's other video effects as clip effects, stickers (images do for
-   now), dragging a picture in the player to move it, fades in and out as one control.
+   Since: the effect catalog's shader effects on clips (the 22 `fx.*` effects ported to WGSL,
+   fx.wgsl, their settings read from the .effect files; an Effects tab with the catalog's
+   controls); emoji stickers (colour glyphs drawn in their colours); pictures moved and scaled
+   by dragging them in the player, snapping to the centre lines; fades in and out as one
+   control for picture and sound; hidden areas drawn over a clip in the player (pixelated).
 4. **Sound:** waveforms on clips, fades, volume keyframes, detaching a video's sound, music,
    voice clean-up (the audio engine's effects, offline).
 
@@ -89,9 +92,11 @@ A project is a document: every change is a step to undo, and it's saved as it ch
    export's mix too. A video's sound detached onto an audio track. Music and sounds from the
    media panel's Audio tab. Voice clean-up per clip: the live mixer's Voice Clarity chain (light,
    medium, strong; natural or podcast), run once on the file on a thread and mixed in its place.
-   Not yet: ducking music under voices, recording a voice-over in the Editor, scrubbing sound,
-   dragging fades and volume on the clip itself, the player's sound choosing the monitor
-   device the Live mixer uses.
+   Since: music turned down under voices (FFmpeg's sidechain compressor, the voices as its
+   key); voice-overs recorded from the microphone while the picture plays; sound while
+   scrubbing; fades and volume dragged on the clips; the player's sound on the Live monitor's
+   device. A Words tab: a clip transcribed, words marked and cut, fillers and long pauses taken
+   out, the track closing up.
 5. **Speed of work:** filmstrip thumbnails, proxies, smooth real-time playback (frames decoded
    ahead), the GPU's video decoder.
 
@@ -109,5 +114,7 @@ A project is a document: every change is a step to undo, and it's saved as it ch
    Measured: 1080p frames 186 → 276 a second in the renderer; 2880×1800 at 60 fps, 139 (232 at
    the player's size); the player showed 8 frames a second before and 26–30 now (a development
    build, its window in the background).
-   Not yet: takes through proxies, scrubbing with frames read ahead around the playhead, the
-   player drawing straight from GPU textures (no read back).
+   Since: takes through proxies; scrubbing back finds frames already decoded (each stream keeps
+   its last frames, and a seek back starts a second early); on macOS the player draws straight
+   from the GPU (an IOSurface the compositor renders into, made NV12 by VideoToolbox for GPUI's
+   surface element: no read back), 30 frames a second.
