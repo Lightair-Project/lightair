@@ -318,6 +318,10 @@ impl StudioWindow {
                 let play = hook == "editor-play";
                 self.editor.update(cx, |e, cx| e.hook_speed(play, cx));
             }
+            Ok("editor-ghost") => {
+                self.show_place(super::Place::Editor, cx);
+                self.editor.update(cx, |e, cx| e.hook_ghost(cx));
+            }
             Ok("editor-more") => {
                 self.show_place(super::Place::Editor, cx);
                 self.editor.update(cx, |e, cx| e.hook_more(cx));
