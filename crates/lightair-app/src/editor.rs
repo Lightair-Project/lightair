@@ -28,6 +28,7 @@ use crate::ui::{self, tok};
 
 mod audio;
 mod effects;
+mod ghost;
 mod looks;
 mod speaker;
 mod speed;
@@ -177,6 +178,8 @@ pub struct Editor {
     /// Sound while scrubbing: on, and the snippet playing (when it began).
     scrub_audio: bool,
     scrub: Option<(speaker::Speaker, std::time::Instant)>,
+    /// Where something dragged over the timeline would land.
+    ghost: Option<ghost::Ghost>,
     preview: Option<Picture>,
     wanted: Option<u64>,
     busy: bool,
@@ -357,6 +360,7 @@ impl Editor {
             recorder: None,
             scrub_audio: true,
             scrub: None,
+            ghost: None,
             preview: None,
             wanted: None,
             busy: false,
@@ -1940,7 +1944,13 @@ impl Editor {
                 let _ = w;
                 cx.notify();
             }))
+            .children(self.ghost_overlay())
+            .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<DraggedMedia>, _, cx| {
+                let drag = ev.drag(cx).clone();
+                this.drag_over(&drag, ev.event.position, ev.bounds.contains(&ev.event.position), cx);
+            }))
             .on_drop(cx.listener(|this, m: &DraggedMedia, w, cx| {
+                this.ghost = None;
                 let pos = w.mouse_position();
                 let t = this.time_at(pos.x).map(|t| this.snap(t as i64, None));
                 let track = this.track_at(pos.y);
@@ -1952,6 +1962,9 @@ impl Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.ghost.is_some() && !cx.has_active_drag() && std::env::var("LIGHTAIR_OPEN").as_deref() != Ok("editor-ghost") {
+            self.ghost = None;
+        }
         self.sync_text_input(window, cx);
         self.want_peaks();
         self.want_strips();
