@@ -26,7 +26,9 @@ use lightair_store::recordings::{File as ItemFile, Index, Item, Kind};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 
+mod audio;
 mod looks;
+mod speaker;
 use lightair_render::sequence::Content;
 use looks::{heading, hint, label};
 
@@ -41,6 +43,12 @@ enum Done {
     /// Caption lines heard in the project's sound.
     Captions(Result<Vec<(u64, u64, String)>, String>),
     Downloaded(Result<(), String>),
+    /// Playback reached the end.
+    Ended,
+    /// A file's waveform.
+    Peaks(PathBuf, Option<Arc<Vec<f32>>>),
+    /// Voices cleaned up.
+    Cleaned(Result<(), String>),
 }
 
 /// A medium being dragged from the media panel.
@@ -100,6 +108,7 @@ enum InspectorTab {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LeftTab {
     Media,
+    Audio,
     Text,
     Shapes,
     Captions,
@@ -132,6 +141,8 @@ pub struct Editor {
     wanted: Option<u64>,
     busy: bool,
     playing: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// The player's sound, while it plays.
+    speaker: Option<speaker::Speaker>,
     exporting: Option<f32>,
     note: Option<SharedString>,
     playhead: u64,
@@ -148,6 +159,9 @@ pub struct Editor {
     text_before: Option<Sequence>,
     captioning: bool,
     downloading: bool,
+    /// Waveforms by file (`None`: being read).
+    peaks: std::collections::HashMap<PathBuf, Option<Arc<Vec<f32>>>>,
+    cleaning: bool,
     naming: Option<(Option<Id>, Entity<InputState>)>,
     watching: bool,
     tx: mpsc::Sender<Done>,
@@ -230,6 +244,8 @@ fn kind_icon(k: Kind) -> &'static str {
 impl Editor {
     pub fn new(studio: Entity<Studio>) -> Self {
         let (tx, rx) = mpsc::channel();
+        // cleaned voices are kept with the app's data
+        lightair_render::sound::set_cache(lightair_platform::paths::data_dir().join("cache").join("sound"));
         Editor {
             studio,
             workspace: None,
@@ -245,6 +261,7 @@ impl Editor {
             wanted: None,
             busy: false,
             playing: None,
+            speaker: None,
             exporting: None,
             note: None,
             playhead: 0,
@@ -259,6 +276,8 @@ impl Editor {
             text_before: None,
             captioning: false,
             downloading: false,
+            peaks: Default::default(),
+            cleaning: false,
             naming: None,
             watching: false,
             tx,
@@ -330,6 +349,14 @@ impl Editor {
                             }
                             Done::Media(media, at, track) => this.take_media(media, at, track, cx),
                             Done::Captions(r) => this.take_captions(r, cx),
+                            Done::Peaks(f, p) => {
+                                this.peaks.insert(f, p);
+                            }
+                            Done::Cleaned(r) => this.take_cleaned(r, cx),
+                            Done::Ended => {
+                                this.playing = None;
+                                this.speaker = None;
+                            }
                             Done::Downloaded(r) => {
                                 this.downloading = false;
                                 this.note = Some(match r {
@@ -475,6 +502,7 @@ impl Editor {
         let _ = p.save(&ws);
         *self.pending.lock().unwrap() = Some(p.sequence.clone());
         self.request(self.playhead);
+        self.clean_voices(cx);
         cx.notify();
     }
 
@@ -641,21 +669,37 @@ impl Editor {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (r, tx, from, flag, pending) = (self.renderer.clone(), self.tx.clone(), self.playhead, stop.clone(), self.pending.clone());
         self.playing = Some(stop);
+        self.speaker = self.seq().and_then(|s| speaker::Speaker::start(s, from));
+        let clock = self.speaker.as_ref().map(|s| s.clock());
         std::thread::spawn(move || {
             let mut guard = r.lock().unwrap();
             let Some(r) = guard.as_mut() else { return };
             catch_up(r, &pending);
             let size = r.sequence().size;
             let start = std::time::Instant::now();
+            let stopped = || flag.load(std::sync::atomic::Ordering::Relaxed);
             r.play(from, |t, rgba| {
-                // in time with the clock (late frames are shown late, not skipped)
-                let due = std::time::Duration::from_millis(t.saturating_sub(from));
-                if let Some(wait) = due.checked_sub(start.elapsed()) {
-                    std::thread::sleep(wait);
+                // in time with the sound when there is some, else the clock (late frames are
+                // shown late, not skipped)
+                let due = t.saturating_sub(from);
+                loop {
+                    let now = match clock.as_ref().and_then(|c| c.heard_ms()) {
+                        Some(ms) => ms,
+                        // the sound starting: a moment's wait for it
+                        None if clock.is_some() && start.elapsed() < std::time::Duration::from_secs(1) => 0,
+                        None => start.elapsed().as_millis() as u64,
+                    };
+                    if now >= due || stopped() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis((due - now).min(10)));
                 }
                 let _ = tx.send(Done::Frame(t, rgba, size));
-                !flag.load(std::sync::atomic::Ordering::Relaxed)
+                !stopped()
             });
+            if !stopped() {
+                let _ = tx.send(Done::Ended);
+            }
         });
         cx.notify();
     }
@@ -664,6 +708,7 @@ impl Editor {
         if let Some(s) = self.playing.take() {
             s.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        self.speaker = None;
         self.busy = false;
         cx.notify();
     }
@@ -1072,8 +1117,13 @@ impl Editor {
             let thumb = (m.kind == MediaKind::Image).then(|| m.path.clone());
             own = own.child(card(SharedString::from(format!("ed-imp-{n}")), m.name.clone(), short(m.duration_ms), icon, thumb, MediaSource::Media(m.id), cx));
         }
-        let tabs: [(&'static str, &'static str, LeftTab); 4] =
-            [("Media", "film", LeftTab::Media), ("Text", "type", LeftTab::Text), ("Shapes", "shapes", LeftTab::Shapes), ("Captions", "captions", LeftTab::Captions)];
+        let tabs: [(&'static str, &'static str, LeftTab); 5] = [
+            ("Media", "film", LeftTab::Media),
+            ("Audio", "music", LeftTab::Audio),
+            ("Text", "type", LeftTab::Text),
+            ("Shapes", "shapes", LeftTab::Shapes),
+            ("Captions", "captions", LeftTab::Captions),
+        ];
         let mut bar = div().flex().items_center().gap_0p5().px_2().h(px(48.)).border_b_1().border_color(tok::border());
         for (n, (name, icon, tab)) in tabs.into_iter().enumerate() {
             let on = self.left == tab;
@@ -1084,7 +1134,7 @@ impl Editor {
                     .flex_col()
                     .items_center()
                     .gap_0p5()
-                    .w(px(64.))
+                    .w(px(54.))
                     .py_1()
                     .rounded(px(6.))
                     .cursor_pointer()
@@ -1111,6 +1161,7 @@ impl Editor {
                 )
                 .child(if self.library.is_empty() { hint("Recordings, takes and clips appear here.") } else { grid })
                 .when(!imported.is_empty(), |d| d.child(heading("IMPORTED")).child(own)),
+            LeftTab::Audio => self.audio_tab(cx),
             LeftTab::Text => self.text_tab(cx),
             LeftTab::Shapes => self.shapes_tab(cx),
             LeftTab::Captions => self.captions_tab(cx),
@@ -1223,16 +1274,7 @@ impl Editor {
                     InspectorTab::Text | InspectorTab::Video => body = self.transform_section(&c, body, cx),
                     InspectorTab::Filter => body = self.filter_section(&c, body, cx),
                     InspectorTab::Transition => body = self.transition_section(&c, body, cx),
-                    InspectorTab::Audio => {
-                        body = body
-                            .child(label("VOLUME"))
-                            .child(self.stepper("ed-vol", "Volume", format!("{:.0}%", c.volume * 100.0), move |this, d, cx| {
-                                this.change(|s| if let Some(c) = s.clip_mut(cid) { c.volume = (c.volume + d * 0.1).clamp(0.0, 4.0) }, cx)
-                            }, cx))
-                            .child(self.chips("ed-mute", &[("Sound on", false), ("Muted", true)], c.muted, move |this, v, cx| {
-                                this.change(|s| if let Some(c) = s.clip_mut(cid) { c.muted = v }, cx)
-                            }, cx));
-                    }
+                    InspectorTab::Audio => body = self.audio_section(&c, &m, body, cx),
                     InspectorTab::Speed => {
                         body = body.child(label("SPEED")).child(self.chips(
                             "ed-speed",
@@ -1424,6 +1466,8 @@ impl Editor {
                 };
                 let pps_ = pps;
                 let diamonds: Vec<f32> = c.keyframes.iter().map(|k| k.at_ms as f32 / 1000.0 * pps_).collect();
+                let volume_marks: Vec<f32> = c.volume_keys.iter().map(|k| k.at_ms as f32 / 1000.0 * pps_).collect();
+                let wave = if track.kind == TrackKind::Audio { self.wave(c, m, left, width, h) } else { None };
                 // a transition straddles the cut before the clip
                 if let Some(tn) = c.transition {
                     let half = tn.duration_ms as f32 / 2000.0 * pps;
@@ -1461,6 +1505,7 @@ impl Editor {
                         .text_size(px(11.))
                         .text_color(rgb(0xFFFFFF))
                         .cursor_pointer()
+                        .children(wave)
                         .child(
                             div()
                                 .flex()
@@ -1474,6 +1519,11 @@ impl Editor {
                         .children(diamonds.into_iter().map(|x| {
                             div().absolute().bottom(px(2.)).left(px(x - 5.0)).child(ui::icon("diamond").size(px(10.)).text_color(rgb(0xFDE68A)))
                         }))
+                        .children(volume_marks.into_iter().map(|x| {
+                            div().absolute().top(px(2.)).left(px(x - 5.0)).child(ui::icon("diamond").size(px(10.)).text_color(rgb(0x93C5FD)))
+                        }))
+                        .when(c.fade_in_ms > 0 || c.fade_out_ms > 0, |d| d.child(div().absolute().right(px(4.)).top(px(2.)).child(ui::icon("audio-waveform").size(px(10.)).text_color(rgba(0xFFFFFFA0)))))
+                        .when(c.voice.is_some(), |d| d.child(div().absolute().right(px(16.)).top(px(2.)).child(ui::icon("mic-vocal").size(px(10.)).text_color(rgba(0xFFFFFFA0)))))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
@@ -1569,6 +1619,7 @@ impl Editor {
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_text_input(window, cx);
+        self.want_peaks();
         // the media panel lists the workspace's Library as it is now
         let v = self.studio.read(cx).library_version;
         if self.library_seen != Some(v) {

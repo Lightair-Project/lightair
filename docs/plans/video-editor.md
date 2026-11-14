@@ -1,6 +1,6 @@
 # The Editor as a full video editor
 
-Status: phases 1 to 3 built (14 November 2026); see the notes under them. This replaces the Screen Studio plan's
+Status: phases 1 to 4 built (14 November 2026); see the notes under them. This replaces the Screen Studio plan's
 "focused editor" decision (docs/plans/screen-studio.md, section 7): the Editor becomes a
 multi-track video editor, in the way CapCut is, while a Studio take keeps everything that made it
 special (zooms, the redrawn pointer, the backdrop) as a kind of clip.
@@ -63,7 +63,7 @@ A project is a document: every change is a step to undo, and it's saved as it ch
    moved in time and between tracks, trimmed by their edges, snapping, split, delete, zoom and
    scroll), undo and redo; export as MP4, ProRes or GIF into the Library.
    Not carried over yet from the earlier single-take Editor: its transcript, captions and hidden
-   areas (phases 3 and 4). Sound isn't heard in the player yet (phase 4).
+   areas (phases 3 and 4). 
 3. **Words and looks:** text clips with styles, transitions between clips, filters and effects
    (the effect catalog's video effects), keyframes for transforms, stickers; captions as a track.
 
@@ -81,5 +81,16 @@ A project is a document: every change is a step to undo, and it's saved as it ch
    now), dragging a picture in the player to move it, fades in and out as one control.
 4. **Sound:** waveforms on clips, fades, volume keyframes, detaching a video's sound, music,
    voice clean-up (the audio engine's effects, offline).
+
+   Built: the player plays the sound (the mix streamed by FFmpeg from the playhead to the
+   default output; the picture keeps time with what's been heard). Waveforms on audio clips, in
+   decibels and shaped by the clip's volume and fades. Fades in and out, volume keys (added or
+   removed at the playhead, straight between, kept in place by splits and trims), all in the
+   export's mix too. A video's sound detached onto an audio track. Music and sounds from the
+   media panel's Audio tab. Voice clean-up per clip: the live mixer's Voice Clarity chain (light,
+   medium, strong; natural or podcast), run once on the file on a thread and mixed in its place.
+   Not yet: ducking music under voices, recording a voice-over in the Editor, scrubbing sound,
+   dragging fades and volume on the clip itself, the player's sound choosing the monitor
+   device the Live mixer uses.
 5. **Speed of work:** filmstrip thumbnails, proxies, smooth real-time playback (frames decoded
    ahead), the GPU's video decoder.

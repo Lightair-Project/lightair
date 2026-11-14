@@ -313,6 +313,10 @@ impl StudioWindow {
                 }
             }
             Ok("editor") => self.show_place(super::Place::Editor, cx),
+            Ok("editor-sound") => {
+                self.show_place(super::Place::Editor, cx);
+                self.editor.update(cx, |e, cx| e.hook_sound(cx));
+            }
             Ok(hook @ ("editor-looks" | "editor-looks-2")) => {
                 self.show_place(super::Place::Editor, cx);
                 let second = hook == "editor-looks-2";
