@@ -296,10 +296,11 @@ deterministically. The editor needs both, so the plan adds a small offline rende
 
 The same renderer draws the editor's scrubbing preview.
 
-Lightair's live effects keep running in libobs. Shaders used in both paths (cursor, zoom, motion
-blur, backdrop and shadow, masks) are written once and compiled for both, to keep live and edited
-output identical. **Decision to confirm:** the dedicated renderer, rather than driving libobs
-offline. That is the largest technical choice in this plan.
+Lightair's live effects keep running in libobs. **Decided** (section 7): a dedicated renderer, not
+libobs driven offline. Effects used in both paths (cursor, zoom, motion blur, backdrop and shadow,
+masks) are written twice: as libobs filters for Live, and in `lightair-render` for the Editor.
+libobs's shader language and the renderer's don't share source. Golden-frame tests render the same
+inputs through both and require matching output, so Live and Editor never drift apart.
 
 ### 4.3 Zoom and motion engine
 
@@ -396,21 +397,28 @@ These follow from Lightair being a live, multi-format studio rather than a recor
   instead of a single voice preset.
 - **Scenes and assets**: intro and outro scenes, prefabs and scene assets placed into an edit.
 
-## 7. Open questions
+## 7. Decisions
 
-- **Renderer:** confirm the dedicated offline renderer, and whether live and edit share shader
-  source (section 4.2).
-- **Scope of the editor:** a focused screen-recording editor (Screen Studio's scope) or a general
-  video editor. This plan assumes the former.
-- **Library location:** this plan keeps media where the user records it and indexes it per
-  project. The alternative is moving recordings inside each project package; that's tidier, but
-  heavy for big files and breaks the recording folder setting.
-- **Switcher shortcuts:** ⌘1–⌘9 already take scenes on air, so the switcher needs others
-  (proposed ⌃1/⌃2/⌃3).
-- **Input Monitoring:** without it there's no auto-zoom or keycaps. Is a degraded mode without the
-  permission acceptable, or should Studio takes require it?
-- **Assets we must make ourselves:** cursor set, device bezels, wallpapers and caption styles.
-  Nothing is copied from Screen Studio or Apple marketing material.
+Settled 14 November 2026 (the recommendations, accepted):
+
+- **Renderer:** a dedicated offline renderer, `lightair-render`. It uses `wgpu` on Metal, decodes
+  with AVFoundation and encodes with VideoToolbox. libobs stays the live compositor. Shared
+  effects exist in both, kept identical by golden-frame tests (section 4.2).
+- **Editor scope:** a focused screen-recording editor (Screen Studio's scope): one Library item
+  at a time, its tracks, zooms, layouts, cuts, captions and masks. Not a general multi-clip video
+  editor (multi-take projects come in phase 5, still within that scope).
+- **Library location:** recordings stay where they're recorded. Each project's
+  `recordings/index.json` points at them, with **Locate…** for moved files. Nothing is moved into
+  project packages.
+- **Switcher shortcuts:** ⌃1 Library, ⌃2 Live, ⌃3 Editor. ⌘1–⌘9 stay with scenes.
+- **Input Monitoring:** not required. The first Studio take explains what it adds (auto-zoom,
+  click effects, keycaps) and lets the user grant it in System Settings. Lightair opens the right
+  pane and never changes the setting itself. Without it, takes still record the pointer path,
+  which needs no permission, so the drawn pointer, smoothing and manual zooms work; auto-zoom,
+  click effects and keycaps need the permission.
+- **Assets:** Lightair makes its own pointer set, device bezels, backdrop gradients and caption
+  styles. Wallpapers come from the user's Mac. Nothing is copied from Screen Studio or Apple
+  marketing material.
 
 ## Sources
 
