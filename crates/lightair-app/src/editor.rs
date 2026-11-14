@@ -202,7 +202,9 @@ type Peaks = Arc<Vec<f32>>;
 fn track_h(t: &lightair_render::sequence::Track) -> f32 {
     t.height.unwrap_or(if t.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H })
 }
-const EDGE: f32 = 7.0;
+const EDGE: f32 = 8.0;
+/// Where a fade's knob sits when there's no fade: clear of the clip's edge, which trims.
+const FADE_KNOB: f32 = 16.0;
 
 pub struct Editor {
     studio: Entity<Studio>,
@@ -239,10 +241,9 @@ pub struct Editor {
     /// The clips picked (with `selected`, the inspector's), and a box being dragged to pick.
     picked: Vec<Id>,
     marquee: Option<select::Marquee>,
-    /// The timeline's tool; its switches (the main track's magnet, snapping, linkage, the
+    /// The timeline's tool; its switches (snapping, linkage, the
     /// preview axis) and the moment under the pointer; clips copied; the zoom slider.
     tool: tools::Tool,
-    magnet: bool,
     snapping: bool,
     linkage: bool,
     axis: bool,
@@ -473,7 +474,6 @@ impl Editor {
             picked: Vec::new(),
             marquee: None,
             tool: tools::Tool::Select,
-            magnet: true,
             snapping: true,
             linkage: true,
             axis: false,
@@ -780,12 +780,6 @@ impl Editor {
         let Some(p) = &mut self.project else { return };
         let before = p.sequence.clone();
         f(&mut p.sequence);
-        // the main track's magnet: no gaps there
-        if self.magnet
-            && let Some(m) = p.sequence.main_track()
-        {
-            p.sequence.pack(m);
-        }
         if p.sequence == before {
             return;
         }
@@ -818,7 +812,8 @@ impl Editor {
     }
 
     pub fn delete_selected(&mut self, cx: &mut Context<Self>) {
-        let picked = self.picked_clips();
+        // with linkage, what's linked to it goes too
+        let picked = self.picked_with_links();
         if picked.is_empty() {
             return;
         }
@@ -1405,11 +1400,6 @@ impl Editor {
         }
         if let (Some(before), Some(p)) = (self.drag_before.take(), &mut self.project) {
             p.sequence.tidy();
-            if self.magnet
-                && let Some(m) = p.sequence.main_track()
-            {
-                p.sequence.pack(m);
-            }
             if before != p.sequence {
                 self.undo.push(before);
                 self.redo.clear();
@@ -2069,7 +2059,8 @@ impl Editor {
                 .border_color(tok::border())
                 .child(div().w(px(24.)).text_size(px(11.)).text_color(tok::text_tertiary()).child(if track.captions { "CC".to_string() } else { name }))
                 .when(track.kind == TrackKind::Video, |d| d.child(toggle(if track.hidden { "eye-off" } else { "eye" }, track.hidden, 0, |t| t.hidden = !t.hidden, cx)))
-                .child(toggle(if track.muted { "volume-x" } else { "volume-2" }, track.muted, 1, |t| t.muted = !t.muted, cx))
+                // sound is on the audio tracks: only they're muted
+                .when(track.kind == TrackKind::Audio, |d| d.child(toggle(if track.muted { "volume-x" } else { "volume-2" }, track.muted, 1, |t| t.muted = !t.muted, cx)))
                 .child(toggle(if track.locked { "lock" } else { "lock-open" }, track.locked, 2, |t| t.locked = !t.locked, cx));
             let mut lane = div().relative().flex_1().h_full().overflow_hidden().when(self.tool == tools::Tool::Split, |d| d.cursor(CursorStyle::ResizeColumn));
             let mut badges = Vec::new();
@@ -2088,6 +2079,11 @@ impl Editor {
                     (_, _, Some(_)) => rgb(0x6D28D9),
                     _ => rgb(0x0E7C86),
                 };
+                // linked: a link before its name (underlined), and how far out of step it is with
+                // its partner of the same file, if it is
+                let partners: Vec<lightair_render::sequence::Clip> = seq.linked(c.id).into_iter().filter(|p| *p != c.id).filter_map(|p| seq.clip(p).cloned()).collect();
+                let linked = !partners.is_empty();
+                let slip: Option<i64> = partners.iter().find(|p| p.media == c.media).map(|p| (c.start_ms as i64 - (c.in_ms as f64 / c.speed.max(0.05) as f64) as i64) - (p.start_ms as i64 - (p.in_ms as f64 / p.speed.max(0.05) as f64) as i64)).filter(|d| d.abs() > 20);
                 let title = match (&c.content, m) {
                     (Some(content), _) => looks::content_name(content),
                     (None, Some(m)) => match c.stream.and_then(|n| m.tracks.get(n as usize)) {
@@ -2134,11 +2130,53 @@ impl Editor {
                     extras.push(div().absolute().top_0().bottom_0().right_0().w(px(fout)).bg(linear_gradient(270., linear_color_stop(rgba(0x000000b0), 0.), linear_color_stop(rgba(0x00000000), 1.))).into_any_element());
                 }
                 if selected && !locked {
-                    let knob = |x: f32| div().absolute().top(px(1.)).left(px(x - 4.0)).size(px(8.)).rounded_full().bg(rgb(0xFFFFFF)).border_1().border_color(rgb(0x111111)).into_any_element();
-                    extras.push(knob(fin.max(4.0)));
-                    extras.push(knob((width - 4.0 - fout.max(4.0)).max(fin.max(4.0) + 8.0)));
+                    // (kept clear of the edges, which trim)
+                    let knob = |x: f32| {
+                        div()
+                            .absolute()
+                            .top(px(1.))
+                            .left(px(x - 5.0))
+                            .size(px(10.))
+                            .rounded_full()
+                            .bg(rgb(0xFFFFFF))
+                            .border_1()
+                            .border_color(rgb(0x111111))
+                            .cursor(CursorStyle::ResizeLeftRight)
+                            .into_any_element()
+                    };
+                    extras.push(knob(fin.max(FADE_KNOB)));
+                    extras.push(knob((width - fout.max(FADE_KNOB)).max(fin.max(FADE_KNOB) + 10.0)));
                     if is_audio {
-                        extras.push(div().absolute().left_0().right_0().top(px(volume_y)).h(px(1.5)).bg(rgba(0xFFFFFFE0)).into_any_element());
+                        // the volume line, in a band that's easy to catch
+                        extras.push(
+                            div()
+                                .absolute()
+                                .left(px(EDGE))
+                                .right(px(EDGE))
+                                .top(px(volume_y - 4.0))
+                                .h(px(9.))
+                                .flex()
+                                .items_center()
+                                .cursor(CursorStyle::ResizeUpDown)
+                                .child(div().w_full().h(px(1.5)).bg(rgba(0xFFFFFFE0)))
+                                .into_any_element(),
+                        );
+                    }
+                }
+                // the edges trim (with the select tool, on tracks that aren't locked)
+                if !locked && self.tool == tools::Tool::Select {
+                    for left_edge in [true, false] {
+                        extras.push(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .when(left_edge, |d| d.left_0())
+                                .when(!left_edge, |d| d.right_0())
+                                .w(px(EDGE))
+                                .cursor(CursorStyle::ResizeLeftRight)
+                                .into_any_element(),
+                        );
                     }
                 }
                 lane = lane.child(
@@ -2158,7 +2196,13 @@ impl Editor {
                         .py_0p5()
                         .text_size(px(11.))
                         .text_color(rgb(0xFFFFFF))
-                        .cursor_pointer()
+                        // the tool's cursor over clips too
+                        .map(|d| match self.tool {
+                            tools::Tool::Split => d.cursor(CursorStyle::ResizeColumn),
+                            tools::Tool::Leftward => d.cursor(CursorStyle::ResizeLeft),
+                            tools::Tool::Rightward => d.cursor(CursorStyle::ResizeRight),
+                            tools::Tool::Select => d,
+                        })
                         .children(wave)
                         .children(strip)
                         .child(
@@ -2168,10 +2212,22 @@ impl Editor {
                                 .gap_2()
                                 .whitespace_nowrap()
                                 .when(has_strip, |d| d.self_start().px_1().rounded(px(3.)).bg(rgba(0x000000a0)))
-                                .child(title)
+                                .when(linked, |d| d.child(ui::icon("link").size(px(10.)).text_color(rgba(0xFFFFFFD0))))
+                                .child(div().when(linked, |d| d.underline()).child(title))
                                 .child(div().opacity(0.7).child(short(c.len_ms())))
+                                .when_some(slip, |d, ms| {
+                                    d.child(
+                                        div()
+                                            .px_1()
+                                            .rounded(px(3.))
+                                            .bg(rgb(0xDC2626))
+                                            .text_color(rgb(0xFFFFFF))
+                                            .child(format!("{}{:.2}s", if ms > 0 { "+" } else { "−" }, ms.unsigned_abs() as f32 / 1000.0)),
+                                    )
+                                })
                                 .when((c.speed - 1.0).abs() > 0.01, |d| d.child(div().opacity(0.8).child(format!("{}×", c.speed))))
-                                .when(c.muted, |d| d.child(ui::icon("volume-x").size(px(11.)))),
+                                // (a video whose sound is apart is muted as a matter of course)
+                                .when(c.muted && !(linked && track.kind == TrackKind::Video), |d| d.child(ui::icon("volume-x").size(px(11.)))),
                         )
                         .children(diamonds.into_iter().map(|x| {
                             div().absolute().bottom(px(2.)).left(px(x - 5.0)).child(ui::icon("diamond").size(px(10.)).text_color(rgb(0xFDE68A)))
@@ -2220,16 +2276,16 @@ impl Editor {
                                 });
                                 let local = x - left;
                                 let near_line = is_audio && (top - (1.0 - vol.min(2.0) / 2.0) * inner).abs() < 5.0;
-                                let d = if was && top < 12.0 && (local - fin.max(4.0)).abs() < 8.0 {
-                                    Drag::FadeIn(cid)
-                                } else if was && top < 12.0 && (local - (width - 4.0 - fout.max(4.0))).abs() < 8.0 {
-                                    Drag::FadeOut(cid)
-                                } else if was && near_line && local > EDGE && width - local > EDGE {
-                                    Drag::Volume { clip: cid, y: f32::from(ev.position.y), from: vol }
-                                } else if x - left < EDGE {
+                                let d = if local < EDGE {
                                     Drag::TrimStart(cid)
-                                } else if left + width - x < EDGE {
+                                } else if width - local < EDGE {
                                     Drag::TrimEnd(cid)
+                                } else if was && top < 13.0 && (local - fin.max(FADE_KNOB)).abs() < 7.0 {
+                                    Drag::FadeIn(cid)
+                                } else if was && top < 13.0 && (local - (width - fout.max(FADE_KNOB))).abs() < 7.0 {
+                                    Drag::FadeOut(cid)
+                                } else if was && near_line {
+                                    Drag::Volume { clip: cid, y: f32::from(ev.position.y), from: vol }
                                 } else {
                                     Drag::Move { clip: cid, grab_ms: t as i64 - start as i64 }
                                 };
@@ -2273,8 +2329,16 @@ impl Editor {
         // markers on the ruler; the moment under the pointer (preview axis)
         let marks: Vec<f32> = seq.markers.iter().map(|m| HEADER_W + self.x_of(*m)).filter(|x| *x >= HEADER_W).collect();
         let hover = self.hover.filter(|_| self.axis).map(|t| HEADER_W + self.x_of(t));
+        let dragging_cursor = match self.drag {
+            Some(Drag::TrimStart(_) | Drag::TrimEnd(_) | Drag::FadeIn(_) | Drag::FadeOut(_)) => Some(CursorStyle::ResizeLeftRight),
+            Some(Drag::Volume { .. }) => Some(CursorStyle::ResizeUpDown),
+            Some(Drag::TrackHeight { .. }) => Some(CursorStyle::ResizeRow),
+            Some(Drag::Move { .. }) => Some(CursorStyle::ClosedHand),
+            _ => None,
+        };
         div()
             .id("ed-timeline")
+            .when_some(dragging_cursor, |d, c| d.cursor(c))
             .relative()
             .flex()
             .flex_col()

@@ -1,6 +1,6 @@
 //! The timeline's tools, as CapCut has them: the select and split tools (and picking all to
 //! the left or right of a point), undo and redo, split, delete left and right of the playhead,
-//! delete, markers, freeze frame, reverse, mirror, rotate and crop; the main track's magnet,
+//! delete, markers, freeze frame, reverse, mirror, rotate and crop;
 //! snapping, linkage and the preview axis (the player following the pointer over the
 //! timeline); zoom, by a slider or to fit; copy, cut, paste and duplicate; and their keys.
 
@@ -90,14 +90,10 @@ impl Editor {
     pub(super) fn delete_side(&mut self, left: bool, cx: &mut Context<Self>) {
         let (t, only) = (self.playhead, self.picked_clips());
         let mut first: Option<Id> = None;
-        let magnet = self.magnet;
         self.change(
             |s| {
                 let done = if left { s.delete_left(t, &only) } else { s.delete_right(t, &only) };
                 first = done.first().copied();
-                if magnet && let Some(m) = s.main_track() {
-                    s.pack(m);
-                }
             },
             cx,
         );
@@ -273,9 +269,25 @@ impl Editor {
 
     // ------------------------------------------------------------ copy, paste, duplicate
 
+    /// What's picked, with the clips linked to it (linkage on).
+    pub(super) fn picked_with_links(&self) -> Vec<Id> {
+        let Some(seq) = self.seq() else { return Vec::new() };
+        let mut all = self.picked_clips();
+        if self.linkage {
+            for c in all.clone() {
+                for l in seq.linked(c) {
+                    if !all.contains(&l) {
+                        all.push(l);
+                    }
+                }
+            }
+        }
+        all
+    }
+
     pub fn copy_picked(&mut self, cx: &mut Context<Self>) {
+        let picked = self.picked_with_links();
         let Some(seq) = self.seq() else { return };
-        let picked = self.picked_clips();
         let mut copied: Vec<Copied> = picked
             .iter()
             .filter_map(|id| {
@@ -295,6 +307,9 @@ impl Editor {
 
     pub fn cut_picked(&mut self, cx: &mut Context<Self>) {
         self.copy_picked(cx);
+        // what was copied goes: linked clips too
+        let gone = self.picked_with_links();
+        self.picked = gone;
         self.delete_selected(cx);
     }
 
@@ -351,7 +366,7 @@ impl Editor {
 
     /// Copies of the picked clips right after them.
     pub fn duplicate_picked(&mut self, cx: &mut Context<Self>) {
-        let end = self.picked_clips().iter().filter_map(|c| self.seq()?.clip(*c)).map(|c| c.end_ms()).max();
+        let end = self.picked_with_links().iter().filter_map(|c| self.seq()?.clip(*c)).map(|c| c.end_ms()).max();
         let Some(end) = end else { return };
         self.copy_picked(cx);
         self.paste_at(Some(end), cx);
@@ -434,10 +449,6 @@ impl Editor {
             ("q", false, false) => self.delete_side(true, cx),
             ("w", false, false) => self.delete_side(false, cx),
             ("m", false, false) => self.toggle_marker(cx),
-            ("n", false, false) => {
-                self.magnet = !self.magnet;
-                cx.notify();
-            }
             ("s", false, false) => {
                 self.snapping = !self.snapping;
                 cx.notify();
@@ -566,14 +577,6 @@ impl Editor {
                 d.child(div().pl_3().text_size(px(12.)).text_color(tok::text_tertiary()).child(format!("Proxy for “{name}” {:.0}%", f * 100.0)))
             })
             .child(div().flex_1())
-            .child(toggle("ed-t-magnet", "magnet", "Main track magnet: no gaps on the main track (N)", self.magnet).on_click(cx.listener(|this, _, _, cx| {
-                this.magnet = !this.magnet;
-                if this.magnet {
-                    let mut m = None;
-                    this.change(|s| m = s.main_track().map(|t| s.pack(t)), cx);
-                }
-                cx.notify();
-            })))
             .child(toggle("ed-t-snap", "between-horizontal-start", "Snapping (S)", self.snapping).on_click(cx.listener(|this, _, _, cx| {
                 this.snapping = !this.snapping;
                 cx.notify();
@@ -663,5 +666,28 @@ impl Editor {
         self.select_all(cx);
         self.tool = Tool::Split;
         self.seek(6_000, cx);
+    }
+}
+
+impl Editor {
+    /// For the check hook: the first clip's right edge dragged 100 points left, as a drag
+    /// would (once the timeline is laid out); its length before and after, logged.
+    pub fn hook_trim(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(b) = *this.timeline_bounds.borrow() else { return };
+                let Some(c) = this.seq().and_then(|s| s.tracks.iter().find(|t| t.kind == TrackKind::Video)).and_then(|t| t.clips.first()).cloned() else { return };
+                let before = c.len_ms();
+                let x = f32::from(b.origin.x) + HEADER_W + this.x_of(c.end_ms()) - 100.0;
+                let y = this.track_top(this.seq().and_then(|s| s.find(c.id)).map_or(0, |f| f.0)).unwrap_or(0.0) + 20.0;
+                this.begin_drag(Drag::TrimEnd(c.id));
+                this.drag_to(point(px(x), px(y)), cx);
+                this.drag_end(cx);
+                let after = this.seq().and_then(|s| s.clip(c.id)).map_or(0, |c| c.len_ms());
+                tracing::info!(before, after, "CHECK trim end by 100 points");
+            });
+        })
+        .detach();
     }
 }
