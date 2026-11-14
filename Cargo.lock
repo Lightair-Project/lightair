@@ -3804,6 +3804,12 @@ dependencies = [
  "lightair-audio",
  "lightair-core",
  "lightair-store",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "objc2-io-surface",
+ "objc2-metal 0.3.2",
+ "objc2-video-toolbox",
  "pollster",
  "serde",
  "serde_json",
@@ -4821,6 +4827,7 @@ dependencies = [
  "dispatch2",
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
+ "objc2-io-surface",
 ]
 
 [[package]]

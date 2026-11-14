@@ -27,16 +27,20 @@ use crate::studio::Studio;
 use crate::ui::{self, tok};
 
 mod audio;
+mod effects;
 mod looks;
 mod speaker;
 mod speed;
+mod stage;
+mod voiceover;
+mod words;
 use lightair_render::sequence::Content;
 use looks::{heading, hint, label};
 
 /// What the background work sends back.
 enum Done {
     /// A frame for the player (made into an image off the window's thread).
-    Frame(u64, Option<Arc<RenderImage>>),
+    Frame(u64, Option<Picture>, Vec<lightair_render::seqrender::Placed>),
     Progress(f32),
     Exported(Result<PathBuf, String>),
     /// Media made from Library items or files (probing takes a moment): placed at the time, or
@@ -51,6 +55,8 @@ enum Done {
     Peaks(PathBuf, Option<Arc<Vec<f32>>>),
     /// Voices cleaned up.
     Cleaned(Result<(), String>),
+    /// A medium's words.
+    Transcript(Id, Result<lightair_render::speech::Transcript, String>),
     /// A proxy being made, and made (its original file).
     ProxyProgress(f32),
     /// A video's filmstrip.
@@ -97,6 +103,11 @@ enum Drag {
     TrimStart(Id),
     TrimEnd(Id),
     Scrub,
+    /// A fade's handle, dragged along the clip.
+    FadeIn(Id),
+    FadeOut(Id),
+    /// The volume line, dragged up and down (from a window y, at a volume).
+    Volume { clip: Id, y: f32, from: f32 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -107,7 +118,9 @@ enum InspectorTab {
     Audio,
     Speed,
     Filter,
+    Effects,
     Transition,
+    Words,
     Screen,
 }
 
@@ -145,11 +158,26 @@ pub struct Editor {
     /// busy, or still being made, when the change happens).
     pending: Arc<Mutex<Pending>>,
     /// The frame being shown, and the one before it (freed from the GPU when the next comes).
-    retired: Option<Arc<RenderImage>>,
+    retired: Option<Picture>,
     /// The player's size in pixels (measured as it's drawn) and the preview size asked for.
     player_px: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
     preview_box: Option<(u32, u32)>,
-    preview: Option<Arc<RenderImage>>,
+    /// The player's place in the window; the pictures in the frame shown; a drag on it; the
+    /// centre lines pulling (x, y); drawing a box to hide.
+    player_bounds: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
+    placed: Vec<lightair_render::seqrender::Placed>,
+    stage_drag: Option<stage::StageDrag>,
+    guides: (bool, bool),
+    hiding: bool,
+    /// A medium being transcribed; words marked to cut (clip, source start, end).
+    transcribing: Option<Id>,
+    marked: Vec<(Id, u64, u64)>,
+    /// A voice-over being recorded.
+    recorder: Option<voiceover::Recorder>,
+    /// Sound while scrubbing: on, and the snippet playing (when it began).
+    scrub_audio: bool,
+    scrub: Option<(speaker::Speaker, std::time::Instant)>,
+    preview: Option<Picture>,
     wanted: Option<u64>,
     busy: bool,
     playing: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -209,6 +237,32 @@ fn catch_up(r: &mut SequenceRenderer, pending: &Mutex<Pending>) {
 
 /// Preview sizes, smallest first: the player gets the first that covers it.
 const PREVIEW_BOXES: [(u32, u32); 5] = [(640, 360), (960, 540), (1280, 720), (1920, 1080), (2560, 1440)];
+
+/// A frame the player shows: an image, or (macOS) the IOSurface the renderer drew into.
+#[derive(Clone)]
+enum Picture {
+    Image(Arc<RenderImage>),
+    #[cfg(target_os = "macos")]
+    Surface(lightair_render::surface::Frame),
+}
+
+impl Picture {
+    fn of(shown: lightair_render::seqrender::Shown, size: (u32, u32)) -> Option<Picture> {
+        match shown {
+            lightair_render::seqrender::Shown::Pixels(p) => image_of(p, size).map(Picture::Image),
+            #[cfg(target_os = "macos")]
+            lightair_render::seqrender::Shown::Surface(f) => Some(Picture::Surface(f)),
+        }
+    }
+
+    fn element(self) -> AnyElement {
+        match self {
+            Picture::Image(i) => img(ImageSource::Render(i)).absolute().size_full().object_fit(ObjectFit::Contain).into_any_element(),
+            #[cfg(target_os = "macos")]
+            Picture::Surface(f) => surface(f.0).absolute().size_full().object_fit(ObjectFit::Contain).into_any_element(),
+        }
+    }
+}
 
 /// A preview frame (BGRA, as the renderer makes them for the player) as an image.
 fn image_of(bgra: Vec<u8>, size: (u32, u32)) -> Option<Arc<RenderImage>> {
@@ -293,6 +347,16 @@ impl Editor {
             retired: None,
             player_px: Default::default(),
             preview_box: Some(PREVIEW_BOXES[2]),
+            player_bounds: Default::default(),
+            placed: Vec::new(),
+            stage_drag: None,
+            guides: (false, false),
+            hiding: false,
+            transcribing: None,
+            marked: Vec::new(),
+            recorder: None,
+            scrub_audio: true,
+            scrub: None,
             preview: None,
             wanted: None,
             busy: false,
@@ -370,8 +434,11 @@ impl Editor {
                     while let Ok(done) = this.rx.try_recv() {
                         changed = true;
                         match done {
-                            Done::Frame(t, image) => {
+                            Done::Frame(t, image, placed) => {
                                 this.busy = false;
+                                if this.playing.is_none() {
+                                    this.placed = placed;
+                                }
                                 if this.playing.is_some() {
                                     this.playhead = t;
                                 }
@@ -383,7 +450,7 @@ impl Editor {
                                     // the frame before last leaves the GPU's atlas (the last one
                                     // may still be on screen until the next draw)
                                     let last = this.preview.replace(image);
-                                    if let Some(gone) = std::mem::replace(&mut this.retired, last) {
+                                    if let Some(Picture::Image(gone)) = std::mem::replace(&mut this.retired, last) {
                                         cx.drop_image(gone, None);
                                     }
                                 }
@@ -403,6 +470,7 @@ impl Editor {
                                 this.peaks.insert(f, p);
                             }
                             Done::Cleaned(r) => this.take_cleaned(r, cx),
+                            Done::Transcript(m, r) => this.take_transcript(m, r, cx),
                             Done::ProxyProgress(f) => {
                                 if let Some(p) = &mut this.proxying {
                                     p.1 = f;
@@ -462,12 +530,16 @@ impl Editor {
             let mut guard = r.lock().unwrap();
             let preview = pending.lock().unwrap().preview;
             *guard = SequenceRenderer::new_with(&seq, preview).ok();
-            let frame = guard.as_mut().and_then(|r| {
+            let frame = guard.as_mut().map(|r| {
+                // macOS: the player shows what the GPU drew, with no read back
+                r.set_zero_copy(true);
                 catch_up(r, &pending);
-                image_of(r.frame(0), r.out_size())
+                let shown = r.shown(0);
+                (Picture::of(shown, r.out_size()), r.placed().to_vec())
             });
             drop(guard);
-            let _ = tx.send(Done::Frame(0, frame));
+            let (image, placed) = frame.unwrap_or_default();
+            let _ = tx.send(Done::Frame(0, image, placed));
         });
         self.make_proxies(cx);
         cx.notify();
@@ -722,19 +794,31 @@ impl Editor {
         self.busy = true;
         std::thread::spawn(move || {
             let mut guard = r.lock().unwrap();
-            let frame = guard.as_mut().and_then(|r| {
+            let frame = guard.as_mut().map(|r| {
                 catch_up(r, &pending);
-                image_of(r.frame(t), r.out_size())
+                let shown = r.shown(t);
+                (Picture::of(shown, r.out_size()), r.placed().to_vec())
             });
-            let _ = tx.send(Done::Frame(t, frame));
+            let (image, placed) = frame.unwrap_or_default();
+            let _ = tx.send(Done::Frame(t, image, placed));
         });
     }
 
     pub fn play(&mut self, cx: &mut Context<Self>) {
+        if self.recorder.is_some() {
+            // playing while a voice-over records: it stops
+            self.voice_over(cx);
+            return;
+        }
         if self.playing.is_some() {
             self.stop(cx);
             return;
         }
+        self.play_with(true, cx);
+    }
+
+    /// Plays from the playhead, with its sound or without.
+    fn play_with(&mut self, sound: bool, cx: &mut Context<Self>) {
         let end = self.seq().map_or(0, |s| s.duration_ms());
         if self.playhead + 100 >= end {
             self.playhead = 0;
@@ -742,18 +826,18 @@ impl Editor {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (r, tx, from, flag, pending) = (self.renderer.clone(), self.tx.clone(), self.playhead, stop.clone(), self.pending.clone());
         self.playing = Some(stop);
-        self.speaker = self.seq().and_then(|s| speaker::Speaker::start(s, from));
+        self.speaker = if sound { self.seq().and_then(|s| speaker::Speaker::start(s, from)) } else { None };
         let clock = self.speaker.as_ref().map(|s| s.clock());
         let step = 1000 / self.seq().map_or(30, |s| s.fps.max(1)) as u64;
         // frames are made ahead on one thread and shown in time on another
-        let (made, ready) = std::sync::mpsc::sync_channel::<(u64, Option<Arc<RenderImage>>)>(4);
+        let (made, ready) = std::sync::mpsc::sync_channel::<(u64, Option<Picture>)>(4);
         let render_flag = flag.clone();
         std::thread::spawn(move || {
             let mut guard = r.lock().unwrap();
             let Some(r) = guard.as_mut() else { return };
             catch_up(r, &pending);
             let size = r.out_size();
-            r.play(from, |t, rgba| made.send((t, image_of(rgba, size))).is_ok() && !render_flag.load(std::sync::atomic::Ordering::Relaxed));
+            r.play_shown(from, |t, shown| made.send((t, Picture::of(shown, size))).is_ok() && !render_flag.load(std::sync::atomic::Ordering::Relaxed));
         });
         std::thread::spawn(move || {
             let stopped = || flag.load(std::sync::atomic::Ordering::Relaxed);
@@ -788,7 +872,7 @@ impl Editor {
                     continue;
                 }
                 shown = std::time::Instant::now();
-                let _ = tx.send(Done::Frame(t, image));
+                let _ = tx.send(Done::Frame(t, image, Vec::new()));
             }
             if !stopped() {
                 let _ = tx.send(Done::Ended);
@@ -916,6 +1000,7 @@ impl Editor {
             Drag::Scrub => {
                 self.playhead = t.min(self.seq().map_or(0, |s| s.duration_ms()));
                 self.request(self.playhead);
+                self.scrub_sound(self.playhead, cx);
             }
             Drag::Move { clip, grab_ms } => {
                 let len = self.seq().and_then(|s| s.clip(clip)).map_or(0, |c| c.len_ms());
@@ -933,6 +1018,36 @@ impl Editor {
                     }
                 }
             }
+            Drag::FadeIn(clip) | Drag::FadeOut(clip) => {
+                let out = matches!(drag, Drag::FadeOut(_));
+                if let Some(c) = self.project.as_mut().and_then(|p| p.sequence.clip_mut(clip)) {
+                    let len = c.len_ms();
+                    let v = if out { c.end_ms().saturating_sub(t) } else { t.saturating_sub(c.start_ms) };
+                    let v = (v / 50 * 50).min(len / 2);
+                    if out {
+                        c.fade_out_ms = v;
+                    } else {
+                        c.fade_in_ms = v;
+                    }
+                }
+                self.after_drag_change();
+            }
+            Drag::Volume { clip, y, from } => {
+                // half the clip's height is a doubling
+                let v = (from + (y - f32::from(pos.y)) / ((VIDEO_H.min(AUDIO_H) - 10.0) / 2.0)).clamp(0.0, 2.0);
+                let v = (v * 20.0).round() / 20.0;
+                if let Some(c) = self.project.as_mut().and_then(|p| p.sequence.clip_mut(clip)) {
+                    // with volume keys, all of them move together
+                    let d = v - c.volume_at(self.playhead.clamp(c.start_ms, c.end_ms().saturating_sub(1)));
+                    if c.volume_keys.is_empty() {
+                        c.volume = v;
+                    } else {
+                        c.volume_keys.iter_mut().for_each(|k| k.volume = (k.volume + d).clamp(0.0, 4.0));
+                    }
+                    self.note = Some(format!("Volume {:.0}%", v * 100.0).into());
+                }
+                self.after_drag_change();
+            }
             Drag::TrimStart(clip) => {
                 let t = self.snap(t as i64, Some(clip));
                 if let Some(p) = &mut self.project {
@@ -947,6 +1062,43 @@ impl Editor {
             }
         }
         cx.notify();
+    }
+
+    /// A moment of sound at `t` while scrubbing (a new one at most every 90 ms, each heard for
+    /// 140 ms).
+    fn scrub_sound(&mut self, t: u64, cx: &mut Context<Self>) {
+        if !self.scrub_audio || self.playing.is_some() || self.scrub.as_ref().is_some_and(|(_, at)| at.elapsed() < std::time::Duration::from_millis(90)) {
+            return;
+        }
+        let Some(sp) = self.seq().and_then(|s| speaker::Speaker::start(s, t)) else { return };
+        sp.clock().start();
+        let began = std::time::Instant::now();
+        self.scrub = Some((sp, began));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(140)).await;
+            let _ = this.update(cx, |this, _| {
+                if this.scrub.as_ref().is_some_and(|(_, at)| *at == began) {
+                    this.scrub = None;
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The top of track `ti` (a window y).
+    fn track_top(&self, ti: usize) -> Option<f32> {
+        let b = (*self.timeline_bounds.borrow())?;
+        let seq = self.seq()?;
+        let above: f32 = seq.tracks.iter().take(ti).map(|t| if t.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H }).sum();
+        Some(f32::from(b.origin.y) + RULER_H + above)
+    }
+
+    /// The renderer takes a change made by dragging (one undo step when the drag ends).
+    fn after_drag_change(&mut self) {
+        if let Some(p) = &self.project {
+            self.pending.lock().unwrap().seq = Some(p.sequence.clone());
+        }
+        self.request(self.playhead);
     }
 
     /// A drag ended: what it changed is one undo step.
@@ -1214,7 +1366,7 @@ impl Editor {
             ("Media", "film", LeftTab::Media),
             ("Audio", "music", LeftTab::Audio),
             ("Text", "type", LeftTab::Text),
-            ("Shapes", "shapes", LeftTab::Shapes),
+            ("Stickers", "sticker", LeftTab::Shapes),
             ("Captions", "captions", LeftTab::Captions),
         ];
         let mut bar = div().flex().items_center().gap_0p5().px_2().h(px(48.)).border_b_1().border_color(tok::border());
@@ -1289,12 +1441,28 @@ impl Editor {
                     .overflow_hidden()
                     .bg(rgb(0x000000))
                     .child({
-                        let cell = self.player_px.clone();
-                        canvas(move |b, window, _| cell.set((f32::from(b.size.width) * window.scale_factor(), f32::from(b.size.height) * window.scale_factor())), |_, _, _, _| {})
-                            .absolute()
-                            .size_full()
+                        let (cell, bounds) = (self.player_px.clone(), self.player_bounds.clone());
+                        canvas(
+                            move |b, window, _| {
+                                cell.set((f32::from(b.size.width) * window.scale_factor(), f32::from(b.size.height) * window.scale_factor()));
+                                *bounds.borrow_mut() = Some(b);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full()
                     })
-                    .when_some(self.preview.clone(), |d, img_| d.child(img(ImageSource::Render(img_)).absolute().size_full().object_fit(ObjectFit::Contain)))
+                    .when_some(self.preview.clone(), |d, p| d.child(p.element()))
+                    .children(self.stage_overlay())
+                    .when(self.hiding, |d| d.cursor_crosshair())
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.stage_down(ev.position, cx)))
+                    .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                        if this.stage_drag.is_some() {
+                            this.stage_move(ev.position, cx);
+                        }
+                    }))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.stage_up(cx)))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.stage_up(cx)))
                     .when(self.project.is_none(), |d| {
                         d.flex().items_center().justify_center().child(
                             div()
@@ -1335,7 +1503,7 @@ impl Editor {
                     Some(Content::Shape(_)) => "Shape",
                     _ => "Text",
                 };
-                let tabs = [(name, InspectorTab::Text), ("Transform", InspectorTab::Video), ("Transition", InspectorTab::Transition)];
+                let tabs = [(name, InspectorTab::Text), ("Transform", InspectorTab::Video), ("Effects", InspectorTab::Effects), ("Transition", InspectorTab::Transition)];
                 let tab = if tabs.iter().any(|t| t.1 == self.tab) { self.tab } else { InspectorTab::Text };
                 body = body.child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().text_ellipsis().child(c.content.as_ref().map(looks::content_name).unwrap_or_default()));
                 body = body.child(self.chips("ed-tabs", &tabs, tab, |this, t, cx| {
@@ -1344,6 +1512,7 @@ impl Editor {
                 }, cx));
                 body = match tab {
                     InspectorTab::Video => self.transform_section(&c, body, cx),
+                    InspectorTab::Effects => self.effects_section(&c, body, cx),
                     InspectorTab::Transition => self.transition_section(&c, body, cx),
                     _ => self.content_section(&c, body, cx),
                 };
@@ -1356,8 +1525,11 @@ impl Editor {
                     tabs.push(("Video", InspectorTab::Video));
                 }
                 tabs.extend([("Audio", InspectorTab::Audio), ("Speed", InspectorTab::Speed)]);
+                if m.kind == MediaKind::Audio || !m.audio.is_empty() {
+                    tabs.push(("Words", InspectorTab::Words));
+                }
                 if !audio {
-                    tabs.extend([("Filter", InspectorTab::Filter), ("Transition", InspectorTab::Transition)]);
+                    tabs.extend([("Filter", InspectorTab::Filter), ("Effects", InspectorTab::Effects), ("Transition", InspectorTab::Transition)]);
                 }
                 if take {
                     tabs.push(("Screen", InspectorTab::Screen));
@@ -1370,8 +1542,10 @@ impl Editor {
                 }, cx));
                 let cid = c.id;
                 match tab {
-                    InspectorTab::Text | InspectorTab::Video => body = self.transform_section(&c, body, cx),
+                    InspectorTab::Text | InspectorTab::Video => body = self.hidden_section(&c, self.transform_section(&c, body, cx), cx),
                     InspectorTab::Filter => body = self.filter_section(&c, body, cx),
+                    InspectorTab::Effects => body = self.effects_section(&c, body, cx),
+                    InspectorTab::Words => body = self.words_section(&c, &m, body, cx),
                     InspectorTab::Transition => body = self.transition_section(&c, body, cx),
                     InspectorTab::Audio => body = self.audio_section(&c, &m, body, cx),
                     InspectorTab::Speed => {
@@ -1466,6 +1640,24 @@ impl Editor {
             .border_color(tok::border())
             .child(ui::icon_button("ed-split", "scissors", tok::text_secondary()).tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Split at the playhead").build(w, cx)).on_click(cx.listener(|this, _, _, cx| this.split(cx))))
             .child(ui::icon_button("ed-del", "trash", tok::text_secondary()).tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Delete the clip").build(w, cx)).on_click(cx.listener(|this, _, _, cx| this.delete_selected(cx))))
+            .child(
+                ui::icon_button("ed-vo", if self.recorder.is_some() { "square" } else { "mic" }, if self.recorder.is_some() { rgb(0xEF4444).into() } else { tok::text_secondary() })
+                    .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Record a voice-over from the playhead").build(w, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.voice_over(cx))),
+            )
+            .when_some(self.recorder.as_ref(), |d, r| {
+                let s = r.began.elapsed().as_secs();
+                d.child(div().text_size(px(12.)).text_color(rgb(0xEF4444)).child(format!("● {}:{:02}", s / 60, s % 60)))
+            })
+            .child(
+                ui::icon_button("ed-scrub", "audio-waveform", if self.scrub_audio { tok::text_secondary() } else { tok::text_tertiary() })
+                    .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Hear the sound while scrubbing").build(w, cx))
+                    .when(self.scrub_audio, |d| d.bg(tok::bg_selected()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.scrub_audio = !this.scrub_audio;
+                        cx.notify();
+                    })),
+            )
             .child(div().flex_1())
             .when_some(self.note.clone(), |d, n| d.child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(n)))
             .when_some(self.proxying.clone(), |d, (name, f)| {
@@ -1591,6 +1783,26 @@ impl Editor {
                     );
                 }
                 let (cid, start, locked) = (c.id, c.start_ms, track.locked);
+                // fades: shaded ends; the selected clip's handles and, for sound, its volume line
+                let (fin, fout) = (c.fade_in_ms as f32 / 1000.0 * pps, c.fade_out_ms as f32 / 1000.0 * pps);
+                let inner = h - 10.0;
+                let is_audio = track.kind == TrackKind::Audio;
+                let volume_y = (1.0 - c.volume_at(self.playhead.clamp(c.start_ms, c.end_ms().saturating_sub(1))).min(2.0) / 2.0) * inner;
+                let mut extras: Vec<AnyElement> = Vec::new();
+                if fin > 0.5 {
+                    extras.push(div().absolute().top_0().bottom_0().left_0().w(px(fin)).bg(linear_gradient(90., linear_color_stop(rgba(0x000000b0), 0.), linear_color_stop(rgba(0x00000000), 1.))).into_any_element());
+                }
+                if fout > 0.5 {
+                    extras.push(div().absolute().top_0().bottom_0().right_0().w(px(fout)).bg(linear_gradient(270., linear_color_stop(rgba(0x000000b0), 0.), linear_color_stop(rgba(0x00000000), 1.))).into_any_element());
+                }
+                if selected && !locked {
+                    let knob = |x: f32| div().absolute().top(px(1.)).left(px(x - 4.0)).size(px(8.)).rounded_full().bg(rgb(0xFFFFFF)).border_1().border_color(rgb(0x111111)).into_any_element();
+                    extras.push(knob(fin.max(4.0)));
+                    extras.push(knob((width - 4.0 - fout.max(4.0)).max(fin.max(4.0) + 8.0)));
+                    if is_audio {
+                        extras.push(div().absolute().left_0().right_0().top(px(volume_y)).h(px(1.5)).bg(rgba(0xFFFFFFE0)).into_any_element());
+                    }
+                }
                 lane = lane.child(
                     div()
                         .id(SharedString::from(format!("ed-clip-{}", c.id)))
@@ -1631,10 +1843,12 @@ impl Editor {
                         }))
                         .when(c.fade_in_ms > 0 || c.fade_out_ms > 0, |d| d.child(div().absolute().right(px(4.)).top(px(2.)).child(ui::icon("audio-waveform").size(px(10.)).text_color(rgba(0xFFFFFFA0)))))
                         .when(c.voice.is_some(), |d| d.child(div().absolute().right(px(16.)).top(px(2.)).child(ui::icon("mic-vocal").size(px(10.)).text_color(rgba(0xFFFFFFA0)))))
+                        .children(extras)
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
+                                let was = this.selected == Some(cid);
                                 this.selected = Some(cid);
                                 if locked {
                                     cx.notify();
@@ -1645,7 +1859,20 @@ impl Editor {
                                 let x = f32::from(ev.position.x - b.origin.x) - HEADER_W;
                                 let left = this.x_of(start);
                                 let width = this.seq().and_then(|s| s.clip(cid)).map_or(0.0, |c| c.len_ms() as f32 / 1000.0 * this.pps());
-                                let d = if x - left < EDGE {
+                                // the selected clip's fade handles (top corners) and volume line
+                                let top = this.track_top(ti).map_or(0.0, |y| f32::from(ev.position.y) - y - 5.0);
+                                let (fin, fout, vol) = this.seq().and_then(|s| s.clip(cid)).map_or((0.0, 0.0, 1.0), |c| {
+                                    (c.fade_in_ms as f32 / 1000.0 * this.pps(), c.fade_out_ms as f32 / 1000.0 * this.pps(), c.volume_at(this.playhead.clamp(c.start_ms, c.end_ms().saturating_sub(1))))
+                                });
+                                let local = x - left;
+                                let near_line = is_audio && (top - (1.0 - vol.min(2.0) / 2.0) * inner).abs() < 5.0;
+                                let d = if was && top < 12.0 && (local - fin.max(4.0)).abs() < 8.0 {
+                                    Drag::FadeIn(cid)
+                                } else if was && top < 12.0 && (local - (width - 4.0 - fout.max(4.0))).abs() < 8.0 {
+                                    Drag::FadeOut(cid)
+                                } else if was && near_line && local > EDGE && width - local > EDGE {
+                                    Drag::Volume { clip: cid, y: f32::from(ev.position.y), from: vol }
+                                } else if x - left < EDGE {
                                     Drag::TrimStart(cid)
                                 } else if left + width - x < EDGE {
                                     Drag::TrimEnd(cid)

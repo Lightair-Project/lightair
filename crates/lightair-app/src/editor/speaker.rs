@@ -40,10 +40,15 @@ impl Clock {
 }
 
 impl Speaker {
-    /// The sequence's sound from `from_ms` on the default output; `None` if it has none, or
-    /// there's nowhere to play it.
+    /// The sequence's sound from `from_ms` on the monitor (the output the Live mixer's monitor
+    /// uses, in the preferences; else the default one); `None` if it has none, or there's
+    /// nowhere to play it.
     pub fn start(seq: &Sequence, from_ms: u64) -> Option<Speaker> {
-        let device = cpal::default_host().default_output_device()?;
+        let host = cpal::default_host();
+        let chosen = crate::prefs::load_from(&crate::prefs::path()).monitor_device.map(|(name, _)| name).filter(|n| !n.is_empty() && n != "default");
+        let device = chosen
+            .and_then(|name| host.output_devices().ok()?.find(|d| d.name().is_ok_and(|n| n == name)))
+            .or_else(|| host.default_output_device())?;
         let config = device.default_output_config().ok()?;
         let (rate, channels) = (config.sample_rate().0, config.channels() as usize);
         let mut child = lightair_render::sound::stream(seq, from_ms, rate).ok()??;
