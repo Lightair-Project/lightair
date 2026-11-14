@@ -117,7 +117,7 @@ pub fn menus() -> Vec<Menu> {
             act("Add Vertical Format", AddVerticalFormat),
         ]),
         Menu::new("Record").items([
-            act("Start or Stop Recording", ToggleRecord),
+            act("Record or Stop", ToggleRecord),
             act("Pause or Resume", PauseRecord),
             act("Add Marker", AddMarker),
             act("Continue in a New File", SplitRecord),
@@ -178,7 +178,7 @@ impl StudioWindow {
             .on_action(cx.listener(|this, _: &AddTimerObject, _, cx| this.add_timer(cx)))
             .on_action(cx.listener(|this, _: &AddScreenScenes, _, cx| this.add_screen_layouts(cx)))
             .on_action(cx.listener(|this, _: &AddVerticalFormat, _, cx| this.add_vertical(cx)))
-            .on_action(cx.listener(|this, _: &ToggleRecord, _, cx| this.studio.update(cx, |s, cx| s.toggle_recording(cx))))
+            .on_action(cx.listener(|this, _: &ToggleRecord, _, cx| this.record_click(cx)))
             .on_action(cx.listener(|this, _: &PauseRecord, _, cx| this.studio.update(cx, |s, cx| s.pause_recording(cx))))
             .on_action(cx.listener(|this, _: &SplitRecord, _, cx| this.studio.update(cx, |s, cx| s.split_recording(cx))))
             .on_action(cx.listener(|this, _: &StudioTakeMenu, _, cx| this.studio_take(cx)))
