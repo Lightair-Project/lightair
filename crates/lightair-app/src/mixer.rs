@@ -168,6 +168,8 @@ impl Render for MixerPanel {
         // when the panel is shorter, compact strips: name, meter, fader, Cue and Mute
         let full_h = 30. + top_h + 196. + 40. + 2. + 16.;
         let compact = (1.0..full_h).contains(&self.panel_h.get());
+        // the knobs (pan, trim over Cue and Mute) need this much of a compact strip's height
+        let knobs = !compact || self.panel_h.get() >= 30. + 196. + 18.;
         for (i, view) in views.iter().enumerate() {
             // Meter ballistics: rise instantly, fall at 24 dB/s.
             let levels = meters().get(view.id).map(|c| c.levels());
@@ -178,7 +180,7 @@ impl Render for MixerPanel {
                 *value = if target > fallen { target } else { fallen.max(-90.0) };
             }
             let shown = *shown;
-            let strip = self.strip(i, view, shown, top_h, compact, cx);
+            let strip = self.strip(i, view, shown, Layout { top_h, compact, knobs }, cx);
             let menu = StripMenu::of(&project, view);
             let is_master = view.kind == MixerStrip::Master;
             if i > 0 && !is_master && views[i - 1].kind_order() != view.kind_order() {
@@ -847,10 +849,10 @@ impl MixerPanel {
         i: usize,
         view: &StripView,
         shown: [f32; 2],
-        top_h: f32,
-        compact: bool,
+        layout: Layout,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let Layout { top_h, compact, knobs } = layout;
         let id = view.id;
         let kind = view.kind;
         let (muted, cue, volume) = (view.muted, view.cue, view.volume_db);
@@ -1210,10 +1212,10 @@ impl MixerPanel {
             .items_center()
             .gap_1p5()
             .h_full()
-            .when_some(view.pan.filter(|_| !compact), |d, pan| {
+            .when_some(view.pan.filter(|_| knobs), |d, pan| {
                 d.child(self.rotary(i * 4, Knob::Pan(id), pan, "PAN", pan_text(pan), cx))
             })
-            .when_some(view.trim.filter(|_| !compact), |d, t| {
+            .when_some(view.trim.filter(|_| knobs), |d, t| {
                 d.child(self.rotary(i * 4 + 1, Knob::Trim(id), t, "TRIM", format!("{t:+.1}"), cx))
             })
             .child(div().flex_1())
@@ -1573,6 +1575,17 @@ struct Channel {
     mono: Option<bool>,
     record: bool,
     sends: Vec<Send>,
+}
+
+/// How the strips are laid out (the same for all of them).
+#[derive(Clone, Copy)]
+struct Layout {
+    /// The height of the effects and routing section.
+    top_h: f32,
+    /// Name, meter, fader, Cue and Mute only (a short panel).
+    compact: bool,
+    /// Room for the pan and trim knobs.
+    knobs: bool,
 }
 
 /// What's being dragged: a slider along, or a knob up and down from where it started.
