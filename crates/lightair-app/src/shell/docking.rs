@@ -214,6 +214,25 @@ impl StudioWindow {
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
             Ok("add-layer") => self.open_add_layer(window, cx),
             Ok("settings") => self.toggle_settings(cx),
+            Ok("hotkey-capture") => {
+                // Settings › Shortcuts listening for a key, then Esc sent through the window (no
+                // shortcut saved): whether it reached Settings, logged
+                self.open_settings(super::settings::Page::Shortcuts, cx);
+                self.hotkey_capture = Some(crate::hotkeys::GlobalAction::FollowZoom);
+                window.focus(&self.settings_focus, cx);
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(800)).await;
+                    let before = this.update(cx, |this, _| this.hotkey_capture.is_some()).unwrap_or(false);
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        tracing::info!(settings_focused = this.settings_focus.is_focused(window), root = this.focus.is_focused(window), within = this.settings_focus.contains_focused(window, cx), "CHECK focus before");
+                    });
+                    let _ = cx.update(|window, cx| window.dispatch_keystroke(Keystroke::parse("escape").unwrap(), cx));
+                    let _ = this.update_in(cx, |this, window, _| {
+                        tracing::info!(listening = before, after_escape = this.hotkey_capture.is_some(), back_to_window = this.focus.is_focused(window), "CHECK settings key");
+                    });
+                })
+                .detach();
+            }
             Ok(hook) if hook.starts_with("settings-") => {
                 use super::settings::Page;
                 let page = match &hook[9..] {
