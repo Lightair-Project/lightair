@@ -30,6 +30,7 @@ mod layer_props;
 mod menus;
 pub(crate) mod mixer_props;
 mod palette;
+mod screen_look;
 mod settings;
 mod source;
 
@@ -3737,7 +3738,8 @@ impl StudioWindow {
                             .child("How every scene change looks on air."),
                     )
                     .child(self.transition_picker(project, cx));
-                body.child(header).child(info).child(transition).into_any_element()
+                let screen = self.screen_look_section(project, &scene, cx);
+                body.child(header).child(info).child(screen).child(transition).into_any_element()
             }
             _ => body.child(div().text_color(tok::text_tertiary()).child("Nothing selected")).into_any_element(),
         };

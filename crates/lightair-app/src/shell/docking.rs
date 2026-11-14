@@ -238,6 +238,16 @@ impl StudioWindow {
                 self.open_settings(page, cx);
             }
             Ok("palette") => self.open_palette(window, cx),
+            Ok("scene-screen") => {
+                // the scene's Inspector with its screen zoom & pointer on (the zoom always in)
+                self.show_place(super::Place::Live, cx);
+                let scene = self.studio.read(cx).selected_scene;
+                if let Some(scene) = scene {
+                    let look = lightair_core::ScreenLook { zoom: lightair_core::ScreenLook::ZOOM_ALWAYS, ..Default::default() };
+                    self.exec(lightair_core::Command::SetSceneScreen { scene, screen: Some(look) }, cx);
+                    self.select_layer(None, cx);
+                }
+            }
             Ok("library") => self.show_place(super::Place::Library, cx),
             Ok(hook @ ("new-project" | "new-project-live")) => {
                 // a second project, made and opened in place, then the Library (or Live)

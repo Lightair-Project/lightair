@@ -8,6 +8,14 @@
 //!   crosshair; a dot and a ring as styles), so they stay sharp at any size.
 //! - Clicks (when the OS lets Lightair see them) draw a circle or a ripple.
 //!
+//! - The follow-zoom (docs/plans/screen-studio.md, "Auto zoom", live): in to where a click was
+//!   and out again after a while without one, or always in, following the pointer. Scale and
+//!   centre move on critically damped springs; the view keeps the pointer inside it and never
+//!   leaves the capture. The pointer and clicks are drawn zoomed too.
+//!
+//! A scene's [`lightair_core::ScreenLook`] puts one of these on each of its screen captures
+//! (`reconcile`); the effect catalog's "Drawn pointer" is the same filter without the zoom.
+//!
 //! Positions map from display points to the capture's pixels through the main display's frame:
 //! a capture of another display places the pointer as if it were the main one (a later phase
 //! maps each display).
@@ -101,6 +109,27 @@ float4 PSDraw(VertInOut vert_in) : TARGET
 technique Draw { pass { vertex_shader = VSDefault(vert_in); pixel_shader = PSDraw(vert_in); } }
 "#;
 
+/// The capture drawn zoomed: `view` is the part shown (x, y, w, h as fractions of it).
+const ZOOM_EFFECT: &str = r#"
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform float4 view;
+sampler_state def_sampler { Filter = Linear; AddressU = Clamp; AddressV = Clamp; };
+struct VertInOut { float4 pos : POSITION; float2 uv : TEXCOORD0; };
+VertInOut VSDefault(VertInOut vert_in)
+{
+    VertInOut vert_out;
+    vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
+    vert_out.uv = vert_in.uv;
+    return vert_out;
+}
+float4 PSDraw(VertInOut vert_in) : TARGET
+{
+    return image.Sample(def_sampler, view.xy + vert_in.uv * view.zw);
+}
+technique Draw { pass { vertex_shader = VSDefault(vert_in); pixel_shader = PSDraw(vert_in); } }
+"#;
+
 #[derive(Clone, Copy, PartialEq)]
 struct Look {
     style: i64,
@@ -112,6 +141,65 @@ struct Look {
     arrow_only: bool,
     /// 0xAABBGGRR
     color: u32,
+    /// Draws the pointer (off: only zooms, the capture keeps its own).
+    draw: bool,
+    /// 0 off, 1 on clicks, 2 always (`ScreenLook`'s).
+    zoom: i64,
+    zoom_scale: f32,
+    zoom_hold: f32,
+    zoom_motion: f32,
+}
+
+/// The follow-zoom's camera (capture pixels).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Cam {
+    scale: f32,
+    scale_v: f32,
+    center: (f32, f32),
+    center_v: (f32, f32),
+    /// Where it's heading (the pointer kept inside the view).
+    aim: (f32, f32),
+}
+
+impl Cam {
+    fn new(size: (f32, f32)) -> Cam {
+        let c = (size.0 / 2.0, size.1 / 2.0);
+        Cam { scale: 1.0, scale_v: 0.0, center: c, center_v: (0.0, 0.0), aim: c }
+    }
+}
+
+/// Where the view heads: as it was while the pointer stays within its middle, else moved just
+/// enough to bring it back in; kept inside the capture.
+fn aim_at(aim: (f32, f32), pointer: (f32, f32), scale: f32, size: (f32, f32)) -> (f32, f32) {
+    let scale = scale.max(1.0);
+    let half = (size.0 / scale / 2.0, size.1 / scale / 2.0);
+    // the middle 60% of the view
+    let slack = (half.0 * 0.6, half.1 * 0.6);
+    let follow = |a: f32, p: f32, s: f32| if p > a + s { p - s } else if p < a - s { p + s } else { a };
+    let a = (follow(aim.0, pointer.0, slack.0), follow(aim.1, pointer.1, slack.1));
+    (a.0.clamp(half.0, (size.0 - half.0).max(half.0)), a.1.clamp(half.1, (size.1 - half.1).max(half.1)))
+}
+
+/// The part of the capture shown (x, y, w, h in its pixels) by a camera at `center`, `scale`.
+fn view_rect(center: (f32, f32), scale: f32, size: (f32, f32)) -> (f32, f32, f32, f32) {
+    let scale = scale.max(1.0);
+    let (w, h) = (size.0 / scale, size.1 / scale);
+    let x = (center.0 - w / 2.0).clamp(0.0, size.0 - w);
+    let y = (center.1 - h / 2.0).clamp(0.0, size.1 - h);
+    (x, y, w, h)
+}
+
+/// One step of the camera towards `scale` and the pointer (capture pixels).
+fn cam_step(cam: &mut Cam, want_scale: f32, pointer: (f32, f32), size: (f32, f32), motion: f32, dt: f32, snap_aim: bool) {
+    cam.aim = if snap_aim { aim_at(pointer, pointer, want_scale, size) } else { aim_at(cam.aim, pointer, want_scale.max(cam.scale), size) };
+    // when out, it heads back to the middle
+    let aim = if want_scale <= 1.001 { (size.0 / 2.0, size.1 / 2.0) } else { cam.aim };
+    let omega = 14.0 - 10.0 * motion.clamp(0.0, 1.0);
+    (cam.scale, cam.scale_v) = spring(cam.scale, cam.scale_v, want_scale, omega, dt);
+    let (x, vx) = spring(cam.center.0, cam.center_v.0, aim.0, omega, dt);
+    let (y, vy) = spring(cam.center.1, cam.center_v.1, aim.1, omega, dt);
+    cam.center = (x, y);
+    cam.center_v = (vx, vy);
 }
 
 /// The textures, made on the graphics thread when first drawn (and again when the colour changes).
@@ -119,6 +207,8 @@ struct Textures {
     effect: *mut sys::gs_effect_t,
     image: *mut sys::gs_eparam_t,
     opacity: *mut sys::gs_eparam_t,
+    zoom: *mut sys::gs_effect_t,
+    view: *mut sys::gs_eparam_t,
     arrow: (*mut sys::gs_texture_t, (f32, f32)),
     ibeam: (*mut sys::gs_texture_t, (f32, f32)),
     cross: (*mut sys::gs_texture_t, (f32, f32)),
@@ -142,6 +232,10 @@ struct Filter {
     opacity: f32,
     shape: Shape,
     textures: Option<Textures>,
+    /// The follow-zoom: its camera, until when it stays in, the newest click seen.
+    cam: Option<Cam>,
+    zoom_until: Option<Instant>,
+    last_click: Option<Instant>,
 }
 
 fn rgb_of(c: u32) -> [f32; 3] {
@@ -166,12 +260,21 @@ unsafe fn make_textures(color: u32) -> Option<Textures> {
         if effect.is_null() {
             return None;
         }
+        let zcode = CString::new(ZOOM_EFFECT).ok()?;
+        let mut zerr: *mut c_char = std::ptr::null_mut();
+        let zoom = sys::gs_effect_create(zcode.as_ptr(), c"lightair-zoom.effect".as_ptr(), &mut zerr);
+        if !zerr.is_null() {
+            tracing::warn!(error = %std::ffi::CStr::from_ptr(zerr).to_string_lossy(), "zoom effect");
+            sys::bfree(zerr as *mut c_void);
+        }
         let (a, i, x) = (arrow(), ibeam(), crosshair());
         let rgb = rgb_of(color);
         Some(Textures {
             effect,
             image: sys::gs_effect_get_param_by_name(effect, c"image".as_ptr()),
             opacity: sys::gs_effect_get_param_by_name(effect, c"opacity".as_ptr()),
+            view: if zoom.is_null() { std::ptr::null_mut() } else { sys::gs_effect_get_param_by_name(zoom, c"view".as_ptr()) },
+            zoom,
             arrow: (texture(&a), a.hot),
             ibeam: (texture(&i), i.hot),
             cross: (texture(&x), x.hot),
@@ -192,6 +295,9 @@ unsafe fn free_textures(t: Textures) {
             }
         }
         sys::gs_effect_destroy(t.effect);
+        if !t.zoom.is_null() {
+            sys::gs_effect_destroy(t.zoom);
+        }
     }
 }
 
@@ -208,6 +314,11 @@ unsafe fn read_look(settings: *mut sys::obs_data_t) -> Look {
         clicks: int(c"clicks"),
         arrow_only: flag(c"arrow_only"),
         color: int(c"color") as u32,
+        draw: flag(c"draw"),
+        zoom: int(c"zoom"),
+        zoom_scale: float(c"zoom_scale").clamp(1.0, 6.0),
+        zoom_hold: float(c"zoom_hold_s").max(0.2),
+        zoom_motion: float(c"zoom_motion").clamp(0.0, 1.0),
     }
 }
 
@@ -223,6 +334,10 @@ unsafe extern "C" fn get_defaults(settings: *mut sys::obs_data_t) {
         sys::obs_data_set_default_double(settings, c"idle_s".as_ptr(), 3.0);
         sys::obs_data_set_default_int(settings, c"clicks".as_ptr(), 2);
         sys::obs_data_set_default_int(settings, c"color".as_ptr(), 0xFFFF_9000);
+        sys::obs_data_set_default_bool(settings, c"draw".as_ptr(), true);
+        sys::obs_data_set_default_double(settings, c"zoom_scale".as_ptr(), 2.0);
+        sys::obs_data_set_default_double(settings, c"zoom_hold_s".as_ptr(), 2.0);
+        sys::obs_data_set_default_double(settings, c"zoom_motion".as_ptr(), 0.5);
     }
 }
 
@@ -239,6 +354,9 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, context: *mut sys::o
         opacity: 1.0,
         shape: Shape::Arrow,
         textures: None,
+        cam: None,
+        zoom_until: None,
+        last_click: None,
     };
     Box::into_raw(Box::new(f)) as *mut c_void
 }
@@ -290,6 +408,41 @@ unsafe extern "C" fn tick(data: *mut c_void, seconds: f32) {
     let want = if idle { 0.0 } else { 1.0 };
     f.opacity += (want - f.opacity) * (dt * 8.0).min(1.0);
     f.shape = if f.look.arrow_only { Shape::Arrow } else { input::shape() };
+    zoom_tick(f, dt);
+}
+
+/// The follow-zoom, a step on.
+fn zoom_tick(f: &mut Filter, dt: f32) {
+    let target = unsafe { sys::obs_filter_get_target(f.context) };
+    let size = if target.is_null() { (0, 0) } else { unsafe { (sys::obs_source_get_base_width(target), sys::obs_source_get_base_height(target)) } };
+    if f.look.zoom == 0 || size.0 == 0 || size.1 == 0 {
+        f.cam = None;
+        f.zoom_until = None;
+        return;
+    }
+    let size = (size.0 as f32, size.1 as f32);
+    let (dx, dy, dw, _) = input::main_display();
+    let k = if dw > 0.0 { size.0 / dw } else { 1.0 };
+    let Some((px, py)) = f.pos else { return };
+    let pointer = ((px - dx) * k, (py - dy) * k);
+    // a new click: in (again) for a while, looking at it
+    let newest = recent_clicks().last().map(|c| c.0);
+    let clicked = newest.is_some_and(|n| f.last_click.is_none_or(|l| n > l));
+    if clicked {
+        f.last_click = newest;
+    }
+    let now = Instant::now();
+    let was_in = f.zoom_until.is_some_and(|u| u > now);
+    if clicked {
+        f.zoom_until = Some(now + Duration::from_secs_f32(f.look.zoom_hold));
+    }
+    let zoomed = match f.look.zoom {
+        2 => true,
+        _ => f.zoom_until.is_some_and(|u| u > now),
+    };
+    let want = if zoomed { f.look.zoom_scale } else { 1.0 };
+    let cam = f.cam.get_or_insert_with(|| Cam::new(size));
+    cam_step(cam, want, pointer, size, f.look.zoom_motion, dt, clicked && !was_in && f.look.zoom == 1);
 }
 
 /// Draws `tex` with its hot spot at `at`, `size` pixels square, turned by `angle` degrees.
@@ -311,16 +464,8 @@ unsafe fn draw(t: &Textures, tex: *mut sys::gs_texture_t, at: (f32, f32), size: 
 
 unsafe extern "C" fn render(data: *mut c_void, _: *mut sys::gs_effect_t) {
     let f = unsafe { &mut *(data as *mut Filter) };
-    unsafe { sys::obs_source_skip_video_filter(f.context) };
     let target = unsafe { sys::obs_filter_get_target(f.context) };
-    if target.is_null() {
-        return;
-    }
-    let (tw, th) = unsafe { (sys::obs_source_get_base_width(target), sys::obs_source_get_base_height(target)) };
-    let Some((px, py)) = f.pos else { return };
-    if tw == 0 || th == 0 {
-        return;
-    }
+    let (tw, th) = if target.is_null() { (0, 0) } else { unsafe { (sys::obs_source_get_base_width(target), sys::obs_source_get_base_height(target)) } };
     if f.textures.as_ref().is_some_and(|t| t.color != f.look.color)
         && let Some(old) = f.textures.take()
     {
@@ -329,12 +474,35 @@ unsafe extern "C" fn render(data: *mut c_void, _: *mut sys::gs_effect_t) {
     if f.textures.is_none() {
         f.textures = unsafe { make_textures(f.look.color) };
     }
+    // the capture: zoomed, or as it is
+    let size_px = (tw as f32, th as f32);
+    let zoomable = f.textures.as_ref().is_some_and(|t| !t.zoom.is_null());
+    let view = f.cam.filter(|c| zoomable && c.scale > 1.001 && tw > 0 && th > 0).map(|c| view_rect(c.center, c.scale, size_px));
+    match (view, f.textures.as_ref()) {
+        (Some((vx, vy, vw, vh)), Some(t)) => unsafe {
+            if sys::obs_source_process_filter_begin(f.context, sys::GS_RGBA, sys::OBS_ALLOW_DIRECT_RENDERING) {
+                let v = sys::vec4 { __bindgen_anon_1: sys::vec4__bindgen_ty_1 { ptr: [vx / size_px.0, vy / size_px.1, vw / size_px.0, vh / size_px.1] } };
+                sys::gs_effect_set_vec4(t.view, &v);
+                sys::obs_source_process_filter_end(f.context, t.zoom, tw, th);
+            }
+        },
+        _ => unsafe { sys::obs_source_skip_video_filter(f.context) },
+    }
+    let Some((px, py)) = f.pos else { return };
+    if tw == 0 || th == 0 || !f.look.draw {
+        return;
+    }
     let Some(t) = &f.textures else { return };
-    // display points → the capture's pixels
+    // display points → the capture's pixels → the view's
     let (dx, dy, dw, _) = input::main_display();
     let scale = if dw > 0.0 { tw as f32 / dw } else { 1.0 };
-    let (x, y) = ((px - dx) * scale, (py - dy) * scale);
-    let size = POINTS * f.look.size * scale;
+    let (vx, vy, vk) = match view {
+        Some((vx, vy, vw, _)) => (vx, vy, size_px.0 / vw),
+        None => (0.0, 0.0, 1.0),
+    };
+    let place = |x: f32, y: f32| (((x - dx) * scale - vx) * vk, ((y - dy) * scale - vy) * vk);
+    let (x, y) = place(px, py);
+    let size = POINTS * f.look.size * scale * vk;
     unsafe {
         sys::gs_blend_state_push();
         sys::gs_enable_blending(true);
@@ -347,7 +515,7 @@ unsafe extern "C" fn render(data: *mut c_void, _: *mut sys::gs_effect_t) {
             let now = Instant::now();
             for (at, cx, cy) in recent_clicks() {
                 let k = (now.duration_since(at).as_secs_f32() / CLICK.as_secs_f32()).clamp(0.0, 1.0);
-                let (cx, cy) = ((cx - dx) * scale, (cy - dy) * scale);
+                let (cx, cy) = place(cx, cy);
                 let (tex, grow, fade) = if f.look.clicks == 1 { (t.click_disc, 0.9 + 0.3 * k, 0.45) } else { (t.click_ring, 0.6 + 1.4 * k, 0.9) };
                 draw(t, tex, (cx, cy), size * 1.6 * grow, (0.5, 0.5), 0.0, fade * (1.0 - k) * f.opacity);
             }
@@ -399,6 +567,40 @@ mod tests {
         }
         assert!((x - 100.0).abs() < 0.5, "{x}");
         assert!(max <= 100.01, "critically damped: no overshoot ({max})");
+    }
+
+    #[test]
+    fn the_zoom_keeps_the_pointer_in_view_and_the_view_on_the_capture() {
+        let size = (1920.0, 1080.0);
+        // in the middle, a small move doesn't move it; a big one brings the pointer back in
+        let aim = (960.0, 540.0);
+        assert_eq!(aim_at(aim, (1000.0, 560.0), 2.0, size), aim);
+        let moved = aim_at(aim, (1500.0, 540.0), 2.0, size);
+        let (x, _, w, _) = view_rect(moved, 2.0, size);
+        assert!(1500.0 > x && 1500.0 < x + w, "the pointer is in the view: {moved:?}");
+        // at the corner it stops at the edge
+        let (x, y, w, h) = view_rect(aim_at(aim, (0.0, 0.0), 2.0, size), 2.0, size);
+        assert_eq!((x, y, w, h), (0.0, 0.0, 960.0, 540.0));
+        let (x, y, ..) = view_rect((1900.0, 1070.0), 3.0, size);
+        assert_eq!((x, y), (1920.0 - 640.0, 1080.0 - 360.0));
+    }
+
+    #[test]
+    fn the_zoom_goes_in_and_comes_back_out() {
+        let size = (1920.0, 1080.0);
+        let mut cam = Cam::new(size);
+        let step = 1.0 / 60.0;
+        cam_step(&mut cam, 2.0, (1600.0, 300.0), size, 0.5, step, true);
+        for _ in 0..120 {
+            cam_step(&mut cam, 2.0, (1600.0, 300.0), size, 0.5, step, false);
+        }
+        assert!((cam.scale - 2.0).abs() < 0.02, "in: {cam:?}");
+        let (x, y, w, h) = view_rect(cam.center, cam.scale, size);
+        assert!(1600.0 > x && 1600.0 < x + w && 300.0 > y && 300.0 < y + h, "looking at it: {cam:?}");
+        for _ in 0..180 {
+            cam_step(&mut cam, 1.0, (1600.0, 300.0), size, 0.5, step, false);
+        }
+        assert!((cam.scale - 1.0).abs() < 0.02, "out again: {cam:?}");
     }
 
     #[test]
