@@ -2081,6 +2081,13 @@ impl StudioWindow {
         div().flex().flex_col().size_full().pt_1().child(
             div()
                 .id("scenes-scroll")
+                // a scene from Assets: added as a new scene
+                .drag_over::<assets::DraggedAsset>(|s, _, _, _| s.bg(tok::bg_raised()))
+                .on_drop(cx.listener(|this, a: &assets::DraggedAsset, _, cx| {
+                    if a.0.kind == assets::AssetKind::Scene {
+                        this.add_scene_asset(&a.0, cx);
+                    }
+                }))
                 .flex()
                 .flex_col()
                 .flex_1()

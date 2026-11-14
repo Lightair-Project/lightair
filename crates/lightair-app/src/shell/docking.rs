@@ -183,7 +183,7 @@ impl StudioWindow {
                     DockLayout::tabs()
                         .panel_view(panel_handle(mixer), cx)
                         .panel_view(panel_handle(assets), cx)
-                        .active_index(usize::from(std::env::var("LIGHTAIR_OPEN").as_deref() == Ok("assets"))),
+                        .active_index(usize::from(std::env::var("LIGHTAIR_OPEN").is_ok_and(|h| h.starts_with("assets")))),
                     // tall enough for a full channel strip (taller for the audio screenshot hooks)
                     Some(px(if std::env::var("LIGHTAIR_OPEN").is_ok_and(|h| h.starts_with("audio")) { 600. } else { 420. })),
                 ),
@@ -457,6 +457,15 @@ impl StudioWindow {
             Ok("audio-add") => {
                 // the mixer's add menu, open
                 self.mixer.update(cx, |m, cx| m.toggle_add_track(window, cx));
+            }
+            Ok("assets-scene") => {
+                // the scene being edited, saved into Assets, and added back as a new scene
+                if let Some(scene) = self.studio.read(cx).selected_scene {
+                    self.save_scene_asset(scene, cx);
+                    if let Some(a) = self.assets(cx).into_iter().find(|a| a.kind == super::assets::AssetKind::Scene) {
+                        self.add_scene_asset(&a, cx);
+                    }
+                }
             }
             Ok("audio-colours") => {
                 // the Streaming mixer with coloured strips (Mic red, Desktop blue, Music amber)

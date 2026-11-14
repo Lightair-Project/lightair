@@ -21,6 +21,8 @@ use crate::ui::{self, tok};
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum AssetKind {
     Prefab,
+    /// A whole scene (`.scene`), added back as a new scene.
+    Scene,
     Image,
     Video,
     Audio,
@@ -32,6 +34,7 @@ impl AssetKind {
         let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         match ext.as_str() {
             "prefab" => AssetKind::Prefab,
+            "scene" => AssetKind::Scene,
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tga" | "heic" => AssetKind::Image,
             "mp4" | "mov" | "m4v" | "mkv" | "webm" | "avi" => AssetKind::Video,
             "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "aiff" => AssetKind::Audio,
@@ -42,6 +45,7 @@ impl AssetKind {
     fn icon(self) -> &'static str {
         match self {
             AssetKind::Prefab => "package",
+            AssetKind::Scene => "layout-dashboard",
             AssetKind::Image => "image",
             AssetKind::Video => "film",
             AssetKind::Audio => "music",
@@ -61,7 +65,7 @@ impl Asset {
     fn name(&self) -> String {
         let stem = self.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         match self.kind {
-            AssetKind::Prefab => stem,
+            AssetKind::Prefab | AssetKind::Scene => stem,
             _ => self.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(stem),
         }
     }
@@ -205,7 +209,8 @@ impl StudioWindow {
                     .context_menu(move |menu, _, _| {
                         let (place, reveal) = (menu_shell.clone(), a3.path.clone());
                         let asset = a3.clone();
-                        menu.item(PopupMenuItem::new("Add to scene").icon(ui::icon("plus")).on_click(
+                        let label = if asset.kind == AssetKind::Scene { "Add as a scene" } else { "Add to scene" };
+                        menu.item(PopupMenuItem::new(label).icon(ui::icon("plus")).on_click(
                             move |_, _, cx| {
                                 if let Some(s) = place.upgrade() {
                                     s.update(cx, |w, cx| w.place_asset(&asset, Placement::Centre, cx));
@@ -235,10 +240,10 @@ impl StudioWindow {
             }))
             // A layer from the Hierarchy: saved as a prefab.
             .drag_over::<DraggedRow>(|s, _, _, _| s.bg(tok::bg_raised()))
-            .on_drop(cx.listener(|this, row: &DraggedRow, _, cx| {
-                if let RowTarget::Layer { layer, .. } = row.target {
-                    this.save_prefab(layer, cx);
-                }
+            .on_drop(cx.listener(|this, row: &DraggedRow, _, cx| match row.target {
+                RowTarget::Layer { layer, .. } => this.save_prefab(layer, cx),
+                RowTarget::Scene(scene) => this.save_scene_asset(scene, cx),
+                RowTarget::Strip(_) => {}
             }))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.selected_asset = None;
@@ -252,7 +257,9 @@ impl StudioWindow {
                         .py_2()
                         .text_size(px(12.))
                         .text_color(tok::text_tertiary())
-                        .child("Drop images, video or sound here. Drag an object from the Hierarchy to make a prefab."),
+                        .child(
+                            "Drop images, video or sound here. Drag an object from the Hierarchy to make a prefab, or a scene to keep it.",
+                        ),
                 )
             })
     }
@@ -317,6 +324,43 @@ impl StudioWindow {
         self.refresh_assets();
     }
 
+    /// Saves a whole scene as `<name>.scene`: its layers and sources, to add again later or in
+    /// another project.
+    pub(super) fn save_scene_asset(&mut self, scene: Id, cx: &mut Context<Self>) {
+        let studio = self.studio.read(cx);
+        let Some(dir) = studio.assets_dir() else { return };
+        let Some(asset) = lightair_core::SceneAsset::of(studio.project(), scene) else { return };
+        let path = free_name(&dir, &asset.name, "scene");
+        let Ok(text) = serde_json::to_string_pretty(&asset) else { return };
+        if let Err(e) = std::fs::write(&path, text) {
+            tracing::warn!(%e, "could not save the scene");
+            return;
+        }
+        self.selected_asset = Some(path);
+        self.refresh_assets();
+        cx.notify();
+    }
+
+    /// Adds a scene asset as a new scene, after the selected one, and selects it.
+    pub(super) fn add_scene_asset(&mut self, asset: &Asset, cx: &mut Context<Self>) {
+        let Some(saved) = std::fs::read_to_string(&asset.path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<lightair_core::SceneAsset>(&t).ok())
+        else {
+            self.studio.update(cx, |s, _| s.issue = Some("That scene file couldn't be read.".into()));
+            return;
+        };
+        let studio = self.studio.read(cx);
+        let project = studio.project().clone();
+        let index = studio.selected_scene.and_then(|s| project.scene_index(s)).map(|i| i + 1);
+        let (commands, id) = saved.add(&project, index);
+        self.exec(Command::Batch { label: format!("Add scene {}", saved.name), commands }, cx);
+        self.studio.update(cx, |s, cx| {
+            s.select_scene(id);
+            cx.notify();
+        });
+    }
+
     fn read_prefab(&self, file: &str, cx: &App) -> Option<Clip> {
         let path = self.studio.read(cx).assets_dir()?.join(file);
         serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
@@ -324,6 +368,9 @@ impl StudioWindow {
 
     /// Adds an asset to the scene: a prefab instance, or a layer for an image, video or sound.
     pub(super) fn place_asset(&mut self, asset: &Asset, at: Placement, cx: &mut Context<Self>) {
+        if asset.kind == AssetKind::Scene {
+            return self.add_scene_asset(asset, cx);
+        }
         let studio = self.studio.read(cx);
         let project = studio.project().clone();
         let Some(scene) = studio.selected_scene.and_then(|id| project.scene(id)).cloned() else { return };
@@ -388,7 +435,7 @@ impl StudioWindow {
                     format!("Add {name}"),
                 )
             }
-            AssetKind::Other => return,
+            AssetKind::Scene | AssetKind::Other => return,
         };
         if commands.is_empty() {
             return;
