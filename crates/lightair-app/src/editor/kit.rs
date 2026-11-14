@@ -206,3 +206,217 @@ impl Editor {
             .into_any_element()
     }
 }
+
+// ------------------------------------------------------------ keys per field
+
+use lightair_render::sequence::Clip;
+
+/// A property's own value (without keys).
+pub(super) fn base_of(c: &Clip, p: &str) -> f32 {
+    let f = c.filter;
+    match p {
+        "x" => c.transform.x,
+        "y" => c.transform.y,
+        "scale" => c.transform.scale,
+        "rotation" => c.transform.rotation,
+        "opacity" => c.transform.opacity,
+        "volume" => c.volume,
+        "brightness" => f.brightness,
+        "contrast" => f.contrast,
+        "saturation" => f.saturation,
+        "temperature" => f.temperature,
+        "vignette" => f.vignette,
+        "blur" => f.blur,
+        "crop.l" => c.crop.0,
+        "crop.t" => c.crop.1,
+        "crop.r" => c.crop.2,
+        "crop.b" => c.crop.3,
+        _ => effect_setting(c, p).map_or(0.0, |(n, k)| c.effects.get(n).and_then(|e| e.settings.get(k)).and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32),
+    }
+}
+
+fn set_base(c: &mut Clip, p: &str, v: f32) {
+    match p {
+        "x" => c.transform.x = v,
+        "y" => c.transform.y = v,
+        "scale" => c.transform.scale = v,
+        "rotation" => c.transform.rotation = v,
+        "opacity" => c.transform.opacity = v,
+        "volume" => c.volume = v,
+        "brightness" => c.filter.brightness = v,
+        "contrast" => c.filter.contrast = v,
+        "saturation" => c.filter.saturation = v,
+        "temperature" => c.filter.temperature = v,
+        "vignette" => c.filter.vignette = v,
+        "blur" => c.filter.blur = v,
+        "crop.l" => c.crop.0 = v,
+        "crop.t" => c.crop.1 = v,
+        "crop.r" => c.crop.2 = v,
+        "crop.b" => c.crop.3 = v,
+        _ => {
+            if let Some((n, k)) = effect_setting(c, p).map(|(n, k)| (n, k.to_string()))
+                && let Some(e) = c.effects.get_mut(n)
+            {
+                e.settings.insert(k, serde_json::json!(v));
+            }
+        }
+    }
+}
+
+/// "fx.<n>.<setting>": the effect's place and the setting.
+fn effect_setting<'a>(_: &Clip, p: &'a str) -> Option<(usize, &'a str)> {
+    let rest = p.strip_prefix("fx.")?;
+    let (n, k) = rest.split_once('.')?;
+    Some((n.parse().ok()?, k))
+}
+
+/// A property's value at `t`.
+pub(super) fn prop_value(c: &Clip, p: &str, t: u64) -> f32 {
+    if p == "volume" { c.volume_at(t) } else { c.prop_at(p, t, base_of(c, p)) }
+}
+
+/// Sets a property at `t`: its key there when it's keyed, else its one value.
+pub(super) fn set_prop(c: &mut Clip, p: &str, t: u64, v: f32) {
+    if p == "volume" {
+        c.set_volume_at(t, v);
+    } else if !c.set_key(p, t, v) {
+        set_base(c, p, v);
+    }
+}
+
+fn has_key(c: &Clip, p: &str, t: u64) -> bool {
+    if p == "volume" {
+        let at = t.saturating_sub(c.start_ms);
+        c.volume_keys.iter().any(|k| k.at_ms.abs_diff(at) < 40)
+    } else {
+        c.has_key(p, t)
+    }
+}
+
+fn key_times(c: &Clip, p: &str) -> Vec<u64> {
+    if p == "volume" { c.volume_keys.iter().map(|k| k.at_ms).collect() } else { c.keys_of(p).iter().map(|k| k.at_ms).collect() }
+}
+
+/// A key for `p` at `t`, or the one there taken away.
+pub(super) fn toggle_prop(c: &mut Clip, p: &str, t: u64) {
+    if p == "volume" {
+        let rel = t.saturating_sub(c.start_ms).min(c.len_ms());
+        if let Some(i) = c.volume_keys.iter().position(|k| k.at_ms.abs_diff(rel) < 40) {
+            let gone = c.volume_keys.remove(i);
+            if c.volume_keys.is_empty() {
+                c.volume = gone.volume;
+            }
+        } else {
+            let volume = c.volume_at(t);
+            c.volume_keys.push(lightair_render::sequence::VolumeKey { at_ms: rel, volume });
+            c.volume_keys.sort_by_key(|k| k.at_ms);
+        }
+        return;
+    }
+    let mut b = base_of(c, p);
+    c.toggle_key(p, t, &mut b);
+    set_base(c, p, b);
+}
+
+impl Editor {
+    /// A number field of a clip's property, keyable: its value at the playhead (dragged or
+    /// stepped by `delta`, within `range`), and ‹ ◇ › for its keys.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn keyed(&self, c: &Clip, prop: impl Into<String>, name: &'static str, fmt: Rc<dyn Fn(f32) -> String>, delta: f32, range: (f32, f32), cx: &mut Context<Self>) -> Div {
+        let prop: String = prop.into();
+        let (cid, t) = (c.id, self.playhead);
+        let v = prop_value(c, &prop, t);
+        let p = prop.clone();
+        let step: Step = Rc::new(move |this, d, cx| {
+            let at = this.playhead;
+            this.change(
+                |s| {
+                    if let Some(c) = s.clip_mut(cid) {
+                        let cur = prop_value(c, &p, at);
+                        set_prop(c, &p, at, (cur + d * delta).clamp(range.0, range.1));
+                    }
+                },
+                cx,
+            )
+        });
+        let id = SharedString::from(format!("ed-k-{prop}"));
+        self.field(id, name, fmt(v), step, cx).child(self.key_control(c, vec![prop], cx))
+    }
+
+    /// ‹ ◇ ›: the keys of `props` (one, or a section's): the previous and next, and one at the
+    /// playhead (filled when there's one there).
+    pub(super) fn key_control(&self, c: &Clip, props: Vec<String>, cx: &mut Context<Self>) -> Div {
+        let (cid, t) = (c.id, self.playhead);
+        let inside = c.start_ms <= t && t < c.end_ms();
+        let rel = t.saturating_sub(c.start_ms);
+        let times: Vec<u64> = props.iter().flat_map(|p| key_times(c, p)).collect();
+        let prev = times.iter().filter(|k| **k + 40 < rel).max().map(|k| c.start_ms + k);
+        let next = times.iter().filter(|k| **k > rel + 40).min().map(|k| c.start_ms + k);
+        let here = props.iter().all(|p| has_key(c, p, t));
+        let keyed = !times.is_empty();
+        let id = props.join("+");
+        let arrow = |icon: &'static str, to: Option<u64>, n: usize, cx: &mut Context<Self>| {
+            div()
+                .id(SharedString::from(format!("ed-kn-{id}-{n}")))
+                .w(px(12.))
+                .flex()
+                .justify_center()
+                .text_color(if to.is_some() { tok::text_secondary() } else { tok::text_tertiary() })
+                .when(to.is_some(), |d| d.cursor_pointer().hover(|d| d.text_color(tok::text())))
+                .child(ui::icon(icon).size(px(11.)))
+                .on_click(cx.listener(move |this, _, _, cx| if let Some(to) = to { this.seek(to, cx) }))
+        };
+        let toggle_props = props.clone();
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .child(arrow("chevron-left", prev, 0, cx))
+            .child(
+                div()
+                    .id(SharedString::from(format!("ed-kd-{id}")))
+                    .size(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .when(inside, |d| d.cursor_pointer().hover(|d| d.bg(tok::bg_raised())))
+                    // filled (in the accent) when there's a key at the playhead
+                    .when(here, |d| d.bg(rgba(0x3B82F633)))
+                    .child(ui::icon("diamond").size(px(12.)).text_color(if here { tok::accent_primary() } else if keyed { tok::text_secondary() } else { tok::text_tertiary() }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let at = this.playhead;
+                        if !this.seq().and_then(|s| s.clip(cid)).is_some_and(|c| c.start_ms <= at && at < c.end_ms()) {
+                            this.note = Some("Move the playhead over the clip to key it there.".into());
+                            cx.notify();
+                            return;
+                        }
+                        let ps = toggle_props.clone();
+                        this.change(
+                            |s| {
+                                if let Some(c) = s.clip_mut(cid) {
+                                    // a section's: all keyed there, or all taken away
+                                    let all = ps.iter().all(|p| has_key(c, p, at));
+                                    for p in &ps {
+                                        if has_key(c, p, at) == all {
+                                            toggle_prop(c, p, at);
+                                        }
+                                    }
+                                }
+                            },
+                            cx,
+                        )
+                    })),
+            )
+            .child(arrow("chevron-right", next, 1, cx))
+    }
+
+    /// A section's title with ‹ ◇ › for all its properties at once.
+    pub(super) fn keyed_title(&self, c: &Clip, title: &'static str, props: &[&str], cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .items_end()
+            .child(label(title).flex_1())
+            .child(self.key_control(c, props.iter().map(|p| p.to_string()).collect(), cx))
+    }
+}

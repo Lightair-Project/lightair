@@ -122,9 +122,8 @@ impl Editor {
             |s| {
                 for c in &targets {
                     if let Some(c) = s.clip_mut(*c) {
-                        let mut tr = c.transform_at(t);
-                        tr.rotation = ((tr.rotation + 90.0) / 90.0).round() * 90.0 % 360.0;
-                        c.set_transform_at(t, tr);
+                        let r = ((c.transform_at(t).rotation + 90.0) / 90.0).round() * 90.0 % 360.0;
+                        kit::set_prop(c, "rotation", t, r);
                     }
                 }
             },
@@ -616,13 +615,14 @@ impl Editor {
     pub(super) fn crop_section(&self, c: &Clip, body: Div, cx: &mut Context<Self>) -> Div {
         let cid = c.id;
         let set = move |this: &mut Self, f: &dyn Fn(&mut Crop), cx: &mut Context<Self>| this.change(|s| if let Some(c) = s.clip_mut(cid) { f(&mut c.crop) }, cx);
-        let pct = |v: f32| format!("{:.0}%", v * 100.0);
-        let (l, t, r, b) = c.crop;
-        body.child(label("CROP"))
-            .child(self.stepper("ed-cl", "Left", pct(l), move |this, d, cx| set(this, &|c| c.0 = (c.0 + d * 0.05).clamp(0.0, 0.9 - c.2), cx), cx))
-            .child(self.stepper("ed-cr", "Right", pct(r), move |this, d, cx| set(this, &|c| c.2 = (c.2 + d * 0.05).clamp(0.0, 0.9 - c.0), cx), cx))
-            .child(self.stepper("ed-ct", "Top", pct(t), move |this, d, cx| set(this, &|c| c.1 = (c.1 + d * 0.05).clamp(0.0, 0.9 - c.3), cx), cx))
-            .child(self.stepper("ed-cb", "Bottom", pct(b), move |this, d, cx| set(this, &|c| c.3 = (c.3 + d * 0.05).clamp(0.0, 0.9 - c.1), cx), cx))
+        use std::rc::Rc;
+        let _ = set;
+        let pct: Rc<dyn Fn(f32) -> String> = Rc::new(|v| format!("{:.0}%", v * 100.0));
+        body.child(self.keyed_title(c, "CROP", &lightair_render::keys::CROP, cx))
+            .child(self.keyed(c, "crop.l", "Left", pct.clone(), 0.05, (0.0, 0.9), cx))
+            .child(self.keyed(c, "crop.r", "Right", pct.clone(), 0.05, (0.0, 0.9), cx))
+            .child(self.keyed(c, "crop.t", "Top", pct.clone(), 0.05, (0.0, 0.9), cx))
+            .child(self.keyed(c, "crop.b", "Bottom", pct, 0.05, (0.0, 0.9), cx))
             .child(
                 div()
                     .flex()

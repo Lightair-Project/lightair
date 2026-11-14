@@ -350,6 +350,11 @@ impl StudioWindow {
                 self.show_place(super::Place::Editor, cx);
                 self.editor.update(cx, |e, cx| e.hook_sound(cx));
             }
+            Ok(hook @ ("editor-grids" | "editor-grids-2")) => {
+                self.show_place(super::Place::Editor, cx);
+                let second = hook == "editor-grids-2";
+                self.editor.update(cx, |e, cx| e.hook_grids(second, cx));
+            }
             Ok(hook @ ("editor-looks" | "editor-looks-2")) => {
                 self.show_place(super::Place::Editor, cx);
                 let second = hook == "editor-looks-2";

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::Sizable;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -28,9 +28,11 @@ use crate::ui::{self, tok};
 
 mod audio;
 mod effects;
-mod kit;
+pub(crate) mod kit;
 mod ghost;
+mod grids;
 mod looks;
+mod menus;
 mod speaker;
 mod speed;
 mod select;
@@ -71,6 +73,8 @@ enum Done {
     /// A video's filmstrip.
     Strip(PathBuf, Option<Arc<speed::Strip>>),
     Proxied(PathBuf, Result<(), String>),
+    /// The looks' thumbnails made.
+    Thumbs(Result<(), String>),
 }
 
 /// A medium being dragged from the media panel.
@@ -176,6 +180,7 @@ enum InspectorTab {
     Transition,
     Words,
     Screen,
+    Animation,
 }
 
 /// What the left panel shows.
@@ -186,6 +191,9 @@ enum LeftTab {
     Text,
     Shapes,
     Captions,
+    Effects,
+    Transitions,
+    Filters,
 }
 
 /// Pixels per second at zoom 1.
@@ -281,8 +289,13 @@ pub struct Editor {
     scroll_ms: f32,
     drag: Option<Drag>,
     timeline_bounds: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
+    /// Where the timeline was right-pressed (for its menu's Paste here).
+    menu_at: Option<u64>,
     tab: InspectorTab,
     left: LeftTab,
+    /// The looks' thumbnails; the Animation tab's slot (in, out, combo).
+    thumbs: grids::Thumbs,
+    anim_slot: lightair_render::thumbs::Slot,
     /// The selected text clip's words, being edited, and the sequence before typing began.
     text_edit: Option<(Id, Entity<InputState>)>,
     text_before: Option<Sequence>,
@@ -503,8 +516,11 @@ impl Editor {
             scroll_ms: 0.0,
             drag: None,
             timeline_bounds: Default::default(),
+            menu_at: None,
             tab: InspectorTab::Video,
             left: LeftTab::Media,
+            thumbs: grids::Thumbs::new(),
+            anim_slot: lightair_render::thumbs::Slot::In,
             text_edit: None,
             text_before: None,
             captioning: false,
@@ -541,6 +557,7 @@ impl Editor {
             }
         }
         self.watch(cx);
+        self.want_thumbs();
         cx.notify();
     }
 
@@ -638,6 +655,7 @@ impl Editor {
                                 }
                             }
                             Done::Proxied(file, r) => this.take_proxy(file, r, cx),
+                            Done::Thumbs(r) => this.take_thumbs(r, cx),
                             Done::Strip(f, s) => {
                                 this.strips.insert(f, s);
                             }
@@ -1563,8 +1581,10 @@ impl Editor {
 
     fn media_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let hidden = self.drag_hidden.clone();
+        let ed = cx.entity().downgrade();
         let card = |id: SharedString, title: String, detail: String, icon: &'static str, thumb: Option<PathBuf>, source: MediaSource, cx: &mut Context<Self>| {
             let drag = DraggedMedia::new(title.clone(), source.clone(), thumb.clone(), icon, &hidden);
+            let (ed, menu_source) = (ed.clone(), source.clone());
             div()
                 .id(id.clone())
                 .flex()
@@ -1610,6 +1630,7 @@ impl Editor {
                 .child(div().text_size(px(11.)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(title))
                 .child(div().text_size(px(10.)).text_color(tok::text_tertiary()).child(detail))
                 .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone()))
+                .context_menu(move |m, _, cx| menus::media_menu(m, &ed, menu_source.clone(), cx))
         };
         let mut grid = div().flex().flex_wrap().gap_2();
         if let Some(take) = self.opened_take.clone() {
@@ -1685,14 +1706,17 @@ impl Editor {
             let thumb = (m.kind == MediaKind::Image).then(|| m.path.clone());
             own = own.child(card(SharedString::from(format!("ed-imp-{n}")), m.name.clone(), short(m.duration_ms), icon, thumb, MediaSource::Media(m.id), cx));
         }
-        let tabs: [(&'static str, &'static str, LeftTab); 5] = [
+        let tabs: [(&'static str, &'static str, LeftTab); 8] = [
             ("Media", "film", LeftTab::Media),
             ("Audio", "music", LeftTab::Audio),
             ("Text", "type", LeftTab::Text),
             ("Stickers", "sticker", LeftTab::Shapes),
+            ("Effects", "sparkles", LeftTab::Effects),
+            ("Transitions", "blend", LeftTab::Transitions),
             ("Captions", "captions", LeftTab::Captions),
+            ("Filters", "aperture", LeftTab::Filters),
         ];
-        let mut bar = div().flex().items_center().gap_0p5().px_2().h(px(48.)).border_b_1().border_color(tok::border());
+        let mut bar = div().id("ed-left-tabs").flex().flex_none().items_center().gap_0p5().px_2().h(px(48.)).border_b_1().border_color(tok::border()).overflow_x_scroll();
         for (n, (name, icon, tab)) in tabs.into_iter().enumerate() {
             let on = self.left == tab;
             bar = bar.child(
@@ -1702,7 +1726,9 @@ impl Editor {
                     .flex_col()
                     .items_center()
                     .gap_0p5()
-                    .w(px(54.))
+                    .flex_none()
+                    .min_w(px(40.))
+                    .px_1()
                     .py_1()
                     .rounded(px(6.))
                     .cursor_pointer()
@@ -1754,6 +1780,9 @@ impl Editor {
             LeftTab::Text => self.text_tab(cx),
             LeftTab::Shapes => self.shapes_tab(cx),
             LeftTab::Captions => self.captions_tab(cx),
+            LeftTab::Effects => self.effects_tab(cx),
+            LeftTab::Transitions => self.transitions_tab(cx),
+            LeftTab::Filters => self.filters_tab(cx),
         };
         div()
             .flex()
@@ -1799,6 +1828,7 @@ impl Editor {
                     .children(self.stage_overlay())
                     .when(self.hiding, |d| d.cursor_crosshair())
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.stage_down(ev.position, cx)))
+                    .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| this.menu_pick_stage(ev.position, cx)))
                     .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                         if this.stage_drag.is_some() {
                             this.stage_move(ev.position, cx);
@@ -1806,6 +1836,10 @@ impl Editor {
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.stage_up(cx)))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.stage_up(cx)))
+                    .context_menu({
+                        let ed = cx.entity().downgrade();
+                        move |m, _, cx| menus::clip_menu(m, &ed, cx)
+                    })
                     .when(self.project.is_none(), |d| {
                         d.flex().items_center().justify_center().child(
                             div()
@@ -1849,7 +1883,13 @@ impl Editor {
                     Some(Content::Shape(_)) => "Shape",
                     _ => "Text",
                 };
-                let tabs = [(name, InspectorTab::Text), ("Transform", InspectorTab::Video), ("Effects", InspectorTab::Effects), ("Transition", InspectorTab::Transition)];
+                let mut tabs = vec![(name, InspectorTab::Text), ("Transform", InspectorTab::Video), ("Animation", InspectorTab::Animation)];
+                if !c.effects.is_empty() {
+                    tabs.push(("Effects", InspectorTab::Effects));
+                }
+                if c.transition.is_some() {
+                    tabs.push(("Transition", InspectorTab::Transition));
+                }
                 let tab = if tabs.iter().any(|t| t.1 == self.tab) { self.tab } else { InspectorTab::Text };
                 head = Some(self.inspector_head(if name == "Text" { "type" } else { "shapes" }, c.content.as_ref().map(looks::content_name).unwrap_or_default(), format!("{name} · {}", short(c.len_ms()))));
                 tab_row = Some(self.tab_bar(&tabs, tab, cx));
@@ -1857,6 +1897,7 @@ impl Editor {
                     InspectorTab::Video => self.transform_section(&c, body, cx),
                     InspectorTab::Effects => self.effects_section(&c, body, cx),
                     InspectorTab::Transition => self.transition_section(&c, body, cx),
+                    InspectorTab::Animation => self.animation_section(&c, body, cx),
                     _ => self.content_section(&c, body, cx),
                 };
             }
@@ -1873,11 +1914,18 @@ impl Editor {
                     tabs.push(("Audio", InspectorTab::Audio));
                 }
                 tabs.push(("Speed", InspectorTab::Speed));
+                if !audio {
+                    tabs.extend([("Animation", InspectorTab::Animation), ("Adjust", InspectorTab::Filter)]);
+                    // what's been put on it from the media panel
+                    if !c.effects.is_empty() {
+                        tabs.push(("Effects", InspectorTab::Effects));
+                    }
+                    if c.transition.is_some() {
+                        tabs.push(("Transition", InspectorTab::Transition));
+                    }
+                }
                 if m.kind == MediaKind::Audio || !m.audio.is_empty() {
                     tabs.push(("Words", InspectorTab::Words));
-                }
-                if !audio {
-                    tabs.extend([("Filter", InspectorTab::Filter), ("Effects", InspectorTab::Effects), ("Transition", InspectorTab::Transition)]);
                 }
                 if take {
                     tabs.push(("Screen", InspectorTab::Screen));
@@ -1898,6 +1946,7 @@ impl Editor {
                     InspectorTab::Effects => body = self.effects_section(&c, body, cx),
                     InspectorTab::Words => body = self.words_section(&c, &m, body, cx),
                     InspectorTab::Transition => body = self.transition_section(&c, body, cx),
+                    InspectorTab::Animation => body = self.animation_section(&c, body, cx),
                     InspectorTab::Audio => body = self.audio_section(&c, &m, body, cx),
                     InspectorTab::Speed => {
                         body = body.child(label("SPEED")).child(self.chips(
@@ -2001,6 +2050,7 @@ impl Editor {
     }
 
     fn timeline(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let ed = cx.entity().downgrade();
         let pps = self.pps();
         let bounds = self.timeline_bounds.clone();
         let Some(seq) = self.seq().cloned() else {
@@ -2048,6 +2098,7 @@ impl Editor {
                     .on_click(cx.listener(move |this, _, _, cx| this.change(|s| if let Some(t) = s.tracks.get_mut(ti) { f(t) }, cx)))
             };
             let header = div()
+                .id(("ed-track-head", ti))
                 .flex()
                 .items_center()
                 .gap_0p5()
@@ -2061,7 +2112,11 @@ impl Editor {
                 .when(track.kind == TrackKind::Video, |d| d.child(toggle(if track.hidden { "eye-off" } else { "eye" }, track.hidden, 0, |t| t.hidden = !t.hidden, cx)))
                 // sound is on the audio tracks: only they're muted
                 .when(track.kind == TrackKind::Audio, |d| d.child(toggle(if track.muted { "volume-x" } else { "volume-2" }, track.muted, 1, |t| t.muted = !t.muted, cx)))
-                .child(toggle(if track.locked { "lock" } else { "lock-open" }, track.locked, 2, |t| t.locked = !t.locked, cx));
+                .child(toggle(if track.locked { "lock" } else { "lock-open" }, track.locked, 2, |t| t.locked = !t.locked, cx))
+                .context_menu({
+                    let ed = ed.clone();
+                    move |m, _, cx| menus::track_menu(m, &ed, ti, cx)
+                });
             let mut lane = div().relative().flex_1().h_full().overflow_hidden().when(self.tool == tools::Tool::Split, |d| d.cursor(CursorStyle::ResizeColumn));
             let mut badges = Vec::new();
             for c in &track.clips {
@@ -2093,7 +2148,8 @@ impl Editor {
                     (None, None) => "Missing".into(),
                 };
                 let pps_ = pps;
-                let diamonds: Vec<f32> = c.keyframes.iter().map(|k| k.at_ms as f32 / 1000.0 * pps_).collect();
+                // every property's keys (not the volume's, drawn apart)
+                let diamonds: Vec<f32> = c.key_times().into_iter().map(|k| k as f32 / 1000.0 * pps_).collect();
                 let volume_marks: Vec<f32> = c.volume_keys.iter().map(|k| k.at_ms as f32 / 1000.0 * pps_).collect();
                 let wave = if track.kind == TrackKind::Audio { self.wave(c, m, left, width, h) } else { None };
                 let strip = if track.kind == TrackKind::Video && c.content.is_none() { self.filmstrip(c, m, left, width, h - 6.0) } else { None };
@@ -2292,7 +2348,20 @@ impl Editor {
                                 this.begin_drag(d);
                                 cx.notify();
                             }),
-                        ),
+                        )
+                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.menu_pick(cid, cx)))
+                        // a look dragged from the media panel goes on it
+                        .when(track.kind == TrackKind::Video, |d| {
+                            d.drag_over::<grids::DraggedLook>(|s, _, _, _| s.border_color(tok::accent_primary()))
+                                .on_drop(cx.listener(move |this, l: &grids::DraggedLook, _, cx| {
+                                    this.pick_only(Some(cid));
+                                    this.apply_look(l.look, vec![cid], cx)
+                                }))
+                        })
+                        .context_menu({
+                            let ed = ed.clone();
+                            move |m, _, cx| menus::clip_menu(m, &ed, cx)
+                        }),
                 );
             }
             let lane = lane.children(badges);
@@ -2359,6 +2428,7 @@ impl Editor {
                     this.hover_at(None, cx);
                 }
             }))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, _| this.menu_at = this.time_at(ev.position.x)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, _, cx| {
@@ -2419,6 +2489,7 @@ impl Editor {
                 let track = this.track_at(pos.y);
                 this.add(m.source.clone(), t, track, cx);
             }))
+            .context_menu(move |m, _, cx| menus::blank_menu(m, &ed, cx))
             .into_any_element()
     }
 }
