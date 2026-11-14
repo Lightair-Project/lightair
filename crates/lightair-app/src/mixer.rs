@@ -1926,35 +1926,10 @@ fn source_item(
     })
 }
 
-/// The apps that are open (the Dock's), name and bundle id, by name; not Lightair itself.
+/// The apps that are open (the Dock's or taskbar's), name and capture id, by name; not
+/// Lightair itself.
 fn running_apps() -> Vec<(String, String)> {
-    use objc2::msg_send;
-    use objc2::rc::Retained;
-    use objc2::runtime::{AnyClass, AnyObject};
-    use objc2_foundation::NSString;
-    let mut out = Vec::new();
-    let Some(class) = AnyClass::get(c"NSWorkspace") else { return out };
-    unsafe {
-        let ws: Retained<AnyObject> = msg_send![class, sharedWorkspace];
-        let apps: Retained<AnyObject> = msg_send![&*ws, runningApplications];
-        let n: usize = msg_send![&*apps, count];
-        for k in 0..n {
-            let app: Retained<AnyObject> = msg_send![&*apps, objectAtIndex: k];
-            let policy: isize = msg_send![&*app, activationPolicy];
-            let pid: i32 = msg_send![&*app, processIdentifier];
-            if policy != 0 || pid as u32 == std::process::id() {
-                continue;
-            }
-            let name: Option<Retained<NSString>> = msg_send![&*app, localizedName];
-            let bundle: Option<Retained<NSString>> = msg_send![&*app, bundleIdentifier];
-            if let (Some(name), Some(bundle)) = (name, bundle) {
-                out.push((name.to_string(), bundle.to_string()));
-            }
-        }
-    }
-    out.sort_by_key(|(n, _)| n.to_lowercase());
-    out.dedup_by(|a, b| a.1 == b.1);
-    out
+    lightair_platform::apps::running().into_iter().map(|a| (a.name, a.id)).collect()
 }
 
 /// The commands that make `track` listen to `to`: the same kind of input changes its settings;

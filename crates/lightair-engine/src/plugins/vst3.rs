@@ -1,9 +1,13 @@
-//! VST3 hosting: bundles in the system and user VST3 folders, loaded with CoreFoundation, one
-//! component and its controller per insert, processed in place as 32-bit float stereo.
+//! VST3 hosting: bundles in the system and user VST3 folders (loaded with CoreFoundation on
+//! macOS, as DLLs on Windows), one component and its controller per insert, processed in place as
+//! 32-bit float stereo.
 //!
 //! VST3 (and the JUCE wrappers most plugins use) expect their component and controller made,
 //! edited and torn down on the main thread: those calls go through [`super::on_main`]. Only
 //! `process` runs on the audio thread.
+
+// The SDK's enum constants are u32 on macOS and i32 on Windows; the casts are needed on one.
+#![allow(clippy::unnecessary_cast)]
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -31,6 +35,7 @@ use super::PluginInfo;
 
 // ------------------------------------------------------------------ CoreFoundation
 
+#[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFURLCreateFromFileSystemRepresentation(alloc: *const c_void, buf: *const u8, len: isize, dir: bool) -> *const c_void;
@@ -41,7 +46,15 @@ unsafe extern "C" {
     fn CFRelease(cf: *const c_void);
 }
 
+#[cfg(target_os = "macos")]
 const UTF8: u32 = 0x0800_0100;
+/// The window type plugin editors attach to.
+#[cfg(target_os = "macos")]
+const PLATFORM_VIEW: FIDString = kPlatformTypeNSView;
+#[cfg(windows)]
+const PLATFORM_VIEW: FIDString = kPlatformTypeHWND;
+#[cfg(not(any(target_os = "macos", windows)))]
+const PLATFORM_VIEW: FIDString = kPlatformTypeX11EmbedWindowID;
 const AUDIO_EFFECT_CLASS: &str = "Audio Module Class";
 const MAX_FRAMES: usize = 4096;
 const MAX_CHANGES: usize = 64;
@@ -93,6 +106,16 @@ fn module(path: &Path) -> Result<Arc<Module>, String> {
     if let Some(m) = MODULES.lock().get(path) {
         return Ok(m.clone());
     }
+    // the bundle stays loaded (and referenced) for the session
+    let factory = unsafe { ComPtr::from_raw(load_factory(path)?) }.ok_or("no plugin factory")?;
+    let m = Arc::new(Module { factory });
+    MODULES.lock().insert(path.to_path_buf(), m.clone());
+    Ok(m)
+}
+
+/// macOS: the bundle through CoreFoundation, `bundleEntry`, then `GetPluginFactory`.
+#[cfg(target_os = "macos")]
+unsafe fn load_factory(path: &Path) -> Result<*mut IPluginFactory, String> {
     let bytes = path.as_os_str().as_encoded_bytes();
     unsafe {
         let url = CFURLCreateFromFileSystemRepresentation(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize, true);
@@ -125,21 +148,59 @@ fn module(path: &Path) -> Result<Arc<Module>, String> {
             return Err("not a VST3 plugin".into());
         }
         let get: extern "system" fn() -> *mut IPluginFactory = std::mem::transmute(get);
-        // the bundle stays loaded (and referenced) for the session
-        let factory = ComPtr::from_raw(get()).ok_or("no plugin factory")?;
-        let m = Arc::new(Module { factory });
-        MODULES.lock().insert(path.to_path_buf(), m.clone());
-        Ok(m)
+        Ok(get())
     }
+}
+
+/// Windows: the module's DLL (inside a bundle, `Contents/x86_64-win/<name>.vst3`; or a single
+/// `.vst3` file), `InitDll`, then `GetPluginFactory`. Never unloaded.
+#[cfg(windows)]
+unsafe fn load_factory(path: &Path) -> Result<*mut IPluginFactory, String> {
+    let dll = if path.is_dir() {
+        let name = path.file_name().ok_or("no bundle name")?;
+        path.join("Contents").join("x86_64-win").join(name)
+    } else {
+        path.to_path_buf()
+    };
+    unsafe {
+        let lib = libloading::Library::new(&dll).map_err(|e| format!("its code didn't load: {e}"))?;
+        if let Ok(init) = lib.get::<extern "system" fn() -> bool>(b"InitDll\0")
+            && !init()
+        {
+            return Err("it didn't start".into());
+        }
+        let get = lib
+            .get::<extern "system" fn() -> *mut IPluginFactory>(b"GetPluginFactory\0")
+            .map_err(|_| "not a VST3 plugin".to_string())?;
+        let factory = get();
+        std::mem::forget(lib);
+        Ok(factory)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+unsafe fn load_factory(_path: &Path) -> Result<*mut IPluginFactory, String> {
+    Err("VST3 hosting isn't available on this platform yet".into())
 }
 
 // ------------------------------------------------------------------ scanning
 
 /// The folders VST3 plugins are installed in.
 pub fn folders() -> Vec<PathBuf> {
-    let mut v = vec![PathBuf::from("/Library/Audio/Plug-Ins/VST3")];
-    if let Some(home) = std::env::var_os("HOME") {
-        v.push(PathBuf::from(home).join("Library/Audio/Plug-Ins/VST3"));
+    let mut v = Vec::new();
+    if cfg!(windows) {
+        // %CommonProgramFiles%\VST3, and the per-user folder
+        if let Some(common) = std::env::var_os("CommonProgramFiles") {
+            v.push(PathBuf::from(common).join("VST3"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            v.push(PathBuf::from(local).join("Programs").join("Common").join("VST3"));
+        }
+    } else {
+        v.push(PathBuf::from("/Library/Audio/Plug-Ins/VST3"));
+        if let Some(home) = std::env::var_os("HOME") {
+            v.push(PathBuf::from(home).join("Library/Audio/Plug-Ins/VST3"));
+        }
     }
     v
 }
@@ -781,7 +842,8 @@ impl Vst3Plugin {
         context.tempo = 120.0;
         context.timeSigNumerator = 4;
         context.timeSigDenominator = 4;
-        context.state = kTempoValid | kTimeSigValid | kContTimeValid;
+        // the flags' C type is unsigned on macOS, signed on Windows
+        context.state = (kTempoValid | kTimeSigValid | kContTimeValid) as _;
         let changes = ComWrapper::new(Changes {
             queues: (0..MAX_CHANGES).map(|_| ComWrapper::new(Queue::default())).collect(),
             count: Cell::new(0),
@@ -864,7 +926,7 @@ impl Vst3Plugin {
     pub fn create_view(&self) -> Option<(ComPtr<IPlugView>, (i32, i32))> {
         let c = self.controller.as_ref()?;
         let view = unsafe { ComPtr::from_raw(c.createView(c"editor".as_ptr())) }?;
-        if !ok(unsafe { view.isPlatformTypeSupported(kPlatformTypeNSView) }) {
+        if !ok(unsafe { view.isPlatformTypeSupported(PLATFORM_VIEW) }) {
             return None;
         }
         let mut r = ViewRect { left: 0, top: 0, right: 0, bottom: 0 };
@@ -1036,18 +1098,18 @@ pub struct Vst3View {
 }
 
 impl Vst3View {
-    /// Attaches `view` to the NSView `parent`; `resize` sets the window's content size when the
-    /// plugin asks.
+    /// Attaches `view` to `parent` (an NSView on macOS, an HWND on Windows); `resize` sets the
+    /// window's content size when the plugin asks.
     ///
     /// # Safety
-    /// `parent` is a live NSView that outlives the returned view.
+    /// `parent` is a live view or window that outlives the returned view.
     pub unsafe fn attach(view: ComPtr<IPlugView>, parent: *mut c_void, resize: impl Fn(i32, i32) + 'static) -> Option<Self> {
         let frame = ComWrapper::new(Frame { resize: Box::new(resize) });
         unsafe {
             if let Some(f) = frame.as_com_ref::<IPlugFrame>() {
                 view.setFrame(f.as_ptr());
             }
-            if !ok(view.attached(parent, kPlatformTypeNSView)) {
+            if !ok(view.attached(parent, PLATFORM_VIEW)) {
                 view.setFrame(std::ptr::null_mut());
                 return None;
             }

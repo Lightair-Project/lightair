@@ -464,7 +464,7 @@ impl Reconciler {
                     return;
                 }
                 // Not read once graphics are up, but must point at something.
-                ovi.graphics_module = c"libobs-opengl".as_ptr();
+                ovi.graphics_module = if cfg!(windows) { c"libobs-d3d11".as_ptr() } else { c"libobs-opengl".as_ptr() };
                 ovi.base_width = format.width;
                 ovi.base_height = format.height;
                 ovi.output_width = format.width;

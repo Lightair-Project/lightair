@@ -94,9 +94,13 @@ fn record_and_stream() {
 
     // libobs's replay buffer writes clips through the obs-ffmpeg-mux helper, which it looks for
     // next to the running executable.
-    let helper = std::env::current_exe().unwrap().with_file_name("obs-ffmpeg-mux");
-    if !helper.exists() {
-        let _ = std::os::unix::fs::symlink("/Applications/OBS.app/Contents/MacOS/obs-ffmpeg-mux", &helper);
+    // (Windows: `cargo xtask test` puts it there.)
+    #[cfg(unix)]
+    {
+        let helper = std::env::current_exe().unwrap().with_file_name("obs-ffmpeg-mux");
+        if !helper.exists() {
+            let _ = std::os::unix::fs::symlink("/Applications/OBS.app/Contents/MacOS/obs-ffmpeg-mux", &helper);
+        }
     }
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
     let mut doc = Document::new(Project::new("Outputs"));

@@ -1,6 +1,7 @@
 # Windows: every Lightair feature on both platforms
 
-Status: plan. Lightair is designed for macOS and Windows (docs/15: Windows 10 22H2+ and 11, x64;
+Status: phase 1 done locally (everything compiles and passes clippy for `x86_64-pc-windows-msvc`;
+the CI workflow is written, not yet run: the repository has no remote). Lightair is designed for macOS and Windows (docs/15: Windows 10 22H2+ and 11, x64;
 Linux after Windows), but so far the code has only been built and run on macOS, and about a dozen
 parts are macOS-only. From now on, **every feature is designed for both**: a new feature names its
 Windows path before it's built, and nothing lands that would stop the Windows build.
@@ -77,6 +78,15 @@ The app and engine call these instead of OS APIs. A test per module runs on both
      per platform).
 
    *Done when:* the Windows CI builds and runs the platform-neutral suite.
+
+   Done: `lightair-platform` (paths, files, apps, realtime); hotkeys on `RegisterHotKey`;
+   GPUI's foreground executor for plugin jobs; VST3 DLL loading and a Win32 editor window; a
+   portable preview path (frames read back as BGRA, shown as images) until DXGI; the eyedropper
+   hidden and camera effects stubbed until phase 3; Audio Unit tests marked macOS-only;
+   `.github/workflows/ci.yml` (libobs from the submodule, clippy, `cargo xtask test`).
+   Checking from a Mac: `PATH="/opt/homebrew/opt/llvm/bin:$PATH" cargo check --workspace
+   --all-targets --target x86_64-pc-windows-msvc` (libobs-sys reads the headers as macOS's
+   there and links nothing).
 2. **It runs on Windows:**
    - DXGI preview into GPUI;
    - portable source kinds with migration;

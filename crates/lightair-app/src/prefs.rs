@@ -89,10 +89,7 @@ pub static RUNNING_SAMPLE_RATE: std::sync::atomic::AtomicU32 = std::sync::atomic
 pub static LOUDNESS_TARGET: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-14);
 
 pub fn path() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
-        .join("Library/Application Support/Lightair/preferences.json")
+    lightair_platform::paths::data_dir().join("preferences.json")
 }
 
 /// Reads preferences, falling back to defaults for a missing or unreadable file.

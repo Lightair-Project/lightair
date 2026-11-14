@@ -5,9 +5,14 @@ mod camera_studio;
 mod effect_drag;
 mod encoding;
 mod eyedropper;
+mod frame_view;
 mod geometry;
 mod hotkeys;
 mod mixer;
+#[cfg(target_os = "macos")]
+mod plugin_editor;
+#[cfg(windows)]
+#[path = "plugin_editor_win.rs"]
 mod plugin_editor;
 mod plugin_scan;
 mod outputs_panel;
@@ -22,6 +27,10 @@ mod selftest;
 mod shell;
 mod starter;
 mod studio;
+#[cfg(target_os = "macos")]
+mod system_effects;
+#[cfg(windows)]
+#[path = "system_effects_win.rs"]
 mod system_effects;
 mod ui;
 
@@ -37,8 +46,7 @@ use crate::shell::StudioWindow;
 use crate::studio::Studio;
 
 fn projects_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join("Library/Application Support/Lightair/Projects")
+    lightair_platform::paths::projects_dir()
 }
 
 fn main() {
@@ -94,7 +102,20 @@ fn main() {
     gpui_kit::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         gpui_kit::init(cx);
         // VST3 plugins are made, edited and torn down on this thread
-        lightair_engine::plugins::set_main_thread(|job| dispatch2::DispatchQueue::main().exec_async(job));
+        // (GPUI's foreground executor: the main thread on both platforms)
+        let (jobs, mut queue) = futures_channel::mpsc::unbounded::<Box<dyn FnOnce() + Send>>();
+        lightair_engine::plugins::set_main_thread(move |job| {
+            let _ = jobs.unbounded_send(job);
+        });
+        cx.foreground_executor()
+            .spawn(async move {
+                use futures_util::StreamExt;
+                while let Some(job) = queue.next().await {
+                    job();
+                }
+            })
+            .detach();
+        frame_view::init(cx);
         ui::apply_theme(cx);
         shell::bind_keys(cx);
 

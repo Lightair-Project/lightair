@@ -801,13 +801,15 @@ impl StudioWindow {
             .gap_2()
             .child(picker)
             .child(div().flex_1().text_size(px(11.)).font_family("Menlo").text_color(tok::text_secondary()).child(hex))
-            .child(
-                ui::icon_button(SharedString::from(format!("fx-drop-{eid}-{key}")), "pipette", tok::text_secondary())
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Pick a colour from the screen").build(window, cx)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.pick_colour(iid, eid, key, cx))),
-            )
+            .when(crate::eyedropper::AVAILABLE, |row| {
+                row.child(
+                    ui::icon_button(SharedString::from(format!("fx-drop-{eid}-{key}")), "pipette", tok::text_secondary())
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("Pick a colour from the screen").build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| this.pick_colour(iid, eid, key, cx))),
+                )
+            })
     }
 
     /// Makes (or brings up to date) the colour pickers of the selected object's effects. Called
@@ -1153,6 +1155,7 @@ impl StudioWindow {
                     self.watch_plugin_editor(effect, cx);
                 }
             }
+            #[cfg(target_os = "macos")]
             Hosted::Au(unit) => {
                 let made = crate::plugin_editor::request(&unit);
                 cx.spawn(async move |this, cx| {

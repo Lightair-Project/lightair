@@ -30,6 +30,7 @@ pub use runtime::Runtime;
 /// OBS modules Lightair loads from an OBS 33 plugin set: the ones that only need libobs.
 /// Modules that link Qt or obs-frontend-api are handled by the compatibility layer
 /// (docs/13-extensibility-and-compatibility.md).
+#[cfg(not(windows))]
 pub const DEFAULT_MODULES: &[&str] = &[
     "aja",
     "coreaudio-encoder",
@@ -50,4 +51,28 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "rtmp-services",
     "text-freetype2",
     "vlc-video",
+];
+
+/// Windows: display, window and game capture; cameras and capture cards (DirectShow); WASAPI
+/// devices, desktop and per-app audio; NVENC and QSV (AMF is in obs-ffmpeg).
+#[cfg(windows)]
+pub const DEFAULT_MODULES: &[&str] = &[
+    "aja",
+    "decklink",
+    "image-source",
+    "lightair-camera-fx",
+    "obs-ffmpeg",
+    "obs-filters",
+    "obs-nvenc",
+    "obs-outputs",
+    "obs-qsv11",
+    "obs-transitions",
+    "obs-webrtc",
+    "obs-x264",
+    "rtmp-services",
+    "text-freetype2",
+    "vlc-video",
+    "win-capture",
+    "win-dshow",
+    "win-wasapi",
 ];
