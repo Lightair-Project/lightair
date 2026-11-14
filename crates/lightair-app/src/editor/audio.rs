@@ -252,7 +252,7 @@ impl Editor {
                         let mut made = None;
                         this.change(|s| made = s.detach_sound(cid), cx);
                         if made.is_some() {
-                            this.selected = made;
+                            this.pick_only(made);
                             this.note = Some("The sound is on an audio track of its own.".into());
                         }
                         cx.notify();
@@ -327,7 +327,7 @@ impl Editor {
             },
             cx,
         );
-        self.selected = sound;
+        self.pick_only(sound);
         self.tab = InspectorTab::Audio;
         self.left = LeftTab::Audio;
         self.seek(3_000, cx);

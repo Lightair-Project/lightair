@@ -32,7 +32,9 @@ mod ghost;
 mod looks;
 mod speaker;
 mod speed;
+mod select;
 mod stage;
+mod tools;
 mod voiceover;
 mod words;
 use lightair_render::sequence::Content;
@@ -58,6 +60,9 @@ enum Done {
     Cleaned(Result<(), String>),
     /// What's inside a take (its Library item's id).
     TakeParts(Id, Vec<TakePart>),
+    /// A frame frozen (the clip, where, the still), a clip reversed (the file played backwards).
+    Frozen(Id, u64, Result<Media, String>),
+    Reversed(Id, Result<Media, String>),
     /// A medium's words.
     Transcript(Id, Result<lightair_render::speech::Transcript, String>),
     /// A proxy being made, and made (its original file).
@@ -220,12 +225,28 @@ pub struct Editor {
     marked: Vec<(Id, u64, u64)>,
     /// A voice-over being recorded.
     recorder: Option<voiceover::Recorder>,
+    /// The clips picked (with `selected`, the inspector's), and a box being dragged to pick.
+    picked: Vec<Id>,
+    marquee: Option<select::Marquee>,
+    /// The timeline's tool; its switches (the main track's magnet, snapping, linkage, the
+    /// preview axis) and the moment under the pointer; clips copied; the zoom slider.
+    tool: tools::Tool,
+    magnet: bool,
+    snapping: bool,
+    linkage: bool,
+    axis: bool,
+    hover: Option<u64>,
+    clipboard: Vec<tools::Copied>,
+    zoom_bar: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
+    zoom_dragging: bool,
     /// The take opened in the media panel (its parts shown), and takes' parts read so far.
     opened_take: Option<Item>,
     take_parts: std::collections::HashMap<Id, Option<Vec<TakePart>>>,
     /// Sound while scrubbing: on, and the snippet playing (when it began).
     scrub_audio: bool,
     scrub: Option<(speaker::Speaker, std::time::Instant)>,
+    /// Where the last scrub sound was taken from.
+    scrub_at: Option<u64>,
     /// Where something dragged over the timeline would land; and the dragged card hidden
     /// meanwhile (it's on the timeline as the ghost).
     ghost: Option<ghost::Ghost>,
@@ -413,10 +434,22 @@ impl Editor {
             transcribing: None,
             marked: Vec::new(),
             recorder: None,
+            picked: Vec::new(),
+            marquee: None,
+            tool: tools::Tool::Select,
+            magnet: true,
+            snapping: true,
+            linkage: true,
+            axis: false,
+            hover: None,
+            clipboard: Vec::new(),
+            zoom_bar: Default::default(),
+            zoom_dragging: false,
             opened_take: None,
             take_parts: Default::default(),
             scrub_audio: true,
             scrub: None,
+            scrub_at: None,
             ghost: None,
             drag_hidden: Default::default(),
             preview: None,
@@ -556,6 +589,8 @@ impl Editor {
                             }
                             Done::Cleaned(r) => this.take_cleaned(r, cx),
                             Done::Transcript(m, r) => this.take_transcript(m, r, cx),
+                            Done::Frozen(c, t, r) => this.take_frozen(c, t, r, cx),
+                            Done::Reversed(c, r) => this.take_reversed(c, r, cx),
                             Done::TakeParts(id, parts) => {
                                 this.take_parts.insert(id, Some(parts));
                             }
@@ -605,7 +640,7 @@ impl Editor {
         self.stop(cx);
         self.undo.clear();
         self.redo.clear();
-        self.selected = None;
+        self.pick_only(None);
         self.playhead = 0;
         self.scroll_ms = 0.0;
         self.preview = None;
@@ -707,6 +742,12 @@ impl Editor {
         let Some(p) = &mut self.project else { return };
         let before = p.sequence.clone();
         f(&mut p.sequence);
+        // the main track's magnet: no gaps there
+        if self.magnet
+            && let Some(m) = p.sequence.main_track()
+        {
+            p.sequence.pack(m);
+        }
         if p.sequence == before {
             return;
         }
@@ -734,15 +775,20 @@ impl Editor {
     }
 
     pub fn delete_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(c) = self.selected.take() {
-            self.change(
-                |s| {
-                    s.remove(c);
-                    s.tidy();
-                },
-                cx,
-            );
+        let picked = self.picked_clips();
+        if picked.is_empty() {
+            return;
         }
+        self.pick_only(None);
+        self.change(
+            |s| {
+                for c in picked {
+                    s.remove(c);
+                }
+                s.tidy();
+            },
+            cx,
+        );
     }
 
     fn split(&mut self, cx: &mut Context<Self>) {
@@ -790,7 +836,7 @@ impl Editor {
                     },
                     cx,
                 );
-                self.selected = made;
+                self.pick_only(made);
                 self.tab = InspectorTab::Text;
                 cx.notify();
             }
@@ -820,6 +866,7 @@ impl Editor {
                 // the parts of one thing (a take's picture, layers and sounds) start together
                 let mut start: Option<u64> = None;
                 let mut pictures = 0;
+                let mut placed_all: Vec<Id> = Vec::new();
                 for mut part in parts {
                     // a take's look lives in the workspace (the screen recording look)
                     if let Some(m) = &mut part.media
@@ -861,6 +908,7 @@ impl Editor {
                     if start.is_none() {
                         start = s.clip(c).map(|c| c.start_ms);
                     }
+                    placed_all.push(c);
                     // a take without a scene: its second picture (the camera beside the
                     // screen) small, bottom right
                     if video && unplaced {
@@ -870,6 +918,15 @@ impl Editor {
                             if let Some(cl) = s.clip_mut(c) {
                                 cl.transform = Transform { x: w * 0.34, y: h * 0.31, scale: 0.25, ..Transform::default() };
                             }
+                        }
+                    }
+                }
+                // the parts of one thing go together (linkage)
+                if placed_all.len() > 1 {
+                    let link = Id::new();
+                    for c in &placed_all {
+                        if let Some(c) = s.clip_mut(*c) {
+                            c.link = Some(link);
                         }
                     }
                 }
@@ -1109,7 +1166,7 @@ impl Editor {
 
     /// `t`, pulled to a snap point (clip edges, the playhead) within 8 pixels.
     fn snap(&self, t: i64, except: Option<Id>) -> u64 {
-        let Some(seq) = self.seq() else { return t.max(0) as u64 };
+        let Some(seq) = self.seq().filter(|_| self.snapping) else { return t.max(0) as u64 };
         let mut points = seq.snap_points(except);
         points.push(self.playhead);
         let reach = 8.0 / self.pps() * 1000.0;
@@ -1142,6 +1199,11 @@ impl Editor {
                 let by_end = self.snap(start as i64 + len as i64, Some(clip));
                 let start = if by_end != start + len { by_end.saturating_sub(len) } else { start };
                 let track = self.track_at(pos.y);
+                // several picked: they all move by as much (in time)
+                if self.move_picked(clip, start) {
+                    cx.notify();
+                    return;
+                }
                 if let Some(p) = &mut self.project {
                     let (cur, _) = p.sequence.find(clip).unwrap_or((0, 0));
                     let kind = p.sequence.tracks[cur].kind;
@@ -1200,15 +1262,22 @@ impl Editor {
     /// A moment of sound at `t` while scrubbing (a new one at most every 90 ms, each heard for
     /// 140 ms).
     fn scrub_sound(&mut self, t: u64, cx: &mut Context<Self>) {
-        if !self.scrub_audio || self.playing.is_some() || self.scrub.as_ref().is_some_and(|(_, at)| at.elapsed() < std::time::Duration::from_millis(90)) {
+        if !self.scrub_audio || self.playing.is_some() {
             return;
         }
-        let Some(sp) = self.seq().and_then(|s| speaker::Speaker::start(s, t)) else { return };
+        // only when the playhead reached another frame (holding still is silent), and not
+        // more often than a snippet lasts
+        let frame = 1000 / self.seq().map_or(30, |s| s.fps.max(1)) as u64;
+        if self.scrub_at.is_some_and(|a| a.abs_diff(t) < frame) || self.scrub.as_ref().is_some_and(|(_, at)| at.elapsed() < std::time::Duration::from_millis(80)) {
+            return;
+        }
+        self.scrub_at = Some(t);
+        let Some(sp) = self.seq().and_then(|s| speaker::Speaker::snippet(s, t, 110)) else { return };
         sp.clock().start();
         let began = std::time::Instant::now();
         self.scrub = Some((sp, began));
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(140)).await;
+            cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
             let _ = this.update(cx, |this, _| {
                 if this.scrub.as_ref().is_some_and(|(_, at)| *at == began) {
                     this.scrub = None;
@@ -1238,13 +1307,22 @@ impl Editor {
     fn drag_end(&mut self, cx: &mut Context<Self>) {
         let Some(drag) = self.drag.take() else { return };
         if matches!(drag, Drag::Scrub) {
+            self.scrub_at = None;
             return;
         }
         if let (Some(before), Some(p)) = (self.drag_before.take(), &mut self.project) {
             p.sequence.tidy();
+            if self.magnet
+                && let Some(m) = p.sequence.main_track()
+            {
+                p.sequence.pack(m);
+            }
             if before != p.sequence {
                 self.undo.push(before);
                 self.redo.clear();
+            } else if let Drag::Move { clip, .. } = drag {
+                self.picked = vec![clip];
+                self.selected = Some(clip);
             }
         }
         self.settle(cx);
@@ -1746,7 +1824,7 @@ impl Editor {
                 }, cx));
                 let cid = c.id;
                 match tab {
-                    InspectorTab::Text | InspectorTab::Video => body = self.hidden_section(&c, self.transform_section(&c, body, cx), cx),
+                    InspectorTab::Text | InspectorTab::Video => body = self.crop_section(&c, self.hidden_section(&c, self.transform_section(&c, body, cx), cx), cx),
                     InspectorTab::Filter => body = self.filter_section(&c, body, cx),
                     InspectorTab::Effects => body = self.effects_section(&c, body, cx),
                     InspectorTab::Words => body = self.words_section(&c, &m, body, cx),
@@ -1832,53 +1910,6 @@ impl Editor {
         div().id("ed-inspector").w(px(290.)).flex_none().border_l_1().border_color(tok::border()).bg(tok::bg_panel()).overflow_y_scroll().child(body)
     }
 
-    fn tools(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .h(px(34.))
-            .border_t_1()
-            .border_b_1()
-            .border_color(tok::border())
-            .child(ui::icon_button("ed-split", "scissors", tok::text_secondary()).tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Split at the playhead").build(w, cx)).on_click(cx.listener(|this, _, _, cx| this.split(cx))))
-            .child(ui::icon_button("ed-del", "trash", tok::text_secondary()).tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Delete the clip").build(w, cx)).on_click(cx.listener(|this, _, _, cx| this.delete_selected(cx))))
-            .child(
-                ui::icon_button("ed-vo", if self.recorder.is_some() { "square" } else { "mic" }, if self.recorder.is_some() { rgb(0xEF4444).into() } else { tok::text_secondary() })
-                    .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Record a voice-over from the playhead").build(w, cx))
-                    .on_click(cx.listener(|this, _, _, cx| this.voice_over(cx))),
-            )
-            .when_some(self.recorder.as_ref(), |d, r| {
-                let s = r.began.elapsed().as_secs();
-                d.child(div().text_size(px(12.)).text_color(rgb(0xEF4444)).child(format!("● {}:{:02}", s / 60, s % 60)))
-            })
-            .child(
-                ui::icon_button("ed-scrub", "audio-waveform", if self.scrub_audio { tok::text_secondary() } else { tok::text_tertiary() })
-                    .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Hear the sound while scrubbing").build(w, cx))
-                    .when(self.scrub_audio, |d| d.bg(tok::bg_selected()))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.scrub_audio = !this.scrub_audio;
-                        cx.notify();
-                    })),
-            )
-            .child(div().flex_1())
-            .when_some(self.note.clone(), |d, n| d.child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(n)))
-            .when_some(self.proxying.clone(), |d, (name, f)| {
-                d.child(div().pl_3().text_size(px(12.)).text_color(tok::text_tertiary()).child(format!("Proxy for “{name}” {:.0}%", f * 100.0)))
-            })
-            .child(div().flex_1())
-            .child(ui::icon_button("ed-zout", "zoom-out", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| {
-                this.zoom = (this.zoom / 1.5).max(0.05);
-                cx.notify();
-            })))
-            .child(div().w(px(46.)).text_center().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!("{:.0}%", self.zoom * 100.0)))
-            .child(ui::icon_button("ed-zin", "zoom-in", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| {
-                this.zoom = (this.zoom * 1.5).min(40.0);
-                cx.notify();
-            })))
-    }
-
     fn timeline(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let pps = self.pps();
         let bounds = self.timeline_bounds.clone();
@@ -1940,7 +1971,7 @@ impl Editor {
                 .when(track.kind == TrackKind::Video, |d| d.child(toggle(if track.hidden { "eye-off" } else { "eye" }, track.hidden, 0, |t| t.hidden = !t.hidden, cx)))
                 .child(toggle(if track.muted { "volume-x" } else { "volume-2" }, track.muted, 1, |t| t.muted = !t.muted, cx))
                 .child(toggle(if track.locked { "lock" } else { "lock-open" }, track.locked, 2, |t| t.locked = !t.locked, cx));
-            let mut lane = div().relative().flex_1().h_full().overflow_hidden();
+            let mut lane = div().relative().flex_1().h_full().overflow_hidden().when(self.tool == tools::Tool::Split, |d| d.cursor(CursorStyle::ResizeColumn));
             let mut badges = Vec::new();
             for c in &track.clips {
                 let m = seq.media(c.media);
@@ -1949,7 +1980,7 @@ impl Editor {
                 if left > 4000.0 || left + width < 0.0 {
                     continue;
                 }
-                let selected = self.selected == Some(c.id);
+                let selected = self.is_picked(c.id);
                 let colour = match (track.kind, &c.content, m.and_then(|m| m.take.as_ref())) {
                     (TrackKind::Audio, _, _) => rgb(0x1E4E8C),
                     (_, Some(Content::Text(_)), _) => rgb(0xB45309),
@@ -2053,6 +2084,22 @@ impl Editor {
                             cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
                                 let was = this.selected == Some(cid);
+                                // the split tool, or picking a side
+                                if let Some(t) = this.time_at(ev.position.x)
+                                    && this.tool_click(Some(cid), t, cx)
+                                {
+                                    return;
+                                }
+                                // ⌘: add or take away; ⇧: the range from the last picked
+                                if ev.modifiers.platform || ev.modifiers.control || ev.modifiers.shift {
+                                    this.pick_click(cid, ev.modifiers.shift, cx);
+                                    return;
+                                }
+                                // a clip of several picked keeps them (they move together); with
+                                // linkage, the clips linked with it come along
+                                if !this.picked.contains(&cid) {
+                                    this.picked = if this.linkage { this.seq().map(|s| s.linked(cid)).unwrap_or_else(|| vec![cid]) } else { vec![cid] };
+                                }
                                 this.selected = Some(cid);
                                 if locked {
                                     cx.notify();
@@ -2102,6 +2149,9 @@ impl Editor {
             );
         }
         let head = HEADER_W + self.x_of(self.playhead);
+        // markers on the ruler; the moment under the pointer (preview axis)
+        let marks: Vec<f32> = seq.markers.iter().map(|m| HEADER_W + self.x_of(*m)).filter(|x| *x >= HEADER_W).collect();
+        let hover = self.hover.filter(|_| self.axis).map(|t| HEADER_W + self.x_of(t));
         div()
             .id("ed-timeline")
             .relative()
@@ -2114,23 +2164,50 @@ impl Editor {
             .child(canvas(move |b, _, _| *bounds.borrow_mut() = Some(b), |_, _, _, _| {}).absolute().size_full())
             .child(div().flex().h(px(RULER_H)).border_b_1().border_color(tok::border()).child(div().w(px(HEADER_W)).flex_none()).child(ruler))
             .child(rows)
+            .children(marks.into_iter().map(|x| {
+                div().absolute().top(px(2.)).left(px(x - 5.0)).child(ui::icon("flag").size(px(11.)).text_color(rgb(0xFBBF24)))
+            }))
+            .when_some(hover.filter(|x| *x >= HEADER_W), |d, x| d.child(div().absolute().top_0().bottom_0().left(px(x)).w(px(1.)).bg(rgba(0xFFFFFF60))))
             .when(head >= HEADER_W, |d| d.child(div().absolute().top_0().bottom_0().left(px(head)).w(px(2.)).bg(rgb(0xFFFFFF))))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.hover_at(None, cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                     let Some(t) = this.time_at(ev.position.x) else { return };
-                    this.selected = None;
+                    let on_ruler = this.timeline_bounds.borrow().is_some_and(|b| f32::from(ev.position.y - b.origin.y) < RULER_H);
                     this.seek(t.min(this.seq().map_or(0, |s| s.duration_ms())), cx);
-                    this.begin_drag(Drag::Scrub);
+                    if on_ruler {
+                        this.begin_drag(Drag::Scrub);
+                    } else if !this.tool_click(None, t, cx) {
+                        // the tracks' empty space: a box to pick clips with (⌘ or ⇧ adds)
+                        let m = ev.modifiers;
+                        this.begin_marquee(ev.position, m.platform || m.control || m.shift);
+                    }
                 }),
             )
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 if this.drag.is_some() {
                     this.drag_to(ev.position, cx);
+                } else if this.marquee.is_some() {
+                    this.marquee_to(ev.position, cx);
+                } else {
+                    let inside = this.timeline_bounds.borrow().is_some_and(|b| b.contains(&ev.position) && f32::from(ev.position.x - b.origin.x) > HEADER_W);
+                    this.hover_at(inside.then_some(ev.position.x), cx);
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.drag_end(cx)))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.drag_end(cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.end_marquee(cx);
+                this.drag_end(cx)
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.end_marquee(cx);
+                this.drag_end(cx)
+            }))
+            .children(self.marquee_overlay())
             .on_scroll(cx.listener(|this, ev: &ScrollEvent, w, cx| {
                 let d = ev.delta.pixel_delta(px(20.));
                 if ev.modifiers.platform || ev.modifiers.control {

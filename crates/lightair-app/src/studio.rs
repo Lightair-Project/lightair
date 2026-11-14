@@ -1186,6 +1186,18 @@ impl Studio {
     }
 
     /// ⇧-click: add a layer to the selection, or take it out.
+    /// Adds a layer to the selection (kept if it's there).
+    pub fn add_selected(&mut self, layer: Id) {
+        if self.selected_layer == Some(layer) || self.also_selected.contains(&layer) {
+            return;
+        }
+        if self.selected_layer.is_none() {
+            self.selected_layer = Some(layer);
+        } else {
+            self.also_selected.push(layer);
+        }
+    }
+
     pub fn toggle_selected(&mut self, layer: Id) {
         if self.selected_layer == Some(layer) {
             self.selected_layer = (!self.also_selected.is_empty()).then(|| self.also_selected.remove(0));

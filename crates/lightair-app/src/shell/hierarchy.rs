@@ -98,6 +98,8 @@ impl StudioWindow {
         let dragging = cx.has_active_drag();
         let hint = self.tree_drop.filter(|_| dragging);
         let list = rows(&scene, &self.collapsed_layers);
+        // the rows' order, for ⇧-click runs
+        let order: std::sync::Arc<Vec<Id>> = std::sync::Arc::new(list.iter().map(|(l, _, _)| l.id).collect());
         let shell = cx.entity().downgrade();
         let mut items = Vec::new();
         for (i, (layer, depth, holds)) in list.into_iter().enumerate() {
@@ -142,17 +144,37 @@ impl StudioWindow {
                 .when(is_sel, |d| d.bg(tok::bg_selected()))
                 .when(!is_sel, |d| d.hover(|d| d.bg(tok::bg_raised())))
                 .when(zone == Some(TreeDrop::Into), |d| d.border_1().border_color(tok::accent_primary()))
-                .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                .on_click({
+                    let order = order.clone();
+                    cx.listener(move |this, ev: &ClickEvent, window, cx| {
                     let m = ev.modifiers();
-                    if m.shift || m.platform {
+                    // ⌘: add or take away; ⇧: the run of rows from the one picked to this one
+                    if m.platform || m.control {
                         this.toggle_selected(id, cx);
+                        return;
+                    }
+                    if m.shift {
+                        let anchor = this.studio.read(cx).selected_layer;
+                        match anchor.and_then(|a| order.iter().position(|x| *x == a)).zip(order.iter().position(|x| *x == id)) {
+                            Some((a, b)) => {
+                                let run: Vec<Id> = order[a.min(b)..=a.max(b)].to_vec();
+                                this.studio.update(cx, |s, cx| {
+                                    for l in run {
+                                        s.add_selected(l);
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                            None => this.toggle_selected(id, cx),
+                        }
                         return;
                     }
                     this.select_layer(Some(id), cx);
                     if ev.click_count() == 2 {
                         this.start_rename(target, &name, window, cx);
                     }
-                }))
+                })
+                })
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.row_right_down(id, cx)))
                 .on_drag(dragged, |row, _, _, cx| cx.new(|_| row.clone()))
                 .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DraggedRow>, _, cx| {

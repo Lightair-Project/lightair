@@ -715,12 +715,12 @@ impl Editor {
             cx,
         );
         if second {
-            self.selected = videos.get(1).copied();
+            self.pick_only(videos.get(1).copied());
             self.tab = InspectorTab::Transition;
             self.left = LeftTab::Captions;
             self.seek(11_800, cx);
         } else {
-            self.selected = made;
+            self.pick_only(made);
             self.tab = InspectorTab::Text;
             self.left = LeftTab::Text;
             self.seek(2_500, cx);
