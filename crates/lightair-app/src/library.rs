@@ -27,9 +27,9 @@ use crate::ui::{self, tok};
 
 /// A project in the side list.
 #[derive(Clone)]
-struct ProjectEntry {
-    name: String,
-    dir: PathBuf,
+pub(crate) struct ProjectEntry {
+    pub name: String,
+    pub dir: PathBuf,
 }
 
 /// The file playing in the player.
@@ -68,7 +68,7 @@ pub struct Library {
 
 /// The projects in Lightair's Projects folder (packages with a project.json), by name; and
 /// the open one, wherever it is.
-fn list_projects(current: Option<&Path>) -> Vec<ProjectEntry> {
+pub(crate) fn list_projects(current: Option<&Path>) -> Vec<ProjectEntry> {
     let name_of = |dir: &Path| -> Option<String> {
         let text = std::fs::read_to_string(dir.join("project.json")).ok()?;
         let v: serde_json::Value = serde_json::from_str(&text).ok()?;
