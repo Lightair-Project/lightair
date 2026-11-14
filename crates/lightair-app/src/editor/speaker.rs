@@ -22,9 +22,16 @@ pub struct Speaker {
 pub struct Clock {
     frames: Arc<AtomicU64>,
     rate: u32,
+    /// Silent until the picture is ready.
+    go: Arc<AtomicBool>,
 }
 
 impl Clock {
+    /// The sound starts (with the first frame).
+    pub fn start(&self) {
+        self.go.store(true, Ordering::Relaxed);
+    }
+
     /// Heard so far, in ms; `None` before the first sound.
     pub fn heard_ms(&self) -> Option<u64> {
         let f = self.frames.load(Ordering::Relaxed);
@@ -83,11 +90,16 @@ impl Speaker {
         });
         let frames = Arc::new(AtomicU64::new(0));
         let heard = frames.clone();
+        let go = Arc::new(AtomicBool::new(false));
+        let going = go.clone();
         let stream = device
             .build_output_stream(
                 &cpal::StreamConfig { channels: channels as u16, sample_rate: cpal::SampleRate(rate), buffer_size: cpal::BufferSize::Default },
                 move |data: &mut [f32], _| {
                     data.fill(0.0);
+                    if !going.load(Ordering::Relaxed) {
+                        return;
+                    }
                     let want = data.len() / channels;
                     let have = (rx.slots() / 2).min(want);
                     if let Ok(chunk) = rx.read_chunk(have * 2) {
@@ -112,7 +124,7 @@ impl Speaker {
             )
             .ok()?;
         stream.play().ok()?;
-        Some(Speaker { _stream: stream, child, stop, clock: Clock { frames, rate } })
+        Some(Speaker { _stream: stream, child, stop, clock: Clock { frames, rate, go } })
     }
 
     pub fn clock(&self) -> Clock {
