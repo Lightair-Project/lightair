@@ -145,35 +145,11 @@ impl Editor {
 
     /// A stepper whose id is made at run time (one per effect control).
     fn stepper_dyn(&self, id: (&'static str, usize), name: &'static str, value: String, step: impl Fn(&mut Self, f32, &mut Context<Self>) + Copy + 'static, cx: &mut Context<Self>) -> Div {
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(div().w(px(76.)).text_size(px(12.)).text_color(tok::text_secondary()).child(name))
-            .child(div().flex_1().px_2().py_0p5().rounded(px(6.)).bg(tok::bg_app()).text_size(px(12.)).font_family("Menlo").child(value))
-            .child(ui::icon_button((id.0, id.1 * 2), "minus", tok::text_secondary()).on_click(cx.listener(move |this, _, _, cx| step(this, -1.0, cx))))
-            .child(ui::icon_button((id.0, id.1 * 2 + 1), "plus", tok::text_secondary()).on_click(cx.listener(move |this, _, _, cx| step(this, 1.0, cx))))
+        self.field(SharedString::from(format!("{}-{}", id.0, id.1)), name, value, std::rc::Rc::new(step), cx)
     }
 
     fn chips_dyn<T: Copy + PartialEq + 'static>(&self, id: (&'static str, usize), options: &[(&'static str, T)], current: T, on: impl Fn(&mut Self, T, &mut Context<Self>) + Copy + 'static, cx: &mut Context<Self>) -> Div {
-        let mut row = div().flex().gap_1();
-        for (k, (text, v)) in options.iter().enumerate() {
-            let v = *v;
-            row = row.child(
-                div()
-                    .id((id.0, id.1 * 8 + k))
-                    .px_2()
-                    .py_0p5()
-                    .rounded(px(6.))
-                    .text_size(px(12.))
-                    .cursor_pointer()
-                    .when(v == current, |d| d.bg(tok::bg_selected()))
-                    .hover(|d| d.bg(tok::bg_selected()))
-                    .child(*text)
-                    .on_click(cx.listener(move |this, _, _, cx| on(this, v, cx))),
-            );
-        }
-        row
+        self.segmented(SharedString::from(format!("{}-{}", id.0, id.1)), options, current, on, cx)
     }
 }
 

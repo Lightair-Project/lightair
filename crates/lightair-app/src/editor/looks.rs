@@ -671,12 +671,17 @@ pub(super) fn heading(t: &'static str) -> Div {
     div().pt_2().pb_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child(t)
 }
 
+/// A section's title: a line above it, its name in sentence case.
 pub(super) fn label(t: &'static str) -> Div {
-    div().pt_2().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child(t)
+    let mut name = t.to_lowercase();
+    if let Some(first) = name.get(0..1) {
+        name = first.to_uppercase() + &name[1..];
+    }
+    div().mt_2().pt_3().border_t_1().border_color(tok::border()).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text()).child(name)
 }
 
 pub(super) fn hint(t: impl Into<SharedString>) -> Div {
-    div().text_size(px(12.)).text_color(tok::text_tertiary()).child(t.into())
+    div().text_size(px(11.5)).line_height(px(16.)).text_color(tok::text_tertiary()).child(t.into())
 }
 
 impl Editor {

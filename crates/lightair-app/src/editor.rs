@@ -28,6 +28,7 @@ use crate::ui::{self, tok};
 
 mod audio;
 mod effects;
+mod kit;
 mod ghost;
 mod looks;
 mod speaker;
@@ -159,6 +160,8 @@ enum Drag {
     FadeOut(Id),
     /// The volume line, dragged up and down (from a window y, at a volume).
     Volume { clip: Id, y: f32, from: f32 },
+    /// A track's bottom edge: its height (from a window y, at a height).
+    TrackHeight { track: usize, y: f32, from: f32 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -191,6 +194,11 @@ const HEADER_W: f32 = 112.0;
 const RULER_H: f32 = 26.0;
 const VIDEO_H: f32 = 58.0;
 const AUDIO_H: f32 = 44.0;
+
+/// A track's height on the timeline.
+fn track_h(t: &lightair_render::sequence::Track) -> f32 {
+    t.height.unwrap_or(if t.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H })
+}
 const EDGE: f32 = 7.0;
 
 pub struct Editor {
@@ -239,6 +247,9 @@ pub struct Editor {
     clipboard: Vec<tools::Copied>,
     zoom_bar: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
     zoom_dragging: bool,
+    /// A number field being dragged, and the sequence before (its one undo step).
+    field_drag: Option<kit::FieldDrag>,
+    field_before: Option<Sequence>,
     /// The take opened in the media panel (its parts shown), and takes' parts read so far.
     opened_take: Option<Item>,
     take_parts: std::collections::HashMap<Id, Option<Vec<TakePart>>>,
@@ -445,6 +456,8 @@ impl Editor {
             clipboard: Vec::new(),
             zoom_bar: Default::default(),
             zoom_dragging: false,
+            field_drag: None,
+            field_before: None,
             opened_take: None,
             take_parts: Default::default(),
             scrub_audio: true,
@@ -751,6 +764,11 @@ impl Editor {
         if p.sequence == before {
             return;
         }
+        // a field being dragged is one undo step, when it ends
+        if self.field_before.is_some() {
+            self.settle(cx);
+            return;
+        }
         self.undo.push(before);
         self.redo.clear();
         self.settle(cx);
@@ -793,14 +811,33 @@ impl Editor {
 
     fn split(&mut self, cx: &mut Context<Self>) {
         let t = self.playhead;
-        let sel = self.selected.filter(|c| self.seq().and_then(|s| s.clip(*c)).is_some_and(|c| c.start_ms < t && t < c.end_ms()));
-        self.change(
-            |s| match sel {
-                Some(c) => {
-                    s.split(c, t);
+        let Some(seq) = self.seq() else { return };
+        let under = |c: &Id| seq.clip(*c).is_some_and(|c| c.start_ms < t && t < c.end_ms());
+        // what's picked under the playhead (else everything under it), linked clips along
+        let mut targets: Vec<Id> = self.picked_clips().into_iter().filter(under).collect();
+        if targets.is_empty() {
+            targets = seq.tracks.iter().filter(|tr| !tr.locked).flat_map(|tr| tr.clips.iter()).filter(|c| c.start_ms < t && t < c.end_ms()).map(|c| c.id).collect();
+        } else if self.linkage {
+            let linked: Vec<Id> = targets.iter().flat_map(|c| seq.linked(*c)).filter(under).collect();
+            for c in linked {
+                if !targets.contains(&c) {
+                    targets.push(c);
                 }
-                None => {
-                    s.split_all(t);
+            }
+        }
+        // each linked group split together: its right halves linked anew
+        let mut groups: Vec<(Option<Id>, Vec<Id>)> = Vec::new();
+        for c in targets {
+            let link = seq.clip(c).and_then(|c| c.link);
+            match groups.iter_mut().find(|(l, _)| l.is_some() && *l == link) {
+                Some((_, g)) => g.push(c),
+                None => groups.push((link, vec![c])),
+            }
+        }
+        self.change(
+            |s| {
+                for (_, g) in &groups {
+                    tools::split_together(s, g, t);
                 }
             },
             cx,
@@ -815,10 +852,14 @@ impl Editor {
         match source {
             MediaSource::Media(id) => self.change(
                 |s| {
-                    match at {
+                    let c = match at {
                         Some(t) => s.place(id, t, track),
                         None => s.append(id),
                     };
+                    // a video's sound on an audio track of its own, linked (as Premiere has it)
+                    if let Some(c) = c {
+                        s.detach_sound(c);
+                    }
                 },
                 cx,
             ),
@@ -909,6 +950,10 @@ impl Editor {
                         start = s.clip(c).map(|c| c.start_ms);
                     }
                     placed_all.push(c);
+                    // a video's sound on an audio track of its own, linked (as Premiere has it)
+                    if let Some(a) = s.detach_sound(c) {
+                        placed_all.push(a);
+                    }
                     // a take without a scene: its second picture (the camera beside the
                     // screen) small, bottom right
                     if video && unplaced {
@@ -1155,7 +1200,7 @@ impl Editor {
         let mut top = f32::from(b.origin.y) + RULER_H;
         let y = f32::from(y);
         for (i, t) in seq.tracks.iter().enumerate() {
-            let h = if t.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H };
+            let h = track_h(t);
             if y >= top && y < top + h {
                 return Some(i);
             }
@@ -1243,16 +1288,31 @@ impl Editor {
                 }
                 self.after_drag_change();
             }
-            Drag::TrimStart(clip) => {
-                let t = self.snap(t as i64, Some(clip));
-                if let Some(p) = &mut self.project {
-                    p.sequence.trim_start(clip, t);
+            Drag::TrackHeight { track, y, from } => {
+                let h = (from + f32::from(pos.y) - y).clamp(26.0, 220.0).round();
+                if let Some(t) = self.project.as_mut().and_then(|p| p.sequence.tracks.get_mut(track)) {
+                    t.height = Some(h);
                 }
             }
-            Drag::TrimEnd(clip) => {
+            Drag::TrimStart(clip) | Drag::TrimEnd(clip) => {
+                let start = matches!(drag, Drag::TrimStart(_));
                 let t = self.snap(t as i64, Some(clip));
+                let linkage = self.linkage;
                 if let Some(p) = &mut self.project {
-                    p.sequence.trim_end(clip, t);
+                    // linked clips with the same edge (a video and its sound) trim with it
+                    let edge = |c: &lightair_render::sequence::Clip| if start { c.start_ms } else { c.end_ms() };
+                    let mine = p.sequence.clip(clip).map(edge);
+                    let mut all = vec![clip];
+                    if linkage {
+                        all.extend(p.sequence.linked(clip).into_iter().filter(|c| *c != clip && p.sequence.clip(*c).map(edge).zip(mine).is_some_and(|(a, b)| a.abs_diff(b) <= 2)));
+                    }
+                    for c in all {
+                        if start {
+                            p.sequence.trim_start(c, t);
+                        } else {
+                            p.sequence.trim_end(c, t);
+                        }
+                    }
                 }
             }
         }
@@ -1291,7 +1351,7 @@ impl Editor {
     fn track_top(&self, ti: usize) -> Option<f32> {
         let b = (*self.timeline_bounds.borrow())?;
         let seq = self.seq()?;
-        let above: f32 = seq.tracks.iter().take(ti).map(|t| if t.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H }).sum();
+        let above: f32 = seq.tracks.iter().take(ti).map(track_h).sum();
         Some(f32::from(b.origin.y) + RULER_H + above)
     }
 
@@ -1372,26 +1432,7 @@ impl Editor {
         on: impl Fn(&mut Self, T, &mut Context<Self>) + Copy + 'static,
         cx: &mut Context<Self>,
     ) -> Div {
-        let mut row = div().flex().flex_wrap().gap_1();
-        for (n, (label, v)) in options.iter().enumerate() {
-            let v = *v;
-            let sel = v == current;
-            row = row.child(
-                div()
-                    .id((id, n))
-                    .px_2()
-                    .py_0p5()
-                    .rounded(px(6.))
-                    .text_size(px(12.))
-                    .cursor_pointer()
-                    .when(sel, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
-                    .when(!sel, |d| d.text_color(tok::text_secondary()))
-                    .hover(|d| d.bg(tok::bg_selected()))
-                    .child(*label)
-                    .on_click(cx.listener(move |this, _, _, cx| on(this, v, cx))),
-            );
-        }
-        row
+        self.segmented(SharedString::from(id), options, current, on, cx)
     }
 
     /// A labelled value with − and + beside it.
@@ -1403,27 +1444,38 @@ impl Editor {
         step: impl Fn(&mut Self, f32, &mut Context<Self>) + Copy + 'static,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.field(SharedString::from(id), label, value, std::rc::Rc::new(step), cx)
+    }
+
+    /// For the window's title bar, beside the workspace: the project picker (and its name
+    /// being typed).
+    pub fn title_left(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (picker, _) = self.title_parts(cx);
         div()
             .flex()
             .items_center()
             .gap_2()
-            .child(div().w(px(76.)).text_size(px(12.)).text_color(tok::text_secondary()).child(label))
-            .child(
-                div()
-                    .flex_1()
-                    .px_2()
-                    .py_0p5()
-                    .rounded(px(6.))
-                    .bg(tok::bg_app())
-                    .text_size(px(12.))
-                    .font_family("Menlo")
-                    .child(value),
-            )
-            .child(ui::icon_button((id, 0usize), "minus", tok::text_secondary()).on_click(cx.listener(move |this, _, _, cx| step(this, -1.0, cx))))
-            .child(ui::icon_button((id, 1usize), "plus", tok::text_secondary()).on_click(cx.listener(move |this, _, _, cx| step(this, 1.0, cx))))
+            .child(ui::icon("chevron-right").size(px(12.)).text_color(tok::text_tertiary()))
+            .child(div().p_0p5().rounded(px(8.)).bg(tok::bg_panel()).border_1().border_color(tok::border()).child(picker))
+            .when_some(self.naming.as_ref(), |d, (_, input)| d.child(div().w(px(200.)).child(TextInput::new(input).small())))
+            .into_any_element()
     }
 
-    fn top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// For the window's title bar, on the right: undo, redo, export.
+    pub fn title_right(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (_, export) = self.title_parts(cx);
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(ui::icon_button("ed-undo", "undo-2", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| this.undo(true, cx))))
+            .child(ui::icon_button("ed-redo", "redo-2", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| this.undo(false, cx))))
+            .child(div().w(px(6.)))
+            .child(export)
+            .into_any_element()
+    }
+
+    fn title_parts(&self, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
         let me = cx.entity().downgrade();
         let (ws, current) = (self.workspace.clone(), self.project.as_ref().map(|p| p.id));
         let name = self.project.as_ref().map_or("No project".to_string(), |p| p.name.clone());
@@ -1483,20 +1535,7 @@ impl Editor {
                     .into_any_element()
             }
         };
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .h(px(40.))
-            .border_b_1()
-            .border_color(tok::border())
-            .child(div().p_0p5().rounded(px(8.)).bg(tok::bg_panel()).border_1().border_color(tok::border()).child(picker))
-            .when_some(self.naming.as_ref(), |d, (_, input)| d.child(div().w(px(220.)).child(TextInput::new(input).small())))
-            .child(div().flex_1())
-            .child(ui::icon_button("ed-undo", "undo-2", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| this.undo(true, cx))))
-            .child(ui::icon_button("ed-redo", "redo-2", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| this.undo(false, cx))))
-            .child(export)
+        (picker.into_any_element(), export)
     }
 
     fn media_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1696,8 +1735,7 @@ impl Editor {
         div()
             .flex()
             .flex_col()
-            .w(px(290.))
-            .flex_none()
+            .size_full()
             .border_r_1()
             .border_color(tok::border())
             .bg(tok::bg_panel())
@@ -1778,7 +1816,10 @@ impl Editor {
     fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let clip = self.selected.and_then(|c| self.seq().and_then(|s| s.clip(c)).cloned());
         let media = clip.as_ref().and_then(|c| self.seq().and_then(|s| s.media(c.media)).cloned());
-        let mut body = div().flex().flex_col().gap_2().p_3();
+        let mut body = div().flex().flex_col().gap_2().px_3().pb_4();
+        // the head and the tabs stay; the sections scroll under them
+        let mut head: Option<AnyElement> = None;
+        let mut tab_row: Option<AnyElement> = None;
         match (clip, media) {
             (Some(c), None) if c.content.is_some() => {
                 let name = match &c.content {
@@ -1787,11 +1828,8 @@ impl Editor {
                 };
                 let tabs = [(name, InspectorTab::Text), ("Transform", InspectorTab::Video), ("Effects", InspectorTab::Effects), ("Transition", InspectorTab::Transition)];
                 let tab = if tabs.iter().any(|t| t.1 == self.tab) { self.tab } else { InspectorTab::Text };
-                body = body.child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().text_ellipsis().child(c.content.as_ref().map(looks::content_name).unwrap_or_default()));
-                body = body.child(self.chips("ed-tabs", &tabs, tab, |this, t, cx| {
-                    this.tab = t;
-                    cx.notify();
-                }, cx));
+                head = Some(self.inspector_head(if name == "Text" { "type" } else { "shapes" }, c.content.as_ref().map(looks::content_name).unwrap_or_default(), format!("{name} · {}", short(c.len_ms()))));
+                tab_row = Some(self.tab_bar(&tabs, tab, cx));
                 body = match tab {
                     InspectorTab::Video => self.transform_section(&c, body, cx),
                     InspectorTab::Effects => self.effects_section(&c, body, cx),
@@ -1806,7 +1844,12 @@ impl Editor {
                 if !audio {
                     tabs.push(("Video", InspectorTab::Video));
                 }
-                tabs.extend([("Audio", InspectorTab::Audio), ("Speed", InspectorTab::Speed)]);
+                // a video whose sound is on its own track: that clip has the sound's controls
+                let sound_apart = !audio && c.muted && c.link.is_some();
+                if !sound_apart {
+                    tabs.push(("Audio", InspectorTab::Audio));
+                }
+                tabs.push(("Speed", InspectorTab::Speed));
                 if m.kind == MediaKind::Audio || !m.audio.is_empty() {
                     tabs.push(("Words", InspectorTab::Words));
                 }
@@ -1817,11 +1860,14 @@ impl Editor {
                     tabs.push(("Screen", InspectorTab::Screen));
                 }
                 let tab = if tabs.iter().any(|t| t.1 == self.tab) { self.tab } else { tabs[0].1 };
-                body = body.child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().text_ellipsis().child(m.name.clone()));
-                body = body.child(self.chips("ed-tabs", &tabs, tab, |this, t, cx| {
-                    this.tab = t;
-                    cx.notify();
-                }, cx));
+                let (icon, what) = match (take, m.kind) {
+                    (true, _) => ("mouse-pointer-2", "Studio take"),
+                    (_, MediaKind::Audio) => ("audio-lines", "Sound"),
+                    (_, MediaKind::Image) => ("image", "Picture"),
+                    _ => ("video", "Video"),
+                };
+                head = Some(self.inspector_head(icon, m.name.clone(), format!("{what} · {}", short(c.len_ms()))));
+                tab_row = Some(self.tab_bar(&tabs, tab, cx));
                 let cid = c.id;
                 match tab {
                     InspectorTab::Text | InspectorTab::Video => body = self.crop_section(&c, self.hidden_section(&c, self.transform_section(&c, body, cx), cx), cx),
@@ -1899,7 +1945,7 @@ impl Editor {
                 let seq_size = self.seq().map_or((1920, 1080), |s| s.size);
                 let fps = self.seq().map_or(30, |s| s.fps);
                 body = body
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Project"))
+
                     .child(label("SIZE"))
                     .child(self.chips("ed-size", &[("1080p", (1920u32, 1080u32)), ("4K", (3840, 2160)), ("Vertical", (1080, 1920)), ("Square", (1080, 1080))], seq_size, |this, v, cx| this.change(|s| s.size = v, cx), cx))
                     .child(label("FRAME RATE"))
@@ -1907,7 +1953,28 @@ impl Editor {
                 body = self.proxies_section(body, cx).child(div().pt_2().text_size(px(12.)).text_color(tok::text_tertiary()).child("Select a clip to change it."));
             }
         }
-        div().id("ed-inspector").w(px(290.)).flex_none().border_l_1().border_color(tok::border()).bg(tok::bg_panel()).overflow_y_scroll().child(body)
+        let head = head.unwrap_or_else(|| {
+            let p = self.project.as_ref();
+            self.inspector_head("clapperboard", p.map_or("No project".into(), |p| p.name.clone()), self.seq().map_or(String::new(), |s| format!("Project · {}×{} · {}", s.size.0, s.size.1, short(s.duration_ms()))))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .border_l_1()
+            .border_color(tok::border())
+            .bg(tok::bg_panel())
+            .child(head)
+            .children(tab_row)
+            .child(div().id("ed-inspector").flex_1().min_h_0().overflow_y_scroll().child(body))
+            // a number field dragged: it follows the pointer anywhere over the inspector
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if this.field_drag.is_some() {
+                    this.field_move(ev.position.x, cx);
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.field_end()))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| this.field_end()))
     }
 
     fn timeline(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1944,7 +2011,7 @@ impl Editor {
         let mut video_n = seq.tracks.iter().filter(|t| t.kind == TrackKind::Video).count();
         let mut audio_n = 0;
         for (ti, track) in seq.tracks.iter().enumerate() {
-            let h = if track.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H };
+            let h = track_h(track);
             let name = if track.kind == TrackKind::Video {
                 let n = video_n;
                 video_n -= 1;
@@ -2005,7 +2072,7 @@ impl Editor {
                     badges.push(
                         div()
                             .absolute()
-                            .top(px(VIDEO_H / 2.0 - 9.0))
+                            .top(px(h / 2.0 - 9.0))
                             .left(px(left - half.max(7.0)))
                             .w(px((half * 2.0).max(14.0)))
                             .h(px(18.))
@@ -2139,13 +2206,31 @@ impl Editor {
             let lane = lane.children(badges);
             rows = rows.child(
                 div()
+                    .relative()
                     .flex()
                     .h(px(h))
                     .border_b_1()
                     .border_color(tok::border())
                     .when(track.kind == TrackKind::Audio, |d| d.bg(tok::bg_panel()))
                     .child(header)
-                    .child(lane),
+                    .child(lane)
+                    // its bottom edge, under the header: dragged to make it taller or shorter
+                    .child(
+                        div()
+                            .id(("ed-track-h", ti))
+                            .absolute()
+                            .left_0()
+                            .bottom(px(-3.))
+                            .w(px(HEADER_W))
+                            .h(px(6.))
+                            .cursor(CursorStyle::ResizeRow)
+                            .hover(|d| d.bg(rgba(0x60A5FA80)))
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.begin_drag(Drag::TrackHeight { track: ti, y: f32::from(ev.position.y), from: h });
+                                cx.notify();
+                            })),
+                    ),
             );
         }
         let head = HEADER_W + self.x_of(self.playhead);
@@ -2254,21 +2339,22 @@ impl Render for Editor {
             self.library_seen = Some(v);
             self.library = self.workspace.as_ref().map(|ws| Index::load(ws).newest_first().into_iter().cloned().collect()).unwrap_or_default();
         }
-        div()
+        use gpui_kit::component::{h_resizable, resizable_panel, v_resizable};
+        // the media, the player and the inspector over the timeline: each edge dragged
+        let top = h_resizable("ed-panels")
+            .child(resizable_panel().size(px(300.)).size_range(px(220.)..px(560.)).child(self.media_panel(cx)))
+            .child(resizable_panel().size_range(px(320.)..Pixels::MAX).child(self.player(cx)))
+            .child(resizable_panel().size(px(320.)).size_range(px(240.)..px(560.)).child(self.inspector(cx)));
+        let bottom = div()
             .flex()
             .flex_col()
             .size_full()
-            .child(self.top_bar(cx))
-            .child(
-                div()
-                    .flex()
-                    .h(relative(0.58))
-                    .min_h_0()
-                    .child(self.media_panel(cx))
-                    .child(self.player(cx))
-                    .child(self.inspector(cx)),
-            )
             .child(self.tools(cx))
-            .child(div().id("ed-timeline-wrap").flex().flex_col().flex_1().min_h_0().overflow_y_scroll().child(self.timeline(cx)))
+            .child(div().id("ed-timeline-wrap").flex().flex_col().flex_1().min_h_0().overflow_y_scroll().child(self.timeline(cx)));
+        div().flex().flex_col().size_full().child(
+            v_resizable("ed-rows")
+                .child(resizable_panel().size(px(470.)).size_range(px(220.)..Pixels::MAX).child(top))
+                .child(resizable_panel().size_range(px(160.)..Pixels::MAX).child(bottom)),
+        )
     }
 }

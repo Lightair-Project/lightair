@@ -2253,6 +2253,7 @@ impl StudioWindow {
     }
 
     fn title_bar(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        let editor = self.place == Place::Editor;
         let studio = self.studio.read(cx);
         let stats = studio.stats;
         let recent_lagged = studio.recent_lagged;
@@ -2334,6 +2335,8 @@ impl StudioWindow {
             // Library · Live · Editor, in the middle of the bar whatever is either side
             .child(div().absolute().inset_0().flex().items_center().justify_center().child(self.place_switcher(cx)))
             .child(self.project_picker(project, cx))
+            // the Editor: its project beside the workspace
+            .when(editor, |d| d.child(self.editor.update(cx, |e, cx| e.title_left(cx))))
             .when(streaming, |d| {
                 d.child(
                     div()
@@ -2348,11 +2351,13 @@ impl StudioWindow {
                 )
             })
             .child(div().flex_1())
-            .child(self.performance(fps_color, cx))
-            .child(go_live)
+            // the Editor: undo, redo and export here; what records and streams only while it does
+            .when(editor, |d| d.child(self.editor.update(cx, |e, cx| e.title_right(cx))))
+            .when(!editor, |d| d.child(self.performance(fps_color, cx)))
+            .when(!editor || streaming, |d| d.child(go_live))
             .children(recording_tools.filter(|_| !taking))
-            .child(record)
-            .child({
+            .when(!editor || recording || taking, |d| d.child(record))
+            .when(!editor, |d| d.child({
                 let ready = self.studio.read(cx).clips_ready();
                 Button::new("clip")
                     .label("Clip")
@@ -2361,8 +2366,8 @@ impl StudioWindow {
                     .disabled(!ready)
                     .tooltip(if ready { "Save the last seconds as a clip" } else { "Turn on Clips in Outputs" })
                     .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.save_clip(cx))))
-            })
-            .when(self.studio.read(cx).last_clip.is_some(), |d| {
+            }))
+            .when(!editor && self.studio.read(cx).last_clip.is_some(), |d| {
                 d.child(
                     Button::new("replay")
                         .label("Replay")

@@ -106,7 +106,7 @@ impl Editor {
         let mut picked = base;
         for (ti, track) in seq.tracks.iter().enumerate() {
             let Some(top) = self.track_top(ti) else { continue };
-            let h = if track.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H };
+            let h = track_h(track);
             if top + h - 3.0 < y0 || top + 3.0 > y1 {
                 continue;
             }
