@@ -22,20 +22,25 @@ impl Editor {
     /// Waveforms for the clips on audio tracks, read on threads (once per file).
     pub(super) fn want_peaks(&mut self) {
         let Some(seq) = self.seq() else { return };
-        let files: Vec<PathBuf> = seq
+        // a file and which of its audio tracks
+        let mut wanted: Vec<(PathBuf, Option<u32>)> = seq
             .tracks
             .iter()
             .filter(|t| t.kind == TrackKind::Audio)
             .flat_map(|t| t.clips.iter())
-            .filter_map(|c| seq.media(c.media).and_then(sound_file))
-            .filter(|f| !self.peaks.contains_key(f))
+            .filter_map(|c| seq.media(c.media).and_then(sound_file).map(|f| (f, c.stream)))
+            .filter(|k| !self.peaks.contains_key(k))
             .collect();
-        for f in files {
-            self.peaks.insert(f.clone(), None);
+        wanted.dedup();
+        for key in wanted {
+            if self.peaks.contains_key(&key) {
+                continue;
+            }
+            self.peaks.insert(key.clone(), None);
             let tx = self.tx.clone();
             std::thread::spawn(move || {
-                let p = lightair_render::sound::peaks(&f).ok().map(Arc::new);
-                let _ = tx.send(Done::Peaks(f, p));
+                let p = lightair_render::sound::peaks_of(&key.0, key.1).ok().map(Arc::new);
+                let _ = tx.send(Done::Peaks(key, p));
             });
         }
     }
@@ -43,7 +48,7 @@ impl Editor {
     /// A clip's waveform, shaped by its volume and fades, for the visible part of the clip
     /// (`left`, `width`: its place in the lane).
     pub(super) fn wave(&self, c: &Clip, m: Option<&Media>, left: f32, width: f32, height: f32) -> Option<AnyElement> {
-        let peaks = self.peaks.get(&sound_file(m?)?)?.clone()?;
+        let peaks = self.peaks.get(&(sound_file(m?)?, c.stream))?.clone()?;
         let pps = self.pps();
         let (from, to) = ((-left).max(0.0), width.min(4000.0 - left));
         let mut bars: Vec<(f32, f32)> = Vec::new();

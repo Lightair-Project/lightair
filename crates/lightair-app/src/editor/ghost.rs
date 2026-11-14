@@ -60,6 +60,7 @@ impl Editor {
                     item: Some(item.id),
                     look: None,
                     transcript: None,
+                    tracks: Vec::new(),
                 };
                 // a video's own sound keeps it on a picture track
                 if kind == MediaKind::Video {

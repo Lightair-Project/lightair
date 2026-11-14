@@ -56,7 +56,7 @@ enum Done {
     /// Playback reached the end.
     Ended,
     /// A file's waveform.
-    Peaks(PathBuf, Option<Arc<Vec<f32>>>),
+    Peaks((PathBuf, Option<u32>), Option<Peaks>),
     /// Voices cleaned up.
     Cleaned(Result<(), String>),
     /// What's inside a take (its Library item's id).
@@ -195,6 +195,9 @@ const RULER_H: f32 = 26.0;
 const VIDEO_H: f32 = 58.0;
 const AUDIO_H: f32 = 44.0;
 
+/// A sound's waveform (shared with the threads that read it).
+type Peaks = Arc<Vec<f32>>;
+
 /// A track's height on the timeline.
 fn track_h(t: &lightair_render::sequence::Track) -> f32 {
     t.height.unwrap_or(if t.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H })
@@ -285,7 +288,7 @@ pub struct Editor {
     captioning: bool,
     downloading: bool,
     /// Waveforms by file (`None`: being read).
-    peaks: std::collections::HashMap<PathBuf, Option<Arc<Vec<f32>>>>,
+    peaks: std::collections::HashMap<(PathBuf, Option<u32>), Option<Peaks>>,
     cleaning: bool,
     /// The proxy being made (its medium's name, how far), and files whose proxy failed.
     proxying: Option<(SharedString, f32)>,
@@ -394,9 +397,17 @@ fn media_of(item: &Item) -> Vec<TakePart> {
             })
     };
     let files: Vec<&ItemFile> = item.files.iter().filter(|f| playable(&f.path)).collect();
-    // a recording of several formats: the first; a multitrack set: every file
-    let pick: Vec<&ItemFile> = if item.kind == Kind::Multitrack { files } else { files.into_iter().take(1).collect() };
-    pick.into_iter()
+    let sound_only = |p: &Path| p.extension().is_some_and(|e| ["wav", "m4a", "mp3", "flac", "aac"].iter().any(|x| e.eq_ignore_ascii_case(x)));
+    // a recording of several formats: the first picture; a multitrack set: every file
+    let picture = files.iter().find(|f| !sound_only(&f.path)).copied();
+    let pick: Vec<&ItemFile> = match (item.kind, picture) {
+        (Kind::Multitrack, _) | (_, None) => files.clone(),
+        (_, Some(p)) => vec![p],
+    };
+    // a recording's mixer tracks recorded beside it (multitrack): with it, each on its own
+    let stems: Vec<&ItemFile> = if item.kind != Kind::Multitrack && picture.is_some() { files.iter().filter(|f| sound_only(&f.path)).copied().collect() } else { Vec::new() };
+    let mut out: Vec<TakePart> = pick
+        .into_iter()
         .filter_map(|f| {
             let mut m = Media::from_file(&f.path).ok()?;
             m.item = Some(item.id);
@@ -405,7 +416,21 @@ fn media_of(item: &Item) -> Vec<TakePart> {
             }
             Some(TakePart::of(m))
         })
-        .collect()
+        .collect();
+    for f in stems {
+        if let Ok(mut m) = Media::from_file(&f.path) {
+            // "Lightair 2026-11-14 17-20-33 - Mic.wav": "Mic"
+            let stem = m.name.rsplit(" - ").next().unwrap_or(&m.name).to_string();
+            m.name = format!("{} · {stem}", item.title);
+            m.item = Some(item.id);
+            out.push(TakePart::of(m));
+        }
+    }
+    if out.len() > 1 && out.iter().skip(1).all(|p| p.media.as_ref().is_some_and(|m| m.kind == MediaKind::Audio)) {
+        // the mixer tracks are apart: the picture's own sound (their mix) kept, but quiet
+        out[0].mute_own_sound = true;
+    }
+    out
 }
 
 fn kind_icon(k: Kind) -> &'static str {
@@ -858,7 +883,7 @@ impl Editor {
                     };
                     // a video's sound on an audio track of its own, linked (as Premiere has it)
                     if let Some(c) = c {
-                        s.detach_sound(c);
+                        s.detach_sounds(c);
                     }
                 },
                 cx,
@@ -918,6 +943,7 @@ impl Editor {
                     }
                     let video = part.media.as_ref().is_some_and(|m| m.kind == MediaKind::Video);
                     let unplaced = part.place.is_none();
+                    let quiet = part.mute_own_sound;
                     let placed = match (at, start) {
                         (Some(u64::MAX), _) => {
                             if let Some(m) = part.media {
@@ -951,9 +977,16 @@ impl Editor {
                     }
                     placed_all.push(c);
                     // a video's sound on an audio track of its own, linked (as Premiere has it)
-                    if let Some(a) = s.detach_sound(c) {
-                        placed_all.push(a);
+                    // (one per audio track of its file)
+                    let sounds = s.detach_sounds(c);
+                    if quiet {
+                        for a in &sounds {
+                            if let Some(a) = s.clip_mut(*a) {
+                                a.muted = true;
+                            }
+                        }
                     }
+                    placed_all.extend(sounds);
                     // a take without a scene: its second picture (the camera beside the
                     // screen) small, bottom right
                     if video && unplaced {
@@ -2057,7 +2090,10 @@ impl Editor {
                 };
                 let title = match (&c.content, m) {
                     (Some(content), _) => looks::content_name(content),
-                    (None, Some(m)) => m.name.clone(),
+                    (None, Some(m)) => match c.stream.and_then(|n| m.tracks.get(n as usize)) {
+                        Some(track) => format!("{} · {track}", m.name),
+                        None => m.name.clone(),
+                    },
                     (None, None) => "Missing".into(),
                 };
                 let pps_ = pps;
