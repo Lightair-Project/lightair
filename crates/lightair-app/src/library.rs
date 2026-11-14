@@ -403,7 +403,7 @@ impl Library {
 
     /// A field for the new project's name; Enter makes it, Escape (or leaving it empty) doesn't.
     pub(crate) fn start_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Workspace name"));
         input.update(cx, |s, cx| s.focus(window, cx));
         let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, _, cx| match ev {
             InputEvent::PressEnter { .. } => {
@@ -462,10 +462,10 @@ impl Library {
                 .pt_3()
                 .pb_1()
                 .pl_2()
-                .child(div().flex_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child("PROJECTS"))
+                .child(div().flex_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child("WORKSPACES"))
                 .child(
                     ui::icon_button("lib-new-project", "plus", tok::text_secondary())
-                        .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("New project").build(w, cx))
+                        .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("New workspace").build(w, cx))
                         .on_click(cx.listener(|this, _, window, cx| this.start_new_project(window, cx))),
                 ),
         );
@@ -481,7 +481,7 @@ impl Library {
                 let (me, dir) = (cx.entity().downgrade(), p.dir.clone());
                 move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
                     let (me2, dir2) = (me.clone(), dir.clone());
-                    menu.item(PopupMenuItem::new("Open project").icon(ui::icon("folder-open")).disabled(open).on_click(move |_, _, cx| {
+                    menu.item(PopupMenuItem::new("Open workspace").icon(ui::icon("folder-open")).disabled(open).on_click(move |_, _, cx| {
                         if let Some(me) = me2.upgrade() {
                             me.update(cx, |this, cx| {
                                 this.open_project = Some(dir2.clone());
@@ -687,7 +687,7 @@ impl Library {
                 let others: Vec<ProjectEntry> = projects.iter().filter(|p| p.dir != dir).cloned().collect();
                 if !others.is_empty() {
                     let (me, dir) = (me.clone(), dir.clone());
-                    menu = menu.submenu_with_icon(Some(ui::icon("folder-input")), "Move to project", window, cx, move |mut sub, _, _| {
+                    menu = menu.submenu_with_icon(Some(ui::icon("folder-input")), "Move to workspace", window, cx, move |mut sub, _, _| {
                         for p in &others {
                             let (me, from, to) = (me.clone(), dir.clone(), p.dir.clone());
                             sub = sub.item(PopupMenuItem::new(p.name.clone()).on_click(move |_, _, cx| {
@@ -783,7 +783,7 @@ impl Library {
                     .child(if searching {
                         "Try other words, or another kind."
                     } else {
-                        "Recordings, clips and multitrack audio from this project appear here as soon as they finish."
+                        "Recordings, clips and multitrack audio from this workspace appear here as soon as they finish."
                     }),
             )
             .when(!searching, |d| {

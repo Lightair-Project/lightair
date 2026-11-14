@@ -247,13 +247,13 @@ impl StudioWindow {
                 }
             }
             Ok("editor-latest") => {
-                // the project's newest recording, in the Editor
+                // the Editor with the workspace's newest recording added to a project
                 if let Some(dir) = self.studio.read(cx).project_dir() {
                     let index = lightair_store::recordings::Index::load(&dir);
                     if let Some(item) = index.newest_first().first() {
                         let id = item.id;
-                        self.editor.update(cx, |e, cx| e.open(dir, id, cx));
                         self.show_place(super::Place::Editor, cx);
+                        self.editor.update(cx, |e, cx| e.add_item(id, cx));
                     }
                 }
             }

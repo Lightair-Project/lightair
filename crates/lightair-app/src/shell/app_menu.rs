@@ -58,8 +58,8 @@ pub fn menus() -> Vec<Menu> {
             act("Quit Lightair", Quit),
         ]),
         Menu::new("File").items([
-            act("New Project…", NewProject),
-            act("Open Project…", OpenProject),
+            act("New Workspace…", NewProject),
+            act("Open Workspace…", OpenProject),
             MenuItem::separator(),
             act("Add Existing Recordings…", AddExistingRecordings),
             act("Import OBS Scenes…", ImportObsScenes),

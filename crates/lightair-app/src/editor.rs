@@ -1,107 +1,127 @@
-//! The Editor (docs/plans/screen-studio.md, "Editor"): one Library item at a time. A preview, a
-//! timeline with its cuts and zooms, the look, and Export into the Library.
+//! The Editor (docs/plans/video-editor.md): a multi-track video editor on the workspace's
+//! projects. Media on the left (the workspace's Library items and files imported into the
+//! project), the player in the middle, the inspector on the right, the timeline below.
 //!
-//! The work is `lightair_render`'s: frames for the preview and playback, and the export, on
-//! threads of their own. The edit is saved in the project (`recordings/edits/<item>.json`) as it
-//! changes; undo and redo step through its versions.
+//! The work is `lightair_render`'s: frames for the player and playback, and the export, on threads
+//! of their own. The project is saved as it changes; undo and redo step through its versions.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::Sizable;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::Id;
-use lightair_render::edit::{Edit, Focus, Zoom};
-use lightair_render::export::{Renderer, Source};
+use lightair_render::edit::Edit;
 use lightair_render::media::Codec;
-use lightair_render::{timeline, zoom};
+use lightair_render::seqrender::SequenceRenderer;
+use lightair_render::sequence::{EditProject, Media, MediaKind, Sequence, TrackKind, Transform};
+use lightair_render::zoom;
 use lightair_store::recordings::{File as ItemFile, Index, Item, Kind};
 
+use crate::studio::Studio;
 use crate::ui::{self, tok};
 
 /// What the background work sends back.
 enum Done {
-    Opened(Result<(), String>),
     Frame(u64, Vec<u8>, (u32, u32)),
     Progress(f32),
     Exported(Result<PathBuf, String>),
-    Transcribed(Result<lightair_render::speech::Transcript, String>),
-    Downloaded(Result<(), String>),
+    /// Media made from Library items or files (probing takes a moment): placed at the time, or
+    /// (`None`) at the main track's end, or (`Some(u64::MAX)`) only kept in the project.
+    Media(Vec<Media>, Option<u64>, Option<usize>),
 }
 
-/// Where the speech model goes (Lightair's data folder).
-fn model() -> PathBuf {
-    lightair_render::speech::model_path(&lightair_platform::paths::data_dir())
+/// A medium being dragged from the media panel.
+#[derive(Clone)]
+pub struct DraggedMedia {
+    label: SharedString,
+    source: MediaSource,
 }
 
-/// The item being edited.
-struct Open {
-    project: PathBuf,
-    item: Item,
-    source: Source,
-    edit_path: PathBuf,
-    edit: Edit,
-    undo: Vec<Edit>,
-    redo: Vec<Edit>,
-    renderer: Arc<Mutex<Option<Renderer>>>,
-    /// The result's length.
-    duration: u64,
-    /// The transcript (kept beside the edit), once made.
-    transcript: Option<lightair_render::speech::Transcript>,
-}
-
-impl Open {
-    fn transcript_path(&self) -> PathBuf {
-        self.edit_path.with_extension("transcript.json")
-    }
-
-    /// The transcript as subtitles for the result, written beside the edit.
-    fn write_srt(&self) -> Option<PathBuf> {
-        let t = self.transcript.as_ref()?;
-        let path = self.edit_path.with_extension("srt");
-        std::fs::write(&path, lightair_render::speech::srt(&self.edit, t, 42)).ok()?;
-        Some(path)
+impl Render for DraggedMedia {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded(px(6.))
+            .bg(tok::bg_raised())
+            .border_1()
+            .border_color(tok::accent_primary())
+            .text_size(px(12.))
+            .child(self.label.clone())
     }
 }
+
+/// Where a medium comes from.
+#[derive(Clone)]
+enum MediaSource {
+    /// A Library item of the workspace.
+    Item(Item),
+    /// Already in the project (imported).
+    Media(Id),
+}
+
+/// A drag on the timeline.
+#[derive(Clone, Copy)]
+enum Drag {
+    Move { clip: Id, grab_ms: i64 },
+    TrimStart(Id),
+    TrimEnd(Id),
+    Scrub,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InspectorTab {
+    Video,
+    Audio,
+    Speed,
+    Screen,
+}
+
+/// Pixels per second at zoom 1.
+const PPS: f32 = 40.0;
+const HEADER_W: f32 = 112.0;
+const RULER_H: f32 = 26.0;
+const VIDEO_H: f32 = 58.0;
+const AUDIO_H: f32 = 44.0;
+const EDGE: f32 = 7.0;
 
 pub struct Editor {
-    open: Option<Open>,
-    note: Option<SharedString>,
-    playhead: u64,
+    studio: Entity<Studio>,
+    workspace: Option<PathBuf>,
+    project: Option<EditProject>,
+    /// The workspace's Library, as the media panel lists it (read when it changes).
+    library: Vec<Item>,
+    library_seen: Option<u64>,
+    undo: Vec<Sequence>,
+    redo: Vec<Sequence>,
+    /// The sequence when a drag began (its undo step).
+    drag_before: Option<Sequence>,
+    renderer: Arc<Mutex<Option<SequenceRenderer>>>,
     preview: Option<Arc<RenderImage>>,
-    /// The frame asked for last, and whether one is being made.
     wanted: Option<u64>,
     busy: bool,
     playing: Option<Arc<std::sync::atomic::AtomicBool>>,
     exporting: Option<f32>,
-    selected_clip: Option<usize>,
-    selected_zoom: Option<usize>,
-    selected_mask: Option<usize>,
-    /// Hide area: drawing a mask on the preview, and where the drag began.
-    masking: bool,
-    drag_from: Option<Point<Pixels>>,
-    preview_bounds: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
+    note: Option<SharedString>,
+    playhead: u64,
+    selected: Option<Id>,
+    /// Timeline zoom (× PPS) and scroll (ms at the left edge).
+    zoom: f32,
+    scroll_ms: f32,
+    drag: Option<Drag>,
+    timeline_bounds: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
+    tab: InspectorTab,
+    naming: Option<(Option<Id>, Entity<InputState>)>,
+    watching: bool,
     tx: mpsc::Sender<Done>,
     rx: mpsc::Receiver<Done>,
-    /// The timeline's place on screen, for clicks.
-    track: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
-    transcribing: bool,
-    downloading: bool,
-}
-
-/// The take folder or the video an item is made of.
-fn source_of(item: &Item) -> Option<Source> {
-    if item.kind == Kind::Take {
-        let folder = item.files.iter().find_map(|f| f.path.parent().filter(|p| p.extension().is_some_and(|e| e == "lightair-take")))?;
-        return Source::of_take(folder);
-    }
-    let video = item.files.iter().map(|f| f.path.clone()).find(|p| {
-        p.exists() && p.extension().is_some_and(|e| ["mp4", "mov", "mkv", "m4v"].iter().any(|v| e.eq_ignore_ascii_case(v)))
-    })?;
-    Some(Source::of_file(&video))
+    _subscriptions: Vec<Subscription>,
 }
 
 /// RGBA → the BGRA GPUI draws.
@@ -116,89 +136,128 @@ fn image_of(rgba: Vec<u8>, size: (u32, u32)) -> Option<Arc<RenderImage>> {
 
 fn clock(ms: u64) -> String {
     let s = ms / 1000;
-    format!("{}:{:02}.{}", s / 60, s % 60, (ms % 1000) / 100)
+    format!("{:02}:{:02}:{:02}.{}", s / 3600, (s / 60) % 60, s % 60, (ms % 1000) / 100)
+}
+
+fn short(ms: u64) -> String {
+    let s = ms / 1000;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60) } else { format!("{:02}:{:02}", s / 60, s % 60) }
+}
+
+/// The media a Library item gives (probing its files): one per video or sound.
+fn media_of(item: &Item) -> Vec<Media> {
+    if item.kind == Kind::Take {
+        let folder = item.files.iter().find_map(|f| f.path.parent().filter(|p| p.extension().is_some_and(|e| e == "lightair-take")));
+        return folder
+            .and_then(Media::from_take)
+            .map(|mut m| {
+                m.name = item.title.clone();
+                m.item = Some(item.id);
+                m
+            })
+            .into_iter()
+            .collect();
+    }
+    let playable = |p: &Path| {
+        p.exists()
+            && p.extension().is_some_and(|e| {
+                ["mp4", "mov", "mkv", "m4v", "wav", "m4a", "mp3", "flac", "aac", "png", "jpg", "jpeg", "gif"].iter().any(|x| e.eq_ignore_ascii_case(x))
+            })
+    };
+    let files: Vec<&ItemFile> = item.files.iter().filter(|f| playable(&f.path)).collect();
+    // a recording of several formats: the first; a multitrack set: every file
+    let pick: Vec<&ItemFile> = if item.kind == Kind::Multitrack { files } else { files.into_iter().take(1).collect() };
+    pick.into_iter()
+        .filter_map(|f| {
+            let mut m = Media::from_file(&f.path).ok()?;
+            m.item = Some(item.id);
+            if item.kind != Kind::Multitrack {
+                m.name = item.title.clone();
+            }
+            Some(m)
+        })
+        .collect()
+}
+
+fn kind_icon(k: Kind) -> &'static str {
+    match k {
+        Kind::Recording => "video",
+        Kind::Take => "mouse-pointer-2",
+        Kind::Clip => "scissors",
+        Kind::Multitrack => "audio-lines",
+        Kind::Export => "film",
+    }
 }
 
 impl Editor {
-    pub fn new() -> Self {
+    pub fn new(studio: Entity<Studio>) -> Self {
         let (tx, rx) = mpsc::channel();
         Editor {
-            open: None,
-            note: None,
-            playhead: 0,
+            studio,
+            workspace: None,
+            project: None,
+            library: Vec::new(),
+            library_seen: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            drag_before: None,
+            renderer: Arc::new(Mutex::new(None)),
             preview: None,
             wanted: None,
             busy: false,
             playing: None,
             exporting: None,
-            selected_clip: None,
-            selected_zoom: None,
-            selected_mask: None,
-            masking: false,
-            drag_from: None,
-            preview_bounds: Default::default(),
+            note: None,
+            playhead: 0,
+            selected: None,
+            zoom: 1.0,
+            scroll_ms: 0.0,
+            drag: None,
+            timeline_bounds: Default::default(),
+            tab: InspectorTab::Video,
+            naming: None,
+            watching: false,
             tx,
             rx,
-            track: Default::default(),
-            transcribing: false,
-            downloading: false,
+            _subscriptions: Vec::new(),
         }
     }
 
-    /// Opens a Library item: its saved edit, or a new one with automatic zooms.
-    pub fn open(&mut self, project: PathBuf, id: Id, cx: &mut Context<Self>) {
-        self.stop(cx);
-        let Some(item) = Index::load(&project).get(id).cloned() else { return };
-        let Some(source) = source_of(&item) else {
-            self.open = None;
-            self.note = Some("Its files aren't where they were. Locate them in the Library first.".into());
-            cx.notify();
-            return;
-        };
-        let edit_path = project.join("recordings").join("edits").join(format!("{id}.json"));
-        let renderer = Arc::new(Mutex::new(None));
-        let (r, tx, src, path) = (renderer.clone(), self.tx.clone(), source.clone(), edit_path.clone());
-        // the probe, the GPU and (new edits) the automatic zooms, away from the window
-        // the project's edit; for a take package from elsewhere, the one it came with
-        let saved = Edit::load(&edit_path).ok().or_else(|| source.video.parent().and_then(|f| Edit::load(&f.join("edit.json")).ok()));
-        let duration = item.duration_ms.unwrap_or(0);
-        let mut edit = saved.clone().unwrap_or_else(|| Edit::new(duration.max(1)));
-        std::thread::spawn(move || {
-            let result = (|| {
-                let probe = lightair_render::media::probe(&src.video).map_err(|e| e.to_string())?;
-                let mut e = saved.unwrap_or_else(|| {
-                    let mut e = Edit::new(probe.duration_ms);
-                    if let Some(log) = src.log.as_ref().and_then(|p| lightair_store::input_log::Log::read(p).ok()) {
-                        e.zooms = zoom::auto(&log, probe.duration_ms);
-                    }
-                    e
-                });
-                if e.clips.is_empty() {
-                    e = Edit { clips: Edit::new(probe.duration_ms).clips, ..e };
-                }
-                let renderer = Renderer::new(src, &e).map_err(|e| e.to_string())?;
-                *r.lock().unwrap() = Some(renderer);
-                if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
-                }
-                let _ = e.save(&path);
-                Ok(())
-            })();
-            let _ = tx.send(Done::Opened(result));
-        });
-        edit.version = edit.version.max(1);
-        let duration = timeline::duration_ms(&edit);
-        let transcript = std::fs::read(edit_path.with_extension("transcript.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
-        self.open = Some(Open { project, item, source, edit_path, edit, undo: Vec::new(), redo: Vec::new(), renderer, duration, transcript });
-        self.playhead = 0;
-        self.preview = None;
-        self.note = Some("Opening…".into());
+    /// Shown: the workspace's last project opens (the workspace may have changed since).
+    pub fn show(&mut self, cx: &mut Context<Self>) {
+        let ws = self.studio.read(cx).project_dir();
+        if ws != self.workspace {
+            self.stop(cx);
+            self.workspace = ws.clone();
+            self.project = None;
+            self.preview = None;
+            self.library_seen = None;
+            *self.renderer.lock().unwrap() = None;
+            if let Some(ws) = &ws
+                && let Some(last) = EditProject::list(ws).first()
+            {
+                self.open_project(last.id, cx);
+            }
+        }
         self.watch(cx);
         cx.notify();
     }
 
-    /// Takes what the threads send, while there's something to wait for.
+    /// A Library item, added at the end of the open project (a new one if none is open).
+    pub fn add_item(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.show(cx);
+        let Some(ws) = &self.workspace else { return };
+        if let Some(item) = Index::load(ws).get(id).cloned() {
+            self.add(MediaSource::Item(item), None, None, cx);
+        }
+    }
+
+    /// Takes what the threads send.
     fn watch(&mut self, cx: &mut Context<Self>) {
+        if self.watching {
+            return;
+        }
+        self.watching = true;
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(30)).await;
@@ -207,53 +266,25 @@ impl Editor {
                     while let Ok(done) = this.rx.try_recv() {
                         changed = true;
                         match done {
-                            Done::Opened(Ok(())) => {
-                                // the saved edit, as the thread settled it
-                                if let Some(o) = &mut this.open {
-                                    if let Ok(e) = Edit::load(&o.edit_path) {
-                                        o.edit = e;
-                                    }
-                                    o.duration = timeline::duration_ms(&o.edit);
-                                }
-                                this.note = None;
-                                this.request(0);
-                            }
-                            Done::Opened(Err(e)) => this.note = Some(format!("Couldn't open it: {e}").into()),
                             Done::Frame(t, rgba, size) => {
                                 this.busy = false;
                                 if this.playing.is_some() {
                                     this.playhead = t;
                                 }
-                                this.preview = image_of(rgba, size).or(this.preview.take());
-                            }
-                            Done::Progress(p) => this.exporting = Some(p),
-                            Done::Transcribed(r) => {
-                                this.transcribing = false;
-                                match r {
-                                    Ok(t) => {
-                                        if let Some(o) = &mut this.open {
-                                            let _ = std::fs::write(o.transcript_path(), serde_json::to_vec(&t).unwrap_or_default());
-                                            this.note = Some(format!("{} words", t.words.len()).into());
-                                            o.transcript = Some(t);
-                                        }
-                                    }
-                                    Err(e) => this.note = Some(e.into()),
+                                if !rgba.is_empty() {
+                                    this.preview = image_of(rgba, size).or(this.preview.take());
                                 }
                             }
-                            Done::Downloaded(r) => {
-                                this.downloading = false;
-                                this.note = Some(match r {
-                                    Ok(()) => "The speech model is ready.".into(),
-                                    Err(e) => format!("The download didn't finish: {e}").into(),
-                                });
-                            }
+                            Done::Progress(p) => this.exporting = Some(p),
                             Done::Exported(r) => {
                                 this.exporting = None;
                                 this.note = Some(match r {
                                     Ok(p) => format!("Exported {} into the Library", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).into(),
                                     Err(e) => format!("The export stopped: {e}").into(),
                                 });
+                                this.studio.update(cx, |s, _| s.library_version += 1);
                             }
+                            Done::Media(media, at, track) => this.take_media(media, at, track, cx),
                         }
                     }
                     this.pump();
@@ -269,7 +300,249 @@ impl Editor {
         .detach();
     }
 
-    /// Asks for the frame at `t` (the newest ask wins).
+    // ------------------------------------------------------------ projects
+
+    fn open_project(&mut self, id: Id, cx: &mut Context<Self>) {
+        let Some(ws) = self.workspace.clone() else { return };
+        let Ok(p) = EditProject::load(&ws, id) else {
+            self.note = Some("That project couldn't be read.".into());
+            return;
+        };
+        self.stop(cx);
+        self.undo.clear();
+        self.redo.clear();
+        self.selected = None;
+        self.playhead = 0;
+        self.scroll_ms = 0.0;
+        self.preview = None;
+        let seq = p.sequence.clone();
+        self.project = Some(p);
+        let (r, tx) = (self.renderer.clone(), self.tx.clone());
+        self.busy = true;
+        std::thread::spawn(move || {
+            let mut made = SequenceRenderer::new(&seq).ok();
+            let frame = made.as_mut().map(|r| (r.frame(0), seq.size));
+            *r.lock().unwrap() = made;
+            let _ = match frame {
+                Some((f, size)) => tx.send(Done::Frame(0, f, size)),
+                None => tx.send(Done::Frame(0, Vec::new(), (0, 0))),
+            };
+        });
+        cx.notify();
+    }
+
+    /// A new project (1080p, 30 fps) called `name`, opened.
+    pub fn new_project(&mut self, name: &str, cx: &mut Context<Self>) -> Option<Id> {
+        let ws = self.workspace.clone().or_else(|| self.studio.read(cx).project_dir())?;
+        self.workspace = Some(ws.clone());
+        let name = if name.trim().is_empty() { "Untitled".to_string() } else { name.trim().to_string() };
+        let mut p = EditProject::new(&name, (1920, 1080), 30);
+        p.save(&ws).ok()?;
+        let id = p.id;
+        self.open_project(id, cx);
+        Some(id)
+    }
+
+    fn start_naming(&mut self, rename: Option<Id>, window: &mut Window, cx: &mut Context<Self>) {
+        let current = rename.and(self.project.as_ref().map(|p| p.name.clone())).unwrap_or_default();
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
+        input.update(cx, |s, cx| {
+            s.set_value(current, window, cx);
+            s.focus(window, cx);
+            s.select_all(window, cx);
+        });
+        let sub = cx.subscribe_in(&input, window, move |this, input, ev: &InputEvent, _, cx| match ev {
+            InputEvent::PressEnter { .. } => {
+                let name = input.read(cx).value().trim().to_string();
+                this.naming = None;
+                match rename {
+                    Some(_) => {
+                        if let (Some(ws), Some(p)) = (this.workspace.clone(), this.project.as_mut())
+                            && !name.is_empty()
+                        {
+                            p.name = name;
+                            let _ = p.save(&ws);
+                        }
+                    }
+                    None => {
+                        this.new_project(&name, cx);
+                    }
+                }
+                cx.notify();
+            }
+            InputEvent::Blur => {
+                this.naming = None;
+                cx.notify();
+            }
+            _ => {}
+        });
+        self._subscriptions.push(sub);
+        self.naming = Some((rename, input));
+        cx.notify();
+    }
+
+    fn delete_project(&mut self, cx: &mut Context<Self>) {
+        let (Some(ws), Some(p)) = (self.workspace.clone(), self.project.take()) else { return };
+        self.stop(cx);
+        let _ = EditProject::delete(&ws, p.id);
+        *self.renderer.lock().unwrap() = None;
+        self.preview = None;
+        self.note = Some(format!("Deleted “{}” (its media stay in the Library)", p.name).into());
+        if let Some(next) = EditProject::list(&ws).first() {
+            self.open_project(next.id, cx);
+        }
+        cx.notify();
+    }
+
+    // ------------------------------------------------------------ changes
+
+    fn seq(&self) -> Option<&Sequence> {
+        self.project.as_ref().map(|p| &p.sequence)
+    }
+
+    /// A change to the sequence: saved, undoable, drawn again.
+    fn change(&mut self, f: impl FnOnce(&mut Sequence), cx: &mut Context<Self>) {
+        let Some(p) = &mut self.project else { return };
+        let before = p.sequence.clone();
+        f(&mut p.sequence);
+        if p.sequence == before {
+            return;
+        }
+        self.undo.push(before);
+        self.redo.clear();
+        self.settle(cx);
+    }
+
+    fn settle(&mut self, cx: &mut Context<Self>) {
+        let (Some(ws), Some(p)) = (self.workspace.clone(), self.project.as_mut()) else { return };
+        let _ = p.save(&ws);
+        let seq = p.sequence.clone();
+        if let Ok(mut r) = self.renderer.try_lock() {
+            if let Some(r) = r.as_mut() {
+                let _ = r.set(&seq);
+            }
+        } else {
+            // the renderer is busy: it takes the change on its next frame
+            let r = self.renderer.clone();
+            std::thread::spawn(move || {
+                if let Some(r) = r.lock().unwrap().as_mut() {
+                    let _ = r.set(&seq);
+                }
+            });
+        }
+        self.request(self.playhead);
+        cx.notify();
+    }
+
+    pub fn undo(&mut self, back: bool, cx: &mut Context<Self>) {
+        let Some(p) = &mut self.project else { return };
+        let (from, to) = if back { (&mut self.undo, &mut self.redo) } else { (&mut self.redo, &mut self.undo) };
+        let Some(s) = from.pop() else { return };
+        to.push(std::mem::replace(&mut p.sequence, s));
+        self.settle(cx);
+    }
+
+    pub fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(c) = self.selected.take() {
+            self.change(
+                |s| {
+                    s.remove(c);
+                    s.tidy();
+                },
+                cx,
+            );
+        }
+    }
+
+    fn split(&mut self, cx: &mut Context<Self>) {
+        let t = self.playhead;
+        let sel = self.selected.filter(|c| self.seq().and_then(|s| s.clip(*c)).is_some_and(|c| c.start_ms < t && t < c.end_ms()));
+        self.change(
+            |s| match sel {
+                Some(c) => {
+                    s.split(c, t);
+                }
+                None => {
+                    s.split_all(t);
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Adds a Library item or imported medium at `at` (on `track` if given), or the main track's end.
+    fn add(&mut self, source: MediaSource, at: Option<u64>, track: Option<usize>, cx: &mut Context<Self>) {
+        if self.project.is_none() {
+            self.new_project("Untitled", cx);
+        }
+        match source {
+            MediaSource::Media(id) => self.change(
+                |s| {
+                    match at {
+                        Some(t) => s.place(id, t, track),
+                        None => s.append(id),
+                    };
+                },
+                cx,
+            ),
+            MediaSource::Item(item) => {
+                // reading the files takes a moment: off the window's thread
+                let tx = self.tx.clone();
+                self.note = Some(format!("Adding “{}”…", item.title).into());
+                std::thread::spawn(move || {
+                    let _ = tx.send(Done::Media(media_of(&item), at, track));
+                });
+                cx.notify();
+            }
+        }
+    }
+
+    fn take_media(&mut self, media: Vec<Media>, at: Option<u64>, track: Option<usize>, cx: &mut Context<Self>) {
+        if media.is_empty() {
+            self.note = Some("Its files couldn't be read (moved? Locate them in the Library).".into());
+            return;
+        }
+        self.note = None;
+        let ws = self.workspace.clone();
+        self.change(
+            |s| {
+                for mut m in media {
+                    // a take's look lives in the workspace (the screen recording look)
+                    if m.take.is_some()
+                        && let (Some(ws), Some(item)) = (&ws, m.item)
+                    {
+                        m.look = Some(ws.join("recordings").join("edits").join(format!("{item}.json")));
+                    }
+                    let id = s.add_media(m);
+                    match at {
+                        Some(u64::MAX) => None,
+                        Some(t) => s.place(id, t, track),
+                        None => s.append(id),
+                    };
+                }
+            },
+            cx,
+        );
+    }
+
+    fn import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project.is_none() {
+            self.new_project("Untitled", cx);
+        }
+        let picked = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Import".into()) });
+        let tx = self.tx.clone();
+        cx.spawn_in(window, async move |_, _| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            std::thread::spawn(move || {
+                let media: Vec<Media> = paths.iter().filter_map(|p| Media::from_file(p).ok()).collect();
+                let _ = tx.send(Done::Media(media, Some(u64::MAX), None));
+            });
+        })
+        .detach();
+    }
+
+    // ------------------------------------------------------------ the player
+
     fn request(&mut self, t: u64) {
         self.wanted = Some(t);
         self.pump();
@@ -279,73 +552,39 @@ impl Editor {
         if self.busy || self.playing.is_some() {
             return;
         }
-        let (Some(t), Some(o)) = (self.wanted.take(), &self.open) else { return };
-        let (r, tx) = (o.renderer.clone(), self.tx.clone());
-        let size = o.edit.size;
+        let Some(t) = self.wanted.take() else { return };
+        let (r, tx) = (self.renderer.clone(), self.tx.clone());
         self.busy = true;
         std::thread::spawn(move || {
-            let frame = r.lock().unwrap().as_mut().and_then(|r| r.frame_at(t).ok());
-            match frame {
-                Some(f) => {
-                    let _ = tx.send(Done::Frame(t, f, size));
-                }
-                None => {
-                    let _ = tx.send(Done::Frame(t, Vec::new(), (0, 0)));
-                }
-            }
+            let mut guard = r.lock().unwrap();
+            let frame = guard.as_mut().map(|r| (r.frame(t), r.sequence().size));
+            let _ = match frame {
+                Some((f, size)) => tx.send(Done::Frame(t, f, size)),
+                None => tx.send(Done::Frame(t, Vec::new(), (0, 0))),
+            };
         });
     }
 
-    /// A change to the edit: saved, undoable, and drawn again.
-    fn change(&mut self, f: impl FnOnce(&mut Edit), cx: &mut Context<Self>) {
-        let Some(o) = &mut self.open else { return };
-        let before = o.edit.clone();
-        f(&mut o.edit);
-        if o.edit == before {
-            return;
-        }
-        o.undo.push(before);
-        o.redo.clear();
-        self.settle(cx);
-    }
-
-    fn settle(&mut self, cx: &mut Context<Self>) {
-        let Some(o) = &mut self.open else { return };
-        o.duration = timeline::duration_ms(&o.edit);
-        let _ = o.edit.save(&o.edit_path);
-        if let Some(r) = o.renderer.lock().unwrap().as_mut() {
-            let _ = r.set_edit(&o.edit);
-        }
-        self.playhead = self.playhead.min(o.duration.saturating_sub(1));
-        self.request(self.playhead);
-        cx.notify();
-    }
-
-    fn undo(&mut self, back: bool, cx: &mut Context<Self>) {
-        let Some(o) = &mut self.open else { return };
-        let (from, to) = if back { (&mut o.undo, &mut o.redo) } else { (&mut o.redo, &mut o.undo) };
-        let Some(e) = from.pop() else { return };
-        to.push(std::mem::replace(&mut o.edit, e));
-        self.settle(cx);
-    }
-
-    fn play(&mut self, cx: &mut Context<Self>) {
+    pub fn play(&mut self, cx: &mut Context<Self>) {
         if self.playing.is_some() {
             self.stop(cx);
             return;
         }
-        let Some(o) = &self.open else { return };
+        let end = self.seq().map_or(0, |s| s.duration_ms());
+        if self.playhead + 100 >= end {
+            self.playhead = 0;
+        }
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (r, tx, from, flag) = (o.renderer.clone(), self.tx.clone(), self.playhead, stop.clone());
+        let (r, tx, from, flag) = (self.renderer.clone(), self.tx.clone(), self.playhead, stop.clone());
         self.playing = Some(stop);
         std::thread::spawn(move || {
             let mut guard = r.lock().unwrap();
             let Some(r) = guard.as_mut() else { return };
+            let size = r.sequence().size;
             let start = std::time::Instant::now();
-            let size = r.size();
-            let _ = r.frames(from, 30.0, |t, rgba| {
-                // in time with the clock (frames that come late are shown late, not skipped)
-                let due = std::time::Duration::from_millis(t - from);
+            r.play(from, |t, rgba| {
+                // in time with the clock (late frames are shown late, not skipped)
+                let due = std::time::Duration::from_millis(t.saturating_sub(from));
                 if let Some(wait) = due.checked_sub(start.elapsed()) {
                     std::thread::sleep(wait);
                 }
@@ -364,133 +603,195 @@ impl Editor {
         cx.notify();
     }
 
-    /// The preview's points as the result's pixels (the frame is drawn fitted, centred).
-    fn result_px(&self, p: Point<Pixels>, size: (u32, u32)) -> Option<(f32, f32)> {
-        let b = (*self.preview_bounds.borrow())?;
-        let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
-        let k = (bw / size.0 as f32).min(bh / size.1 as f32);
-        let (ox, oy) = ((bw - size.0 as f32 * k) / 2.0, (bh - size.1 as f32 * k) / 2.0);
-        Some(((f32::from(p.x - b.origin.x) - ox) / k, (f32::from(p.y - b.origin.y) - oy) / k))
-    }
-
-    /// A hidden area from a drag on the preview, for 3 seconds from the playhead.
-    fn add_mask(&mut self, from: Point<Pixels>, to: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(o) = &self.open else { return };
-        let size = o.edit.size;
-        let (Some(a), Some(b)) = (self.result_px(from, size), self.result_px(to, size)) else { return };
-        let t = self.playhead;
-        let corners = {
-            let Ok(guard) = o.renderer.try_lock() else { return };
-            let Some(r) = guard.as_ref() else { return };
-            (r.screen_point(a, t), r.screen_point(b, t))
-        };
-        let (Some(p), Some(q)) = corners else {
-            self.note = Some("Drag over the screen to hide part of it.".into());
-            cx.notify();
-            return;
-        };
-        let (x, y, w, h) = (p.0.min(q.0), p.1.min(q.1), (p.0 - q.0).abs(), (p.1 - q.1).abs());
-        if w < 0.005 || h < 0.005 {
-            return;
-        }
-        let start = timeline::source_at(&o.edit, t).unwrap_or(0);
-        let end = o.edit.clips.iter().map(|c| c.end_ms).max().unwrap_or(start);
-        self.masking = false;
-        self.change(|e| e.masks.push(lightair_render::edit::Mask { start_ms: start, end_ms: (start + 3_000).min(end), x, y, w, h }), cx);
-        self.selected_mask = self.open.as_ref().map(|o| o.edit.masks.len() - 1);
-    }
-
-    /// Transcribes the item's audio on the computer.
-    fn transcribe(&mut self, cx: &mut Context<Self>) {
-        let Some(o) = &self.open else { return };
-        if self.transcribing {
-            return;
-        }
-        let (audio, tx) = (o.source.audio.clone(), self.tx.clone());
-        self.transcribing = true;
-        self.note = Some("Listening…".into());
-        std::thread::spawn(move || {
-            let r = lightair_render::speech::transcribe(&audio, &model()).map_err(|e| e.to_string());
-            let _ = tx.send(Done::Transcribed(r));
-        });
-        cx.notify();
-    }
-
-    /// Downloads the speech model (asked for by the user's click), with the system's curl.
-    fn download_model(&mut self, cx: &mut Context<Self>) {
-        if self.downloading {
-            return;
-        }
-        let (path, tx) = (model(), self.tx.clone());
-        self.downloading = true;
-        self.note = Some("Downloading the speech model (142 MB)…".into());
-        std::thread::spawn(move || {
-            let r = (|| {
-                std::fs::create_dir_all(path.parent().ok_or("no folder")?).map_err(|e| e.to_string())?;
-                let part = path.with_extension("part");
-                let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
-                let ok = std::process::Command::new(curl)
-                    .args(["-fsSL", "-o"])
-                    .arg(&part)
-                    .arg(lightair_render::speech::MODEL_URL)
-                    .status()
-                    .map_err(|e| e.to_string())?
-                    .success();
-                if !ok {
-                    let _ = std::fs::remove_file(&part);
-                    return Err("couldn't reach the download".to_string());
-                }
-                std::fs::rename(&part, &path).map_err(|e| e.to_string())
-            })();
-            let _ = tx.send(Done::Downloaded(r));
-        });
+    fn seek(&mut self, t: u64, cx: &mut Context<Self>) {
+        self.stop(cx);
+        self.playhead = t;
+        self.request(t);
         cx.notify();
     }
 
     fn export(&mut self, codec: Codec, cx: &mut Context<Self>) {
-        if self.open.is_none() || self.exporting.is_some() {
+        if self.exporting.is_some() {
             return;
         }
         self.stop(cx);
-        let Some(o) = &self.open else { return };
-        let folder = o.source.video.parent().map(Path::to_path_buf).unwrap_or_default();
-        let folder = if folder.extension().is_some_and(|e| e == "lightair-take") { folder.parent().map(Path::to_path_buf).unwrap_or(folder) } else { folder };
+        let (Some(p), Some(ws)) = (&self.project, self.workspace.clone()) else { return };
+        if p.sequence.duration_ms() == 0 {
+            self.note = Some("Put something on the timeline first.".into());
+            cx.notify();
+            return;
+        }
+        let folder = self.studio.read(cx).recording_folder();
         let ext = match codec {
             Codec::ProRes => "mov",
             Codec::Gif => "gif",
             Codec::H264 => "mp4",
         };
-        let subtitles = o.write_srt();
-        let fps = if codec == Codec::Gif { 15.0 } else { 60.0 };
-        let name = format!("{} (edited).{ext}", o.item.title.replace(['/', ':', '\\'], "-"));
-        let out = (1..).map(|n| if n == 1 { folder.join(&name) } else { folder.join(name.replace(" (edited)", &format!(" (edited {n})"))) }).find(|p| !p.exists()).unwrap_or_else(|| folder.join(&name));
-        let (r, tx, project, from, title, duration) =
-            (o.renderer.clone(), self.tx.clone(), o.project.clone(), o.item.id, o.item.title.clone(), o.duration);
+        let base = p.name.replace(['/', ':', '\\'], "-");
+        let out = (1..)
+            .map(|n| if n == 1 { folder.join(format!("{base}.{ext}")) } else { folder.join(format!("{base} {n}.{ext}")) })
+            .find(|p| !p.exists())
+            .unwrap_or_else(|| folder.join(format!("{base}.{ext}")));
+        let (seq, tx, title, duration) = (p.sequence.clone(), self.tx.clone(), p.name.clone(), p.sequence.duration_ms());
         self.exporting = Some(0.0);
         std::thread::spawn(move || {
-            let mut guard = r.lock().unwrap();
-            let Some(r) = guard.as_mut() else { return };
-            r.subtitles = subtitles.clone().filter(|_| codec != Codec::Gif);
-            let progress = tx.clone();
-            let result = r
-                .export(&out, fps, codec, |p| {
+            let result = (|| {
+                let _ = std::fs::create_dir_all(out.parent().unwrap_or(Path::new(".")));
+                let mut r = SequenceRenderer::new(&seq).map_err(|e| e.to_string())?;
+                let progress = tx.clone();
+                r.export(&out, codec, |p| {
                     let _ = progress.send(Done::Progress(p));
                     true
                 })
-                .map_err(|e| e.to_string());
-            if result.is_ok() {
-                // the captions beside it too, for players and sites that take them separately
-                if let Some(srt) = subtitles.filter(|_| codec != Codec::Gif) {
-                    let _ = std::fs::copy(srt, out.with_extension("srt"));
-                }
-                let mut item = Item::new(Kind::Export, format!("{title} (edited)"), vec![ItemFile { path: out.clone(), format: None }], chrono::Utc::now().timestamp_millis());
+                .map_err(|e| e.to_string())?;
+                let mut item = Item::new(Kind::Export, title, vec![ItemFile { path: out.clone(), format: None }], chrono::Utc::now().timestamp_millis());
                 item.duration_ms = Some(duration);
-                item.from = Some(from);
-                let _ = Index::add_to(&project, item);
-            }
-            let _ = tx.send(Done::Exported(result.map(|_| out)));
+                let _ = Index::add_to(&ws, item);
+                Ok(out.clone())
+            })();
+            let _ = tx.send(Done::Exported(result));
         });
         cx.notify();
+    }
+
+    // ------------------------------------------------------------ the timeline's maths
+
+    fn pps(&self) -> f32 {
+        PPS * self.zoom
+    }
+
+    /// A window x as a time on the timeline.
+    fn time_at(&self, x: Pixels) -> Option<u64> {
+        let b = (*self.timeline_bounds.borrow())?;
+        let px = f32::from(x - b.origin.x) - HEADER_W;
+        Some(((px / self.pps() * 1000.0) + self.scroll_ms).max(0.0) as u64)
+    }
+
+    fn x_of(&self, ms: u64) -> f32 {
+        (ms as f32 - self.scroll_ms) / 1000.0 * self.pps()
+    }
+
+    /// The track under a window y.
+    fn track_at(&self, y: Pixels) -> Option<usize> {
+        let b = (*self.timeline_bounds.borrow())?;
+        let seq = self.seq()?;
+        let mut top = f32::from(b.origin.y) + RULER_H;
+        let y = f32::from(y);
+        for (i, t) in seq.tracks.iter().enumerate() {
+            let h = if t.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H };
+            if y >= top && y < top + h {
+                return Some(i);
+            }
+            top += h;
+        }
+        None
+    }
+
+    /// `t`, pulled to a snap point (clip edges, the playhead) within 8 pixels.
+    fn snap(&self, t: i64, except: Option<Id>) -> u64 {
+        let Some(seq) = self.seq() else { return t.max(0) as u64 };
+        let mut points = seq.snap_points(except);
+        points.push(self.playhead);
+        let reach = 8.0 / self.pps() * 1000.0;
+        points
+            .into_iter()
+            .map(|p| (p, (p as i64 - t).abs()))
+            .filter(|(_, d)| (*d as f32) < reach)
+            .min_by_key(|(_, d)| *d)
+            .map_or(t.max(0) as u64, |(p, _)| p)
+    }
+
+    fn begin_drag(&mut self, d: Drag) {
+        self.drag_before = self.project.as_ref().map(|p| p.sequence.clone());
+        self.drag = Some(d);
+    }
+
+    fn drag_to(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag else { return };
+        let Some(t) = self.time_at(pos.x) else { return };
+        match drag {
+            Drag::Scrub => {
+                self.playhead = t.min(self.seq().map_or(0, |s| s.duration_ms()));
+                self.request(self.playhead);
+            }
+            Drag::Move { clip, grab_ms } => {
+                let len = self.seq().and_then(|s| s.clip(clip)).map_or(0, |c| c.len_ms());
+                let start = self.snap(t as i64 - grab_ms, Some(clip));
+                // or its end snaps
+                let by_end = self.snap(start as i64 + len as i64, Some(clip));
+                let start = if by_end != start + len { by_end.saturating_sub(len) } else { start };
+                let track = self.track_at(pos.y);
+                if let Some(p) = &mut self.project {
+                    let (cur, _) = p.sequence.find(clip).unwrap_or((0, 0));
+                    let kind = p.sequence.tracks[cur].kind;
+                    let to = track.filter(|t| p.sequence.tracks.get(*t).is_some_and(|tr| tr.kind == kind)).unwrap_or(cur);
+                    if !p.sequence.move_clip(clip, to, start) {
+                        p.sequence.move_clip(clip, cur, start);
+                    }
+                }
+            }
+            Drag::TrimStart(clip) => {
+                let t = self.snap(t as i64, Some(clip));
+                if let Some(p) = &mut self.project {
+                    p.sequence.trim_start(clip, t);
+                }
+            }
+            Drag::TrimEnd(clip) => {
+                let t = self.snap(t as i64, Some(clip));
+                if let Some(p) = &mut self.project {
+                    p.sequence.trim_end(clip, t);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// A drag ended: what it changed is one undo step.
+    fn drag_end(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.take() else { return };
+        if matches!(drag, Drag::Scrub) {
+            return;
+        }
+        if let (Some(before), Some(p)) = (self.drag_before.take(), &mut self.project) {
+            p.sequence.tidy();
+            if before != p.sequence {
+                self.undo.push(before);
+                self.redo.clear();
+            }
+        }
+        self.settle(cx);
+    }
+
+    /// A take's look, changed (saved where the media says, drawn again).
+    fn change_look(&mut self, media: Id, f: impl FnOnce(&mut Edit), cx: &mut Context<Self>) {
+        let Some(m) = self.seq().and_then(|s| s.media(media)).cloned() else { return };
+        let Some(path) = m.look.clone().or_else(|| m.take.as_ref().map(|t| t.join("edit.json"))) else { return };
+        let mut e = Edit::load(&path).unwrap_or_else(|_| {
+            let mut e = Edit::new(m.duration_ms.max(1));
+            if let Some(log) = m.take.as_ref().and_then(|t| lightair_store::input_log::Log::read(&t.join("input.bin")).ok()) {
+                e.zooms = zoom::auto(&log, m.duration_ms);
+            }
+            e
+        });
+        f(&mut e);
+        if let Some(d) = path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = e.save(&path);
+        if let Some(r) = self.renderer.lock().unwrap().as_mut() {
+            r.forget_take(media);
+        }
+        self.request(self.playhead);
+        cx.notify();
+    }
+
+    fn look_of(&self, media: &Media) -> Edit {
+        media
+            .look
+            .clone()
+            .or_else(|| media.take.as_ref().map(|t| t.join("edit.json")))
+            .and_then(|p| Edit::load(&p).ok())
+            .unwrap_or_else(|| Edit::new(media.duration_ms.max(1)))
     }
 
     // ------------------------------------------------------------ view
@@ -500,13 +801,13 @@ impl Editor {
         id: &'static str,
         options: &[(&'static str, T)],
         current: T,
-        set: impl Fn(&mut Edit, T) + Copy + 'static,
+        on: impl Fn(&mut Self, T, &mut Context<Self>) + Copy + 'static,
         cx: &mut Context<Self>,
     ) -> Div {
         let mut row = div().flex().flex_wrap().gap_1();
         for (n, (label, v)) in options.iter().enumerate() {
             let v = *v;
-            let on = v == current;
+            let sel = v == current;
             row = row.child(
                 div()
                     .id((id, n))
@@ -515,434 +816,657 @@ impl Editor {
                     .rounded(px(6.))
                     .text_size(px(12.))
                     .cursor_pointer()
-                    .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
-                    .when(!on, |d| d.text_color(tok::text_secondary()))
+                    .when(sel, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                    .when(!sel, |d| d.text_color(tok::text_secondary()))
                     .hover(|d| d.bg(tok::bg_selected()))
                     .child(*label)
-                    .on_click(cx.listener(move |this, _, _, cx| this.change(|e| set(e, v), cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| on(this, v, cx))),
             );
         }
         row
     }
 
-    fn side(&self, o: &Open, cx: &mut Context<Self>) -> impl IntoElement {
-        let e = &o.edit;
-        let label = |t: &'static str| div().pt_2().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child(t);
-        let swatches = {
-            let mut row = div().flex().flex_wrap().gap_1p5();
-            for (n, (colours, _)) in lightair_render::compose::BACKDROPS.iter().enumerate() {
-                let on = e.look.backdrop == n as i64;
-                row = row.child(
-                    div()
-                        .id(("ed-backdrop", n))
-                        .size(px(28.))
-                        .rounded(px(6.))
-                        .border_2()
-                        .border_color(if on { tok::accent_primary() } else { tok::bg_panel() })
-                        .bg(rgb(colours[1]))
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| this.change(|e| e.look.backdrop = n as i64, cx))),
-                );
+    /// A labelled value with − and + beside it.
+    fn stepper(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        value: String,
+        step: impl Fn(&mut Self, f32, &mut Context<Self>) + Copy + 'static,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().w(px(76.)).text_size(px(12.)).text_color(tok::text_secondary()).child(label))
+            .child(
+                div()
+                    .flex_1()
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(6.))
+                    .bg(tok::bg_app())
+                    .text_size(px(12.))
+                    .font_family("Menlo")
+                    .child(value),
+            )
+            .child(ui::icon_button((id, 0usize), "minus", tok::text_secondary()).on_click(cx.listener(move |this, _, _, cx| step(this, -1.0, cx))))
+            .child(ui::icon_button((id, 1usize), "plus", tok::text_secondary()).on_click(cx.listener(move |this, _, _, cx| step(this, 1.0, cx))))
+    }
+
+    fn top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let me = cx.entity().downgrade();
+        let (ws, current) = (self.workspace.clone(), self.project.as_ref().map(|p| p.id));
+        let name = self.project.as_ref().map_or("No project".to_string(), |p| p.name.clone());
+        let picker = Button::new("ed-project").label(name).small().ghost().dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            for p in ws.as_ref().map(|w| EditProject::list(w)).unwrap_or_default() {
+                let (me, id) = (me.clone(), p.id);
+                menu = menu.item(PopupMenuItem::new(p.name).checked(current == Some(p.id)).on_click(move |_, _, cx| {
+                    if let Some(me) = me.upgrade() {
+                        me.update(cx, |this, cx| this.open_project(id, cx));
+                    }
+                }));
             }
-            row
+            let (a, b, c) = (me.clone(), me.clone(), me.clone());
+            menu.separator()
+                .item(PopupMenuItem::new("New Project…").icon(ui::icon("plus")).on_click(move |_, w, cx| {
+                    if let Some(me) = a.upgrade() {
+                        me.update(cx, |this, cx| this.start_naming(None, w, cx));
+                    }
+                }))
+                .item(PopupMenuItem::new("Rename…").icon(ui::icon("pencil")).disabled(current.is_none()).on_click(move |_, w, cx| {
+                    if let Some(me) = b.upgrade() {
+                        me.update(cx, |this, cx| {
+                            let id = this.project.as_ref().map(|p| p.id);
+                            this.start_naming(id, w, cx)
+                        });
+                    }
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Delete Project").icon(ui::icon("trash")).disabled(current.is_none()).on_click(move |_, _, cx| {
+                    if let Some(me) = c.upgrade() {
+                        me.update(cx, |this, cx| this.delete_project(cx));
+                    }
+                }))
+        });
+        let export = match self.exporting {
+            Some(p) => Button::new("ed-export").label(format!("Exporting {:.0}%", p * 100.0)).small().outline().loading(true).into_any_element(),
+            None => {
+                let me = cx.entity().downgrade();
+                Button::new("ed-export")
+                    .label("Export")
+                    .icon(ui::icon("upload"))
+                    .small()
+                    .primary()
+                    .dropdown_menu(move |menu, _, _| {
+                        let go = |codec: Codec| {
+                            let me = me.clone();
+                            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                if let Some(me) = me.upgrade() {
+                                    me.update(cx, |this, cx| this.export(codec, cx));
+                                }
+                            }
+                        };
+                        menu.item(PopupMenuItem::new("Video (MP4)").on_click(go(Codec::H264)))
+                            .item(PopupMenuItem::new("ProRes (MOV)").on_click(go(Codec::ProRes)))
+                            .item(PopupMenuItem::new("GIF").on_click(go(Codec::Gif)))
+                    })
+                    .into_any_element()
+            }
         };
         div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .w(px(260.))
-            .flex_none()
-            .p_3()
-            .border_l_1()
-            .border_color(tok::border())
-            .bg(tok::bg_panel())
-            .child(label("BACKDROP"))
-            .child(swatches)
-            .child(label("PADDING"))
-            .child(self.chips("ed-pad", &[("None", 0), ("Small", 1), ("Medium", 2), ("Large", 3)], ((e.look.padding / 0.035).round() as i32).clamp(0, 3), |e, v| e.look.padding = v as f32 * 0.035, cx))
-            .child(label("CORNERS"))
-            .child(self.chips("ed-radius", &[("Square", 0), ("Soft", 1), ("Round", 2)], ((e.look.radius / 0.015).round() as i32).clamp(0, 2), |e, v| e.look.radius = v as f32 * 0.015, cx))
-            .child(label("POINTER"))
-            .child(self.chips("ed-pstyle", &[("Pointer", 0i64), ("Dot", 1), ("Ring", 2), ("Hidden", -1)], if e.pointer.hidden { -1 } else { e.pointer.style }, |e, v| {
-                e.pointer.hidden = v < 0;
-                if v >= 0 {
-                    e.pointer.style = v;
-                }
-            }, cx))
-            .child(self.chips("ed-psize", &[("Small", 10), ("Medium", 15), ("Large", 25), ("Huge", 40)], (e.pointer.size * 10.0).round() as i32, |e, v| e.pointer.size = v as f32 / 10.0, cx))
-            .child(label("SMOOTHING"))
-            .child(self.chips("ed-smooth", &[("Off", 0), ("Some", 5), ("Lots", 9)], (e.pointer.smoothing * 10.0).round() as i32, |e, v| e.pointer.smoothing = v as f32 / 10.0, cx))
-            .child(label("CLICKS"))
-            .child(self.chips("ed-clicks", &[("None", 0i64), ("Circle", 1), ("Ripple", 2)], e.pointer.clicks, |e, v| e.pointer.clicks = v, cx))
-            .child(label("SIZE"))
-            .child(self.chips("ed-size", &[("720p", (1280u32, 720u32)), ("1080p", (1920, 1080)), ("4K", (3840, 2160)), ("Vertical", (1080, 1920))], e.size, |e, v| e.size = v, cx))
-            .when_some(o.transcript.as_ref(), |d, t| {
-                // the words, where they are in the result; a click goes there
-                let mut words = div().flex().flex_wrap().gap_x_1().text_size(px(12.));
-                for (n, w) in t.words.iter().enumerate() {
-                    let Some(at) = timeline::result_at(e, w.start_ms) else { continue };
-                    let here = self.playhead >= at && self.playhead < at + (w.end_ms - w.start_ms).max(1);
-                    words = words.child(
-                        div()
-                            .id(("ed-word", n))
-                            .cursor_pointer()
-                            .rounded(px(3.))
-                            .when(here, |d| d.bg(tok::bg_selected()))
-                            .hover(|d| d.text_color(tok::text()))
-                            .text_color(tok::text_secondary())
-                            .child(w.text.clone())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.stop(cx);
-                                this.playhead = at;
-                                this.request(at);
-                                cx.notify();
-                            })),
-                    );
-                }
-                d.child(label("TRANSCRIPT")).child(div().id("ed-words").flex_1().min_h_0().overflow_y_scroll().child(words))
-            })
-    }
-
-    fn timeline(&self, o: &Open, cx: &mut Context<Self>) -> impl IntoElement {
-        let total = o.duration.max(1) as f32;
-        let e = &o.edit;
-        let track = self.track.clone();
-        let head = self.playhead as f32 / total;
-        // clips, as they play
-        let mut clips = div().relative().h(px(36.)).w_full();
-        let mut at = 0u64;
-        for (n, c) in e.clips.iter().enumerate() {
-            let len = ((c.end_ms - c.start_ms) as f32 / c.speed) as u64;
-            let on = self.selected_clip == Some(n);
-            clips = clips.child(
-                div()
-                    .id(("ed-clip", n))
-                    .absolute()
-                    .top_0()
-                    .h_full()
-                    .left(relative(at as f32 / total))
-                    .w(relative(len as f32 / total))
-                    .px_1()
-                    .rounded(px(6.))
-                    .border_2()
-                    .border_color(if on { tok::accent_primary() } else { tok::bg_app() })
-                    .bg(tok::bg_raised())
-                    .text_size(px(11.))
-                    .text_color(tok::text_secondary())
-                    .overflow_hidden()
-                    .child(if (c.speed - 1.0).abs() > 0.01 { format!("Clip · {}×", c.speed) } else { "Clip".into() })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected_clip = Some(n);
-                        this.selected_zoom = None;
-                        cx.notify();
-                    })),
-            );
-            at += len;
-        }
-        // zooms, where they land in the result
-        let mut zooms = div().relative().h(px(28.)).w_full();
-        for (n, z) in e.zooms.iter().enumerate() {
-            let (Some(a), Some(b)) = (timeline::result_at(e, z.start_ms), timeline::result_at(e, z.end_ms.saturating_sub(1))) else { continue };
-            let on = self.selected_zoom == Some(n);
-            zooms = zooms.child(
-                div()
-                    .id(("ed-zoom", n))
-                    .absolute()
-                    .top_0()
-                    .h_full()
-                    .left(relative(a as f32 / total))
-                    .w(relative((b.saturating_sub(a)).max(1) as f32 / total))
-                    .px_1()
-                    .rounded(px(6.))
-                    .border_2()
-                    .border_color(if on { tok::accent_primary() } else { tok::bg_app() })
-                    .bg(rgba(0x7C3AED80))
-                    .text_size(px(11.))
-                    .overflow_hidden()
-                    .child(format!("{}× {}", z.scale, if z.auto { "auto" } else { "" }))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected_zoom = Some(n);
-                        this.selected_clip = None;
-                        cx.notify();
-                    })),
-            );
-        }
-        let mut masks = div().relative().h(px(22.)).w_full();
-        for (n, m) in e.masks.iter().enumerate() {
-            let (Some(a), Some(b)) = (timeline::result_at(e, m.start_ms), timeline::result_at(e, m.end_ms.saturating_sub(1))) else { continue };
-            let on = self.selected_mask == Some(n);
-            masks = masks.child(
-                div()
-                    .id(("ed-mask", n))
-                    .absolute()
-                    .top_0()
-                    .h_full()
-                    .left(relative(a as f32 / total))
-                    .w(relative((b.saturating_sub(a)).max(1) as f32 / total))
-                    .px_1()
-                    .rounded(px(6.))
-                    .border_2()
-                    .border_color(if on { tok::accent_primary() } else { tok::bg_app() })
-                    .bg(rgba(0x6B728080))
-                    .text_size(px(11.))
-                    .overflow_hidden()
-                    .child("Hidden")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected_mask = Some(n);
-                        this.selected_zoom = None;
-                        this.selected_clip = None;
-                        cx.notify();
-                    })),
-            );
-        }
-        let lane = |label: &'static str, content: Div| {
-            div().flex().items_center().gap_2().child(div().w(px(56.)).flex_none().text_size(px(11.)).text_color(tok::text_tertiary()).child(label)).child(content)
-        };
-        div()
-            .id("ed-timeline")
-            .relative()
-            .flex()
-            .flex_col()
-            .gap_1p5()
-            .p_3()
-            .border_t_1()
-            .border_color(tok::border())
-            .child(lane("", div().flex_1().h(px(18.)).relative().child(canvas(move |b, _, _| *track.borrow_mut() = Some(b), |_, _, _, _| {}).absolute().size_full()).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                    let Some(b) = *this.track.borrow() else { return };
-                    let k = (f32::from(ev.position.x - b.origin.x) / f32::from(b.size.width).max(1.0)).clamp(0.0, 1.0);
-                    let total = this.open.as_ref().map_or(0, |o| o.duration);
-                    this.stop(cx);
-                    this.playhead = (k * total as f32) as u64;
-                    this.request(this.playhead);
-                    cx.notify();
-                }),
-            ).child(div().absolute().top_0().h_full().left(relative(head)).w(px(2.)).bg(tok::live())).child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!("{} / {}", clock(self.playhead), clock(o.duration))))))
-            .child(lane("Clips", clips.flex_1()))
-            .child(lane("Zooms", zooms.flex_1()))
-            .when(!e.masks.is_empty(), |d| d.child(lane("Hidden", masks.flex_1())))
-    }
-
-    fn tools(&self, o: &Open, cx: &mut Context<Self>) -> impl IntoElement {
-        let source = timeline::source_at(&o.edit, self.playhead).unwrap_or(0);
-        let mut row = div()
             .flex()
             .items_center()
             .gap_2()
             .px_3()
-            .py_1p5()
-            .child(ui::icon_button("ed-play", if self.playing.is_some() { "pause" } else { "play" }, tok::text()).on_click(cx.listener(|this, _, _, cx| this.play(cx))))
-            .child(Button::new("ed-split").label("Split").icon(ui::icon("scissors")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| this.change(|e| e.split(source), cx))))
-            .child(Button::new("ed-zoom-add").label("Add zoom").icon(ui::icon("zoom-in")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
-                this.change(|e| e.zooms.push(Zoom { start_ms: source, end_ms: source + 3_000, scale: zoom::DEFAULT_SCALE, focus: Focus::Pointer, auto: false }), cx)
-            })))
-            .child(
-                Button::new("ed-mask")
-                    .label(if self.masking { "Drag over the area…" } else { "Hide area" })
-                    .icon(ui::icon("eye-off"))
-                    .xsmall()
-                    .map(|b| if self.masking { b.primary() } else { b.ghost() })
-                    .tooltip("Blocks out passwords, keys or messages for a while")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.masking = !this.masking;
-                        cx.notify();
-                    })),
-            )
-            .child(Button::new("ed-zoom-auto").label("Auto zooms").icon(ui::icon("sparkles")).xsmall().ghost().on_click(cx.listener(|this, _, _, cx| {
-                let Some(o) = &this.open else { return };
-                let Some(log) = o.source.log.as_ref().and_then(|p| lightair_store::input_log::Log::read(p).ok()) else {
-                    this.note = Some("Automatic zooms need a Studio take (they follow its clicks and typing).".into());
-                    cx.notify();
-                    return;
-                };
-                let duration = o.edit.clips.iter().map(|c| c.end_ms).max().unwrap_or(0);
-                let auto = zoom::auto(&log, duration);
-                this.change(|e| {
-                    e.zooms.retain(|z| !z.auto);
-                    e.zooms.extend(auto);
-                    e.zooms.sort_by_key(|z| z.start_ms);
-                }, cx)
-            })))
-            .child(match (&o.transcript, model().is_file()) {
-                (Some(_), _) => Button::new("ed-tighten")
-                    .label("Remove fillers and pauses")
-                    .icon(ui::icon("wand-sparkles"))
-                    .xsmall()
-                    .ghost()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let Some(t) = this.open.as_ref().and_then(|o| o.transcript.clone()) else { return };
-                        this.change(|e| *e = lightair_render::speech::tighten(e, &t, 900, 300), cx)
-                    })),
-                (None, true) => Button::new("ed-transcribe")
-                    .label(if self.transcribing { "Transcribing…" } else { "Transcribe" })
-                    .icon(ui::icon("captions"))
-                    .xsmall()
-                    .ghost()
-                    .loading(self.transcribing)
-                    .on_click(cx.listener(|this, _, _, cx| this.transcribe(cx))),
-                (None, false) => Button::new("ed-model")
-                    .label(if self.downloading { "Downloading…" } else { "Get speech model" })
-                    .icon(ui::icon("download"))
-                    .xsmall()
-                    .ghost()
-                    .loading(self.downloading)
-                    .tooltip("142 MB, once: speech is recognised on this computer, never sent anywhere")
-                    .on_click(cx.listener(|this, _, _, cx| this.download_model(cx))),
-            })
-            .child(div().flex_1());
-        if let Some(n) = self.selected_clip.filter(|n| *n < o.edit.clips.len()) {
-            row = row
-                .child(self.chips("ed-speed", &[("1×", 10), ("1.5×", 15), ("2×", 20), ("4×", 40)], (o.edit.clips[n].speed * 10.0).round() as i32, move |e, v| {
-                    if let Some(c) = e.clips.get_mut(n) {
-                        c.speed = v as f32 / 10.0;
-                    }
-                }, cx))
-                .child(Button::new("ed-clip-del").label("Delete clip").icon(ui::icon("trash")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
-                    this.selected_clip = None;
-                    this.change(|e| {
-                        if e.clips.len() > 1 && n < e.clips.len() {
-                            e.clips.remove(n);
-                        }
-                    }, cx)
-                })));
-        }
-        if let Some(n) = self.selected_mask.filter(|n| *n < o.edit.masks.len()) {
-            let m = o.edit.masks[n];
-            row = row
-                .child(self.chips("ed-mlen", &[("1 s", 1_000u64), ("3 s", 3_000), ("10 s", 10_000), ("To the end", u64::MAX)], if m.end_ms >= o.edit.clips.iter().map(|c| c.end_ms).max().unwrap_or(0) { u64::MAX } else { m.end_ms - m.start_ms }, move |e, v| {
-                    let end = e.clips.iter().map(|c| c.end_ms).max().unwrap_or(0);
-                    if let Some(m) = e.masks.get_mut(n) {
-                        m.end_ms = if v == u64::MAX { end } else { (m.start_ms + v).min(end) };
-                    }
-                }, cx))
-                .child(Button::new("ed-mask-del").label("Show again").icon(ui::icon("eye")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
-                    this.selected_mask = None;
-                    this.change(|e| {
-                        if n < e.masks.len() {
-                            e.masks.remove(n);
-                        }
-                    }, cx)
-                })));
-        }
-        if let Some(n) = self.selected_zoom.filter(|n| *n < o.edit.zooms.len()) {
-            row = row
-                .child(self.chips("ed-zscale", &[("1.5×", 15), ("2×", 20), ("2.5×", 25), ("3×", 30)], (o.edit.zooms[n].scale * 10.0).round() as i32, move |e, v| {
-                    if let Some(z) = e.zooms.get_mut(n) {
-                        z.scale = v as f32 / 10.0;
-                        z.auto = false;
-                    }
-                }, cx))
-                .child(Button::new("ed-zoom-del").label("Delete zoom").icon(ui::icon("trash")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
-                    this.selected_zoom = None;
-                    this.change(|e| {
-                        if n < e.zooms.len() {
-                            e.zooms.remove(n);
-                        }
-                    }, cx)
-                })));
-        }
-        row
+            .h(px(40.))
+            .border_b_1()
+            .border_color(tok::border())
+            .child(div().p_0p5().rounded(px(8.)).bg(tok::bg_panel()).border_1().border_color(tok::border()).child(picker))
+            .when_some(self.naming.as_ref(), |d, (_, input)| d.child(div().w(px(220.)).child(TextInput::new(input).small())))
+            .child(div().flex_1())
+            .child(ui::icon_button("ed-undo", "undo-2", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| this.undo(true, cx))))
+            .child(ui::icon_button("ed-redo", "redo-2", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| this.undo(false, cx))))
+            .child(export)
     }
-}
 
-impl Render for Editor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(o) = self.open.take() else {
-            return div()
+    fn media_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let card = |id: SharedString, title: String, detail: String, icon: &'static str, thumb: Option<PathBuf>, source: MediaSource, cx: &mut Context<Self>| {
+            let drag = DraggedMedia { label: title.clone().into(), source: source.clone() };
+            div()
+                .id(id.clone())
                 .flex()
                 .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .size_full()
-                .child(ui::icon("scissors").size(px(36.)).text_color(tok::text_tertiary()))
-                .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("Nothing open"))
+                .gap_1()
+                .w(px(122.))
+                .cursor_grab()
                 .child(
                     div()
-                        .max_w(px(420.))
-                        .text_center()
-                        .text_color(tok::text_secondary())
-                        .child(self.note.clone().unwrap_or_else(|| "Open a recording or a Studio take from the Library: right-click it, Open in Editor.".into())),
+                        .relative()
+                        .w_full()
+                        .h(px(68.))
+                        .rounded(px(6.))
+                        .overflow_hidden()
+                        .bg(tok::bg_canvas_well())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .map(|d| match thumb {
+                            Some(p) => d.child(img(p).size_full().object_fit(ObjectFit::Cover)),
+                            None => d.child(ui::icon(icon).size(px(20.)).text_color(tok::text_tertiary())),
+                        })
+                        .child(
+                            div()
+                                .id((id.clone(), 1usize))
+                                .absolute()
+                                .right(px(4.))
+                                .bottom(px(4.))
+                                .size(px(20.))
+                                .rounded_full()
+                                .bg(rgba(0x000000c0))
+                                .border_1()
+                                .border_color(rgba(0xffffff60))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgba(0x000000ff)))
+                                .child(ui::icon("plus").size(px(12.)).text_color(rgb(0xFFFFFF)))
+                                .on_click(cx.listener(move |this, _, _, cx| this.add(source.clone(), None, None, cx))),
+                        ),
                 )
-                .into_any_element();
+                .child(div().text_size(px(11.)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(title))
+                .child(div().text_size(px(10.)).text_color(tok::text_tertiary()).child(detail))
+                .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone()))
         };
-        let el = div()
+        let mut grid = div().flex().flex_wrap().gap_2();
+        for (n, item) in self.library.iter().enumerate() {
+            let detail = format!("{} · {}", item.kind.label(), item.duration_ms.map_or("—".into(), short));
+            let thumb = item.thumbnail.clone().filter(|t| t.exists());
+            grid = grid.child(card(
+                SharedString::from(format!("ed-lib-{n}")),
+                item.title.clone(),
+                detail,
+                kind_icon(item.kind),
+                thumb,
+                MediaSource::Item(item.clone()),
+                cx,
+            ));
+        }
+        let imported: Vec<Media> = self.seq().map(|s| s.media.iter().filter(|m| m.item.is_none()).cloned().collect()).unwrap_or_default();
+        let mut own = div().flex().flex_wrap().gap_2();
+        for (n, m) in imported.iter().enumerate() {
+            let icon = match m.kind {
+                MediaKind::Video => "film",
+                MediaKind::Audio => "music",
+                MediaKind::Image => "image",
+            };
+            let thumb = (m.kind == MediaKind::Image).then(|| m.path.clone());
+            own = own.child(card(SharedString::from(format!("ed-imp-{n}")), m.name.clone(), short(m.duration_ms), icon, thumb, MediaSource::Media(m.id), cx));
+        }
+        let heading = |t: &'static str| div().pt_2().pb_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child(t);
+        div()
             .flex()
             .flex_col()
-            .size_full()
+            .w(px(290.))
+            .flex_none()
+            .border_r_1()
+            .border_color(tok::border())
+            .bg(tok::bg_panel())
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
                     .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(tok::border())
-                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(o.item.title.clone()))
-                    .child(div().text_size(px(12.)).text_color(tok::text_tertiary()).child(o.item.kind.label()))
-                    .child(div().flex_1())
-                    .child(ui::icon_button("ed-undo", "undo-2", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| this.undo(true, cx))))
-                    .child(ui::icon_button("ed-redo", "redo-2", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| this.undo(false, cx))))
-                    .child(match self.exporting {
-                        Some(p) => Button::new("ed-export").label(format!("Exporting {:.0}%", p * 100.0)).small().outline().loading(true).into_any_element(),
-                        None => div()
-                            .flex()
-                            .gap_1()
-                            .child(Button::new("ed-export-gif").label("GIF").small().ghost().on_click(cx.listener(|this, _, _, cx| this.export(Codec::Gif, cx))))
-                            .child(Button::new("ed-export-prores").label("ProRes").small().ghost().on_click(cx.listener(|this, _, _, cx| this.export(Codec::ProRes, cx))))
-                            .child(Button::new("ed-export").label("Export MP4").small().primary().on_click(cx.listener(|this, _, _, cx| this.export(Codec::H264, cx))))
-                            .into_any_element(),
+                    .h(px(36.))
+                    .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("Media"))
+                    .child(Button::new("ed-import").label("Import").icon(ui::icon("plus")).xsmall().outline().on_click(cx.listener(|this, _, w, cx| this.import(w, cx)))),
+            )
+            .child(
+                div()
+                    .id("ed-media")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_3()
+                    .pb_3()
+                    .child(heading("THIS WORKSPACE"))
+                    .child(if self.library.is_empty() {
+                        div().text_size(px(12.)).text_color(tok::text_tertiary()).child("Recordings, takes and clips appear here.")
+                    } else {
+                        grid
+                    })
+                    .when(!imported.is_empty(), |d| d.child(heading("IMPORTED")).child(own)),
+            )
+    }
+
+    fn player(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let duration = self.seq().map_or(0, |s| s.duration_ms());
+        let size = self.seq().map_or((1920, 1080), |s| s.size);
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .m_2()
+                    .rounded(px(6.))
+                    .overflow_hidden()
+                    .bg(rgb(0x000000))
+                    .when_some(self.preview.clone(), |d, img_| d.child(img(ImageSource::Render(img_)).absolute().size_full().object_fit(ObjectFit::Contain)))
+                    .when(self.project.is_none(), |d| {
+                        d.flex().items_center().justify_center().child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap_2()
+                                .child(div().text_color(tok::text_secondary()).child("No project open"))
+                                .child(Button::new("ed-first").label("New project").small().primary().on_click(cx.listener(|this, _, w, cx| this.start_naming(None, w, cx)))),
+                        )
                     }),
             )
             .child(
                 div()
                     .flex()
-                    .flex_1()
-                    .min_h_0()
+                    .items_center()
+                    .px_3()
+                    .pb_2()
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
                             .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .relative()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .m_3()
-                                    .rounded(px(8.))
-                                    .overflow_hidden()
-                                    .bg(tok::bg_canvas_well())
-                                    .when(self.masking, |d| d.cursor_crosshair())
-                                    .child({
-                                        let b = self.preview_bounds.clone();
-                                        canvas(move |bounds, _, _| *b.borrow_mut() = Some(bounds), |_, _, _, _| {}).absolute().size_full()
-                                    })
-                                    .when_some(self.preview.clone(), |d, img_| d.child(img(ImageSource::Render(img_)).absolute().size_full().object_fit(ObjectFit::Contain)))
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, _| {
-                                        if this.masking {
-                                            this.drag_from = Some(ev.position);
-                                        }
-                                    }))
-                                    .on_mouse_up(MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _, cx| {
-                                        if let Some(from) = this.drag_from.take() {
-                                            this.add_mask(from, ev.position, cx);
-                                        }
-                                    })),
-                            )
-                            .child(self.tools(&o, cx))
-                            .child(self.timeline(&o, cx)),
+                            .text_size(px(12.))
+                            .font_family("Menlo")
+                            .child(div().flex().gap_1().child(div().text_color(tok::accent_primary()).child(clock(self.playhead))).child(div().text_color(tok::text_tertiary()).child(format!("/ {}", clock(duration))))),
                     )
-                    .child(self.side(&o, cx)),
+                    .child(ui::icon_button("ed-play", if self.playing.is_some() { "pause" } else { "play" }, tok::text()).on_click(cx.listener(|this, _, _, cx| this.play(cx))))
+                    .child(div().flex_1().flex().justify_end().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!("{}×{} · {} fps", size.0, size.1, self.seq().map_or(30, |s| s.fps)))),
             )
-            .when_some(self.note.clone(), |d, note| {
-                d.child(div().px_3().py_1().border_t_1().border_color(tok::border()).text_size(px(12.)).text_color(tok::text_secondary()).child(note))
-            })
-            .into_any_element();
-        self.open = Some(o);
-        el
+    }
+
+    fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let clip = self.selected.and_then(|c| self.seq().and_then(|s| s.clip(c)).cloned());
+        let media = clip.as_ref().and_then(|c| self.seq().and_then(|s| s.media(c.media)).cloned());
+        let label = |t: &'static str| div().pt_2().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child(t);
+        let mut body = div().flex().flex_col().gap_2().p_3();
+        match (clip, media) {
+            (Some(c), Some(m)) => {
+                let cid = c.id;
+                let take = m.take.is_some();
+                let tab = if !take && self.tab == InspectorTab::Screen { InspectorTab::Video } else { self.tab };
+                let mut tabs: Vec<(&'static str, InspectorTab)> = vec![("Video", InspectorTab::Video), ("Audio", InspectorTab::Audio), ("Speed", InspectorTab::Speed)];
+                if take {
+                    tabs.push(("Screen", InspectorTab::Screen));
+                }
+                if m.kind == MediaKind::Audio {
+                    tabs.retain(|t| t.1 != InspectorTab::Video);
+                }
+                body = body.child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().text_ellipsis().child(m.name.clone()));
+                body = body.child(self.chips("ed-tabs", &tabs, if m.kind == MediaKind::Audio && tab == InspectorTab::Video { InspectorTab::Audio } else { tab }, |this, t, cx| {
+                    this.tab = t;
+                    cx.notify();
+                }, cx));
+                let tf = c.transform;
+                let set = move |this: &mut Self, f: &dyn Fn(&mut Transform), cx: &mut Context<Self>| {
+                    this.change(
+                        |s| {
+                            if let Some(c) = s.clip_mut(cid) {
+                                f(&mut c.transform);
+                            }
+                        },
+                        cx,
+                    )
+                };
+                match if m.kind == MediaKind::Audio && tab == InspectorTab::Video { InspectorTab::Audio } else { tab } {
+                    InspectorTab::Video => {
+                        body = body
+                            .child(label("TRANSFORM"))
+                            .child(self.stepper("ed-scale", "Scale", format!("{:.0}%", tf.scale * 100.0), move |this, d, cx| set(this, &|t| t.scale = (t.scale + d * 0.05).clamp(0.05, 10.0), cx), cx))
+                            .child(self.stepper("ed-x", "Position X", format!("{:.0}", tf.x), move |this, d, cx| set(this, &|t| t.x += d * 10.0, cx), cx))
+                            .child(self.stepper("ed-y", "Position Y", format!("{:.0}", tf.y), move |this, d, cx| set(this, &|t| t.y += d * 10.0, cx), cx))
+                            .child(self.stepper("ed-rot", "Rotate", format!("{:.0}°", tf.rotation), move |this, d, cx| set(this, &|t| t.rotation += d * 5.0, cx), cx))
+                            .child(self.stepper("ed-op", "Opacity", format!("{:.0}%", tf.opacity * 100.0), move |this, d, cx| set(this, &|t| t.opacity = (t.opacity + d * 0.1).clamp(0.0, 1.0), cx), cx))
+                            .child(Button::new("ed-reset").label("Reset").icon(ui::icon("rotate-ccw")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| set(this, &|t| *t = Transform::default(), cx))));
+                    }
+                    InspectorTab::Audio => {
+                        body = body
+                            .child(label("VOLUME"))
+                            .child(self.stepper("ed-vol", "Volume", format!("{:.0}%", c.volume * 100.0), move |this, d, cx| {
+                                this.change(|s| if let Some(c) = s.clip_mut(cid) { c.volume = (c.volume + d * 0.1).clamp(0.0, 4.0) }, cx)
+                            }, cx))
+                            .child(self.chips("ed-mute", &[("Sound on", false), ("Muted", true)], c.muted, move |this, v, cx| {
+                                this.change(|s| if let Some(c) = s.clip_mut(cid) { c.muted = v }, cx)
+                            }, cx));
+                    }
+                    InspectorTab::Speed => {
+                        body = body.child(label("SPEED")).child(self.chips(
+                            "ed-speed",
+                            &[("0.25×", 25), ("0.5×", 50), ("1×", 100), ("1.5×", 150), ("2×", 200), ("4×", 400), ("8×", 800)],
+                            (c.speed * 100.0).round() as i32,
+                            move |this, v, cx| {
+                                let mut ok = true;
+                                this.change(|s| ok = s.set_speed(cid, v as f32 / 100.0), cx);
+                                if !ok {
+                                    this.note = Some("Slower would run into the next clip: make room first.".into());
+                                    cx.notify();
+                                }
+                            },
+                            cx,
+                        ));
+                    }
+                    InspectorTab::Screen => {
+                        let look = self.look_of(&m);
+                        let mid = m.id;
+                        let mut sw = div().flex().flex_wrap().gap_1p5();
+                        for (n, (colours, _)) in lightair_render::compose::BACKDROPS.iter().enumerate() {
+                            let on = look.look.backdrop == n as i64;
+                            sw = sw.child(
+                                div()
+                                    .id(("ed-bd", n))
+                                    .size(px(26.))
+                                    .rounded(px(6.))
+                                    .border_2()
+                                    .border_color(if on { tok::accent_primary() } else { tok::bg_panel() })
+                                    .bg(rgb(colours[1]))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| this.change_look(mid, |e| e.look.backdrop = n as i64, cx))),
+                            );
+                        }
+                        body = body
+                            .child(label("BACKDROP"))
+                            .child(sw)
+                            .child(label("PADDING"))
+                            .child(self.chips("ed-pad", &[("None", 0), ("Small", 1), ("Medium", 2), ("Large", 3)], ((look.look.padding / 0.035).round() as i32).clamp(0, 3), move |this, v, cx| this.change_look(mid, |e| e.look.padding = v as f32 * 0.035, cx), cx))
+                            .child(label("POINTER"))
+                            .child(self.chips("ed-ps", &[("Pointer", 0i64), ("Dot", 1), ("Ring", 2), ("Hidden", -1)], if look.pointer.hidden { -1 } else { look.pointer.style }, move |this, v, cx| {
+                                this.change_look(mid, |e| {
+                                    e.pointer.hidden = v < 0;
+                                    if v >= 0 {
+                                        e.pointer.style = v;
+                                    }
+                                }, cx)
+                            }, cx))
+                            .child(self.chips("ed-psize", &[("Small", 10), ("Medium", 15), ("Large", 25)], (look.pointer.size * 10.0).round() as i32, move |this, v, cx| this.change_look(mid, |e| e.pointer.size = v as f32 / 10.0, cx), cx))
+                            .child(label("CLICKS"))
+                            .child(self.chips("ed-clicks", &[("None", 0i64), ("Circle", 1), ("Ripple", 2)], look.pointer.clicks, move |this, v, cx| this.change_look(mid, |e| e.pointer.clicks = v, cx), cx))
+                            .child(label("ZOOMS"))
+                            .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(format!("{} zooms", look.zooms.len())))
+                            .child(Button::new("ed-autozoom").label("Automatic zooms").icon(ui::icon("sparkles")).xsmall().outline().on_click(cx.listener(move |this, _, _, cx| {
+                                let Some(m) = this.seq().and_then(|s| s.media(mid)).cloned() else { return };
+                                let Some(log) = m.take.as_ref().and_then(|t| lightair_store::input_log::Log::read(&t.join("input.bin")).ok()) else { return };
+                                let auto = zoom::auto(&log, m.duration_ms);
+                                this.change_look(mid, |e| {
+                                    e.zooms.retain(|z| !z.auto);
+                                    e.zooms.extend(auto);
+                                }, cx)
+                            })));
+                    }
+                }
+            }
+            _ => {
+                let seq_size = self.seq().map_or((1920, 1080), |s| s.size);
+                let fps = self.seq().map_or(30, |s| s.fps);
+                body = body
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Project"))
+                    .child(label("SIZE"))
+                    .child(self.chips("ed-size", &[("1080p", (1920u32, 1080u32)), ("4K", (3840, 2160)), ("Vertical", (1080, 1920)), ("Square", (1080, 1080))], seq_size, |this, v, cx| this.change(|s| s.size = v, cx), cx))
+                    .child(label("FRAME RATE"))
+                    .child(self.chips("ed-fps", &[("24", 24u32), ("30", 30), ("60", 60)], fps, |this, v, cx| this.change(|s| s.fps = v, cx), cx))
+                    .child(div().pt_2().text_size(px(12.)).text_color(tok::text_tertiary()).child("Select a clip to change it."));
+            }
+        }
+        div().id("ed-inspector").w(px(290.)).flex_none().border_l_1().border_color(tok::border()).bg(tok::bg_panel()).overflow_y_scroll().child(body)
+    }
+
+    fn tools(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .h(px(34.))
+            .border_t_1()
+            .border_b_1()
+            .border_color(tok::border())
+            .child(ui::icon_button("ed-split", "scissors", tok::text_secondary()).tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Split at the playhead").build(w, cx)).on_click(cx.listener(|this, _, _, cx| this.split(cx))))
+            .child(ui::icon_button("ed-del", "trash", tok::text_secondary()).tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Delete the clip").build(w, cx)).on_click(cx.listener(|this, _, _, cx| this.delete_selected(cx))))
+            .child(div().flex_1())
+            .when_some(self.note.clone(), |d, n| d.child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(n)))
+            .child(div().flex_1())
+            .child(ui::icon_button("ed-zout", "zoom-out", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| {
+                this.zoom = (this.zoom / 1.5).max(0.05);
+                cx.notify();
+            })))
+            .child(div().w(px(46.)).text_center().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!("{:.0}%", self.zoom * 100.0)))
+            .child(ui::icon_button("ed-zin", "zoom-in", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| {
+                this.zoom = (this.zoom * 1.5).min(40.0);
+                cx.notify();
+            })))
+    }
+
+    fn timeline(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let pps = self.pps();
+        let bounds = self.timeline_bounds.clone();
+        let Some(seq) = self.seq().cloned() else {
+            return div().h(px(200.)).flex().items_center().justify_center().text_color(tok::text_tertiary()).child("Make a project to start editing.").into_any_element();
+        };
+        // the ruler: a label every ~90 px
+        let step_s = [0.5f32, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0].into_iter().find(|s| s * pps >= 90.0).unwrap_or(600.0);
+        let mut ruler = div().relative().h(px(RULER_H)).flex_1().overflow_hidden();
+        let first = (self.scroll_ms / 1000.0 / step_s).floor() as i64;
+        for k in first..first + 60 {
+            let s = k as f32 * step_s;
+            let x = self.x_of((s * 1000.0) as u64);
+            if x > 4000.0 {
+                break;
+            }
+            ruler = ruler.child(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top_0()
+                    .h_full()
+                    .border_l_1()
+                    .border_color(tok::border())
+                    .pl_1()
+                    .text_size(px(10.))
+                    .text_color(tok::text_tertiary())
+                    .child(short((s * 1000.0) as u64)),
+            );
+        }
+        let mut rows = div().flex().flex_col();
+        let mut video_n = seq.tracks.iter().filter(|t| t.kind == TrackKind::Video).count();
+        let mut audio_n = 0;
+        for (ti, track) in seq.tracks.iter().enumerate() {
+            let h = if track.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H };
+            let name = if track.kind == TrackKind::Video {
+                let n = video_n;
+                video_n -= 1;
+                format!("V{n}")
+            } else {
+                audio_n += 1;
+                format!("A{audio_n}")
+            };
+            let toggle = |icon: &'static str, on: bool, id: usize, f: fn(&mut lightair_render::sequence::Track), cx: &mut Context<Self>| {
+                ui::icon_button(("ed-tr", ti * 4 + id), icon, if on { tok::text_tertiary() } else { tok::text_secondary() })
+                    .on_click(cx.listener(move |this, _, _, cx| this.change(|s| if let Some(t) = s.tracks.get_mut(ti) { f(t) }, cx)))
+            };
+            let header = div()
+                .flex()
+                .items_center()
+                .gap_0p5()
+                .w(px(HEADER_W))
+                .flex_none()
+                .h_full()
+                .px_1()
+                .border_r_1()
+                .border_color(tok::border())
+                .child(div().w(px(24.)).text_size(px(11.)).text_color(tok::text_tertiary()).child(name))
+                .when(track.kind == TrackKind::Video, |d| d.child(toggle(if track.hidden { "eye-off" } else { "eye" }, track.hidden, 0, |t| t.hidden = !t.hidden, cx)))
+                .child(toggle(if track.muted { "volume-x" } else { "volume-2" }, track.muted, 1, |t| t.muted = !t.muted, cx))
+                .child(toggle(if track.locked { "lock" } else { "lock-open" }, track.locked, 2, |t| t.locked = !t.locked, cx));
+            let mut lane = div().relative().flex_1().h_full().overflow_hidden();
+            for c in &track.clips {
+                let m = seq.media(c.media);
+                let left = self.x_of(c.start_ms);
+                let width = (c.len_ms() as f32 / 1000.0 * pps).max(4.0);
+                if left > 4000.0 || left + width < 0.0 {
+                    continue;
+                }
+                let selected = self.selected == Some(c.id);
+                let colour = match (track.kind, m.and_then(|m| m.take.as_ref())) {
+                    (TrackKind::Audio, _) => rgb(0x1E4E8C),
+                    (_, Some(_)) => rgb(0x6D28D9),
+                    _ => rgb(0x0E7C86),
+                };
+                let (cid, start, locked) = (c.id, c.start_ms, track.locked);
+                lane = lane.child(
+                    div()
+                        .id(SharedString::from(format!("ed-clip-{}", c.id)))
+                        .absolute()
+                        .top(px(3.))
+                        .bottom(px(3.))
+                        .left(px(left))
+                        .w(px(width))
+                        .rounded(px(5.))
+                        .bg(colour)
+                        .border_2()
+                        .border_color(if selected { rgb(0xFFFFFF).into() } else { tok::bg_app() })
+                        .overflow_hidden()
+                        .px_1p5()
+                        .py_0p5()
+                        .text_size(px(11.))
+                        .text_color(rgb(0xFFFFFF))
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .whitespace_nowrap()
+                                .child(m.map_or("Missing".into(), |m| m.name.clone()))
+                                .child(div().opacity(0.7).child(short(c.len_ms())))
+                                .when((c.speed - 1.0).abs() > 0.01, |d| d.child(div().opacity(0.8).child(format!("{}×", c.speed))))
+                                .when(c.muted, |d| d.child(ui::icon("volume-x").size(px(11.)))),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.selected = Some(cid);
+                                if locked {
+                                    cx.notify();
+                                    return;
+                                }
+                                let Some(t) = this.time_at(ev.position.x) else { return };
+                                let Some(b) = *this.timeline_bounds.borrow() else { return };
+                                let x = f32::from(ev.position.x - b.origin.x) - HEADER_W;
+                                let left = this.x_of(start);
+                                let width = this.seq().and_then(|s| s.clip(cid)).map_or(0.0, |c| c.len_ms() as f32 / 1000.0 * this.pps());
+                                let d = if x - left < EDGE {
+                                    Drag::TrimStart(cid)
+                                } else if left + width - x < EDGE {
+                                    Drag::TrimEnd(cid)
+                                } else {
+                                    Drag::Move { clip: cid, grab_ms: t as i64 - start as i64 }
+                                };
+                                this.begin_drag(d);
+                                cx.notify();
+                            }),
+                        ),
+                );
+            }
+            rows = rows.child(
+                div()
+                    .flex()
+                    .h(px(h))
+                    .border_b_1()
+                    .border_color(tok::border())
+                    .when(track.kind == TrackKind::Audio, |d| d.bg(tok::bg_panel()))
+                    .child(header)
+                    .child(lane),
+            );
+        }
+        let head = HEADER_W + self.x_of(self.playhead);
+        div()
+            .id("ed-timeline")
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(180.))
+            .overflow_hidden()
+            .bg(tok::bg_app())
+            .child(canvas(move |b, _, _| *bounds.borrow_mut() = Some(b), |_, _, _, _| {}).absolute().size_full())
+            .child(div().flex().h(px(RULER_H)).border_b_1().border_color(tok::border()).child(div().w(px(HEADER_W)).flex_none()).child(ruler))
+            .child(rows)
+            .when(head >= HEADER_W, |d| d.child(div().absolute().top_0().bottom_0().left(px(head)).w(px(2.)).bg(rgb(0xFFFFFF))))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                    let Some(t) = this.time_at(ev.position.x) else { return };
+                    this.selected = None;
+                    this.seek(t.min(this.seq().map_or(0, |s| s.duration_ms())), cx);
+                    this.begin_drag(Drag::Scrub);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if this.drag.is_some() {
+                    this.drag_to(ev.position, cx);
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.drag_end(cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.drag_end(cx)))
+            .on_scroll(cx.listener(|this, ev: &ScrollEvent, w, cx| {
+                let d = ev.delta.pixel_delta(px(20.));
+                if ev.modifiers.platform || ev.modifiers.control {
+                    // zoom around the pointer
+                    let k = (1.0 - f32::from(d.y) * 0.01).clamp(0.5, 2.0);
+                    this.zoom = (this.zoom * k).clamp(0.05, 40.0);
+                } else {
+                    let dx = if f32::from(d.x).abs() > f32::from(d.y).abs() { f32::from(d.x) } else { f32::from(d.y) };
+                    this.scroll_ms = (this.scroll_ms - dx / this.pps() * 1000.0).max(0.0);
+                }
+                let _ = w;
+                cx.notify();
+            }))
+            .on_drop(cx.listener(|this, m: &DraggedMedia, w, cx| {
+                let pos = w.mouse_position();
+                let t = this.time_at(pos.x).map(|t| this.snap(t as i64, None));
+                let track = this.track_at(pos.y);
+                this.add(m.source.clone(), t, track, cx);
+            }))
+            .into_any_element()
+    }
+}
+
+impl Render for Editor {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // the media panel lists the workspace's Library as it is now
+        let v = self.studio.read(cx).library_version;
+        if self.library_seen != Some(v) {
+            self.library_seen = Some(v);
+            self.library = self.workspace.as_ref().map(|ws| Index::load(ws).newest_first().into_iter().cloned().collect()).unwrap_or_default();
+        }
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(self.top_bar(cx))
+            .child(
+                div()
+                    .flex()
+                    .h(relative(0.58))
+                    .min_h_0()
+                    .child(self.media_panel(cx))
+                    .child(self.player(cx))
+                    .child(self.inspector(cx)),
+            )
+            .child(self.tools(cx))
+            .child(div().id("ed-timeline-wrap").flex().flex_col().flex_1().min_h_0().overflow_y_scroll().child(self.timeline(cx)))
     }
 }
