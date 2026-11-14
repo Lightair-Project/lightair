@@ -328,6 +328,26 @@ impl Library {
         .detach();
     }
 
+    /// A take, with its edit, copied into a folder the user picks, to give or keep.
+    fn export_package(&mut self, project: PathBuf, id: Id, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.indexes.get(&project).and_then(|i| i.get(id)).cloned() else { return };
+        let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Put the package here".into()) });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(folder) = paths.into_iter().next() else { return };
+            let edit = project.join("recordings").join("edits").join(format!("{id}.json"));
+            let result = recordings::export_package(&item, Some(&edit), &folder);
+            let _ = this.update(cx, |this, cx| {
+                this.note = Some(match result {
+                    Ok(p) => format!("Saved {}", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).into(),
+                    Err(e) => format!("Couldn't save the package: {e}").into(),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn add_existing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.selected.clone().or_else(|| self.studio.read(cx).project_dir()) else { return };
         let picked = cx.prompt_for_paths(PathPromptOptions {
@@ -566,7 +586,7 @@ impl Library {
             });
 
         let menu = {
-            let (me, dir, projects, title) = (cx.entity().downgrade(), dir.clone(), self.projects.clone(), item.title.clone());
+            let (me, dir, projects, title, kind) = (cx.entity().downgrade(), dir.clone(), self.projects.clone(), item.title.clone(), item.kind);
             move |mut menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>| {
                 let act = |f: fn(&mut Library, PathBuf, Id, &mut Window, &mut Context<Library>)| {
                     let (me, dir) = (me.clone(), dir.clone());
@@ -604,6 +624,9 @@ impl Library {
                         }
                         sub
                     });
+                }
+                if kind == Kind::Take {
+                    menu = menu.item(PopupMenuItem::new("Export package…").icon(ui::icon("package")).on_click(act(|t, d, i, w, cx| t.export_package(d, i, w, cx))));
                 }
                 if missing {
                     menu = menu.item(PopupMenuItem::new("Locate…").icon(ui::icon("search")).on_click(act(|t, d, _, w, cx| t.locate(d, w, cx))));

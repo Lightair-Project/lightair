@@ -99,6 +99,8 @@ fn main() {
         selftest::run(&engine, &what);
         return;
     }
+    // iPhones and iPads by USB, among the cameras
+    lightair_platform::devices::allow_ios_screens();
     let preview = Preview::attach();
 
     gpui_kit::application().with_assets(assets::Assets).run(move |cx: &mut App| {
