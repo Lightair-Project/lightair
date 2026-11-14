@@ -2,10 +2,11 @@
 
 Status: research done, nothing built yet. Goal: every **offline** Screen Studio capability exists
 in Lightair, done the Lightair way (live-first, multi-format, on-device), with an original design
-and none of Screen Studio's assets, wording or branding. Lightair becomes three places: the
+and none of Screen Studio's assets, wording or branding, **on macOS and Windows alike**
+(docs/plans/windows.md): every part below names how it works on each. Lightair becomes three places: the
 **Library** (every recording, by project), **Live** (today's studio) and the **Editor**.
 
-Scope: everything runs on the Mac. Screen Studio's online features are left out: shareable links,
+Scope: everything runs on the computer (Mac or PC). Screen Studio's online features are left out: shareable links,
 comments and view counts, cloud transcription, cloud voices, online background search, project
 sharing through links, team accounts.
 
@@ -68,8 +69,8 @@ Every recording Lightair made, sorted by project.
 - **Filters and search** by kind, format (wide, vertical…), date and title. Markers are listed
   inside an item and searchable.
 - **Actions:**
-  - **Open in Editor**, **Play** (Quick Look, full-screen preview).
-  - **Reveal in Finder**, **Rename**, **Duplicate**.
+  - **Open in Editor**, **Play** (Lightair's own player; Quick Look too on macOS).
+  - **Reveal** (Finder or Explorer), **Rename**, **Duplicate**.
   - **Move to project** (an older recording made under the wrong project).
   - **Move to Trash**: recoverable from the Trash, and Lightair asks first. Nothing is ever
     deleted outright.
@@ -112,7 +113,7 @@ Phase: see section 5.
 
 | Screen Studio | What it does | Lightair | Path | How | Phase |
 |---|---|---|---|---|---|
-| Display, window or area | Pick what to record | Has (display/window/app capture via ScreenCaptureKit; crop) | Both | A **Studio take** records the chosen capture layer raw | 2 |
+| Display, window or area | Pick what to record | Has on macOS (ScreenCaptureKit; crop); Windows through libobs's display, window and game capture (docs/plans/windows.md) | Both | A **Studio take** records the chosen capture layer raw | 2 |
 | Webcam, mic, system audio | Recorded with the screen | Has (camera layers, audio engine, desktop/app audio) | Both | Take keeps each as its own track (multitrack stems already exist) | 2 |
 | Cursor recorded as data | Screen captured without cursor; cursor path, clicks, cursor shapes logged | New | Both | **Input recorder** (section 4.1); capture layer with the cursor off | 2 |
 | Pause and resume | Stop mid-take, continue | Has (recording pause) | Both | Take pauses all tracks and the input log together | 2 |
@@ -121,10 +122,11 @@ Phase: see section 5.
 | Crash recovery (saved every 2 s) | A take survives power loss | Part (libobs recording) | Both | Fragmented MP4/MOV for every track; input log flushed every second; recover on launch | 2 |
 | Recording flag (⌘⌥⌃F) | Marks moments on the timeline | Has (markers) | Both | Markers land on the take's timeline | 2 |
 | Speaker notes | Talking points on screen, not recorded | New | Both | Floating notes window excluded from capture (same exclusion as Lightair's own windows) | 3 |
-| Resize recorded window | Set a window to an exact size in one click | New | Live | Accessibility API resize (asks the user for Accessibility access; never changed for them) | 4 |
-| Hide desktop icons | Clean desktop while recording | New | Live | Exclude Finder's desktop windows from the capture filter (no system setting changed) | 3 |
+| Resize recorded window | Set a window to an exact size in one click | New | Live | macOS: Accessibility API (the user grants access; never changed for them). Windows: `SetWindowPos`, no permission | 4 |
+| Hide desktop icons | Clean desktop while recording | New | Live | macOS: leave Finder's desktop windows out of the capture (no setting changed). Windows: capture can't leave them out, so Lightair offers to hide the desktop icons for the take and puts them back after, asking first | 3 |
 | Hide Dock icon / recording widget | Controls not in the recording | Part (Lightair excludes its own windows) | Live | Small take widget, excluded from capture | 2 |
-| iPhone/iPad over USB | Record a device's screen with a cable | New | Both | CoreMediaIO "screen capture devices" exposed as a camera input (libobs's capture supports this); device bezels drawn by Lightair (our own artwork, no Apple marketing frames) | 4 |
+| iPhone/iPad over USB | Record a device's screen with a cable | New | Both | **macOS only**: Apple exposes iOS screens over USB only to Macs (CoreMediaIO "screen capture devices", which libobs's camera capture supports). Device bezels drawn by Lightair (our own artwork) | 4 |
+| Android over USB (Lightair's addition) | Record an Android phone's screen with a cable | New | Both | macOS and Windows: the phone's screen over USB debugging (ADB), the approach of the open-source scrcpy (Apache 2.0); our own bezels | 4 |
 | iPhone Mirroring | Record the mirrored iPhone window | Has (window capture) | Both | Preset that picks the iPhone Mirroring window | 4 |
 | Import any video | Edit an existing video like a take | New | Edit | Take from a file: video track, no input log (manual zooms only) | 3 |
 | Multi-clip recordings (roadmap) | Several takes in one project | New | Edit | Editor timeline holds several takes | 5 |
@@ -140,7 +142,7 @@ Phase: see section 5.
 | Classic and Loupe zoom (4.0 "Glass Loupe") | Whole-frame zoom, or a magnifier over the area | New | Both | Two zoom kinds: frame zoom (crop/scale of the capture layer) and loupe (circle or rounded magnifier with lens edge, rest of frame visible) | 3 |
 | Smart framing | Zooms avoid the webcam covering the cursor | New | Both | Zoom target solved against the camera's rectangle in each format | 4 |
 | Screen animation: Focused / Smooth | Spring settings for screen movement | New | Both | Spring presets on the zoom engine | 3 |
-| Sharper zoomed text (on-device AI) | Super-resolution when zoomed in | New | Edit | First: render from the full-resolution capture (recorded at native Retina size). Later: MetalFX upscaling (Apple's), no custom model | 5 |
+| Sharper zoomed text (on-device AI) | Super-resolution when zoomed in | New | Edit | First: render from the full-resolution capture (recorded at native Retina size). Later: FSR 1 upscaling (AMD's, MIT-licensed shader) in the renderer, the same on both platforms, no custom model | 5 |
 | Always keep zoomed in (vertical) | In a narrow format, the frame follows the cursor | Part (formats, auto-reframe) | Both | Per-format follow-crop: in a vertical canvas the screen layer is cropped and follows the cursor | 3 |
 
 ### Cursor
@@ -149,7 +151,7 @@ Phase: see section 5.
 |---|---|---|---|---|---|
 | Smooth cursor | Shaky paths become glides | New | Both | Critically damped spring on the logged path; live adds ~1 frame of latency | 2 |
 | Cursor size and style after recording | Bigger, different look | New | Both | Lightair draws the cursor: system shapes at high resolution, plus our own styles (touch dot, outline, filled) | 2 |
-| Sharp system cursors | Hi-res replacements as cursors grow | New | Both | Our own vector cursor set covering macOS's standard shapes | 2 |
+| Sharp system cursors | Hi-res replacements as cursors grow | New | Both | Our own vector cursor set covering macOS's and Windows's standard shapes (each platform's look) | 2 |
 | Hide cursor / hide when idle | Remove it, or fade when resting | New | Both | Draw flags with idle timeout | 2 |
 | Hide cursor in sections | Per timeline range | New | Edit | Range flag | 3 |
 | Loop cursor position | Returns to start at the end | New | Edit | End-of-clip path blend | 3 |
@@ -169,12 +171,12 @@ Phase: see section 5.
 | Position, size, roundness, mirror | Camera bubble | Has (layout, shape, flip) | Both | Camera styles as layer presets | 2 |
 | Smaller during zooms | Camera shrinks when the screen zooms | New | Both | Camera size follows the zoom engine's state | 3 |
 | Layouts: Fullscreen camera, Split screen, Camera overlay, Screen only, Camera cutout | Switch within one recording, transitions animate | Has (scenes, Move transition, background removal) | Both | Live: layout scenes with Move transitions. Edit: a layouts track with the same five layouts, animated | 2 (live) / 3 (edit) |
-| Camera cutout | Background removed on the Mac | Has (Camera Studio background removal, Apple Vision) | Both | Cutout layout uses it | 2 |
+| Camera cutout | Background removed on the computer | Has on macOS (Camera Studio background removal, Apple Vision); Windows through the module's ONNX backend with DirectML | Both | Cutout layout uses it | 2 |
 | Face tracking | Keeps the face centred | Part (face tracker in Camera Studio; auto-frame designed) | Both | Build Camera Studio's auto-frame | 3 |
 | Hide during silence | Camera steps aside when you stop talking | New | Both | Voice activity from the audio engine drives the layout (with hold and fade) | 3 |
 | Camera looks, LUTs, sharpen | Colour grading and detail | Has (grades, LUT filter); sharpen New | Both | Add a sharpen effect (edge-aware) to the effect catalog | 3 |
 | Camera crop | Keep part of the camera picture | Has (crop) | Both | No work | — |
-| Portrait / Studio Light / backgrounds (Apple's) | macOS camera effects | Has (system camera effects panel) | Live | No work | — |
+| Portrait / Studio Light / backgrounds (Apple's) | The OS's own camera effects | Has on macOS (system camera effects panel); Windows Studio Effects where supported (docs/plans/windows.md) | Live | No work here | — |
 
 ### Audio
 
@@ -201,14 +203,14 @@ Phase: see section 5.
 
 | Screen Studio | What it does | Lightair | Path | How | Phase |
 |---|---|---|---|---|---|
-| Background: wallpaper, gradient, colour, image | Behind the recording | Part (colour/image layers) | Both | "Backdrop" for the screen layer: colour, gradient, image, the Mac's own wallpapers, any image in Assets (Screen Studio's online image search is left out) | 2 |
+| Background: wallpaper, gradient, colour, image | Behind the recording | Part (colour/image layers) | Both | "Backdrop" for the screen layer: colour, gradient, image, the computer's own wallpapers (macOS or Windows), any image in Assets (Screen Studio's online image search is left out) | 2 |
 | Padding, rounded corners, inset, shadow | Recording floats on the backdrop | Part (layout shape for corners) | Both | Layer style: padding, corner radius, inset, drop shadow (angle, distance, softness) | 2 |
 | Any aspect ratio (Wide 16:9, Vertical 9:16, Square 1:1, Classic 4:3, Tall 3:4) | Re-target after recording | Has (formats, per-format layouts, auto-reframe) | Both | Editor renders every format of the project; zooms re-aim per format | 3 |
 | Reel mode (Instagram/TikTok overlay) | Check nothing hides under platform UI | Has (safe areas) | Both | No work | — |
-| Captions (on-device Whisper or Apple speech; styles, animations, fonts, colours, position) | Readable captions | Part (captions widget designed, not built) | Both | Shared speech engine (4.4): live captions layer and editor caption track, styles in our design system | 4 |
+| Captions (on-device Whisper, or Apple's speech recognition on macOS; styles, animations, fonts, colours, position) | Readable captions | Part (captions widget designed, not built) | Both | Shared speech engine (4.4): live captions layer and editor caption track, styles in our design system | 4 |
 | Show shortcuts (keycap overlay; size; single keys; per-shortcut disable) | Keys pressed appear on screen | New | Both | Key log (4.1) to a keycap layer; live and edited | 3 |
 | Masks and highlight | Cover a region, or dim all but one | Part (pixelate, blur effects) | Both | Mask/highlight regions on a timeline; live as a mask layer | 3 |
-| Hide sensitive data and faces (4.1) | Detects emails, phones, cards, keys and faces, covers them | New | Both | Vision text recognition plus pattern matching, Vision face detection; edit: every frame; live: sampled with tracking | 5 |
+| Hide sensitive data and faces (4.1) | Detects emails, phones, cards, keys and faces, covers them | New | Both | Text recognition plus pattern matching, and face detection: Apple Vision on macOS, Windows' on-device OCR (Windows.Media.Ocr) and the module's ONNX face model on Windows; edit: every frame; live: sampled with tracking | 5 |
 | Animations: motion blur, cursor and screen springs | Feel of motion | New | Both | Section 3.3 | 3 |
 | Presets: whole look, shared with a team | Consistency | Part (looks, templates, prefabs, scene assets) | Both | "Studio preset" file (backdrop, styles, cursor, zoom, captions) in Assets | 3 |
 
@@ -216,13 +218,13 @@ Phase: see section 5.
 
 | Screen Studio | What it does | Lightair | Path | How | Phase |
 |---|---|---|---|---|---|
-| MP4 720p/1080p/4K at up to 60 fps | Export | Has for live recording | Edit | Offline render, VideoToolbox H.264/HEVC | 3 |
+| MP4 720p/1080p/4K at up to 60 fps | Export | Has for live recording | Edit | Offline render; hardware H.264/HEVC (VideoToolbox on macOS; NVENC, AMF or QSV on Windows) | 3 |
 | GIF up to 1080p, looping | Small loops for docs | New | Edit | GIF encoder with good palettes; check licences (gifski and libimagequant are AGPL/GPL: don't link them unless the licence fits) | 4 |
-| ProRes 422 LT/422/HQ/4444 (4.1) | For Final Cut, Resolve, Premiere | Part (libobs ProRes on Apple) | Both | ProRes in the recording formats and in export | 3 |
+| ProRes 422 LT/422/HQ/4444 (4.1) | For Final Cut, Resolve, Premiere | Part (libobs ProRes on macOS) | Both | ProRes in the recording formats and in export: hardware on Apple silicon, FFmpeg's software encoder on Windows | 3 |
 | Copy video to clipboard | Paste into Slack or a doc | New | Edit | Pasteboard file URL after export | 3 |
 | Extract raw tracks | Original screen, camera, mic files | New | Edit | A take *is* raw files: "Reveal raw files" | 2 |
 | Export transcript (.srt matching cuts) | Subtitles file | New | Edit | From the caption track after cuts | 4 |
-| Hardware encoding, faster exports | Media engine | Has (VideoToolbox) | Edit | Render pipeline in section 4.2 | 3 |
+| Hardware encoding, faster exports | Media engine | Has (VideoToolbox; NVENC/AMF/QSV on Windows) | Edit | Render pipeline in section 4.2 | 3 |
 | Preview quality modes (Quality, Performance, Power saving) | Editor playback | New | Edit | Editor preview settings | 3 |
 | Share whole project | Teammate keeps editing | New | Edit | Offline: **Export package**, a take with its edits as one file (AirDrop, a drive); **Import package** adds it to a project's Library | 4 |
 | Quick share after recording | Save, copy, edit right away | New | Both | Post-recording card: Open in Editor, Copy, Reveal, Show in Library | 3 |
@@ -252,11 +254,17 @@ Logs, at up to 120 Hz while a take or live cursor effects run:
   as text. Typing-detection keeps only timing.
 - **focused app and window frame**, for auto-zoom targets and "resize recorded window".
 
-Permissions: mouse position needs none. Clicks and keys need **Input Monitoring** (a listen-only
-event tap). Lightair asks the user and explains why, and never changes privacy settings itself.
-Without the permission, Studio takes still work: no clicks means no auto-zoom (manual zooms only),
-and no keys means no keycaps. The log is a compact binary file next to the take's media, flushed
-every second for crash safety.
+How, per platform (in `lightair-platform`'s `input` module):
+
+- **macOS:** pointer position needs no permission. Clicks and keys need **Input Monitoring** (a
+  listen-only event tap). Lightair asks the user and explains why, and never changes privacy
+  settings itself. Without the permission, Studio takes still work: no clicks means no auto-zoom
+  (manual zooms only), and no keys means no keycaps. Cursor shape from `NSCursor`.
+- **Windows:** Raw Input with background delivery for the pointer, clicks and keys (no permission
+  or hook needed). Cursor shape and hot spot from `GetCursorInfo`, mapped to Lightair's cursor set.
+
+The log is a compact binary file next to the take's media, the same format on both, flushed every
+second for crash safety.
 
 ### 4.2 Studio takes and the Editor
 
@@ -264,8 +272,8 @@ A **take** is a folder:
 
 ```text
 Take 2026-11-14 10.32.lightair-take/
-  screen.mov        capture layer, cursor off, native resolution, fragmented (crash-safe)
-  camera.mov        each camera layer in the scene
+  screen.mp4        capture layer, cursor off, native resolution, fragmented (crash-safe)
+  camera.mp4        each camera layer in the scene
   mic.wav, system.wav …   stems (the multitrack recorder already writes these)
   input.bin         section 4.1
   take.json         timing, devices, formats, markers
@@ -289,10 +297,11 @@ Everything is a document command, so undo, the command palette and presets work 
 deterministically. The editor needs both, so the plan adds a small offline renderer, a new crate
 `lightair-render`:
 
-- **Decode:** AVFoundation (`AVAssetReader`).
-- **Composite:** Metal (through `wgpu`, or Metal directly), with Lightair's effect shaders ported
-  to its shading language.
-- **Encode:** VideoToolbox (`AVAssetWriter`).
+- **Decode and encode:** FFmpeg's libraries (already part of libobs), with hardware decoding and
+  encoding on each platform: VideoToolbox on macOS; D3D11VA with NVENC, AMF or QSV on Windows.
+  One code path for both.
+- **Composite:** `wgpu` (Metal on macOS, Direct3D 12 on Windows), with Lightair's effect shaders
+  written in WGSL.
 
 The same renderer draws the editor's scrubbing preview.
 
@@ -324,17 +333,17 @@ plus a cursor overlay drawn by a new libobs filter. Edited, it runs in `lightair
 
 One on-device speech-to-text service for live captions (designed as CH-10) and the editor:
 
-- **Engine:** Apple's speech recognition (SpeechAnalyzer, macOS 26+) where available, otherwise a
-  bundled Whisper model (Base/Small/Medium, as Screen Studio offers). Check the model licences;
-  whisper.cpp and the Whisper weights are MIT.
+- **Engine:** a bundled Whisper model (Base/Small/Medium, as Screen Studio offers) on both
+  platforms, with Apple's speech recognition (SpeechAnalyzer, macOS 26+) as a faster option on
+  Macs. whisper.cpp and the Whisper weights are MIT-licensed.
 - **Output:** word timings, which drive edit-by-transcript, filler and pause removal, caption
   timing and .srt export.
 
 ### 4.5 Offline
 
-Everything in this plan runs on the Mac, with no account and no network: recording, input data,
+Everything in this plan runs on the computer, with no account and no network: recording, input data,
 rendering, transcription, voice cleanup, masks and detection, export. Nothing in a
-recording leaves the Mac unless the user copies or moves the file themselves.
+recording leaves the computer unless the user copies or moves the file themselves.
 
 ## 5. Phases
 
@@ -344,7 +353,7 @@ Each phase ships with tests and screenshots, like the audio plan.
    - the Library / Live / Editor switcher (the Editor shows "coming soon" until phase 3);
    - recordings index in each project;
    - every recording, clip and multitrack file registers itself;
-   - Library view: projects, cards with thumbnails, filters, search, markers, Quick Look, Reveal,
+   - Library view: projects, cards with thumbnails, filters, search, markers, Play, Reveal,
      Rename, Duplicate, Move to project, Move to Trash (asked first), storage;
    - Add existing recordings; missing files with Locate.
 
@@ -373,7 +382,8 @@ Each phase ships with tests and screenshots, like the audio plan.
    - editing ordinary recordings and imported videos.
 
    *Tests:* render is deterministic (the same edit gives the same frames), auto-zoom segments from
-   synthetic click logs, export at 4K60 runs faster than real time on Apple silicon.
+   synthetic click logs, export at 4K60 runs faster than real time on Apple silicon and on a
+   mid-range Windows GPU (NVENC/AMF/QSV).
 4. **Words and devices:**
    - on-device speech engine, captions (live and edited, styles), edit by transcript, filler and
      pause removal, .srt export;
@@ -382,7 +392,7 @@ Each phase ships with tests and screenshots, like the audio plan.
    - speaker notes.
 5. **Extras (all on-device):**
    - sensitive-data and face detection;
-   - super-resolution zoom (MetalFX);
+   - super-resolution zoom (FSR 1, both platforms);
    - multi-take projects.
 
 ## 6. Where Lightair goes further
@@ -401,8 +411,9 @@ These follow from Lightair being a live, multi-format studio rather than a recor
 
 Settled 14 November 2026 (the recommendations, accepted):
 
-- **Renderer:** a dedicated offline renderer, `lightair-render`. It uses `wgpu` on Metal, decodes
-  with AVFoundation and encodes with VideoToolbox. libobs stays the live compositor. Shared
+- **Renderer:** a dedicated offline renderer, `lightair-render`: `wgpu` (Metal on macOS, Direct3D
+  12 on Windows), FFmpeg decoding and encoding with each platform's hardware codecs. libobs stays
+  the live compositor. Shared
   effects exist in both, kept identical by golden-frame tests (section 4.2).
 - **Editor scope:** a focused screen-recording editor (Screen Studio's scope): one Library item
   at a time, its tracks, zooms, layouts, cuts, captions and masks. Not a general multi-clip video
@@ -411,13 +422,16 @@ Settled 14 November 2026 (the recommendations, accepted):
   `recordings/index.json` points at them, with **Locate…** for moved files. Nothing is moved into
   project packages.
 - **Switcher shortcuts:** ⌃1 Library, ⌃2 Live, ⌃3 Editor. ⌘1–⌘9 stay with scenes.
-- **Input Monitoring:** not required. The first Studio take explains what it adds (auto-zoom,
-  click effects, keycaps) and lets the user grant it in System Settings. Lightair opens the right
-  pane and never changes the setting itself. Without it, takes still record the pointer path,
-  which needs no permission, so the drawn pointer, smoothing and manual zooms work; auto-zoom,
-  click effects and keycaps need the permission.
+- **Input Monitoring (macOS):** not required. The first Studio take explains what it adds
+  (auto-zoom, click effects, keycaps) and lets the user grant it in System Settings. Lightair opens
+  the right pane and never changes the setting itself. Without it, takes still record the pointer
+  path, which needs no permission, so the drawn pointer, smoothing and manual zooms work; auto-zoom,
+  click effects and keycaps need the permission. Windows needs no permission for any of it.
+- **Both platforms:** every part of this plan ships on macOS and Windows together, through
+  `lightair-platform` (docs/plans/windows.md). The one exception is iPhone/iPad over USB (macOS
+  only, Apple's limit); Android over USB works on both.
 - **Assets:** Lightair makes its own pointer set, device bezels, backdrop gradients and caption
-  styles. Wallpapers come from the user's Mac. Nothing is copied from Screen Studio or Apple
+  styles. Wallpapers come from the user's own computer. Nothing is copied from Screen Studio or Apple
   marketing material.
 
 ## Sources
