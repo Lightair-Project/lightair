@@ -31,6 +31,9 @@ pub struct Reconciler {
     inputs: HashMap<Id, Source>,
     /// Input effect chains (Camera Studio, colour correction, …).
     input_effects: HashMap<Id, Chain>,
+    /// Screen captures zoomed and given a drawn pointer by their scene's `ScreenLook` (the
+    /// pointer filter, last on the input, and the settings it was given).
+    screen_looks: HashMap<Id, (Source, serde_json::Value)>,
     /// Canvases for additional formats. The primary format uses libobs's main canvas.
     canvases: HashMap<Id, Canvas>,
     /// (scene, format) → libobs scene.
@@ -139,7 +142,8 @@ impl Reconciler {
                         recreated = true;
                     } else if let Some(src) = self.inputs.get(&after.id) {
                         if before.settings != after.settings || draws_pointer(before) != draws_pointer(after) {
-                            src.update(&data_from_json(&input_settings(after)));
+                            let drawn = self.screen_looks.get(&after.id).is_some_and(|(_, s)| s["draw"] == true);
+                            src.update(&data_from_json(&input_settings(after, drawn)));
                             if after.kind == TIMER_KIND {
                                 self.timers.configure(after.id, &after.settings);
                             }
@@ -208,6 +212,80 @@ impl Reconciler {
         });
         if audio_changed {
             self.sync_audio(project);
+        }
+        let screens_changed = patches.iter().any(|p| {
+            matches!(
+                p,
+                Patch::SceneAdded(_)
+                    | Patch::SceneChanged { .. }
+                    | Patch::SceneRemoved(_)
+                    | Patch::ProgramChanged(_)
+                    | Patch::InputAdded(_)
+                    | Patch::InputChanged { .. }
+                    | Patch::InputRemoved(_)
+            )
+        });
+        if screens_changed || recreated {
+            self.sync_screen_looks(project);
+        }
+    }
+
+    /// Puts each scene's `ScreenLook` on its screen captures: a pointer filter (zoom, drawn
+    /// pointer, clicks) last on each, the capture's own pointer hidden while Lightair draws one.
+    /// A capture in several scenes takes the look of the scene on air, else the first one's.
+    fn sync_screen_looks(&mut self, project: &Project) {
+        let mut want: HashMap<Id, lightair_core::ScreenLook> = HashMap::new();
+        let on_air = project.program.and_then(|p| project.scene(p));
+        for scene in on_air.into_iter().chain(project.scenes.iter()) {
+            let Some(look) = scene.screen else { continue };
+            for layer in &scene.layers {
+                let Some(input) = layer.input.and_then(|i| project.inputs.get(&i)) else { continue };
+                if is_screen(input) {
+                    want.entry(input.id).or_insert(look);
+                }
+            }
+        }
+        // gone: the filter off, the capture's own pointer back
+        let gone: Vec<Id> = self.screen_looks.keys().copied().filter(|id| !want.contains_key(id)).collect();
+        for id in gone {
+            if let (Some((filter, was)), Some(src)) = (self.screen_looks.remove(&id), self.inputs.get(&id)) {
+                unsafe { sys::obs_source_filter_remove(src.as_ptr(), filter.as_ptr()) };
+                if let Some(input) = project.inputs.get(&id).filter(|i| !draws_pointer(i))
+                    && was["draw"] == true
+                {
+                    src.update(&data_from_json(&input_settings(input, false)));
+                }
+            }
+        }
+        for (id, look) in want {
+            let (Some(src), Some(input)) = (self.inputs.get(&id), project.inputs.get(&id)) else { continue };
+            let settings = screen_look_settings(&look);
+            // drawn before (a new filter: as the capture was made, with its own pointer)
+            let drew = self.screen_looks.get(&id).map_or(draws_pointer(input), |(_, s)| s["draw"] == true || draws_pointer(input));
+            match self.screen_looks.get_mut(&id) {
+                Some((_, was)) if *was == settings => {}
+                Some((filter, was)) => {
+                    filter.update(&data_from_json(&settings));
+                    *was = settings;
+                }
+                None => {
+                    let Some(filter) = Source::create_private(crate::cursor::KIND, &format!("screen-look:{id}"), Some(&data_from_json(&settings))) else {
+                        tracing::warn!("could not create the screen look");
+                        continue;
+                    };
+                    unsafe { sys::obs_source_filter_add(src.as_ptr(), filter.as_ptr()) };
+                    self.screen_looks.insert(id, (filter, settings));
+                }
+            }
+            // the capture's own pointer, hidden while Lightair draws one (only when that changes:
+            // a capture given new settings may start again)
+            if drew != (look.cursor || draws_pointer(input)) {
+                src.update(&data_from_json(&input_settings(input, look.cursor)));
+            }
+            // last, so it zooms what the input's effects made
+            if let Some((filter, _)) = self.screen_looks.get(&id) {
+                unsafe { sys::obs_source_filter_set_order(src.as_ptr(), filter.as_ptr(), sys::OBS_ORDER_MOVE_BOTTOM) };
+            }
         }
     }
 
@@ -480,7 +558,7 @@ impl Reconciler {
             Some((id, _)) => id,
             None => input.kind.as_str(),
         };
-        let settings = data_from_json(&input_settings(input));
+        let settings = data_from_json(&input_settings(input, false));
         match Source::create(kind, &input.id.to_string(), Some(&settings)) {
             Some(src) => {
                 if timer {
@@ -504,6 +582,9 @@ impl Reconciler {
         }
         if let (Some(src), Some(mut chain)) = (self.inputs.get(&id), self.input_effects.remove(&id)) {
             unsafe { chain_remove(src.as_ptr(), &mut chain) };
+        }
+        if let (Some(src), Some((filter, _))) = (self.inputs.get(&id), self.screen_looks.remove(&id)) {
+            unsafe { sys::obs_source_filter_remove(src.as_ptr(), filter.as_ptr()) };
         }
         self.inputs.remove(&id);
     }
@@ -1589,10 +1670,12 @@ fn transition_source(
 }
 
 /// An input's settings as its libobs source takes them (portable kinds translated).
-fn input_settings(input: &lightair_core::Input) -> serde_json::Value {
+/// An input's libobs settings; `drawn`: its scene's look draws the pointer (so the capture's
+/// own goes, as with the drawn pointer effect).
+fn input_settings(input: &lightair_core::Input, drawn: bool) -> serde_json::Value {
     let mut s = crate::kinds::resolve(&input.kind, &input.settings).map_or_else(|| input.settings.clone(), |(_, s)| s);
     // Lightair draws the pointer: the capture's own goes (every platform's name for it)
-    if draws_pointer(input)
+    if (drawn || draws_pointer(input))
         && let Some(o) = s.as_object_mut()
     {
         for key in ["show_cursor", "capture_cursor", "cursor"] {
@@ -1600,6 +1683,32 @@ fn input_settings(input: &lightair_core::Input) -> serde_json::Value {
         }
     }
     s
+}
+
+/// Whether an input is a screen capture (a display, a window, an app or a game).
+fn is_screen(input: &lightair_core::Input) -> bool {
+    input.kind == lightair_core::kinds::SCREEN
+        || matches!(input.kind.as_str(), "screen_capture" | "display_capture" | "monitor_capture" | "window_capture" | "game_capture")
+}
+
+/// A `ScreenLook` as the pointer filter's settings.
+fn screen_look_settings(l: &lightair_core::ScreenLook) -> serde_json::Value {
+    serde_json::json!({
+        "draw": l.cursor,
+        "style": l.cursor_style,
+        "size": l.cursor_size,
+        "smoothing": l.cursor_smoothing,
+        "tilt": l.cursor_tilt,
+        "idle_s": l.cursor_idle_s,
+        // clicks are drawn with the pointer
+        "clicks": if l.cursor { l.clicks } else { 0 },
+        "arrow_only": false,
+        "color": l.cursor_color,
+        "zoom": l.zoom,
+        "zoom_scale": l.zoom_scale,
+        "zoom_hold_s": l.zoom_hold_s,
+        "zoom_motion": l.zoom_motion,
+    })
 }
 
 /// Whether an input has the drawn pointer on.
