@@ -204,12 +204,19 @@ pub fn spec(project: &Project) -> la::GraphSpec {
         .collect();
     strips.extend(project.audio.buses.iter().map(|b| la::Strip {
         name: b.name.clone(),
+        trim_db: b.trim_db,
         inserts: inserts(&b.effects),
         gain_db: fader(b.volume_db),
         pan: b.pan,
         mute: b.muted,
         dest: dest(b.route),
-        sends: sends(&b.sends),
+        sends: {
+            let mut s = sends(&b.sends);
+            if b.cue {
+                s.push(la::Send { mix: CUE, level_db: 0.0, pre_fader: false });
+            }
+            s
+        },
         ..la::Strip::bus(node(b.id))
     }));
     let master = &project.audio.master;
@@ -224,16 +231,30 @@ pub fn spec(project: &Project) -> la::GraphSpec {
             mute: m.muted,
             to_program: m.to_program,
             pan: m.pan,
+            trim_db: m.trim_db,
+            to_cue: m.cue,
             ..la::Mix::new(node(m.id))
         })
         .collect();
-    if project.tracks.iter().any(|t| t.cue) {
+    let a = &project.audio;
+    let cued = project.tracks.iter().any(|t| t.cue)
+        || a.buses.iter().any(|b| b.cue)
+        || a.mixes.iter().any(|m| m.cue)
+        || master.cue;
+    if cued {
         mixes.push(la::Mix { name: "Cue".into(), ..la::Mix::new(CUE) });
     }
     la::GraphSpec {
         strips,
         mixes,
-        program: la::Master { inserts: inserts(&master.effects), gain_db: fader(master.volume_db), mute: master.muted },
+        program: la::Master {
+            inserts: inserts(&master.effects),
+            gain_db: fader(master.volume_db),
+            mute: master.muted,
+            trim_db: master.trim_db,
+            to_cue: master.cue,
+        },
+        cue: cued.then_some(CUE),
     }
 }
 

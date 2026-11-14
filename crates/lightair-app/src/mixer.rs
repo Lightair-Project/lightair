@@ -1167,14 +1167,17 @@ impl MixerPanel {
             .gap_1p5()
             .h_full()
             .when_some(view.pan, |d, pan| d.child(self.rotary(i * 4, Knob::Pan(id), pan, "PAN", pan_text(pan), cx)))
-            .when_some(view.channel.as_ref().and_then(|ch| ch.trim_db), |d, t| {
+            .when_some(view.trim, |d, t| {
                 d.child(self.rotary(i * 4 + 1, Knob::Trim(id), t, "TRIM", format!("{t:+.1}"), cx))
             })
             .child(div().flex_1())
             .when_some(cue, |d, cue| {
                 d.child(button("cue", "CUE", cue, tok::text()).on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
-                    this.exec(Command::SetTrackCue { track: id, cue: !cue }, cx)
+                    let p = this.studio.read(cx).project().clone();
+                    if let Some(cmd) = cue_cmd(&p, kind, !cue) {
+                        this.exec(cmd, cx);
+                    }
                 })))
             })
             .child(button("mute", "MUTE", muted, tok::live()).on_click(cx.listener(move |this, _, _, cx| {
@@ -1436,7 +1439,7 @@ impl StripMenu {
         Self {
             muted: v.muted,
             mute: mute_cmd(p, v.kind, !v.muted),
-            cue: v.cue.map(|c| (c, Command::SetTrackCue { track: v.id, cue: !c })),
+            cue: v.cue.and_then(|c| Some((c, cue_cmd(p, v.kind, !c)?))),
             reset: (v.volume_db.abs() >= 0.05).then(|| volume_cmd(p, v.kind, 0.0)).flatten(),
             remove: match v.kind {
                 MixerStrip::Track(track) => Some(("Remove track", Command::RemoveTrack { track })),
@@ -1508,13 +1511,14 @@ struct StripView {
     mix_to_program: Option<bool>,
     /// Pan (balance, for a mix); none for the master.
     pan: Option<f32>,
+    /// Gain before the effects.
+    trim: Option<f32>,
 }
 
 /// A track's or bus's routing, as the strip shows it.
 struct Channel {
     route: Route,
     /// Tracks only.
-    trim_db: Option<f32>,
     invert: Option<bool>,
     mono: Option<bool>,
     record: bool,
@@ -1565,6 +1569,13 @@ impl Knob {
                 if let Some(t) = f.trim_db {
                     *t = v
                 }
+            })
+            .or_else(|| {
+                if id == lightair_core::MASTER_ID {
+                    return Some(Command::UpdateMaster { master: Master { trim_db: v, ..p.audio.master.clone() } });
+                }
+                let m = p.audio.mix(id)?;
+                Some(Command::UpdateMix { mix: AudioMix { trim_db: v, ..m.clone() } })
             }),
             Knob::Send(id, mix) => strip_update(p, id, |f| {
                 for s in f.sends.iter_mut().filter(|s| s.mix == mix) {
@@ -1607,7 +1618,7 @@ fn strip_update(p: &Project, id: Id, f: impl FnOnce(StripFields)) -> Option<Comm
         pan: &mut b.pan,
         record: &mut b.record,
         sends: &mut b.sends,
-        trim_db: None,
+        trim_db: Some(&mut b.trim_db),
         invert: None,
         mono: None,
     });
@@ -1794,7 +1805,6 @@ fn strip_views(p: &Project) -> Vec<StripView> {
             source: source(t),
             channel: Some(Channel {
                 route: t.route,
-                trim_db: Some(t.trim_db),
                 invert: Some(t.invert),
                 mono: Some(t.mono),
                 record: t.record,
@@ -1802,6 +1812,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
             }),
             mix_to_program: None,
             pan: Some(t.pan),
+            trim: Some(t.trim_db),
         })
         .collect();
     v.extend(p.audio.buses.iter().map(|b| StripView {
@@ -1810,13 +1821,12 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         name: b.name.clone(),
         volume_db: b.volume_db,
         muted: b.muted,
-        cue: None,
+        cue: Some(b.cue),
         effects: on(&b.effects),
         badge: Some("BUS"),
         source: None,
         channel: Some(Channel {
             route: b.route,
-            trim_db: None,
             invert: None,
             mono: None,
             record: b.record,
@@ -1824,6 +1834,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         }),
         mix_to_program: None,
         pan: Some(b.pan),
+        trim: Some(b.trim_db),
     }));
     v.extend(p.audio.mixes.iter().map(|x| StripView {
         id: x.id,
@@ -1831,13 +1842,14 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         name: x.name.clone(),
         volume_db: x.volume_db,
         muted: x.muted,
-        cue: None,
+        cue: Some(x.cue),
         effects: on(&x.effects),
         badge: Some("MIX"),
         source: None,
         channel: None,
         mix_to_program: Some(x.to_program),
         pan: Some(x.pan),
+        trim: Some(x.trim_db),
     }));
     // Program last: always the right-most strip
     let m = &p.audio.master;
@@ -1847,13 +1859,14 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         name: "Program".into(),
         volume_db: m.volume_db,
         muted: m.muted,
-        cue: None,
+        cue: Some(m.cue),
         effects: on(&m.effects),
         badge: None, // "Program" says it
         source: None,
         channel: None,
         mix_to_program: None,
         pan: None,
+        trim: Some(m.trim_db),
     });
     v
 }
@@ -1865,6 +1878,16 @@ fn volume_cmd(p: &Project, kind: MixerStrip, db: f32) -> Option<Command> {
         MixerStrip::Bus(id) => Command::UpdateBus { bus: Bus { volume_db: db, ..p.audio.bus(id)?.clone() } },
         MixerStrip::Mix(id) => Command::UpdateMix { mix: AudioMix { volume_db: db, ..p.audio.mix(id)?.clone() } },
         MixerStrip::Master => Command::UpdateMaster { master: Master { volume_db: db, ..p.audio.master.clone() } },
+    })
+}
+
+/// The command that puts a strip in headphones (the cue) or takes it out.
+fn cue_cmd(p: &Project, kind: MixerStrip, cue: bool) -> Option<Command> {
+    Some(match kind {
+        MixerStrip::Track(track) => Command::SetTrackCue { track, cue },
+        MixerStrip::Bus(id) => Command::UpdateBus { bus: Bus { cue, ..p.audio.bus(id)?.clone() } },
+        MixerStrip::Mix(id) => Command::UpdateMix { mix: AudioMix { cue, ..p.audio.mix(id)?.clone() } },
+        MixerStrip::Master => Command::UpdateMaster { master: Master { cue, ..p.audio.master.clone() } },
     })
 }
 
