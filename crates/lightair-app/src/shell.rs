@@ -482,6 +482,14 @@ impl StudioWindow {
                 this.show_place(Place::Editor, cx);
                 this.editor.update(cx, |e, cx| e.add_item(id, cx));
             }
+            if let Some(ids) = library.update(cx, |l, _| l.open_many.take()) {
+                this.show_place(Place::Editor, cx);
+                this.editor.update(cx, |e, cx| {
+                    for id in ids {
+                        e.add_item(id, cx);
+                    }
+                });
+            }
             if let Some(parts) = library.update(cx, |l, _| l.open_parts.take()) {
                 this.show_place(Place::Editor, cx);
                 this.editor.update(cx, |e, cx| e.add_parts(parts, cx));
@@ -1004,7 +1012,8 @@ impl StudioWindow {
             });
         let selection = studio.selection();
         match hit {
-            Some(layer) if ev.modifiers.shift => self.toggle_selected(layer.id, cx),
+            // ⇧ or ⌘: add or take away
+            Some(layer) if ev.modifiers.shift || ev.modifiers.platform => self.toggle_selected(layer.id, cx),
             Some(layer) => {
                 let id = layer.id;
                 // Dragging one of several selected layers moves them all; otherwise select it.
@@ -1053,10 +1062,11 @@ impl StudioWindow {
             }
             // Empty space: start a selection box (⇧ adds to the selection).
             None => {
-                if !ev.modifiers.shift {
+                let adding = ev.modifiers.shift || ev.modifiers.platform;
+                if !adding {
                     self.select_layer(None, cx);
                 }
-                self.marquee = Some((format, (x, y), (x, y), ev.modifiers.shift));
+                self.marquee = Some((format, (x, y), (x, y), adding));
             }
         }
     }
@@ -1613,11 +1623,45 @@ impl Render for StudioWindow {
                     this.delete_selection(cx)
                 }
             }))
-            .on_action(cx.listener(|this, _: &NudgeLeft, _, cx| this.nudge(-1.0, 0.0, cx)))
-            .on_action(cx.listener(|this, _: &NudgeRight, _, cx| this.nudge(1.0, 0.0, cx)))
-            .on_action(cx.listener(|this, _: &NudgeUp, _, cx| this.nudge(0.0, -1.0, cx)))
-            .on_action(cx.listener(|this, _: &NudgeDown, _, cx| this.nudge(0.0, 1.0, cx)))
+            // in the Editor: the playhead a frame, a cut
+            .on_action(cx.listener(|this, _: &NudgeLeft, _, cx| {
+                if this.place == Place::Editor {
+                    let k = Keystroke::parse("left").unwrap();
+                    this.editor.update(cx, |e, cx| e.key(&k, cx));
+                    return;
+                }
+                this.nudge(-1.0, 0.0, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NudgeRight, _, cx| {
+                if this.place == Place::Editor {
+                    let k = Keystroke::parse("right").unwrap();
+                    this.editor.update(cx, |e, cx| e.key(&k, cx));
+                    return;
+                }
+                this.nudge(1.0, 0.0, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NudgeUp, _, cx| {
+                if this.place == Place::Editor {
+                    let k = Keystroke::parse("up").unwrap();
+                    this.editor.update(cx, |e, cx| e.key(&k, cx));
+                    return;
+                }
+                this.nudge(0.0, -1.0, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NudgeDown, _, cx| {
+                if this.place == Place::Editor {
+                    let k = Keystroke::parse("down").unwrap();
+                    this.editor.update(cx, |e, cx| e.key(&k, cx));
+                    return;
+                }
+                this.nudge(0.0, 1.0, cx)
+            }))
             .on_action(cx.listener(|this, _: &Deselect, window, cx| {
+                if this.place == Place::Editor {
+                    let k = Keystroke::parse("escape").unwrap();
+                    this.editor.update(cx, |e, cx| e.key(&k, cx));
+                    return;
+                }
                 // Esc in a rename field cancels it; otherwise it leaves crop mode or the
                 // rotate gizmo first.
                 if this.renaming.is_some() {
@@ -1655,11 +1699,33 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &ToggleMics, _, cx| this.studio.update(cx, |s, cx| s.toggle_mics(cx))))
             .on_action(cx.listener(|this, _: &GroupSelection, window, cx| this.group_selection(window, cx)))
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| {
-                this.copy_selection(cx);
+                if this.place == Place::Editor {
+                    this.editor.update(cx, |e, cx| e.copy_picked(cx));
+                } else {
+                    this.copy_selection(cx);
+                }
             }))
-            .on_action(cx.listener(|this, _: &CutSelection, _, cx| this.cut_selection(cx)))
-            .on_action(cx.listener(|this, _: &PasteLayers, _, cx| this.paste_layers(cx)))
-            .on_action(cx.listener(|this, _: &DuplicateSelection, _, cx| this.duplicate_selection(cx)))
+            .on_action(cx.listener(|this, _: &CutSelection, _, cx| {
+                if this.place == Place::Editor {
+                    this.editor.update(cx, |e, cx| e.cut_picked(cx));
+                } else {
+                    this.cut_selection(cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PasteLayers, _, cx| {
+                if this.place == Place::Editor {
+                    this.editor.update(cx, |e, cx| e.paste_at(None, cx));
+                } else {
+                    this.paste_layers(cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DuplicateSelection, _, cx| {
+                if this.place == Place::Editor {
+                    this.editor.update(cx, |e, cx| e.duplicate_picked(cx));
+                } else {
+                    this.duplicate_selection(cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &BringToFront, _, cx| this.arrange("Bring to front", |_, n| n - 1, cx)))
             .on_action(cx.listener(|this, _: &SendToBack, _, cx| this.arrange("Send to back", |_, _| 0, cx)))
             .on_action(cx.listener(|this, _: &BringForward, _, cx| this.arrange("Bring forward", |i, _| i + 1, cx)))
@@ -1670,21 +1736,37 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &ToggleLayerLocked, _, cx| this.toggle_selection_locked(cx)))
             .on_action(cx.listener(|this, _: &MoveOutOfParent, _, cx| this.move_out_of_parent(cx)))
             .on_action(cx.listener(|this, _: &FillCanvas, _, cx| this.fill_canvas(cx)))
-            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(1.25, None, cx)))
-            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(0.8, None, cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                if this.place == Place::Editor {
+                    let k = Keystroke::parse(crate::ui::key("cmd-=")).unwrap();
+                    this.editor.update(cx, |e, cx| e.key(&k, cx));
+                    return;
+                }
+                this.zoom_by(1.25, None, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                if this.place == Place::Editor {
+                    let k = Keystroke::parse(crate::ui::key("cmd--")).unwrap();
+                    this.editor.update(cx, |e, cx| e.key(&k, cx));
+                    return;
+                }
+                this.zoom_by(0.8, None, cx)
+            }))
             .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.zoom_to_fit(cx)))
             .on_action(cx.listener(|this, _: &ZoomToActual, _, cx| this.zoom_to_actual(cx)))
             // Space held: dragging the canvas pans it.
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                // the Editor: space plays (unless a text field has the keys)
-                if this.place == Place::Editor
-                    && ev.keystroke.key == "space"
-                    && !ev.keystroke.modifiers.modified()
-                    && !window.context_stack().iter().any(|c| c.contains("Input"))
-                {
-                    this.editor.update(cx, |e, cx| e.play(cx));
-                    cx.stop_propagation();
-                    return;
+                // the Editor: space plays, and its tools' keys (unless a text field has the keys)
+                if this.place == Place::Editor && !window.context_stack().iter().any(|c| c.contains("Input")) {
+                    if ev.keystroke.key == "space" && !ev.keystroke.modifiers.modified() {
+                        this.editor.update(cx, |e, cx| e.play(cx));
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if this.editor.update(cx, |e, cx| e.key(&ev.keystroke, cx)) {
+                        cx.stop_propagation();
+                        return;
+                    }
                 }
                 if ev.keystroke.key == "space" && !ev.keystroke.modifiers.modified() && !this.space_down {
                     this.space_down = true;
@@ -1718,6 +1800,10 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &Scene8, w, cx| this.scene_shortcut(7, w, cx)))
             .on_action(cx.listener(|this, _: &Scene9, w, cx| this.scene_shortcut(8, w, cx)))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
+                if this.place == Place::Editor {
+                    this.editor.update(cx, |e, cx| e.select_all(cx));
+                    return;
+                }
                 this.studio.update(cx, |s, cx| {
                     let p = s.project().clone();
                     let layers: Vec<Id> = s

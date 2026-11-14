@@ -26,7 +26,11 @@ use crate::studio::Studio;
 use crate::ui::{self, tok};
 
 mod inside;
+mod pick;
 pub(crate) use inside::part_icon;
+
+/// Where each card is drawn (for picking with a box).
+type CardBounds = std::rc::Rc<std::cell::RefCell<HashMap<(PathBuf, Id), Bounds<Pixels>>>>;
 
 /// A project in the side list.
 #[derive(Clone)]
@@ -56,11 +60,21 @@ pub struct Library {
     search: Entity<InputState>,
     kind: Option<Kind>,
     renaming: Option<(PathBuf, Id, Entity<InputState>)>,
-    confirm_trash: Option<(PathBuf, Id)>,
+    /// What's to go to the Trash (asked first): one item or several.
+    confirm_trash: Vec<(PathBuf, Id)>,
     playing: Option<Playing>,
     note: Option<SharedString>,
     /// Asked for by "Open in Editor": the window switches to the Editor.
     pub open_in_editor: Option<(PathBuf, Id)>,
+    /// Items asked for in the Editor together (the window takes them there).
+    pub open_many: Option<Vec<Id>>,
+    /// The items picked, the last one picked alone (for ⇧-click runs), a box being dragged to
+    /// pick, and where the cards and the cards' area are.
+    picked: Vec<(PathBuf, Id)>,
+    anchor: Option<(PathBuf, Id)>,
+    marquee: Option<pick::Marquee>,
+    card_bounds: CardBounds,
+    body_bounds: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
     /// Parts of a take asked for in the Editor (the window takes them there).
     pub open_parts: Option<Vec<lightair_render::sequence::TakePart>>,
     /// Takes opened to show their parts, and their parts (`None`: being read).
@@ -172,11 +186,17 @@ impl Library {
             search,
             kind: None,
             renaming: None,
-            confirm_trash: None,
+            confirm_trash: Vec::new(),
             playing: None,
             note: None,
             open_in_editor: None,
             open_parts: None,
+            open_many: None,
+            picked: Vec::new(),
+            anchor: None,
+            marquee: None,
+            card_bounds: Default::default(),
+            body_bounds: Default::default(),
             inside_open: Default::default(),
             inside: HashMap::new(),
             open_project: None,
@@ -401,14 +421,25 @@ impl Library {
     }
 
     fn trash(&mut self, cx: &mut Context<Self>) {
-        let Some((project, id)) = self.confirm_trash.take() else { return };
-        let result = self.indexes.get_mut(&project).map(|i| i.trash(id, lightair_platform::files::trash));
-        match result {
-            Some(Ok(())) => self.note = Some(format!("Moved to the {}", trash_name()).into()),
-            Some(Err(e)) => self.note = Some(format!("Couldn't move it to the {}: {e}", trash_name()).into()),
-            None => {}
+        let items = std::mem::take(&mut self.confirm_trash);
+        let (mut moved, mut failed) = (0, None);
+        for (project, id) in &items {
+            match self.indexes.get_mut(project).map(|i| i.trash(*id, lightair_platform::files::trash)) {
+                Some(Ok(())) => moved += 1,
+                Some(Err(e)) => failed = Some(e.to_string()),
+                None => {}
+            }
+            self.picked.retain(|p| p != &(project.clone(), *id));
         }
-        self.save(&project);
+        let projects: std::collections::HashSet<PathBuf> = items.iter().map(|(p, _)| p.clone()).collect();
+        for p in projects {
+            self.save(&p);
+        }
+        self.note = Some(match failed {
+            Some(e) => format!("Couldn't move it to the {}: {e}", trash_name()).into(),
+            None if moved == 1 => format!("Moved to the {}", trash_name()).into(),
+            None => format!("{moved} items moved to the {}", trash_name()).into(),
+        });
         cx.notify();
     }
 
@@ -719,15 +750,18 @@ impl Library {
                 let _ = &title;
                 menu.separator().item(
                     PopupMenuItem::new(format!("Move to {}…", trash_name())).icon(ui::icon("trash")).on_click(act(|t, d, i, _, cx| {
-                        t.confirm_trash = Some((d, i));
+                        t.confirm_trash = vec![(d, i)];
                         cx.notify();
                     })),
                 )
             }
         };
 
+        let picked = self.is_picked(&dir, id);
+        let (bounds, key, pdir) = (self.card_bounds.clone(), (dir.clone(), id), dir.clone());
         div()
             .id(("lib-card", n))
+            .relative()
             .flex()
             .flex_col()
             .gap_1p5()
@@ -735,7 +769,17 @@ impl Library {
             .p_1p5()
             .rounded(px(10.))
             .cursor_pointer()
+            .border_2()
+            .border_color(if picked { tok::accent_primary() } else { rgba(0x00000000).into() })
+            .when(picked, |d| d.bg(tok::bg_selected()))
             .hover(|d| d.bg(tok::bg_raised()))
+            .child(canvas(move |b, _, _| {
+                bounds.borrow_mut().insert(key.clone(), b);
+            }, |_, _, _, _| {}).absolute().size_full())
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.pick_card(&pdir, id, ev.modifiers, cx);
+            }))
             .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                 if ev.click_count() >= 2 {
                     let dir = dir.clone();
@@ -835,9 +879,10 @@ impl Library {
     }
 
     fn trash_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (project, id) = self.confirm_trash.as_ref()?;
-        let item = self.indexes.get(project)?.get(*id)?;
-        let files = item.files.iter().filter(|f| f.path.exists()).count();
+        let items: Vec<&Item> = self.confirm_trash.iter().filter_map(|(p, id)| self.indexes.get(p)?.get(*id)).collect();
+        let item = *items.first()?;
+        let files: usize = items.iter().map(|i| i.files.iter().filter(|f| f.path.exists()).count()).sum();
+        let title = if items.len() == 1 { format!("Move “{}” to the {}?", item.title, trash_name()) } else { format!("Move {} items to the {}?", items.len(), trash_name()) };
         Some(
             div()
                 .absolute()
@@ -862,7 +907,7 @@ impl Library {
                             div()
                                 .text_size(px(15.))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(format!("Move “{}” to the {}?", item.title, trash_name())),
+                                .child(title),
                         )
                         .child(div().text_color(tok::text_secondary()).child(format!(
                             "Its {} go to the {}, where you can put {} back. It leaves the Library.",
@@ -877,7 +922,7 @@ impl Library {
                                 .gap_2()
                                 .child(Button::new("lib-trash-cancel").label("Cancel").small().ghost().on_click(cx.listener(
                                     |this, _, _, cx| {
-                                        this.confirm_trash = None;
+                                        this.confirm_trash.clear();
                                         cx.notify();
                                     },
                                 )))
@@ -1038,6 +1083,8 @@ fn trash_name() -> &'static str {
 
 impl Render for Library {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // the cards drawn this time say where they are
+        self.card_bounds.borrow_mut().clear();
         if self.seen_version != Some(self.studio.read(cx).library_version) {
             self.reload(cx);
         }
@@ -1085,7 +1132,10 @@ impl Render for Library {
                 if ev.keystroke.key == "escape" {
                     if this.playing.is_some() {
                         this.close_player(cx);
-                    } else if this.confirm_trash.take().is_some() {
+                    } else if !this.picked.is_empty() && this.confirm_trash.is_empty() {
+                        this.picked.clear();
+                        cx.notify();
+                    } else if !std::mem::take(&mut this.confirm_trash).is_empty() {
                         cx.notify();
                     }
                 } else if ev.keystroke.key == "space"
@@ -1124,14 +1174,31 @@ impl Render for Library {
                             )
                             .child(self.filters(cx)),
                     )
-                    .child(
+                    .children(self.picked_bar(cx))
+                    .child({
+                        let bounds = self.body_bounds.clone();
                         div()
                             .id("lib-body")
+                            .relative()
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
-                            .map(|d| if shown.is_empty() { d.child(self.empty(searching, cx)) } else { d.child(body) }),
-                    )
+                            .child(canvas(move |b, _, _| *bounds.borrow_mut() = Some(b), |_, _, _, _| {}).absolute().size_full())
+                            .map(|d| if shown.is_empty() { d.child(self.empty(searching, cx)) } else { d.child(body) })
+                            .children(self.marquee_overlay())
+                            // the space between cards: a box to pick with
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                                this.begin_marquee(ev.position, ev.modifiers);
+                                cx.notify();
+                            }))
+                            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                                if this.marquee.is_some() {
+                                    this.marquee_to(ev.position, cx);
+                                }
+                            }))
+                            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_marquee(cx)))
+                            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_marquee(cx)))
+                    })
                     .when_some(self.note.clone(), |d, note| {
                         d.child(
                             div()

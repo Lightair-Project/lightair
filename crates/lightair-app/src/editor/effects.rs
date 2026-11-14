@@ -215,7 +215,7 @@ impl Editor {
             },
             cx,
         );
-        self.selected = Some(first);
+        self.pick_only(Some(first));
         self.tab = InspectorTab::Effects;
         self.left = LeftTab::Shapes;
         self.seek(2_000, cx);

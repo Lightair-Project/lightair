@@ -160,7 +160,7 @@ impl Editor {
                 cx,
             );
         }
-        self.selected = None;
+        self.pick_only(None);
         self.make_proxies(cx);
     }
 }

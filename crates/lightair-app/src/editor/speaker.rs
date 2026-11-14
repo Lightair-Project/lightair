@@ -44,6 +44,16 @@ impl Speaker {
     /// uses, in the preferences; else the default one); `None` if it has none, or there's
     /// nowhere to play it.
     pub fn start(seq: &Sequence, from_ms: u64) -> Option<Speaker> {
+        Self::open(seq, from_ms, None)
+    }
+
+    /// A moment of the sound from `from_ms`, `ms` long, faded in and out (scrubbing), then
+    /// silence.
+    pub fn snippet(seq: &Sequence, from_ms: u64, ms: u64) -> Option<Speaker> {
+        Self::open(seq, from_ms, Some(ms))
+    }
+
+    fn open(seq: &Sequence, from_ms: u64, limit_ms: Option<u64>) -> Option<Speaker> {
         let host = cpal::default_host();
         let chosen = crate::prefs::load_from(&crate::prefs::path()).monitor_device.map(|(name, _)| name).filter(|n| !n.is_empty() && n != "default");
         let device = chosen
@@ -51,6 +61,9 @@ impl Speaker {
             .or_else(|| host.default_output_device())?;
         let config = device.default_output_config().ok()?;
         let (rate, channels) = (config.sample_rate().0, config.channels() as usize);
+        // a snippet's length and its fades, in frames
+        let limit = limit_ms.map(|ms| ms * rate as u64 / 1000);
+        let (fade_in, fade_out) = ((rate / 400) as u64, (rate / 60) as u64);
         let mut child = lightair_render::sound::stream(seq, from_ms, rate).ok()??;
         let mut out = child.stdout.take()?;
         let (mut tx, mut rx) = rtrb::RingBuffer::<f32>::new(rate as usize * 2);
@@ -107,11 +120,24 @@ impl Speaker {
                     }
                     let want = data.len() / channels;
                     let have = (rx.slots() / 2).min(want);
+                    let done = heard.load(Ordering::Relaxed);
+                    // a snippet: its envelope, then nothing
+                    let gain = |k: usize| -> f32 {
+                        let Some(limit) = limit else { return 1.0 };
+                        let i = done + k as u64;
+                        if i >= limit {
+                            return 0.0;
+                        }
+                        let up = (i as f32 / fade_in.max(1) as f32).min(1.0);
+                        let down = ((limit - i) as f32 / fade_out.max(1) as f32).min(1.0);
+                        up * down
+                    };
                     if let Ok(chunk) = rx.read_chunk(have * 2) {
                         let (a, b) = chunk.as_slices();
                         let at = |i: usize| if i < a.len() { a[i] } else { b[i - a.len()] };
                         for k in 0..have {
-                            let (l, r) = (at(k * 2), at(k * 2 + 1));
+                            let g = gain(k);
+                            let (l, r) = (at(k * 2) * g, at(k * 2 + 1) * g);
                             if channels == 1 {
                                 data[k] = (l + r) * 0.5;
                             } else {

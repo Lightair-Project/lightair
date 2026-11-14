@@ -64,9 +64,10 @@ impl Editor {
         }
         let (Some(p), Some((_, k, _)), Some(seq)) = (self.to_result(pos), self.stage(), self.seq().cloned()) else { return };
         let selected = self.selected.and_then(|c| self.placed_of(c));
+        let playhead = self.playhead;
         let start = |clip: Id, kind: StageKind| -> Option<StageDrag> {
             let c = seq.clip(clip)?;
-            Some(StageDrag { clip, kind, from: p, start: c.transform_at(self.playhead), before: seq.clone(), to: p })
+            Some(StageDrag { clip, kind, from: p, start: c.transform_at(playhead), before: seq.clone(), to: p })
         };
         let drag = match selected {
             Some(s) if self.hiding => start(s.clip, StageKind::Hide),
@@ -81,7 +82,7 @@ impl Editor {
                 Some(q) => {
                     // a locked track's clips stay put
                     let locked = seq.find(q.clip).is_some_and(|(t, _)| seq.tracks[t].locked);
-                    self.selected = Some(q.clip);
+                    self.pick_only(Some(q.clip));
                     if locked { None } else { start(q.clip, StageKind::Move) }
                 }
                 None => None,
