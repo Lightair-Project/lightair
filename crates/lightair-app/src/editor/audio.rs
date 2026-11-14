@@ -121,7 +121,7 @@ impl Editor {
         let mut list = div().flex().flex_col().gap_1();
         for (n, m) in sounds.iter().enumerate() {
             let (id, name) = (m.id, m.name.clone());
-            let drag = DraggedMedia { label: name.clone().into(), source: MediaSource::Media(id) };
+            let drag = DraggedMedia::new(name.clone(), MediaSource::Media(id), None, "music", &self.drag_hidden);
             list = list.child(
                 div()
                     .id(("ed-snd", n))
