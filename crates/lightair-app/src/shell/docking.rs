@@ -334,6 +334,10 @@ impl StudioWindow {
                 self.show_place(super::Place::Editor, cx);
                 self.editor.update(cx, |e, cx| e.hook_trim(cx));
             }
+            Ok("editor-alone") => {
+                self.show_place(super::Place::Editor, cx);
+                self.editor.update(cx, |e, cx| e.hook_alone(cx));
+            }
             Ok("editor-tools") => {
                 self.show_place(super::Place::Editor, cx);
                 self.editor.update(cx, |e, cx| e.hook_tools(cx));

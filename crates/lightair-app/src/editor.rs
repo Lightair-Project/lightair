@@ -254,6 +254,8 @@ pub struct Editor {
     tool: tools::Tool,
     snapping: bool,
     linkage: bool,
+    /// The clip being dragged was taken with ⌥: its linked clips stay put.
+    drag_alone: bool,
     axis: bool,
     hover: Option<u64>,
     clipboard: Vec<tools::Copied>,
@@ -489,6 +491,7 @@ impl Editor {
             tool: tools::Tool::Select,
             snapping: true,
             linkage: true,
+            drag_alone: false,
             axis: false,
             hover: None,
             clipboard: Vec::new(),
@@ -1343,13 +1346,13 @@ impl Editor {
             Drag::TrimStart(clip) | Drag::TrimEnd(clip) => {
                 let start = matches!(drag, Drag::TrimStart(_));
                 let t = self.snap(t as i64, Some(clip));
-                let linkage = self.linkage;
+                let (linkage, alone) = (self.linkage, self.drag_alone);
                 if let Some(p) = &mut self.project {
                     // linked clips with the same edge (a video and its sound) trim with it
                     let edge = |c: &lightair_render::sequence::Clip| if start { c.start_ms } else { c.end_ms() };
                     let mine = p.sequence.clip(clip).map(edge);
                     let mut all = vec![clip];
-                    if linkage {
+                    if linkage && !alone {
                         all.extend(p.sequence.linked(clip).into_iter().filter(|c| *c != clip && p.sequence.clip(*c).map(edge).zip(mine).is_some_and(|(a, b)| a.abs_diff(b) <= 2)));
                     }
                     for c in all {
@@ -2311,10 +2314,10 @@ impl Editor {
                                     return;
                                 }
                                 // a clip of several picked keeps them (they move together); with
-                                // linkage, the clips linked with it come along
-                                if !this.picked.contains(&cid) {
-                                    this.picked = if this.linkage { this.seq().map(|s| s.linked(cid)).unwrap_or_else(|| vec![cid]) } else { vec![cid] };
-                                }
+                                // linkage, the clips linked with it come along. ⌥ (or linkage
+                                // off): only it, its linked clips left where they are
+                                this.drag_alone = ev.modifiers.alt;
+                                this.pick_for_drag(cid, ev.modifiers.alt);
                                 this.selected = Some(cid);
                                 if locked {
                                     cx.notify();

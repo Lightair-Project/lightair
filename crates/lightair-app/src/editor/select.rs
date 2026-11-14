@@ -74,6 +74,39 @@ impl Editor {
         cx.notify();
     }
 
+    /// A press on `clip` that may drag it: what's picked. A clip of several picked keeps them;
+    /// with linkage, its linked clips come along. `alone` (⌥), or linkage off: only it, when
+    /// what's picked is just it and its linked clips.
+    pub(super) fn pick_for_drag(&mut self, clip: Id, alone: bool) {
+        let group = self.seq().map(|s| s.linked(clip)).unwrap_or_else(|| vec![clip]);
+        let mut now = self.picked_clips();
+        now.sort();
+        let mut its = group.clone();
+        its.sort();
+        let just_its_link = now == its;
+        if alone || !self.is_picked(clip) || (!self.linkage && just_its_link) {
+            self.picked = if self.linkage && !alone { group } else { vec![clip] };
+        }
+        self.selected = Some(clip);
+    }
+
+    /// Linkage switched: off, what's picked is only the clip whose linked clips came with it.
+    pub(super) fn set_linkage(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.linkage = on;
+        if let Some(sel) = self.selected
+            && !on
+        {
+            let mut its = self.seq().map(|s| s.linked(sel)).unwrap_or_default();
+            its.sort();
+            let mut now = self.picked_clips();
+            now.sort();
+            if now == its {
+                self.pick_only(Some(sel));
+            }
+        }
+        cx.notify();
+    }
+
     /// Every clip, picked (⌘A).
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         let all: Vec<Id> = self.seq().map(|s| s.tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.id)).collect()).unwrap_or_default();
