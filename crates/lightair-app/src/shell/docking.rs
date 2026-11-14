@@ -458,6 +458,18 @@ impl StudioWindow {
                 // the mixer's add menu, open
                 self.mixer.update(cx, |m, cx| m.toggle_add_track(window, cx));
             }
+            Ok("audio-colours") => {
+                // the Streaming mixer with coloured strips (Mic red, Desktop blue, Music amber)
+                self.use_audio_template(lightair_core::templates::Template::Streaming, cx);
+                let tracks: Vec<lightair_core::Id> = self.studio.read(cx).project().tracks.iter().map(|t| t.id).collect();
+                for (t, c) in tracks.into_iter().zip([0xE5484D, 0x0090FF, 0xFFB224]) {
+                    self.exec(
+                        lightair_core::Command::SetStripColor { strip: lightair_core::MixerStrip::Track(t), color: Some(c) },
+                        cx,
+                    );
+                }
+                self.exec(lightair_core::Command::SetStripColor { strip: lightair_core::MixerStrip::Master, color: Some(0x30A46C) }, cx);
+            }
             Ok("audio-template") => {
                 // the Streaming template (it changes no preferences), the mic selected
                 self.use_audio_template(lightair_core::templates::Template::Streaming, cx);
