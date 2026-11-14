@@ -482,6 +482,10 @@ impl StudioWindow {
                 this.show_place(Place::Editor, cx);
                 this.editor.update(cx, |e, cx| e.add_item(id, cx));
             }
+            if let Some(parts) = library.update(cx, |l, _| l.open_parts.take()) {
+                this.show_place(Place::Editor, cx);
+                this.editor.update(cx, |e, cx| e.add_parts(parts, cx));
+            }
             cx.notify();
         })
         .detach();

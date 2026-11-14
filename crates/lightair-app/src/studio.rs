@@ -727,6 +727,11 @@ impl Studio {
                 return;
             }
         };
+        // the scene as it is: what the take doesn't record (images, text, colours) rebuilt in
+        // the Editor, and where everything was
+        if let Some(scene) = lightair_store::take_scene::TakeScene::of(&project, &folder) {
+            let _ = scene.write(&folder);
+        }
         // the audio engine's stems, beside the video
         let (p, f) = (project.clone(), folder.clone());
         let audio = match self.engine.call(move |s| s.reconciler.start_stems(&p, &f, "Audio", false)) {

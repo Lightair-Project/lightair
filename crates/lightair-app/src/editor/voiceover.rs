@@ -64,7 +64,7 @@ impl Editor {
             std::thread::spawn(move || {
                 let r = lightair_render::sound::write_wav(&path, &stereo, rate).map_err(|e| e.to_string()).and_then(|_| Media::from_file(&path).map_err(|e| e.to_string()));
                 let _ = tx.send(match r {
-                    Ok(m) => Done::Media(vec![m], Some(at), None),
+                    Ok(m) => Done::Media(vec![TakePart::of(m)], Some(at), None),
                     Err(e) => Done::Exported(Err(format!("the voice-over couldn't be saved: {e}"))),
                 });
             });

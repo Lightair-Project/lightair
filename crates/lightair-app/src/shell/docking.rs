@@ -322,6 +322,14 @@ impl StudioWindow {
                 self.show_place(super::Place::Editor, cx);
                 self.editor.update(cx, |e, cx| e.hook_ghost(cx));
             }
+            Ok("library-inside") => {
+                self.show_place(super::Place::Library, cx);
+                self.library.update(cx, |l, cx| l.hook_inside(cx));
+            }
+            Ok("editor-take-open") => {
+                self.show_place(super::Place::Editor, cx);
+                self.editor.update(cx, |e, cx| e.hook_open_take(cx));
+            }
             Ok("editor-more") => {
                 self.show_place(super::Place::Editor, cx);
                 self.editor.update(cx, |e, cx| e.hook_more(cx));
