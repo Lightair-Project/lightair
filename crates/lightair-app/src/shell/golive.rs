@@ -112,9 +112,9 @@ impl StudioWindow {
                         .flex()
                         .items_start()
                         .gap_2()
-                        .child(ui::icon(icon).size(px(15.)).text_color(colour).mt(px(2.)))
+                        .child(div().flex_none().child(ui::icon(icon).size(px(15.)).text_color(colour).mt(px(2.))))
                         .child(
-                            div().flex().flex_col().child(div().child(c.title.clone())).child(
+                            div().flex_1().min_w_0().flex().flex_col().child(div().child(c.title.clone())).child(
                                 div().text_size(px(11.)).text_color(tok::text_tertiary()).child(c.detail.clone()),
                             ),
                         ),

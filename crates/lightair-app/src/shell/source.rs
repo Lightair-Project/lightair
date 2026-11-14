@@ -444,9 +444,14 @@ impl StudioWindow {
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title))
+                                .gap_3()
+                                .child(div().flex_none().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title))
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
                                         .text_size(px(11.))
                                         .text_color(tok::text_tertiary())
                                         .child(format!("for {}", input.name)),

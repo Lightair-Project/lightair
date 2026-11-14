@@ -462,7 +462,8 @@ impl OutputsPanel {
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(div().flex().flex_col().child(div().text_size(px(13.)).child("Automatic")).child(
+                .gap_3()
+                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Automatic")).child(
                     div().text_size(px(11.)).text_color(tok::text_tertiary()).child(if automatic {
                         summary(&auto)
                     } else {
@@ -514,7 +515,7 @@ impl OutputsPanel {
                         .on_click(set(Box::new(|e| e.bitrate_kbps = (e.bitrate_kbps + 500).min(51_000)))),
                 )
                 .when_some(max.filter(|m| enc.bitrate_kbps > *m), |d, m| {
-                    d.child(div().text_size(px(11.)).text_color(tok::warn()).child(format!(
+                    d.child(div().flex_1().min_w_0().text_size(px(11.)).text_color(tok::warn()).child(format!(
                         "{} takes up to {} Mbps",
                         p.name,
                         m / 1000

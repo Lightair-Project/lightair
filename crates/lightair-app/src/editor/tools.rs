@@ -573,7 +573,7 @@ impl Editor {
             .child(div().flex_1())
             .when_some(self.note.clone(), |d, n| d.child(div().text_size(px(12.)).text_color(tok::text_secondary()).overflow_hidden().text_ellipsis().whitespace_nowrap().child(n)))
             .when_some(self.proxying.clone(), |d, (name, f)| {
-                d.child(div().pl_3().text_size(px(12.)).text_color(tok::text_tertiary()).child(format!("Proxy for “{name}” {:.0}%", f * 100.0)))
+                d.child(div().pl_3().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(12.)).text_color(tok::text_tertiary()).child(format!("Proxy for “{name}” {:.0}%", f * 100.0)))
             })
             .child(div().flex_1())
             .child(toggle("ed-t-snap", "between-horizontal-start", "Snapping (S)", self.snapping).on_click(cx.listener(|this, _, _, cx| {

@@ -2494,6 +2494,8 @@ impl StudioWindow {
                 .as_ref()
                 .and_then(|s| std::path::Path::new(&s.path).file_name().map(|n| n.to_string_lossy().into_owned()))
                 .unwrap_or_else(|| "Choose video…".into());
+            // a long file name, shortened (a button doesn't shrink)
+            let name = if name.chars().count() > 24 { format!("{}…", name.chars().take(22).collect::<String>()) } else { name };
             let mut row = div().flex().items_center().gap_1().w_full().child(
                 Button::new("stinger-file")
                     .label(name)
@@ -3561,8 +3563,8 @@ impl StudioWindow {
                 .items_center()
                 .gap_2()
                 .text_size(px(11.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(color).child(text.to_string()))
-                .child(div().text_color(tok::text_secondary()).child(name.unwrap_or_else(|| "—".into())))
+                .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(color).child(text.to_string()))
+                .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_color(tok::text_secondary()).child(name.unwrap_or_else(|| "—".into())))
         };
         div()
             .flex()

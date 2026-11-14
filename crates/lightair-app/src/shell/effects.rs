@@ -342,8 +342,9 @@ impl StudioWindow {
                     .pb_1p5()
                     .text_size(px(11.))
                     .text_color(tok::warn())
-                    .child(ui::icon("triangle-alert").size(px(12.)))
-                    .child(w),
+                    .items_start()
+                    .child(div().flex_none().mt(px(1.)).child(ui::icon("triangle-alert").size(px(12.))))
+                    .child(div().flex_1().min_w_0().child(w)),
             );
         }
         if open {
