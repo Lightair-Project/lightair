@@ -40,6 +40,7 @@ mod stage;
 mod tools;
 mod voiceover;
 mod words;
+mod zooms;
 use lightair_render::sequence::Content;
 use looks::{heading, hint, label};
 
@@ -166,6 +167,9 @@ enum Drag {
     Volume { clip: Id, y: f32, from: f32 },
     /// A track's bottom edge: its height (from a window y, at a height).
     TrackHeight { track: usize, y: f32, from: f32 },
+    /// A zoom block on the zoom track (its take, its place in the take's zooms, the clip it's
+    /// over).
+    Zoom { media: Id, index: usize, clip: Id, part: zooms::ZoomPart },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -256,6 +260,10 @@ pub struct Editor {
     linkage: bool,
     /// The clip being dragged was taken with ⌥: its linked clips stay put.
     drag_alone: bool,
+    /// The zoom picked on the zoom track (its take, its place in the take's zooms), and takes'
+    /// zooms as their looks have them (read once).
+    zoom_sel: Option<(Id, usize)>,
+    zoom_files: std::cell::RefCell<std::collections::HashMap<Id, Vec<lightair_render::edit::Zoom>>>,
     axis: bool,
     hover: Option<u64>,
     clipboard: Vec<tools::Copied>,
@@ -492,6 +500,8 @@ impl Editor {
             snapping: true,
             linkage: true,
             drag_alone: false,
+            zoom_sel: None,
+            zoom_files: Default::default(),
             axis: false,
             hover: None,
             clipboard: Vec::new(),
@@ -833,6 +843,9 @@ impl Editor {
     }
 
     pub fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        if self.delete_zoom(cx) {
+            return;
+        }
         // with linkage, what's linked to it goes too
         let picked = self.picked_with_links();
         if picked.is_empty() {
@@ -1246,7 +1259,7 @@ impl Editor {
     fn track_at(&self, y: Pixels) -> Option<usize> {
         let b = (*self.timeline_bounds.borrow())?;
         let seq = self.seq()?;
-        let mut top = f32::from(b.origin.y) + RULER_H;
+        let mut top = f32::from(b.origin.y) + self.tracks_top();
         let y = f32::from(y);
         for (i, t) in seq.tracks.iter().enumerate() {
             let h = track_h(t);
@@ -1337,6 +1350,7 @@ impl Editor {
                 }
                 self.after_drag_change();
             }
+            Drag::Zoom { media, index, clip, part } => self.drag_zoom(media, index, clip, part, t),
             Drag::TrackHeight { track, y, from } => {
                 let h = (from + f32::from(pos.y) - y).clamp(26.0, 220.0).round();
                 if let Some(t) = self.project.as_mut().and_then(|p| p.sequence.tracks.get_mut(track)) {
@@ -1401,7 +1415,7 @@ impl Editor {
         let b = (*self.timeline_bounds.borrow())?;
         let seq = self.seq()?;
         let above: f32 = seq.tracks.iter().take(ti).map(track_h).sum();
-        Some(f32::from(b.origin.y) + RULER_H + above)
+        Some(f32::from(b.origin.y) + self.tracks_top() + above)
     }
 
     /// The renderer takes a change made by dragging (one undo step when the drag ends).
@@ -1880,6 +1894,10 @@ impl Editor {
         // the head and the tabs stay; the sections scroll under them
         let mut head: Option<AnyElement> = None;
         let mut tab_row: Option<AnyElement> = None;
+        if let Some((h, b)) = self.zoom_inspector(cx) {
+            head = Some(h);
+            body = b;
+        } else {
         match (clip, media) {
             (Some(c), None) if c.content.is_some() => {
                 let name = match &c.content {
@@ -2003,15 +2021,17 @@ impl Editor {
                             .child(label("CLICKS"))
                             .child(self.chips("ed-clicks", &[("None", 0i64), ("Circle", 1), ("Ripple", 2)], look.pointer.clicks, move |this, v, cx| this.change_look(mid, |e| e.pointer.clicks = v, cx), cx))
                             .child(label("ZOOMS"))
-                            .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(format!("{} zooms", look.zooms.len())))
+                            .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(format!("{} zooms, on the zoom track under the timeline", self.zooms_of(&m).len())))
                             .child(Button::new("ed-autozoom").label("Automatic zooms").icon(ui::icon("sparkles")).xsmall().outline().on_click(cx.listener(move |this, _, _, cx| {
                                 let Some(m) = this.seq().and_then(|s| s.media(mid)).cloned() else { return };
                                 let Some(log) = m.take.as_ref().and_then(|t| lightair_store::input_log::Log::read(&t.join("input.bin")).ok()) else { return };
                                 let auto = zoom::auto(&log, m.duration_ms);
-                                this.change_look(mid, |e| {
-                                    e.zooms.retain(|z| !z.auto);
-                                    e.zooms.extend(auto);
-                                }, cx)
+                                let mut zs = this.zooms_of(&m);
+                                zs.retain(|z| !z.auto);
+                                zs.extend(auto);
+                                zs.sort_by_key(|z| z.start_ms);
+                                this.zoom_sel = None;
+                                this.change(|s| if let Some(m) = s.media.iter_mut().find(|x| x.id == mid) { m.zooms = Some(zs) }, cx)
                             })));
                     }
                 }
@@ -2027,6 +2047,7 @@ impl Editor {
                     .child(self.chips("ed-fps", &[("24", 24u32), ("30", 30), ("60", 60)], fps, |this, v, cx| this.change(|s| s.fps = v, cx), cx));
                 body = self.proxies_section(body, cx).child(div().pt_2().text_size(px(12.)).text_color(tok::text_tertiary()).child("Select a clip to change it."));
             }
+        }
         }
         let head = head.unwrap_or_else(|| {
             let p = self.project.as_ref();
@@ -2397,6 +2418,7 @@ impl Editor {
                     ),
             );
         }
+        let zoom_lane = self.zoom_lane(cx);
         let head = HEADER_W + self.x_of(self.playhead);
         // markers on the ruler; the moment under the pointer (preview axis)
         let marks: Vec<f32> = seq.markers.iter().map(|m| HEADER_W + self.x_of(*m)).filter(|x| *x >= HEADER_W).collect();
@@ -2405,7 +2427,8 @@ impl Editor {
             Some(Drag::TrimStart(_) | Drag::TrimEnd(_) | Drag::FadeIn(_) | Drag::FadeOut(_)) => Some(CursorStyle::ResizeLeftRight),
             Some(Drag::Volume { .. }) => Some(CursorStyle::ResizeUpDown),
             Some(Drag::TrackHeight { .. }) => Some(CursorStyle::ResizeRow),
-            Some(Drag::Move { .. }) => Some(CursorStyle::ClosedHand),
+            Some(Drag::Move { .. } | Drag::Zoom { part: zooms::ZoomPart::Body { .. }, .. }) => Some(CursorStyle::ClosedHand),
+            Some(Drag::Zoom { .. }) => Some(CursorStyle::ResizeLeftRight),
             _ => None,
         };
         div()
@@ -2420,6 +2443,8 @@ impl Editor {
             .bg(tok::bg_app())
             .child(canvas(move |b, _, _| *bounds.borrow_mut() = Some(b), |_, _, _, _| {}).absolute().size_full())
             .child(div().flex().h(px(RULER_H)).border_b_1().border_color(tok::border()).child(div().w(px(HEADER_W)).flex_none()).child(ruler))
+            // the zoom track, under the ruler (when there's a screen take)
+            .children(zoom_lane)
             .child(rows)
             .children(marks.into_iter().map(|x| {
                 div().absolute().top(px(2.)).left(px(x - 5.0)).child(ui::icon("flag").size(px(11.)).text_color(rgb(0xFBBF24)))
