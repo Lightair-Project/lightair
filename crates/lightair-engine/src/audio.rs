@@ -139,6 +139,7 @@ pub fn params(e: &Effect) -> Option<Params> {
             eq: r.flag("eq"),
             compress: r.flag("compress"),
             limit: r.flag("limit"),
+            podcast: r.num("character") >= 0.5,
         }),
         lightair_core::catalog::PLUGIN_KIND => Params::Plugin(PluginParams { plugin: crate::plugins::instance(e) }),
         _ => return None,

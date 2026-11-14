@@ -28,6 +28,8 @@ pub(super) enum PaletteAction {
     AddColour,
     AddTimer,
     AddVertical,
+    AddScreenLayouts,
+    StudioTake,
     ImportObs,
     Transition(TransitionKind),
     Undo,
@@ -106,6 +108,8 @@ fn entries(project: &Project, studio_mode: bool) -> Vec<Entry> {
         ("Add colour object", "", "square", AddColour),
         ("Add timer object", "", "timer", AddTimer),
         ("Add vertical format", "", "smartphone", AddVertical),
+        ("Add screen recording scenes", "", "monitor", AddScreenLayouts),
+        ("Start or stop a Studio take", "", "mouse-pointer-2", StudioTake),
         ("Import OBS scenes", "", "import", ImportObs),
         ("Undo", "⌘Z", "undo-2", Undo),
         ("Redo", "⇧⌘Z", "redo-2", Redo),
@@ -210,6 +214,8 @@ impl StudioWindow {
             AddColour => self.add_colour(cx),
             AddTimer => self.add_timer(cx),
             AddVertical => self.add_vertical(cx),
+            AddScreenLayouts => self.add_screen_layouts(cx),
+            StudioTake => self.studio_take(cx),
             ImportObs => self.import_obs(window, cx),
             Transition(kind) => {
                 let current = self.studio.read(cx).project().transition;

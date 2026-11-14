@@ -1798,6 +1798,37 @@ impl StudioWindow {
         self.studio.update(cx, |s, _| s.library_version += 1);
     }
 
+    /// Adds the screen recording scenes (screen, screen + camera, split, camera) on backdrops,
+    /// from the project's screen (a display capture is added if it has none) and camera.
+    pub(crate) fn add_screen_layouts(&mut self, cx: &mut Context<Self>) {
+        use lightair_core::kinds;
+        let project = self.studio.read(cx).project().clone();
+        let mut commands = Vec::new();
+        let screen = match project.inputs.values().find(|i| i.kind == kinds::SCREEN) {
+            Some(i) => i.id,
+            None => {
+                let input = lightair_core::Input::new("Display", kinds::SCREEN, display_settings());
+                let id = input.id;
+                commands.push(Command::AddInput { input });
+                id
+            }
+        };
+        let camera = project.inputs.values().find(|i| i.kind == kinds::CAMERA).map(|i| i.id);
+        let (_, _, dw, dh) = lightair_platform::input::main_display();
+        let sources = lightair_core::screen_layouts::Sources {
+            screen,
+            screen_aspect: if dh > 0.0 { dw / dh } else { 16.0 / 10.0 },
+            camera,
+            preset: 0,
+        };
+        let mut with = project.as_ref().clone();
+        for c in &commands {
+            let _ = c.apply(&mut with);
+        }
+        commands.extend(lightair_core::screen_layouts::scenes(&with, &sources));
+        self.exec(Command::Batch { label: "Add screen recording scenes".into(), commands }, cx);
+    }
+
     /// Starts a Studio take after a 3-second countdown (again during it: cancels), or stops one.
     pub(crate) fn studio_take(&mut self, cx: &mut Context<Self>) {
         if self.studio.read(cx).is_taking() {
