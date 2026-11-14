@@ -1231,7 +1231,8 @@ impl MixerPanel {
                     .when_some(view.mix_to_program, |d, on| d.child(self.measured(id, self.mix_output(i, id, on, cx)))),
             )
             .child(levels)
-            .child(div().flex().flex_none().items_center().h(px(40.)).px_2().pb_1().child(self.strip_source(i, view, cx)))
+                        // full width, centred in its row
+            .child(div().flex().flex_col().flex_none().justify_center().h(px(40.)).px_2().pb_1().child(self.strip_source(i, view, cx)))
     }
 
     /// The strip's foot: a track's device (pick another here), or what the strip is.
