@@ -28,6 +28,13 @@ enum Done {
     Frame(u64, Vec<u8>, (u32, u32)),
     Progress(f32),
     Exported(Result<PathBuf, String>),
+    Transcribed(Result<lightair_render::speech::Transcript, String>),
+    Downloaded(Result<(), String>),
+}
+
+/// Where the speech model goes (Lightair's data folder).
+fn model() -> PathBuf {
+    lightair_render::speech::model_path(&lightair_platform::paths::data_dir())
 }
 
 /// The item being edited.
@@ -42,6 +49,22 @@ struct Open {
     renderer: Arc<Mutex<Option<Renderer>>>,
     /// The result's length.
     duration: u64,
+    /// The transcript (kept beside the edit), once made.
+    transcript: Option<lightair_render::speech::Transcript>,
+}
+
+impl Open {
+    fn transcript_path(&self) -> PathBuf {
+        self.edit_path.with_extension("transcript.json")
+    }
+
+    /// The transcript as subtitles for the result, written beside the edit.
+    fn write_srt(&self) -> Option<PathBuf> {
+        let t = self.transcript.as_ref()?;
+        let path = self.edit_path.with_extension("srt");
+        std::fs::write(&path, lightair_render::speech::srt(&self.edit, t, 42)).ok()?;
+        Some(path)
+    }
 }
 
 pub struct Editor {
@@ -60,6 +83,8 @@ pub struct Editor {
     rx: mpsc::Receiver<Done>,
     /// The timeline's place on screen, for clicks.
     track: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
+    transcribing: bool,
+    downloading: bool,
 }
 
 /// The take folder or the video an item is made of.
@@ -106,6 +131,8 @@ impl Editor {
             tx,
             rx,
             track: Default::default(),
+            transcribing: false,
+            downloading: false,
         }
     }
 
@@ -123,7 +150,8 @@ impl Editor {
         let renderer = Arc::new(Mutex::new(None));
         let (r, tx, src, path) = (renderer.clone(), self.tx.clone(), source.clone(), edit_path.clone());
         // the probe, the GPU and (new edits) the automatic zooms, away from the window
-        let saved = Edit::load(&edit_path).ok();
+        // the project's edit; for a take package from elsewhere, the one it came with
+        let saved = Edit::load(&edit_path).ok().or_else(|| source.video.parent().and_then(|f| Edit::load(&f.join("edit.json")).ok()));
         let duration = item.duration_ms.unwrap_or(0);
         let mut edit = saved.clone().unwrap_or_else(|| Edit::new(duration.max(1)));
         std::thread::spawn(move || {
@@ -151,7 +179,8 @@ impl Editor {
         });
         edit.version = edit.version.max(1);
         let duration = timeline::duration_ms(&edit);
-        self.open = Some(Open { project, item, source, edit_path, edit, undo: Vec::new(), redo: Vec::new(), renderer, duration });
+        let transcript = std::fs::read(edit_path.with_extension("transcript.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        self.open = Some(Open { project, item, source, edit_path, edit, undo: Vec::new(), redo: Vec::new(), renderer, duration, transcript });
         self.playhead = 0;
         self.preview = None;
         self.note = Some("Opening…".into());
@@ -189,6 +218,26 @@ impl Editor {
                                 this.preview = image_of(rgba, size).or(this.preview.take());
                             }
                             Done::Progress(p) => this.exporting = Some(p),
+                            Done::Transcribed(r) => {
+                                this.transcribing = false;
+                                match r {
+                                    Ok(t) => {
+                                        if let Some(o) = &mut this.open {
+                                            let _ = std::fs::write(o.transcript_path(), serde_json::to_vec(&t).unwrap_or_default());
+                                            this.note = Some(format!("{} words", t.words.len()).into());
+                                            o.transcript = Some(t);
+                                        }
+                                    }
+                                    Err(e) => this.note = Some(e.into()),
+                                }
+                            }
+                            Done::Downloaded(r) => {
+                                this.downloading = false;
+                                this.note = Some(match r {
+                                    Ok(()) => "The speech model is ready.".into(),
+                                    Err(e) => format!("The download didn't finish: {e}").into(),
+                                });
+                            }
                             Done::Exported(r) => {
                                 this.exporting = None;
                                 this.note = Some(match r {
@@ -306,6 +355,53 @@ impl Editor {
         cx.notify();
     }
 
+    /// Transcribes the item's audio on the computer.
+    fn transcribe(&mut self, cx: &mut Context<Self>) {
+        let Some(o) = &self.open else { return };
+        if self.transcribing {
+            return;
+        }
+        let (audio, tx) = (o.source.audio.clone(), self.tx.clone());
+        self.transcribing = true;
+        self.note = Some("Listening…".into());
+        std::thread::spawn(move || {
+            let r = lightair_render::speech::transcribe(&audio, &model()).map_err(|e| e.to_string());
+            let _ = tx.send(Done::Transcribed(r));
+        });
+        cx.notify();
+    }
+
+    /// Downloads the speech model (asked for by the user's click), with the system's curl.
+    fn download_model(&mut self, cx: &mut Context<Self>) {
+        if self.downloading {
+            return;
+        }
+        let (path, tx) = (model(), self.tx.clone());
+        self.downloading = true;
+        self.note = Some("Downloading the speech model (142 MB)…".into());
+        std::thread::spawn(move || {
+            let r = (|| {
+                std::fs::create_dir_all(path.parent().ok_or("no folder")?).map_err(|e| e.to_string())?;
+                let part = path.with_extension("part");
+                let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
+                let ok = std::process::Command::new(curl)
+                    .args(["-fsSL", "-o"])
+                    .arg(&part)
+                    .arg(lightair_render::speech::MODEL_URL)
+                    .status()
+                    .map_err(|e| e.to_string())?
+                    .success();
+                if !ok {
+                    let _ = std::fs::remove_file(&part);
+                    return Err("couldn't reach the download".to_string());
+                }
+                std::fs::rename(&part, &path).map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(Done::Downloaded(r));
+        });
+        cx.notify();
+    }
+
     fn export(&mut self, codec: Codec, cx: &mut Context<Self>) {
         if self.open.is_none() || self.exporting.is_some() {
             return;
@@ -314,7 +410,13 @@ impl Editor {
         let Some(o) = &self.open else { return };
         let folder = o.source.video.parent().map(Path::to_path_buf).unwrap_or_default();
         let folder = if folder.extension().is_some_and(|e| e == "lightair-take") { folder.parent().map(Path::to_path_buf).unwrap_or(folder) } else { folder };
-        let ext = if codec == Codec::ProRes { "mov" } else { "mp4" };
+        let ext = match codec {
+            Codec::ProRes => "mov",
+            Codec::Gif => "gif",
+            Codec::H264 => "mp4",
+        };
+        let subtitles = o.write_srt();
+        let fps = if codec == Codec::Gif { 15.0 } else { 60.0 };
         let name = format!("{} (edited).{ext}", o.item.title.replace(['/', ':', '\\'], "-"));
         let out = (1..).map(|n| if n == 1 { folder.join(&name) } else { folder.join(name.replace(" (edited)", &format!(" (edited {n})"))) }).find(|p| !p.exists()).unwrap_or_else(|| folder.join(&name));
         let (r, tx, project, from, title, duration) =
@@ -323,14 +425,19 @@ impl Editor {
         std::thread::spawn(move || {
             let mut guard = r.lock().unwrap();
             let Some(r) = guard.as_mut() else { return };
+            r.subtitles = subtitles.clone().filter(|_| codec != Codec::Gif);
             let progress = tx.clone();
             let result = r
-                .export(&out, 60.0, codec, |p| {
+                .export(&out, fps, codec, |p| {
                     let _ = progress.send(Done::Progress(p));
                     true
                 })
                 .map_err(|e| e.to_string());
             if result.is_ok() {
+                // the captions beside it too, for players and sites that take them separately
+                if let Some(srt) = subtitles.filter(|_| codec != Codec::Gif) {
+                    let _ = std::fs::copy(srt, out.with_extension("srt"));
+                }
                 let mut item = Item::new(Kind::Export, format!("{title} (edited)"), vec![ItemFile { path: out.clone(), format: None }], chrono::Utc::now().timestamp_millis());
                 item.duration_ms = Some(duration);
                 item.from = Some(from);
@@ -424,6 +531,31 @@ impl Editor {
             .child(self.chips("ed-clicks", &[("None", 0i64), ("Circle", 1), ("Ripple", 2)], e.pointer.clicks, |e, v| e.pointer.clicks = v, cx))
             .child(label("SIZE"))
             .child(self.chips("ed-size", &[("720p", (1280u32, 720u32)), ("1080p", (1920, 1080)), ("4K", (3840, 2160)), ("Vertical", (1080, 1920))], e.size, |e, v| e.size = v, cx))
+            .when_some(o.transcript.as_ref(), |d, t| {
+                // the words, where they are in the result; a click goes there
+                let mut words = div().flex().flex_wrap().gap_x_1().text_size(px(12.));
+                for (n, w) in t.words.iter().enumerate() {
+                    let Some(at) = timeline::result_at(e, w.start_ms) else { continue };
+                    let here = self.playhead >= at && self.playhead < at + (w.end_ms - w.start_ms).max(1);
+                    words = words.child(
+                        div()
+                            .id(("ed-word", n))
+                            .cursor_pointer()
+                            .rounded(px(3.))
+                            .when(here, |d| d.bg(tok::bg_selected()))
+                            .hover(|d| d.text_color(tok::text()))
+                            .text_color(tok::text_secondary())
+                            .child(w.text.clone())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.stop(cx);
+                                this.playhead = at;
+                                this.request(at);
+                                cx.notify();
+                            })),
+                    );
+                }
+                d.child(label("TRANSCRIPT")).child(div().id("ed-words").flex_1().min_h_0().overflow_y_scroll().child(words))
+            })
     }
 
     fn timeline(&self, o: &Open, cx: &mut Context<Self>) -> impl IntoElement {
@@ -546,6 +678,32 @@ impl Editor {
                     e.zooms.sort_by_key(|z| z.start_ms);
                 }, cx)
             })))
+            .child(match (&o.transcript, model().is_file()) {
+                (Some(_), _) => Button::new("ed-tighten")
+                    .label("Remove fillers and pauses")
+                    .icon(ui::icon("wand-sparkles"))
+                    .xsmall()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let Some(t) = this.open.as_ref().and_then(|o| o.transcript.clone()) else { return };
+                        this.change(|e| *e = lightair_render::speech::tighten(e, &t, 900, 300), cx)
+                    })),
+                (None, true) => Button::new("ed-transcribe")
+                    .label(if self.transcribing { "Transcribing…" } else { "Transcribe" })
+                    .icon(ui::icon("captions"))
+                    .xsmall()
+                    .ghost()
+                    .loading(self.transcribing)
+                    .on_click(cx.listener(|this, _, _, cx| this.transcribe(cx))),
+                (None, false) => Button::new("ed-model")
+                    .label(if self.downloading { "Downloading…" } else { "Get speech model" })
+                    .icon(ui::icon("download"))
+                    .xsmall()
+                    .ghost()
+                    .loading(self.downloading)
+                    .tooltip("142 MB, once: speech is recognised on this computer, never sent anywhere")
+                    .on_click(cx.listener(|this, _, _, cx| this.download_model(cx))),
+            })
             .child(div().flex_1());
         if let Some(n) = self.selected_clip.filter(|n| *n < o.edit.clips.len()) {
             row = row
@@ -628,6 +786,7 @@ impl Render for Editor {
                         None => div()
                             .flex()
                             .gap_1()
+                            .child(Button::new("ed-export-gif").label("GIF").small().ghost().on_click(cx.listener(|this, _, _, cx| this.export(Codec::Gif, cx))))
                             .child(Button::new("ed-export-prores").label("ProRes").small().ghost().on_click(cx.listener(|this, _, _, cx| this.export(Codec::ProRes, cx))))
                             .child(Button::new("ed-export").label("Export MP4").small().primary().on_click(cx.listener(|this, _, _, cx| this.export(Codec::H264, cx))))
                             .into_any_element(),

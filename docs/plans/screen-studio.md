@@ -426,6 +426,17 @@ Each phase ships with tests and screenshots, like the audio plan.
    - GIF export; export/import package;
    - iPhone/iPad over USB with our own bezels; resize recorded window; smart framing;
    - speaker notes.
+
+   Done (14 November 2026): speech on the computer (`lightair_render::speech`: whisper.cpp as a
+   helper program, its model downloaded once on the user's click, word times); in the Editor,
+   Transcribe, the transcript (a word moves the playhead), Remove fillers and pauses, captions as
+   a subtitle track in exports and a `.srt` beside them; GIF export (one palette, 15 fps, at most
+   960 wide); take packages (Export package…, and Add existing recordings brings a package in,
+   its edit with it); iPhones and iPads by USB appear among the cameras on macOS.
+
+   Still open from this phase: live captions and caption styles burned into the picture; edit by
+   deleting words in the transcript; Android over USB; device bezels; resize recorded window;
+   smart framing; speaker notes.
 5. **Extras (all on-device):**
    - sensitive-data and face detection;
    - super-resolution zoom (FSR 1, both platforms);
