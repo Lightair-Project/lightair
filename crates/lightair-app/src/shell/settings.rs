@@ -184,7 +184,7 @@ impl StudioWindow {
     }
 
     /// The keys pressed for the global shortcut being set.
-    fn capture_hotkey(&mut self, k: &Keystroke, cx: &mut Context<Self>) {
+    pub(super) fn capture_hotkey(&mut self, k: &Keystroke, cx: &mut Context<Self>) {
         let Some(action) = self.hotkey_capture else { return };
         if k.key == "escape" {
             self.hotkey_capture = None;
@@ -334,7 +334,10 @@ impl StudioWindow {
                 .justify_center()
                 .items_center()
                 .bg(tok::scrim())
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                    this.toggle_settings(cx);
+                    window.focus(&this.focus, cx);
+                }))
                 .child(
                     div()
                         .id("settings")
@@ -347,13 +350,13 @@ impl StudioWindow {
                         .border_1()
                         .border_color(tok::border_strong())
                         .shadow_lg()
+                        .track_focus(&self.settings_focus)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                            if this.hotkey_capture.is_some() {
-                                cx.stop_propagation();
-                                this.capture_hotkey(&ev.keystroke, cx);
-                            } else if ev.keystroke.key == "escape" {
+                        // (a shortcut being set takes its keys first: `StudioWindow::_hotkey_keys`)
+                        .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                            if this.hotkey_capture.is_none() && ev.keystroke.key == "escape" {
                                 this.toggle_settings(cx);
+                                window.focus(&this.focus, cx);
                             }
                         }))
                         .child(
@@ -628,9 +631,11 @@ impl StudioWindow {
                         .label(if keys.is_some() { "Change" } else { "Set" })
                         .xsmall()
                         .outline()
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             this.hotkey_capture = Some(action);
                             this.hotkey_note = None;
+                            // the keys pressed next come here
+                            window.focus(&this.settings_focus, cx);
                             cx.notify();
                         })),
                 )

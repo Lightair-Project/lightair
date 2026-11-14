@@ -288,6 +288,11 @@ pub struct StudioWindow {
     active_format: Option<Id>,
     side_by_side: bool,
     focus: FocusHandle,
+    /// Settings, focused while a shortcut is being set (so the keys pressed reach it).
+    settings_focus: FocusHandle,
+    /// Takes the keys pressed while a global shortcut is being set, before the window's own
+    /// shortcuts would.
+    _hotkey_keys: Subscription,
     drag: Option<Drag>,
     guides: Guides,
     add_menu: bool,
@@ -516,6 +521,25 @@ impl StudioWindow {
             confirm_end: None,
             studio,
             focus,
+            settings_focus: cx.focus_handle(),
+            _hotkey_keys: {
+                let me = cx.entity().downgrade();
+                cx.intercept_keystrokes(move |ev, window, cx| {
+                    let Some(me) = me.upgrade() else { return };
+                    let taken = me.update(cx, |this, cx| {
+                        this.hotkey_capture?;
+                        this.capture_hotkey(&ev.keystroke, cx);
+                        Some((this.hotkey_capture.is_none(), this.focus.clone()))
+                    });
+                    if let Some((done, focus)) = taken {
+                        cx.stop_propagation();
+                        // set (or cancelled): the window's keys again
+                        if done {
+                            window.focus(&focus, cx);
+                        }
+                    }
+                })
+            },
             drag: None,
             guides: vec![],
             add_menu: false,
