@@ -1,6 +1,6 @@
 # The Editor as a full video editor
 
-Status: phases 1 and 2 built (14 November 2026); see the notes under them. This replaces the Screen Studio plan's
+Status: phases 1 to 3 built (14 November 2026); see the notes under them. This replaces the Screen Studio plan's
 "focused editor" decision (docs/plans/screen-studio.md, section 7): the Editor becomes a
 multi-track video editor, in the way CapCut is, while a Studio take keeps everything that made it
 special (zooms, the redrawn pointer, the backdrop) as a kind of clip.
@@ -66,6 +66,19 @@ A project is a document: every change is a step to undo, and it's saved as it ch
    areas (phases 3 and 4). Sound isn't heard in the player yet (phase 4).
 3. **Words and looks:** text clips with styles, transitions between clips, filters and effects
    (the effect catalog's video effects), keyframes for transforms, stickers; captions as a track.
+
+   Built: text and shape clips (drawn on the CPU with cosmic-text and tiny-skia, kept until they
+   change), from the media panel's Text and Shapes tabs (style presets, clicked in at the
+   playhead or dragged onto a track), edited in the inspector (words, size, line width, colour,
+   weight, alignment, a box behind, an outline; a shape's kind, size, corners, fill and line).
+   Filters per clip in the compositor's shader (presets, and brightness, contrast, saturation,
+   warmth, vignette, blur). Transitions across a cut (crossfade, dip to black, slide, zoom; 0.3
+   to 2 s; one cut or every cut), shown on the timeline. Keyframes for the transform (added or
+   removed at the playhead, eased between, kept in place by splits and trims), marked on clips.
+   Captions: the project's sound mixed and transcribed on the computer (whisper), the lines made
+   into text clips on a captions track (made again in place, restyled together).
+   Not yet: the effect catalog's other video effects as clip effects, stickers (images do for
+   now), dragging a picture in the player to move it, fades in and out as one control.
 4. **Sound:** waveforms on clips, fades, volume keyframes, detaching a video's sound, music,
    voice clean-up (the audio engine's effects, offline).
 5. **Speed of work:** filmstrip thumbnails, proxies, smooth real-time playback (frames decoded
