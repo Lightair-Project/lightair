@@ -6,15 +6,6 @@ use super::*;
 use gpui_kit::component::Disableable;
 use lightair_render::sequence::{Clip, VoiceClean, VolumeKey};
 
-/// The file a medium's sound is drawn from.
-pub(super) fn sound_file(m: &Media) -> Option<PathBuf> {
-    match m.kind {
-        MediaKind::Image => None,
-        MediaKind::Audio => Some(m.path.clone()),
-        MediaKind::Video => m.audio.first().cloned(),
-    }
-}
-
 /// Voice clean-up strengths offered: (name, amount; negative: off).
 const VOICE: [(&str, i32); 4] = [("Off", -1), ("Light", 25), ("Medium", 50), ("Strong", 85)];
 
@@ -23,12 +14,13 @@ impl Editor {
     pub(super) fn want_peaks(&mut self) {
         let Some(seq) = self.seq() else { return };
         // a file and which of its audio tracks
+        // everything each sound clip plays (a take's stems, a file's tracks)
         let mut wanted: Vec<(PathBuf, Option<u32>)> = seq
             .tracks
             .iter()
             .filter(|t| t.kind == TrackKind::Audio)
             .flat_map(|t| t.clips.iter())
-            .filter_map(|c| seq.media(c.media).and_then(sound_file).map(|f| (f, c.stream)))
+            .flat_map(|c| lightair_render::sound::sources(seq, c, false))
             .filter(|k| !self.peaks.contains_key(k))
             .collect();
         wanted.dedup();
@@ -47,8 +39,18 @@ impl Editor {
 
     /// A clip's waveform, shaped by its volume and fades, for the visible part of the clip
     /// (`left`, `width`: its place in the lane).
-    pub(super) fn wave(&self, c: &Clip, m: Option<&Media>, left: f32, width: f32, height: f32) -> Option<AnyElement> {
-        let peaks = self.peaks.get(&(sound_file(m?)?, c.stream))?.clone()?;
+    pub(super) fn wave(&self, c: &Clip, _media: Option<&Media>, left: f32, width: f32, height: f32) -> Option<AnyElement> {
+        // the waveform of what it plays: its sources added together, as they're mixed
+        let seq = self.seq()?;
+        let all: Vec<Peaks> = lightair_render::sound::sources(seq, c, false).iter().map(|k| self.peaks.get(k).cloned().flatten()).collect::<Option<Vec<_>>>()?;
+        if all.is_empty() {
+            return None;
+        }
+        let peaks: Peaks = if all.len() == 1 {
+            all[0].clone()
+        } else {
+            Arc::new(lightair_render::sound::combine(&all.iter().map(|p| p.as_slice()).collect::<Vec<_>>()))
+        };
         let pps = self.pps();
         let (from, to) = ((-left).max(0.0), width.min(4000.0 - left));
         let mut bars: Vec<(f32, f32)> = Vec::new();
