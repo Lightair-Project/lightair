@@ -61,8 +61,10 @@ fn main() {
         .init();
 
     // The canvas size comes from the project's primary format; read it before starting libobs.
+    // the one asked for, the one open last, or the default
     let project_dir = std::env::var_os("LIGHTAIR_PROJECT")
         .map(PathBuf::from)
+        .or_else(|| prefs::load_from(&prefs::path()).last_project.filter(|d| d.join("project.json").exists()))
         .unwrap_or_else(|| projects_dir().join("Default.lightair"));
     let canvas = lightair_store::load_snapshot(&project_dir)
         .map(|p| (p.primary_format().width, p.primary_format().height))
@@ -122,6 +124,7 @@ fn main() {
         frame_view::init(cx);
         ui::apply_theme(cx);
         shell::bind_keys(cx);
+        shell::app_menu::bind(cx);
 
         let starter: fn() -> lightair_core::Project = match std::env::var("LIGHTAIR_STARTER").as_deref() {
             Ok("plain") => starter::plain_project,
