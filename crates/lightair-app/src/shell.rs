@@ -1951,6 +1951,46 @@ impl StudioWindow {
         )
     }
 
+    /// The project's name, as a menu of the projects to open, and New Project.
+    fn project_picker(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+        let (me, current) = (cx.entity().downgrade(), self.studio.read(cx).project_dir());
+        let button = Button::new("project-picker")
+            .label(project.name.clone())
+            .small()
+            .ghost()
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                // read when the menu opens: projects come and go
+                for p in crate::library::list_projects(current.as_deref()) {
+                    let (me, dir) = (me.clone(), p.dir.clone());
+                    let open = current.as_ref() == Some(&p.dir);
+                    menu = menu.item(PopupMenuItem::new(p.name).checked(open).on_click(move |_, _, cx| {
+                        if !open && let Some(me) = me.upgrade() {
+                            me.update(cx, |this, cx| this.open_project(dir.clone(), cx));
+                        }
+                    }));
+                }
+                let (new, library) = (me.clone(), me.clone());
+                menu.separator()
+                    .item(PopupMenuItem::new("New Project…").icon(ui::icon("plus")).on_click(move |_, window, cx| {
+                        if let Some(me) = new.upgrade() {
+                            me.update(cx, |this, cx| {
+                                this.show_place(Place::Library, cx);
+                                this.library.update(cx, |l, cx| l.start_new_project(window, cx));
+                            });
+                        }
+                    }))
+                    .item(PopupMenuItem::new("All Projects in the Library").icon(ui::icon("library")).on_click(move |_, _, cx| {
+                        if let Some(me) = library.upgrade() {
+                            me.update(cx, |this, cx| this.show_place(Place::Library, cx));
+                        }
+                    }))
+            });
+        // in a container like the switcher's
+        div().p_0p5().rounded(px(8.)).bg(tok::bg_panel()).border_1().border_color(tok::border()).child(button)
+    }
+
     /// Library · Live · Editor.
     fn place_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = |id: &'static str, label: &'static str, place: Place, key: &'static str| {
@@ -2096,7 +2136,7 @@ impl StudioWindow {
             .bg(tok::bg_app())
             // Library · Live · Editor, in the middle of the bar whatever is either side
             .child(div().absolute().inset_0().flex().items_center().justify_center().child(self.place_switcher(cx)))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(project.name.clone()))
+            .child(self.project_picker(project, cx))
             .when(streaming, |d| {
                 d.child(
                     div()
