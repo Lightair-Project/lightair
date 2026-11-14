@@ -30,6 +30,35 @@ struct Pending {
     thumbnail_due: Option<std::time::Instant>,
 }
 
+/// A Studio take in progress (docs/plans/screen-studio.md, 4.2): its folder, Library entry,
+/// and the input it logs.
+struct TakeRun {
+    project: Option<PathBuf>,
+    folder: PathBuf,
+    item: Item,
+    started: std::time::Instant,
+    recorder: Option<lightair_platform::input::Recorder>,
+    log: Option<lightair_store::input_log::Writer>,
+    tracks: Vec<lightair_engine::take::Track>,
+    audio: Vec<PathBuf>,
+    stopping: bool,
+    thumbnail_due: Option<std::time::Instant>,
+}
+
+fn log_entry(e: lightair_platform::input::Event) -> lightair_store::input_log::Entry {
+    use lightair_platform::input::Event as E;
+    use lightair_store::input_log::Entry;
+    match e {
+        E::Move { x, y } => Entry::Move { x, y },
+        E::Down { button, x, y } => Entry::Down { button, x, y },
+        E::Up { button, x, y } => Entry::Up { button, x, y },
+        E::Scroll { dx, dy } => Entry::Scroll { dx, dy },
+        E::KeyDown { code, modifiers } => Entry::KeyDown { code, modifiers },
+        E::KeyUp { code, modifiers } => Entry::KeyUp { code, modifiers },
+        E::Shape(s) => Entry::Shape(s as u8),
+    }
+}
+
 /// A still for the Library: the program as it is now, written to `path` (by the window, which
 /// has the preview).
 #[derive(Debug, Clone)]
@@ -75,6 +104,10 @@ pub struct Studio {
     refit: Option<(Vec<lightair_store::EstimatedLayer>, std::time::Instant)>,
     /// The recording on its way into the Library.
     pending: Option<Pending>,
+    /// The Studio take being recorded.
+    take: Option<TakeRun>,
+    /// The take just saved (project, item), for the window's card.
+    pub last_take: Option<(PathBuf, Id)>,
     /// Stills the window should take for the Library.
     pub thumbnails: Vec<ThumbnailRequest>,
     /// Bumped when a project's recordings index changes (the Library reloads).
@@ -112,6 +145,8 @@ impl Studio {
             recent_lagged: 0,
             refit: None,
             pending: None,
+            take: None,
+            last_take: None,
             thumbnails: Vec::new(),
             library_version: 0,
             stems: None,
@@ -475,6 +510,9 @@ impl Studio {
     }
 
     pub fn toggle_recording(&mut self, cx: &mut Context<Self>) {
+        if self.take.is_some() {
+            return self.toggle_take(cx);
+        }
         if self.is_recording() {
             let status = runtime().recording();
             if let Some(p) = &mut self.pending {
@@ -579,6 +617,176 @@ impl Studio {
             self.index_add(&dir, item);
         }
         cx.notify();
+    }
+
+    /// A Studio take is being recorded (and isn't stopping yet).
+    pub fn is_taking(&self) -> bool {
+        self.take.as_ref().is_some_and(|t| !t.stopping)
+    }
+
+    /// How long the take has run.
+    pub fn take_elapsed(&self) -> Option<std::time::Duration> {
+        self.take.as_ref().filter(|t| !t.stopping).map(|t| t.started.elapsed())
+    }
+
+    /// Starts or stops a Studio take: each screen and camera in the program to its own file,
+    /// the multitrack audio, and the pointer, clicks and keys, in a take folder.
+    pub fn toggle_take(&mut self, cx: &mut Context<Self>) {
+        if self.take.is_some() {
+            self.stop_take(cx);
+            return;
+        }
+        if self.is_recording() {
+            self.issue = Some("Stop the recording first.".into());
+            cx.notify();
+            return;
+        }
+        let project = self.project().clone();
+        let stamp = chrono::Local::now().format("%Y-%m-%d %H.%M.%S");
+        let folder = self.recording_folder().join(format!("Take {stamp}.lightair-take"));
+        let fps = (project.primary_format().fps_num, project.primary_format().fps_den);
+        self.flush();
+        let (f, p, caps) = (folder.clone(), project.clone(), self.engine.capabilities.encoders.clone());
+        let started = self.engine.call(move |s| {
+            let sources = s.reconciler.take_sources(&p);
+            let take = lightair_engine::take::Take::start(sources, &f, fps, &mut s.outputs, &caps)?;
+            let tracks = take.tracks.clone();
+            s.take = Some(take);
+            Ok::<_, String>(tracks)
+        });
+        let tracks = match started {
+            Ok(t) => t,
+            Err(e) => {
+                self.issue = Some(format!("The take didn't start: {e}").into());
+                cx.notify();
+                return;
+            }
+        };
+        // the audio engine's stems, beside the video
+        let (p, f) = (project.clone(), folder.clone());
+        let audio = match self.engine.call(move |s| s.reconciler.start_stems(&p, &f, "Audio", false)) {
+            Ok(files) => files,
+            Err(e) => {
+                self.issue = Some(format!("The take's audio didn't start: {e}").into());
+                Vec::new()
+            }
+        };
+        // the pointer, clicks and keys
+        let recorder = lightair_platform::input::Recorder::start(120);
+        let log = lightair_store::input_log::Writer::create(&folder.join("input.bin"), recorder.listening).ok().map(|mut w| {
+            use lightair_store::input_log::{Entry, Record};
+            let (x, y, dw, dh) = lightair_platform::input::main_display();
+            let at = std::time::Duration::ZERO;
+            let _ = w.write(&[Record { at, entry: Entry::Display { x, y } }, Record { at, entry: Entry::DisplaySize { w: dw, h: dh } }]);
+            w
+        });
+        let title = format!("Take · {}", chrono::Local::now().format("%-d %b, %H:%M"));
+        let mut item = Item::new(Kind::Take, title, Vec::new(), chrono::Utc::now().timestamp_millis());
+        item.files = tracks.iter().map(|t| ItemFile { path: t.file.clone(), format: Some(t.name.clone()) }).collect();
+        let project_dir = self.project_dir();
+        if let Some(dir) = &project_dir {
+            item.thumbnail = Some(recordings::thumbnails_dir(dir).join(format!("{}.png", item.id)));
+            // written now, so a take cut short is still in the Library
+            self.index_add(dir, item.clone());
+        }
+        self.take = Some(TakeRun {
+            project: project_dir,
+            folder,
+            item,
+            started: std::time::Instant::now(),
+            recorder: Some(recorder),
+            log,
+            tracks,
+            audio,
+            stopping: false,
+            thumbnail_due: Some(std::time::Instant::now() + std::time::Duration::from_secs(3)),
+        });
+        cx.notify();
+    }
+
+    fn stop_take(&mut self, cx: &mut Context<Self>) {
+        let Some(t) = &mut self.take else { return };
+        if t.stopping {
+            return;
+        }
+        t.stopping = true;
+        t.item.duration_ms = Some(t.started.elapsed().as_millis() as u64);
+        self.engine.post(|s| s.outputs.stop_recording());
+        let report = self.engine.call(|s| s.reconciler.stop_stems());
+        let Some(t) = &mut self.take else { return };
+        if let Some(r) = t.recorder.take() {
+            let rest: Vec<_> = r
+                .stop()
+                .into_iter()
+                .map(|s| lightair_store::input_log::Record { at: s.at, entry: log_entry(s.event) })
+                .collect();
+            if let Some(w) = &mut t.log {
+                let _ = w.write(&rest);
+                let _ = w.flush();
+            }
+        }
+        if let Some(r) = &report {
+            t.audio = r.files.clone();
+        }
+        let sidecar = serde_json::json!({
+            "started_ms": t.item.started_ms,
+            "duration_ms": t.item.duration_ms,
+            "video": t.tracks.iter().map(|k| serde_json::json!({
+                "name": k.name,
+                "file": k.file.file_name().map(|n| n.to_string_lossy().into_owned()),
+                "input": k.input,
+                "width": k.width,
+                "height": k.height,
+            })).collect::<Vec<_>>(),
+            "audio": t.audio.iter().filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>(),
+            "audio_start_ns": report.as_ref().map(|r| r.start_ns),
+            "sample_rate": report.as_ref().map(|r| r.sample_rate),
+            "input": "input.bin",
+            "markers": t.item.markers,
+        });
+        let take_json = t.folder.join("take.json");
+        if let Ok(text) = serde_json::to_string_pretty(&sidecar) {
+            let _ = std::fs::write(&take_json, text);
+        }
+        t.item.files.extend(t.audio.iter().map(|f| ItemFile { path: f.clone(), format: None }));
+        t.item.files.push(ItemFile { path: t.folder.join("input.bin"), format: None });
+        t.item.files.push(ItemFile { path: take_json, format: None });
+        cx.notify();
+    }
+
+    /// Follows the take: its input log to disk every second, the still, and its Library entry
+    /// once its files have stopped.
+    fn track_take(&mut self) {
+        let Some(t) = &mut self.take else { return };
+        if let (Some(r), Some(w)) = (&t.recorder, &mut t.log) {
+            let records: Vec<_> =
+                r.take().into_iter().map(|s| lightair_store::input_log::Record { at: s.at, entry: log_entry(s.event) }).collect();
+            let _ = w.write(&records);
+            let _ = w.flush();
+        }
+        if t.thumbnail_due.is_some_and(|d| d <= std::time::Instant::now()) {
+            t.thumbnail_due = None;
+            if let Some(path) = t.item.thumbnail.clone() {
+                self.thumbnails.push(ThumbnailRequest { path });
+            }
+        }
+        let Some(t) = &self.take else { return };
+        if !t.stopping || !self.engine.call(|s| s.take.as_ref().is_none_or(|t| t.finished())) {
+            return;
+        }
+        // the per-source canvases go once their files have stopped
+        self.engine.post(|s| s.take = None);
+        let Some(mut t) = self.take.take() else { return };
+        if t.thumbnail_due.is_some() {
+            t.item.thumbnail = None;
+        }
+        t.item.files.retain(|f| f.path.exists());
+        if let Some(dir) = t.project {
+            let id = t.item.id;
+            self.index_add(&dir, t.item);
+            self.last_take = Some((dir, id));
+        }
+        self.issue = Some(format!("Take saved: {}", t.folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).into());
     }
 
     /// Writes an item to a project's recordings index (and tells the Library).
@@ -687,6 +895,10 @@ impl Studio {
             let at_ms = status.recorded(since).as_millis() as u64;
             p.item.markers.push(Marker { at_ms, label: format!("Marker {n}") });
         }
+        if ok && let Some(t) = &mut self.take {
+            let at_ms = t.started.elapsed().as_millis() as u64;
+            t.item.markers.push(Marker { at_ms, label: format!("Marker {n}") });
+        }
         self.issue = Some(if ok {
             format!("Marker {n} added").into()
         } else {
@@ -781,6 +993,7 @@ impl Studio {
         self.check_outputs();
         self.announce_clips();
         self.track_recording();
+        self.track_take();
         let stats = lightair_engine::read_stats();
         self.recent_lagged = stats.lagged_frames.saturating_sub(self.stats.lagged_frames);
         self.stats = stats;

@@ -239,6 +239,29 @@ impl StudioWindow {
             }
             Ok("palette") => self.open_palette(window, cx),
             Ok("library") => self.show_place(super::Place::Library, cx),
+            Ok("studio-take") => {
+                // a 4-second take of the Main scene, its display pointed at an app that isn't
+                // there (nobody's screen in the files), into a folder beside the project
+                let p = self.studio.read(cx).project().clone();
+                let mut settings = p.outputs.recording.clone();
+                if let Some(dir) = self.studio.read(cx).project_dir().and_then(|d| d.parent().map(|p| p.join("shot-recordings"))) {
+                    settings.folder = Some(dir);
+                }
+                self.exec(lightair_core::Command::SetRecordingSettings { settings }, cx);
+                if let Some(display) = p.inputs.values().find(|i| i.kind == lightair_core::kinds::SCREEN) {
+                    let s = serde_json::json!({"mode": lightair_core::kinds::APP, "app": "app.lightair.nothing", "cursor": false});
+                    self.exec(lightair_core::Command::SetInputSettings { input: display.id, settings: s }, cx);
+                }
+                if let Some(main) = p.scenes.iter().find(|s| s.name == "Main") {
+                    self.exec(lightair_core::Command::SetProgram { scene: Some(main.id) }, cx);
+                }
+                self.studio_take(cx);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_secs(8)).await;
+                    let _ = this.update(cx, |this, cx| this.studio_take(cx));
+                })
+                .detach();
+            }
             Ok("cursor") => {
                 // the drawn pointer, big, on the background colour (not on a screen capture: no
                 // one's screen in the picture)

@@ -275,6 +275,8 @@ pub struct StudioWindow {
     /// Library, Live or Editor.
     place: Place,
     library: Entity<crate::library::Library>,
+    /// A Studio take's countdown: when it began.
+    take_countdown: Option<Instant>,
     /// A program preview made for the Library's stills, and the stills it's for.
     thumbnail_shot: Option<(Preview, Vec<crate::studio::ThumbnailRequest>)>,
     /// Screen bounds of each visible format's stage, from the last frame.
@@ -479,6 +481,7 @@ impl StudioWindow {
             place: Place::Live,
             library,
             thumbnail_shot: None,
+            take_countdown: None,
             stage_bounds: Rc::default(),
             active_format: Some(primary),
             side_by_side: false,
@@ -835,6 +838,7 @@ impl StudioWindow {
                 }
             }
             A::Take => self.take(cx),
+            A::StudioTake => self.studio_take(cx),
             A::AddMarker => self.studio.update(cx, |s, cx| s.add_marker(cx)),
             A::SaveClip => self.studio.update(cx, |s, cx| s.save_clip(cx)),
             A::MuteMics => self.studio.update(cx, |s, cx| s.toggle_mics(cx)),
@@ -1714,6 +1718,8 @@ impl Render for StudioWindow {
             .children(self.go_live_overlay(cx))
             .children(self.settings_overlay(cx))
             .children(self.palette_overlay(cx))
+            .children(self.take_countdown_overlay())
+            .children(self.take_card(cx))
     }
 }
 
@@ -1792,6 +1798,92 @@ impl StudioWindow {
         self.studio.update(cx, |s, _| s.library_version += 1);
     }
 
+    /// Starts a Studio take after a 3-second countdown (again during it: cancels), or stops one.
+    pub(crate) fn studio_take(&mut self, cx: &mut Context<Self>) {
+        if self.studio.read(cx).is_taking() {
+            self.studio.update(cx, |s, cx| s.toggle_take(cx));
+        } else if self.take_countdown.take().is_none() {
+            self.take_countdown = Some(Instant::now());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.take_countdown.take().is_some() {
+                        this.studio.update(cx, |s, cx| s.toggle_take(cx));
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// The countdown's number over the window.
+    fn take_countdown_overlay(&self) -> Option<AnyElement> {
+        let started = self.take_countdown?;
+        let left = 3u64.saturating_sub(started.elapsed().as_secs()).max(1);
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_1()
+                        .size(px(160.))
+                        .justify_center()
+                        .rounded_full()
+                        .bg(rgba(0x0000_00b0))
+                        .child(div().text_size(px(64.)).font_weight(FontWeight::BOLD).text_color(rgb(0xFFFFFF)).child(left.to_string()))
+                        .child(div().text_size(px(11.)).text_color(rgb(0xDDDDDD)).child("Studio take")),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// After a take: where it went.
+    fn take_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (_, id) = self.studio.read(cx).last_take.clone()?;
+        let _ = id;
+        Some(
+            div()
+                .absolute()
+                .right(px(16.))
+                .bottom(px(40.))
+                .flex()
+                .items_center()
+                .gap_3()
+                .p_3()
+                .rounded(px(12.))
+                .bg(tok::bg_panel())
+                .border_1()
+                .border_color(tok::border_strong())
+                .shadow_lg()
+                .child(ui::icon("circle-check").size(px(18.)).text_color(tok::ok()))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(div().font_weight(FontWeight::MEDIUM).child("Take saved"))
+                        .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("Screen, cameras, audio and pointer, in the Library")),
+                )
+                .child(Button::new("take-card-library").label("Show").small().outline().on_click(cx.listener(|this, _, _, cx| {
+                    this.studio.update(cx, |s, _| s.last_take = None);
+                    this.show_place(Place::Library, cx);
+                })))
+                .child(ui::icon_button("take-card-close", "x", tok::text_tertiary()).on_click(cx.listener(|this, _, _, cx| {
+                    this.studio.update(cx, |s, _| s.last_take = None);
+                    cx.notify();
+                })))
+                .into_any_element(),
+        )
+    }
+
     /// Library · Live · Editor.
     fn place_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = |id: &'static str, label: &'static str, place: Place, key: &'static str| {
@@ -1831,6 +1923,27 @@ impl StudioWindow {
         let fps_color = if stats.active_fps > 0.0 && recent_lagged == 0 { tok::ok() } else { tok::warn() };
         let has_destination = project.outputs.destinations.iter().any(|d| d.enabled);
 
+        let taking = studio.is_taking();
+        let take_button = match studio.take_elapsed() {
+            Some(t) => {
+                let t = t.as_secs();
+                Button::new("studio-take")
+                    .label(format!("■ Take {:02}:{:02}", t / 60, t % 60))
+                    .small()
+                    .danger()
+                    .tooltip("Stop the Studio take")
+            }
+            None if self.take_countdown.is_some() => {
+                Button::new("studio-take").label("Starting…").small().outline().tooltip("Click to cancel")
+            }
+            None => Button::new("studio-take")
+                .label("Studio take")
+                .icon(ui::icon("mouse-pointer-2"))
+                .small()
+                .outline()
+                .tooltip("Each screen and camera, the audio and the pointer, for the Editor"),
+        }
+        .on_click(cx.listener(|this, _, _, cx| this.studio_take(cx)));
         let rec_status = runtime().recording();
         let rec = rec_status.state.clone();
         let recording = matches!(rec, OutputState::Active { .. });
@@ -1931,8 +2044,9 @@ impl StudioWindow {
             .child(div().flex_1())
             .child(self.performance(fps_color, cx))
             .child(go_live)
-            .children(recording_tools)
-            .child(record)
+            .children(recording_tools.filter(|_| !taking))
+            .when(!taking, |d| d.child(record))
+            .child(take_button)
             .child({
                 let ready = self.studio.read(cx).clips_ready();
                 Button::new("clip")

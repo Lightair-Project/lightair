@@ -22,6 +22,7 @@ pub mod player;
 pub mod plugins;
 mod reconcile;
 mod runtime;
+pub mod take;
 pub mod timers;
 mod transition;
 

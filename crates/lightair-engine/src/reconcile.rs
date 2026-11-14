@@ -1057,6 +1057,33 @@ impl Reconciler {
     /// What libobs actually holds, read back from libobs (not from our maps): per scene and
     /// format, the items bottom-to-top with source, position, bounds, rotation and visibility.
     /// Used to check that incremental reconciliation and a full rebuild produce identical state.
+    /// What a Studio take records: the screens and cameras in the program (visible in the
+    /// primary format), each once, with its live source.
+    pub fn take_sources(&self, project: &Project) -> Vec<(lightair_core::Input, *mut sys::obs_source_t)> {
+        let Some(scene) = project.program.and_then(|p| project.scene(p)) else { return Vec::new() };
+        let format = project.primary_format().id;
+        let mut out: Vec<(lightair_core::Input, *mut sys::obs_source_t)> = Vec::new();
+        for layer in scene.flatten().layers {
+            let visible = layer.layouts.get(&format).is_none_or(|l| l.visible);
+            let Some(input) = layer.input.and_then(|i| project.inputs.get(&i)) else { continue };
+            if !visible
+                || !matches!(input.kind.as_str(), lightair_core::kinds::SCREEN | lightair_core::kinds::CAMERA)
+                || out.iter().any(|(i, _)| i.id == input.id)
+            {
+                continue;
+            }
+            if let Some(src) = self.inputs.get(&input.id) {
+                out.push(((**input).clone(), src.as_ptr()));
+            }
+        }
+        out
+    }
+
+    /// An input's live source (borrowed), for tests and the take.
+    pub fn input_source(&self, input: Id) -> Option<*mut sys::obs_source_t> {
+        self.input_ptr(input)
+    }
+
     /// The libobs source type an input plays as (diagnostics and tests).
     pub fn input_type(&self, input: Id) -> Option<String> {
         let src = self.inputs.get(&input)?;
