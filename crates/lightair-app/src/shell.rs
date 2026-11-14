@@ -275,6 +275,7 @@ pub struct StudioWindow {
     /// Library, Live or Editor.
     place: Place,
     library: Entity<crate::library::Library>,
+    pub(crate) editor: Entity<crate::editor::Editor>,
     /// A Studio take's countdown: when it began.
     take_countdown: Option<Instant>,
     /// A program preview made for the Library's stills, and the stills it's for.
@@ -470,7 +471,8 @@ impl StudioWindow {
         let primary = studio.read(cx).project().primary_format().id;
         let library = cx.new(|cx| crate::library::Library::new(studio.clone(), window, cx));
         cx.observe(&library, |this, library, cx| {
-            if let Some(_item) = library.update(cx, |l, _| l.open_in_editor.take()) {
+            if let Some((project, id)) = library.update(cx, |l, _| l.open_in_editor.take()) {
+                this.editor.update(cx, |e, cx| e.open(project, id, cx));
                 this.place = Place::Editor;
             }
             cx.notify();
@@ -480,6 +482,7 @@ impl StudioWindow {
             previews: HashMap::from([(primary, preview)]),
             place: Place::Live,
             library,
+            editor: cx.new(|_| crate::editor::Editor::new()),
             thumbnail_shot: None,
             take_countdown: None,
             stage_bounds: Rc::default(),
@@ -1708,7 +1711,7 @@ impl Render for StudioWindow {
             .child(match self.place {
                 Place::Live => div().flex().flex_1().min_h_0().children(self.dock.clone()),
                 Place::Library => div().flex().flex_1().min_h_0().child(self.library.clone()),
-                Place::Editor => div().flex().flex_1().min_h_0().child(editor_placeholder()),
+                Place::Editor => div().flex().flex_1().min_h_0().child(self.editor.clone()),
             })
             .child(self.status_bar(cx))
             .children(self.add_layer_overlay(cx))
@@ -1734,29 +1737,12 @@ fn key_label(key: &str) -> String {
     }
 }
 
-/// The Editor, until it arrives (docs/plans/screen-studio.md, phase 3).
-fn editor_placeholder() -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .size_full()
-        .child(ui::icon("scissors").size(px(36.)).text_color(tok::text_tertiary()))
-        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("The Editor is coming"))
-        .child(
-            div()
-                .max_w(px(420.))
-                .text_center()
-                .text_color(tok::text_secondary())
-                .child("Zooms, cuts, captions and layouts for your recordings. Until then, play and organise them in the Library."),
-        )
-}
-
 impl StudioWindow {
     pub(crate) fn show_place(&mut self, place: Place, cx: &mut Context<Self>) {
         self.place = place;
+        if place == Place::Editor {
+            // (it opens what the Library asks for)
+        }
         if place == Place::Library {
             self.library.update(cx, |l, cx| l.reload(cx));
         }

@@ -2,6 +2,7 @@
 
 mod assets;
 mod camera_studio;
+mod editor;
 mod effect_drag;
 mod encoding;
 mod eyedropper;

@@ -18,6 +18,7 @@ lightair-audio.workspace = true
 lightair-store.workspace = true
 serde_json.workspace = true
 lightair-platform.workspace = true
+lightair-render.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 libc = "0.2"
 serde.workspace = true

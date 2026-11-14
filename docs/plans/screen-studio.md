@@ -406,6 +406,20 @@ Each phase ships with tests and screenshots, like the audio plan.
    *Tests:* render is deterministic (the same edit gives the same frames), auto-zoom segments from
    synthetic click logs, export at 4K60 runs faster than real time on Apple silicon and on a
    mid-range Windows GPU (NVENC/AMF/QSV).
+
+   Done (14 November 2026): `lightair-render` (the edit document; cuts and speed; automatic
+   zooms and the spring camera; the pointer path; the wgpu compositor; FFmpeg as a helper for
+   decoding, encoding and audio through the cuts) and the Editor (opened from the Library: a
+   preview, playback, a timeline with clips and zooms, split, delete, speed, add and automatic
+   zooms, zoom strength, backdrop, padding, corners, pointer look, size and smoothing, clicks,
+   result size, undo and redo, saved as it changes; MP4 and ProRes export into the Library,
+   linked to the item it came from). Ordinary recordings open too (no pointer track).
+
+   Still open from this phase: keycaps, typing speed-up, click sounds, a music track, volume
+   ranges; hiding the pointer or smoothing per range, looping it; masks, highlights and the
+   layouts track; the camera shrinking during zooms, face auto-frame, hiding during silence;
+   motion blur; per-format follow-crop; copy to clipboard and export presets; sound in the
+   preview; golden-frame tests between Live and the Editor; the 4K60 speed measurement.
 4. **Words and devices:**
    - on-device speech engine, captions (live and edited, styles), edit by transcript, filler and
      pause removal, .srt export;
