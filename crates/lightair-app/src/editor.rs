@@ -29,12 +29,14 @@ use crate::ui::{self, tok};
 mod audio;
 mod looks;
 mod speaker;
+mod speed;
 use lightair_render::sequence::Content;
 use looks::{heading, hint, label};
 
 /// What the background work sends back.
 enum Done {
-    Frame(u64, Vec<u8>, (u32, u32)),
+    /// A frame for the player (made into an image off the window's thread).
+    Frame(u64, Option<Arc<RenderImage>>),
     Progress(f32),
     Exported(Result<PathBuf, String>),
     /// Media made from Library items or files (probing takes a moment): placed at the time, or
@@ -49,6 +51,11 @@ enum Done {
     Peaks(PathBuf, Option<Arc<Vec<f32>>>),
     /// Voices cleaned up.
     Cleaned(Result<(), String>),
+    /// A proxy being made, and made (its original file).
+    ProxyProgress(f32),
+    /// A video's filmstrip.
+    Strip(PathBuf, Option<Arc<speed::Strip>>),
+    Proxied(PathBuf, Result<(), String>),
 }
 
 /// A medium being dragged from the media panel.
@@ -136,7 +143,12 @@ pub struct Editor {
     renderer: Arc<Mutex<Option<SequenceRenderer>>>,
     /// The sequence as last changed, for the renderer to take before its next frame (it may be
     /// busy, or still being made, when the change happens).
-    pending: Arc<Mutex<Option<Sequence>>>,
+    pending: Arc<Mutex<Pending>>,
+    /// The frame being shown, and the one before it (freed from the GPU when the next comes).
+    retired: Option<Arc<RenderImage>>,
+    /// The player's size in pixels (measured as it's drawn) and the preview size asked for.
+    player_px: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
+    preview_box: Option<(u32, u32)>,
     preview: Option<Arc<RenderImage>>,
     wanted: Option<u64>,
     busy: bool,
@@ -162,6 +174,14 @@ pub struct Editor {
     /// Waveforms by file (`None`: being read).
     peaks: std::collections::HashMap<PathBuf, Option<Arc<Vec<f32>>>>,
     cleaning: bool,
+    /// The proxy being made (its medium's name, how far), and files whose proxy failed.
+    proxying: Option<(SharedString, f32)>,
+    proxy_failed: Vec<PathBuf>,
+    /// Filmstrips by file (`None`: being read).
+    strips: std::collections::HashMap<PathBuf, Option<Arc<speed::Strip>>>,
+    /// Frames shown while playing, and when the first was (for measuring).
+    shown: u64,
+    shown_since: Option<std::time::Instant>,
     naming: Option<(Option<Id>, Entity<InputState>)>,
     watching: bool,
     tx: mpsc::Sender<Done>,
@@ -169,18 +189,31 @@ pub struct Editor {
     _subscriptions: Vec<Subscription>,
 }
 
-/// The renderer brought up to the sequence's last change, if there's one it hasn't taken.
-fn catch_up(r: &mut SequenceRenderer, pending: &Mutex<Option<Sequence>>) {
-    if let Some(seq) = pending.lock().unwrap().take() {
-        let _ = r.set(&seq);
-    }
+/// What the renderer is to take before its next frame.
+#[derive(Default)]
+struct Pending {
+    /// The sequence's last change, if it hasn't been taken.
+    seq: Option<Sequence>,
+    /// The most the player shows (always set: the player's frames are BGRA previews).
+    preview: Option<(u32, u32)>,
 }
 
-/// RGBA → the BGRA GPUI draws.
-fn image_of(rgba: Vec<u8>, size: (u32, u32)) -> Option<Arc<RenderImage>> {
-    let mut bgra = rgba;
-    for p in bgra.as_chunks_mut::<4>().0 {
-        p.swap(0, 2);
+/// The renderer brought up to the sequence's last change and the player's size.
+fn catch_up(r: &mut SequenceRenderer, pending: &Mutex<Pending>) {
+    let mut p = pending.lock().unwrap();
+    if let Some(seq) = p.seq.take() {
+        let _ = r.set(&seq);
+    }
+    r.set_preview(p.preview);
+}
+
+/// Preview sizes, smallest first: the player gets the first that covers it.
+const PREVIEW_BOXES: [(u32, u32); 5] = [(640, 360), (960, 540), (1280, 720), (1920, 1080), (2560, 1440)];
+
+/// A preview frame (BGRA, as the renderer makes them for the player) as an image.
+fn image_of(bgra: Vec<u8>, size: (u32, u32)) -> Option<Arc<RenderImage>> {
+    if bgra.is_empty() {
+        return None;
     }
     let buffer = image::RgbaImage::from_raw(size.0, size.1, bgra)?;
     Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
@@ -256,7 +289,10 @@ impl Editor {
             redo: Vec::new(),
             drag_before: None,
             renderer: Arc::new(Mutex::new(None)),
-            pending: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(Pending { seq: None, preview: Some(PREVIEW_BOXES[2]) })),
+            retired: None,
+            player_px: Default::default(),
+            preview_box: Some(PREVIEW_BOXES[2]),
             preview: None,
             wanted: None,
             busy: false,
@@ -278,6 +314,11 @@ impl Editor {
             downloading: false,
             peaks: Default::default(),
             cleaning: false,
+            proxying: None,
+            proxy_failed: Vec::new(),
+            strips: Default::default(),
+            shown: 0,
+            shown_since: None,
             naming: None,
             watching: false,
             tx,
@@ -329,13 +370,22 @@ impl Editor {
                     while let Ok(done) = this.rx.try_recv() {
                         changed = true;
                         match done {
-                            Done::Frame(t, rgba, size) => {
+                            Done::Frame(t, image) => {
                                 this.busy = false;
                                 if this.playing.is_some() {
                                     this.playhead = t;
                                 }
-                                if !rgba.is_empty() {
-                                    this.preview = image_of(rgba, size).or(this.preview.take());
+                                if this.playing.is_some() {
+                                    this.shown += 1;
+                                    this.shown_since.get_or_insert_with(std::time::Instant::now);
+                                }
+                                if let Some(image) = image {
+                                    // the frame before last leaves the GPU's atlas (the last one
+                                    // may still be on screen until the next draw)
+                                    let last = this.preview.replace(image);
+                                    if let Some(gone) = std::mem::replace(&mut this.retired, last) {
+                                        cx.drop_image(gone, None);
+                                    }
                                 }
                             }
                             Done::Progress(p) => this.exporting = Some(p),
@@ -353,6 +403,15 @@ impl Editor {
                                 this.peaks.insert(f, p);
                             }
                             Done::Cleaned(r) => this.take_cleaned(r, cx),
+                            Done::ProxyProgress(f) => {
+                                if let Some(p) = &mut this.proxying {
+                                    p.1 = f;
+                                }
+                            }
+                            Done::Proxied(file, r) => this.take_proxy(file, r, cx),
+                            Done::Strip(f, s) => {
+                                this.strips.insert(f, s);
+                            }
                             Done::Ended => {
                                 this.playing = None;
                                 this.speaker = None;
@@ -396,22 +455,21 @@ impl Editor {
         self.preview = None;
         let seq = p.sequence.clone();
         self.project = Some(p);
-        *self.pending.lock().unwrap() = None;
+        self.pending.lock().unwrap().seq = None;
         let (r, tx, pending) = (self.renderer.clone(), self.tx.clone(), self.pending.clone());
         self.busy = true;
         std::thread::spawn(move || {
             let mut guard = r.lock().unwrap();
-            *guard = SequenceRenderer::new(&seq).ok();
-            let frame = guard.as_mut().map(|r| {
+            let preview = pending.lock().unwrap().preview;
+            *guard = SequenceRenderer::new_with(&seq, preview).ok();
+            let frame = guard.as_mut().and_then(|r| {
                 catch_up(r, &pending);
-                (r.frame(0), r.sequence().size)
+                image_of(r.frame(0), r.out_size())
             });
             drop(guard);
-            let _ = match frame {
-                Some((f, size)) => tx.send(Done::Frame(0, f, size)),
-                None => tx.send(Done::Frame(0, Vec::new(), (0, 0))),
-            };
+            let _ = tx.send(Done::Frame(0, frame));
         });
+        self.make_proxies(cx);
         cx.notify();
     }
 
@@ -500,9 +558,10 @@ impl Editor {
     fn settle(&mut self, cx: &mut Context<Self>) {
         let (Some(ws), Some(p)) = (self.workspace.clone(), self.project.as_mut()) else { return };
         let _ = p.save(&ws);
-        *self.pending.lock().unwrap() = Some(p.sequence.clone());
+        self.pending.lock().unwrap().seq = Some(p.sequence.clone());
         self.request(self.playhead);
         self.clean_voices(cx);
+        self.make_proxies(cx);
         cx.notify();
     }
 
@@ -632,6 +691,23 @@ impl Editor {
 
     // ------------------------------------------------------------ the player
 
+    /// Frames at the size the player shows them (the smallest preview size that covers it).
+    fn fit_preview(&mut self) {
+        let (w, h) = self.player_px.get();
+        if w < 2.0 {
+            return;
+        }
+        // larger than them all: the sequence's own size (a box it fits in)
+        let fits = PREVIEW_BOXES.iter().copied().find(|b| b.0 as f32 >= w && b.1 as f32 >= h).or(Some((7680, 4320)));
+        if fits != self.preview_box {
+            self.preview_box = fits;
+            self.pending.lock().unwrap().preview = fits;
+            if self.playing.is_none() {
+                self.request(self.playhead);
+            }
+        }
+    }
+
     fn request(&mut self, t: u64) {
         self.wanted = Some(t);
         self.pump();
@@ -646,14 +722,11 @@ impl Editor {
         self.busy = true;
         std::thread::spawn(move || {
             let mut guard = r.lock().unwrap();
-            let frame = guard.as_mut().map(|r| {
+            let frame = guard.as_mut().and_then(|r| {
                 catch_up(r, &pending);
-                (r.frame(t), r.sequence().size)
+                image_of(r.frame(t), r.out_size())
             });
-            let _ = match frame {
-                Some((f, size)) => tx.send(Done::Frame(t, f, size)),
-                None => tx.send(Done::Frame(t, Vec::new(), (0, 0))),
-            };
+            let _ = tx.send(Done::Frame(t, frame));
         });
     }
 
@@ -671,32 +744,52 @@ impl Editor {
         self.playing = Some(stop);
         self.speaker = self.seq().and_then(|s| speaker::Speaker::start(s, from));
         let clock = self.speaker.as_ref().map(|s| s.clock());
+        let step = 1000 / self.seq().map_or(30, |s| s.fps.max(1)) as u64;
+        // frames are made ahead on one thread and shown in time on another
+        let (made, ready) = std::sync::mpsc::sync_channel::<(u64, Option<Arc<RenderImage>>)>(4);
+        let render_flag = flag.clone();
         std::thread::spawn(move || {
             let mut guard = r.lock().unwrap();
             let Some(r) = guard.as_mut() else { return };
             catch_up(r, &pending);
-            let size = r.sequence().size;
-            let start = std::time::Instant::now();
+            let size = r.out_size();
+            r.play(from, |t, rgba| made.send((t, image_of(rgba, size))).is_ok() && !render_flag.load(std::sync::atomic::Ordering::Relaxed));
+        });
+        std::thread::spawn(move || {
             let stopped = || flag.load(std::sync::atomic::Ordering::Relaxed);
-            r.play(from, |t, rgba| {
-                // in time with the sound when there is some, else the clock (late frames are
-                // shown late, not skipped)
+            // the clock (and the sound) start with the first frame
+            let Ok(first) = ready.recv() else { return };
+            if let Some(c) = &clock {
+                c.start();
+            }
+            let start = std::time::Instant::now();
+            // in time with the sound when there is some, else the clock
+            let now = || match clock.as_ref().and_then(|c| c.heard_ms()) {
+                Some(ms) => ms,
+                // the sound starting: a moment's wait for it
+                None if clock.is_some() && start.elapsed() < std::time::Duration::from_secs(1) => 0,
+                None => start.elapsed().as_millis() as u64,
+            };
+            let mut shown = std::time::Instant::now();
+            for (t, image) in std::iter::once(first).chain(ready.iter()) {
                 let due = t.saturating_sub(from);
                 loop {
-                    let now = match clock.as_ref().and_then(|c| c.heard_ms()) {
-                        Some(ms) => ms,
-                        // the sound starting: a moment's wait for it
-                        None if clock.is_some() && start.elapsed() < std::time::Duration::from_secs(1) => 0,
-                        None => start.elapsed().as_millis() as u64,
-                    };
-                    if now >= due || stopped() {
+                    let n = now();
+                    if n >= due || stopped() {
                         break;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis((due - now).min(10)));
+                    std::thread::sleep(std::time::Duration::from_millis((due - n).min(10)));
                 }
-                let _ = tx.send(Done::Frame(t, rgba, size));
-                !stopped()
-            });
+                if stopped() {
+                    return;
+                }
+                // more than two frames late: skipped (unless nothing has been shown lately)
+                if now() > due + 2 * step && shown.elapsed() < std::time::Duration::from_millis(100) {
+                    continue;
+                }
+                shown = std::time::Instant::now();
+                let _ = tx.send(Done::Frame(t, image));
+            }
             if !stopped() {
                 let _ = tx.send(Done::Ended);
             }
@@ -1195,6 +1288,12 @@ impl Editor {
                     .rounded(px(6.))
                     .overflow_hidden()
                     .bg(rgb(0x000000))
+                    .child({
+                        let cell = self.player_px.clone();
+                        canvas(move |b, window, _| cell.set((f32::from(b.size.width) * window.scale_factor(), f32::from(b.size.height) * window.scale_factor())), |_, _, _, _| {})
+                            .absolute()
+                            .size_full()
+                    })
                     .when_some(self.preview.clone(), |d, img_| d.child(img(ImageSource::Render(img_)).absolute().size_full().object_fit(ObjectFit::Contain)))
                     .when(self.project.is_none(), |d| {
                         d.flex().items_center().justify_center().child(
@@ -1348,8 +1447,8 @@ impl Editor {
                     .child(label("SIZE"))
                     .child(self.chips("ed-size", &[("1080p", (1920u32, 1080u32)), ("4K", (3840, 2160)), ("Vertical", (1080, 1920)), ("Square", (1080, 1080))], seq_size, |this, v, cx| this.change(|s| s.size = v, cx), cx))
                     .child(label("FRAME RATE"))
-                    .child(self.chips("ed-fps", &[("24", 24u32), ("30", 30), ("60", 60)], fps, |this, v, cx| this.change(|s| s.fps = v, cx), cx))
-                    .child(div().pt_2().text_size(px(12.)).text_color(tok::text_tertiary()).child("Select a clip to change it."));
+                    .child(self.chips("ed-fps", &[("24", 24u32), ("30", 30), ("60", 60)], fps, |this, v, cx| this.change(|s| s.fps = v, cx), cx));
+                body = self.proxies_section(body, cx).child(div().pt_2().text_size(px(12.)).text_color(tok::text_tertiary()).child("Select a clip to change it."));
             }
         }
         div().id("ed-inspector").w(px(290.)).flex_none().border_l_1().border_color(tok::border()).bg(tok::bg_panel()).overflow_y_scroll().child(body)
@@ -1369,6 +1468,9 @@ impl Editor {
             .child(ui::icon_button("ed-del", "trash", tok::text_secondary()).tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Delete the clip").build(w, cx)).on_click(cx.listener(|this, _, _, cx| this.delete_selected(cx))))
             .child(div().flex_1())
             .when_some(self.note.clone(), |d, n| d.child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(n)))
+            .when_some(self.proxying.clone(), |d, (name, f)| {
+                d.child(div().pl_3().text_size(px(12.)).text_color(tok::text_tertiary()).child(format!("Proxy for “{name}” {:.0}%", f * 100.0)))
+            })
             .child(div().flex_1())
             .child(ui::icon_button("ed-zout", "zoom-out", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| {
                 this.zoom = (this.zoom / 1.5).max(0.05);
@@ -1468,6 +1570,8 @@ impl Editor {
                 let diamonds: Vec<f32> = c.keyframes.iter().map(|k| k.at_ms as f32 / 1000.0 * pps_).collect();
                 let volume_marks: Vec<f32> = c.volume_keys.iter().map(|k| k.at_ms as f32 / 1000.0 * pps_).collect();
                 let wave = if track.kind == TrackKind::Audio { self.wave(c, m, left, width, h) } else { None };
+                let strip = if track.kind == TrackKind::Video && c.content.is_none() { self.filmstrip(c, m, left, width, h - 6.0) } else { None };
+                let has_strip = strip.is_some();
                 // a transition straddles the cut before the clip
                 if let Some(tn) = c.transition {
                     let half = tn.duration_ms as f32 / 2000.0 * pps;
@@ -1506,11 +1610,14 @@ impl Editor {
                         .text_color(rgb(0xFFFFFF))
                         .cursor_pointer()
                         .children(wave)
+                        .children(strip)
                         .child(
                             div()
+                                .relative()
                                 .flex()
                                 .gap_2()
                                 .whitespace_nowrap()
+                                .when(has_strip, |d| d.self_start().px_1().rounded(px(3.)).bg(rgba(0x000000a0)))
                                 .child(title)
                                 .child(div().opacity(0.7).child(short(c.len_ms())))
                                 .when((c.speed - 1.0).abs() > 0.01, |d| d.child(div().opacity(0.8).child(format!("{}×", c.speed))))
@@ -1620,6 +1727,8 @@ impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_text_input(window, cx);
         self.want_peaks();
+        self.want_strips();
+        self.fit_preview();
         // the media panel lists the workspace's Library as it is now
         let v = self.studio.read(cx).library_version;
         if self.library_seen != Some(v) {

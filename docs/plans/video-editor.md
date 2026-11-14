@@ -1,6 +1,6 @@
 # The Editor as a full video editor
 
-Status: phases 1 to 4 built (14 November 2026); see the notes under them. This replaces the Screen Studio plan's
+Status: phases 1 to 5 built (14 November 2026); see the notes under them. This replaces the Screen Studio plan's
 "focused editor" decision (docs/plans/screen-studio.md, section 7): the Editor becomes a
 multi-track video editor, in the way CapCut is, while a Studio take keeps everything that made it
 special (zooms, the redrawn pointer, the backdrop) as a kind of clip.
@@ -94,3 +94,20 @@ A project is a document: every change is a step to undo, and it's saved as it ch
    device the Live mixer uses.
 5. **Speed of work:** filmstrip thumbnails, proxies, smooth real-time playback (frames decoded
    ahead), the GPU's video decoder.
+
+   Built: the player's frames are made at the player's size (the smallest of 640×360 to
+   2560×1440 that covers it) and come back from the GPU as BGRA, ready to draw (swapping bytes on
+   the window's thread cost 74 ms a 1080p frame in a development build); frames are made into
+   images off the window's thread, and the one before last leaves the GPU's atlas (they were
+   never freed). Videos are decoded ahead on a thread of their own (the GPU's decoder through
+   FFmpeg's `-hwaccel auto`, as before); playback makes frames ahead on one thread and shows
+   them in time on another, skipping late ones, the clock and the sound starting with the first
+   frame. One graphics device is shared by every renderer. Proxies: videos larger than 1080p
+   are copied at 1080p (a keyframe every half second) one at a time on a thread, read by the
+   player and never by the export; on by default, per project. Filmstrips on video clips, read
+   from keyframes (every frame when there are too few).
+   Measured: 1080p frames 186 → 276 a second in the renderer; 2880×1800 at 60 fps, 139 (232 at
+   the player's size); the player showed 8 frames a second before and 26–30 now (a development
+   build, its window in the background).
+   Not yet: takes through proxies, scrubbing with frames read ahead around the playhead, the
+   player drawing straight from GPU textures (no read back).
