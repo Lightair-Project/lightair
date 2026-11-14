@@ -183,7 +183,6 @@ Phase: see section 5.
 | Noise reduction, "Podcast" voice | On-device voice cleanup | Has (Voice Clarity, noise suppression, EQ, compressor) | Both | "Podcast" = a Voice Clarity preset; Edit applies it offline too | 2 |
 | Set volume per section | Volume on a range | Has (track fader); range New | Edit | Volume envelope on the timeline | 3 |
 | Background music, looping | A track under the voice | Has (media layer, ducking) | Both | Edit: a music track that loops to length, ducked under the voice. Library: user's files only (no bundled music) | 3 |
-| AI voiceover | Typed script becomes a voice | New | Edit | On-device speech only (AVSpeechSynthesizer, including the user's Personal Voice) | 5 |
 
 ### Editing
 
@@ -236,8 +235,9 @@ Phase: see section 5.
 - **Licensing, accounts, affiliates**: Lightair has no paid tiers (docs/02, "Lightair has no paid
   tiers").
 - **Everything online**: shareable links (comments, private links, view counts), cloud
-  transcription, cloud AI voices, online background search, sharing projects through links,
-  team accounts, and Screen Studio's planned MCP server.
+  transcription, online background search, sharing projects through links, team accounts, and
+  Screen Studio's planned MCP server.
+- **AI voiceover**: not wanted, on-device or in the cloud.
 
 ## 4. The new parts
 
@@ -332,7 +332,7 @@ One on-device speech-to-text service for live captions (designed as CH-10) and t
 ### 4.5 Offline
 
 Everything in this plan runs on the Mac, with no account and no network: recording, input data,
-rendering, transcription, voice cleanup, voiceover, masks and detection, export. Nothing in a
+rendering, transcription, voice cleanup, masks and detection, export. Nothing in a
 recording leaves the Mac unless the user copies or moves the file themselves.
 
 ## 5. Phases
@@ -381,7 +381,6 @@ Each phase ships with tests and screenshots, like the audio plan.
    - speaker notes.
 5. **Extras (all on-device):**
    - sensitive-data and face detection;
-   - AI voiceover with the Mac's own voices;
    - super-resolution zoom (MetalFX);
    - multi-take projects.
 
