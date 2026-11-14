@@ -333,15 +333,14 @@ fn short(ms: u64) -> String {
 fn media_of(item: &Item) -> Vec<Media> {
     if item.kind == Kind::Take {
         let folder = item.files.iter().find_map(|f| f.path.parent().filter(|p| p.extension().is_some_and(|e| e == "lightair-take")));
-        return folder
-            .and_then(Media::from_take)
-            .map(|mut m| {
-                m.name = item.title.clone();
-                m.item = Some(item.id);
-                m
-            })
-            .into_iter()
-            .collect();
+        // its parts: the picture with its look, the camera beside a screen, each recorded
+        // mixer track's sound
+        let mut parts = folder.map(Media::take_parts).unwrap_or_default();
+        for (n, m) in parts.iter_mut().enumerate() {
+            m.name = if n == 0 { item.title.clone() } else { format!("{} · {}", item.title, m.name) };
+            m.item = Some(item.id);
+        }
+        return parts;
     }
     let playable = |p: &Path| {
         p.exists()
@@ -774,6 +773,9 @@ impl Editor {
         let ws = self.workspace.clone();
         self.change(
             |s| {
+                // the parts of one item (a take's picture, camera and sounds) start together
+                let mut first: Option<(u64, Option<Id>)> = None;
+                let mut pictures = 0;
                 for mut m in media {
                     // a take's look lives in the workspace (the screen recording look)
                     if m.take.is_some()
@@ -781,12 +783,28 @@ impl Editor {
                     {
                         m.look = Some(ws.join("recordings").join("edits").join(format!("{item}.json")));
                     }
+                    let (item, video) = (m.item, m.kind == MediaKind::Video);
                     let id = s.add_media(m);
-                    match at {
-                        Some(u64::MAX) => None,
-                        Some(t) => s.place(id, t, track),
-                        None => s.append(id),
+                    let placed = match (at, first) {
+                        (Some(u64::MAX), _) => None,
+                        (_, Some((start, of))) if of.is_some() && of == item => s.place(id, start, None),
+                        (Some(t), _) => s.place(id, t, track),
+                        (None, _) => s.append(id),
                     };
+                    let Some(c) = placed else { continue };
+                    if first.is_none() {
+                        first = s.clip(c).map(|c| (c.start_ms, item));
+                    }
+                    // a second picture (the camera beside the screen): small, bottom right
+                    if video {
+                        pictures += 1;
+                        if pictures > 1 {
+                            let (w, h) = (s.size.0 as f32, s.size.1 as f32);
+                            if let Some(cl) = s.clip_mut(c) {
+                                cl.transform = Transform { x: w * 0.34, y: h * 0.31, scale: 0.25, ..Transform::default() };
+                            }
+                        }
+                    }
                 }
             },
             cx,
