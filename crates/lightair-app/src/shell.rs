@@ -478,9 +478,9 @@ impl StudioWindow {
             if let Some(name) = library.update(cx, |l, _| l.new_project.take()) {
                 this.new_project(&name, cx);
             }
-            if let Some((project, id)) = library.update(cx, |l, _| l.open_in_editor.take()) {
-                this.editor.update(cx, |e, cx| e.open(project, id, cx));
-                this.place = Place::Editor;
+            if let Some((_, id)) = library.update(cx, |l, _| l.open_in_editor.take()) {
+                this.show_place(Place::Editor, cx);
+                this.editor.update(cx, |e, cx| e.add_item(id, cx));
             }
             cx.notify();
         })
@@ -489,7 +489,10 @@ impl StudioWindow {
             previews: HashMap::from([(primary, preview)]),
             place: Place::Live,
             library,
-            editor: cx.new(|_| crate::editor::Editor::new()),
+            editor: {
+                let s = studio.clone();
+                cx.new(|_| crate::editor::Editor::new(s))
+            },
             thumbnail_shot: None,
             take_countdown: None,
             stage_bounds: Rc::default(),
@@ -1585,9 +1588,27 @@ impl Render for StudioWindow {
             .relative()
             .key_context("Studio")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &Undo, _, cx| this.studio.update(cx, |s, cx| s.undo(cx))))
-            .on_action(cx.listener(|this, _: &Redo, _, cx| this.studio.update(cx, |s, cx| s.redo(cx))))
-            .on_action(cx.listener(|this, _: &DeleteSelection, _, cx| this.delete_selection(cx)))
+            .on_action(cx.listener(|this, _: &Undo, _, cx| {
+                if this.place == Place::Editor {
+                    this.editor.update(cx, |e, cx| e.undo(true, cx));
+                } else {
+                    this.studio.update(cx, |s, cx| s.undo(cx))
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Redo, _, cx| {
+                if this.place == Place::Editor {
+                    this.editor.update(cx, |e, cx| e.undo(false, cx));
+                } else {
+                    this.studio.update(cx, |s, cx| s.redo(cx))
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DeleteSelection, _, cx| {
+                if this.place == Place::Editor {
+                    this.editor.update(cx, |e, cx| e.delete_selected(cx));
+                } else {
+                    this.delete_selection(cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &NudgeLeft, _, cx| this.nudge(-1.0, 0.0, cx)))
             .on_action(cx.listener(|this, _: &NudgeRight, _, cx| this.nudge(1.0, 0.0, cx)))
             .on_action(cx.listener(|this, _: &NudgeUp, _, cx| this.nudge(0.0, -1.0, cx)))
@@ -1650,7 +1671,17 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.zoom_to_fit(cx)))
             .on_action(cx.listener(|this, _: &ZoomToActual, _, cx| this.zoom_to_actual(cx)))
             // Space held: dragging the canvas pans it.
-            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                // the Editor: space plays (unless a text field has the keys)
+                if this.place == Place::Editor
+                    && ev.keystroke.key == "space"
+                    && !ev.keystroke.modifiers.modified()
+                    && !window.context_stack().iter().any(|c| c.contains("Input"))
+                {
+                    this.editor.update(cx, |e, cx| e.play(cx));
+                    cx.stop_propagation();
+                    return;
+                }
                 if ev.keystroke.key == "space" && !ev.keystroke.modifiers.modified() && !this.space_down {
                     this.space_down = true;
                     cx.notify();
@@ -1748,7 +1779,7 @@ impl StudioWindow {
     pub(crate) fn show_place(&mut self, place: Place, cx: &mut Context<Self>) {
         self.place = place;
         if place == Place::Editor {
-            // (it opens what the Library asks for)
+            self.editor.update(cx, |e, cx| e.show(cx));
         }
         if place == Place::Library {
             self.library.update(cx, |l, cx| l.reload(cx));
@@ -1828,7 +1859,7 @@ impl StudioWindow {
                 self.show_place(Place::Live, cx);
             }
             Err(e) => {
-                self.studio.update(cx, |s, _| s.issue = Some(format!("Couldn't make the project: {e}").into()));
+                self.studio.update(cx, |s, _| s.issue = Some(format!("Couldn't make the workspace: {e}").into()));
                 cx.notify();
             }
         }
@@ -2081,7 +2112,7 @@ impl StudioWindow {
                 }
                 let (new, library) = (me.clone(), me.clone());
                 menu.separator()
-                    .item(PopupMenuItem::new("New Project…").icon(ui::icon("plus")).on_click(move |_, window, cx| {
+                    .item(PopupMenuItem::new("New Workspace…").icon(ui::icon("plus")).on_click(move |_, window, cx| {
                         if let Some(me) = new.upgrade() {
                             me.update(cx, |this, cx| {
                                 this.show_place(Place::Library, cx);
@@ -2089,7 +2120,7 @@ impl StudioWindow {
                             });
                         }
                     }))
-                    .item(PopupMenuItem::new("All Projects in the Library").icon(ui::icon("library")).on_click(move |_, _, cx| {
+                    .item(PopupMenuItem::new("All Workspaces in the Library").icon(ui::icon("library")).on_click(move |_, _, cx| {
                         if let Some(me) = library.upgrade() {
                             me.update(cx, |this, cx| this.show_place(Place::Library, cx));
                         }

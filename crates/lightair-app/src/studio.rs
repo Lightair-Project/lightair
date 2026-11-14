@@ -128,7 +128,7 @@ impl Studio {
             }
             Err(e) => {
                 tracing::error!(%e, "could not open the project; using an unsaved one");
-                (Project::new("Untitled"), None, Some(SharedString::from(format!("Project not saved: {e}"))))
+                (Project::new("Untitled"), None, Some(SharedString::from(format!("Workspace not saved: {e}"))))
             }
         };
         let selected_scene = project.program.or(project.scenes.first().map(|s| s.id));

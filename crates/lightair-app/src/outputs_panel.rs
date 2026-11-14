@@ -845,7 +845,7 @@ impl OutputsPanel {
                                 .gap_2()
                                 .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(tok::warn()).child(
                                     format!(
-                                        "{} wants vertical video, and this project has no vertical format yet.",
+                                        "{} wants vertical video, and this workspace has no vertical format yet.",
                                         p.name
                                     ),
                                 ))

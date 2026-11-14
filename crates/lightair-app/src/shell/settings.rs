@@ -441,12 +441,12 @@ impl StudioWindow {
                         ),
                     )),
             )
-            .child(group("Project").child(row(
+            .child(group("Workspace").child(row(
                 name.as_str(),
                 project_dir.as_ref().map(|d| d.to_string_lossy().into_owned()).as_deref(),
                 reveal_button("reveal-project", project_dir),
             )))
-            .child(note(&format!("General settings belong to this {}. The rest are saved with the project.", ui::MACHINE)))
+            .child(note(&format!("General settings belong to this {}. The rest are saved with the workspace.", ui::MACHINE)))
     }
 
     fn audio_page(&self, cx: &mut Context<Self>) -> Div {

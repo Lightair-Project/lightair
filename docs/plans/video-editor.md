@@ -1,6 +1,6 @@
 # The Editor as a full video editor
 
-Status: plan, phases 1 and 2 under way (14 November 2026). This replaces the Screen Studio plan's
+Status: phases 1 and 2 built (14 November 2026); see the notes under them. This replaces the Screen Studio plan's
 "focused editor" decision (docs/plans/screen-studio.md, section 7): the Editor becomes a
 multi-track video editor, in the way CapCut is, while a Studio take keeps everything that made it
 special (zooms, the redrawn pointer, the backdrop) as a kind of clip.
@@ -55,6 +55,15 @@ A project is a document: every change is a step to undo, and it's saved as it ch
 2. **The window:** media, player, inspector, the multi-track timeline (move between tracks and
    in time, trim by either edge, split at the playhead, delete, snapping to edges and the
    playhead, zoom), undo and redo, opening any Library item or a new empty sequence.
+
+   Built: projects in the workspace (new, rename, delete, the last one reopened); media from the
+   workspace's Library and imported files (dragged onto a track or added with +); the player and
+   playback; the inspector (transform, volume and mute, speed, a take's screen look, the
+   project's size and frame rate); the timeline (ruler, tracks with show, mute and lock, clips
+   moved in time and between tracks, trimmed by their edges, snapping, split, delete, zoom and
+   scroll), undo and redo; export as MP4, ProRes or GIF into the Library.
+   Not carried over yet from the earlier single-take Editor: its transcript, captions and hidden
+   areas (phases 3 and 4). Sound isn't heard in the player yet (phase 4).
 3. **Words and looks:** text clips with styles, transitions between clips, filters and effects
    (the effect catalog's video effects), keyframes for transforms, stickers; captions as a track.
 4. **Sound:** waveforms on clips, fades, volume keyframes, detaching a video's sound, music,
