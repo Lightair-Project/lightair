@@ -19,8 +19,15 @@ use crate::studio::Studio;
 use crate::ui::{self, tok};
 
 const STRIP_W: f32 = 166.0;
-/// The effects list's height on a strip (the routing below it is added to this).
+/// The effects list's height on a strip (the routing below it is added to this), and the least
+/// it's shown at (a row and the +).
 const FX_H: f32 = 76.0;
+const FX_MIN: f32 = 50.0;
+/// The meter area's height with the knobs, and without.
+const LEVELS_H: f32 = 196.0;
+const LEVELS_MIN: f32 = 110.0;
+/// The source row at the foot.
+const FOOT_H: f32 = 40.0;
 const DB_MIN: f32 = -60.0;
 const DB_MAX: f32 = 12.0;
 
@@ -163,13 +170,7 @@ impl Render for MixerPanel {
         let mut master = None;
         let views = strip_views(&project);
         self.sections.borrow_mut().retain(|id, _| views.iter().any(|v| v.id == *id));
-        let top_h = FX_H + self.sections.borrow().values().copied().fold(0.0, f32::max);
-        // a full strip (header, effects and routing, levels, source, borders and padding) or,
-        // when the panel is shorter, compact strips: name, meter, fader, Cue and Mute
-        let full_h = 30. + top_h + 196. + 40. + 2. + 16.;
-        let compact = (1.0..full_h).contains(&self.panel_h.get());
-        // the knobs (pan, trim over Cue and Mute) need this much of a compact strip's height
-        let knobs = !compact || self.panel_h.get() >= 30. + 196. + 18.;
+        let layout = Layout::fit(self.panel_h.get(), self.sections.borrow().values().copied().fold(0.0, f32::max));
         for (i, view) in views.iter().enumerate() {
             // Meter ballistics: rise instantly, fall at 24 dB/s.
             let levels = meters().get(view.id).map(|c| c.levels());
@@ -180,7 +181,7 @@ impl Render for MixerPanel {
                 *value = if target > fallen { target } else { fallen.max(-90.0) };
             }
             let shown = *shown;
-            let strip = self.strip(i, view, shown, Layout { top_h, compact, knobs }, cx);
+            let strip = self.strip(i, view, shown, layout, cx);
             let menu = StripMenu::of(&project, view);
             let is_master = view.kind == MixerStrip::Master;
             if i > 0 && !is_master && views[i - 1].kind_order() != view.kind_order() {
@@ -852,7 +853,9 @@ impl MixerPanel {
         layout: Layout,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let Layout { top_h, compact, knobs } = layout;
+        let Layout { fx_h, routing, section, foot, knobs } = layout;
+        let compact = fx_h <= 0.0;
+        let top_h = fx_h + if routing { section } else { 0.0 };
         let id = view.id;
         let kind = view.kind;
         let (muted, cue, volume) = (view.muted, view.cue, view.volume_db);
@@ -1238,7 +1241,7 @@ impl MixerPanel {
         let levels = div()
             .flex()
             .flex_1()
-            .min_h(px(if compact { 110. } else { 196. }))
+            .min_h(px(if knobs { LEVELS_H } else { LEVELS_MIN }))
             .gap_2()
             .px_2()
             .py_2()
@@ -1254,7 +1257,9 @@ impl MixerPanel {
             .flex_none()
             .w(px(STRIP_W))
             .h_full()
-            .min_h(px(if compact { 30. + 110. } else { 30. + top_h + 196. + 40. }))
+            .min_h(px(
+                30. + top_h + if knobs { LEVELS_H } else { LEVELS_MIN } + if foot { FOOT_H } else { 0. },
+            ))
             .rounded(px(8.))
             .overflow_hidden()
             .bg(tok::bg_raised())
@@ -1269,23 +1274,25 @@ impl MixerPanel {
             }))
             .child(header)
             // effects and routing: the same height on every strip
-            .when(!compact, |d| d.child(
+            .when(top_h > 0.0, |d| d.child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_none()
                     .h(px(top_h))
-                    .child(fx)
-                    .when_some(view.channel.as_ref(), |d, ch| {
+                    .when(!compact, |d| d.child(fx))
+                    .when_some(view.channel.as_ref().filter(|_| routing), |d, ch| {
                         d.child(self.measured(id, self.channel(i, view, ch, &project, cx)))
                     })
-                    .when_some(view.mix_to_program, |d, on| d.child(self.measured(id, self.mix_output(i, id, on, cx)))),
+                    .when_some(view.mix_to_program.filter(|_| routing), |d, on| {
+                        d.child(self.measured(id, self.mix_output(i, id, on, cx)))
+                    }),
             ))
             .child(levels)
                         // full width, centred in its row
-            .when(!compact, |d| {
+            .when(foot, |d| {
                 d.child(
-                    div().flex().flex_col().flex_none().justify_center().h(px(40.)).px_2().pb_1().child(self.strip_source(i, view, cx)),
+                    div().flex().flex_col().flex_none().justify_center().h(px(FOOT_H)).px_2().pb_1().child(self.strip_source(i, view, cx)),
                 )
             })
     }
@@ -1577,15 +1584,44 @@ struct Channel {
     sends: Vec<Send>,
 }
 
-/// How the strips are laid out (the same for all of them).
+/// How the strips are laid out: the same for all of them, so meters line up. A short panel
+/// keeps what matters most (name, meter, fader, Cue and Mute), then fits in turn the knobs, the
+/// source, the routing and the effects; what's left lengthens the meters.
 #[derive(Clone, Copy)]
 struct Layout {
-    /// The height of the effects and routing section.
-    top_h: f32,
-    /// Name, meter, fader, Cue and Mute only (a short panel).
-    compact: bool,
-    /// Room for the pan and trim knobs.
+    /// The effects list's height (0: hidden; the header shows how many are on).
+    fx_h: f32,
+    /// The routing section (output, switches, sends) is shown, this tall.
+    routing: bool,
+    section: f32,
+    /// The source at the foot.
+    foot: bool,
+    /// The pan and trim knobs.
     knobs: bool,
+}
+
+impl Layout {
+    /// For a panel `height` tall (0: not measured yet) whose tallest routing section is `section`.
+    fn fit(height: f32, section: f32) -> Self {
+        let full = Self { fx_h: FX_H, routing: true, section, foot: true, knobs: true };
+        if height < 1.0 {
+            return full;
+        }
+        // the panel's padding and the strip's border, and the header
+        let mut room = height - 18.0 - 30.0;
+        let knobs = room >= LEVELS_H;
+        room -= if knobs { LEVELS_H } else { LEVELS_MIN };
+        let foot = room >= FOOT_H;
+        if foot {
+            room -= FOOT_H;
+        }
+        let routing = room >= section;
+        if routing {
+            room -= section;
+        }
+        let fx_h = if room >= FX_MIN { room.min(FX_H) } else { 0.0 };
+        Self { fx_h, routing, section, foot, knobs }
+    }
 }
 
 /// What's being dragged: a slider along, or a knob up and down from where it started.
