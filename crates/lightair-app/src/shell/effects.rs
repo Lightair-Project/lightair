@@ -245,7 +245,8 @@ impl StudioWindow {
         let def = catalog::def(&e.kind);
         let (eid, on) = (e.id, e.enabled);
         let open = self.props.open_effect == Some(eid);
-        let system = e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM);
+        let system =
+            !cfg!(windows) && e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM);
         let summary = match def {
             Some(_) if system => "macOS camera effect".into(),
             Some(d) => d.summary(&e.settings),
@@ -423,7 +424,9 @@ impl StudioWindow {
         }
         let mut group_open = true;
         let mut first_heading = true;
-        let system = e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM);
+        // (macOS's own camera effect; Windows segments with MediaPipe whatever the project says)
+        let system =
+            !cfg!(windows) && e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM);
         if system {
             col = col.child(system_effect_panel(d.kind, cx));
         }
@@ -464,7 +467,11 @@ impl StudioWindow {
                 continue;
             }
             // Quality levels are Apple Vision's; macOS's own effect has its settings in Control Center.
-            let model = e.settings.get("bg_model").and_then(Value::as_i64).unwrap_or(0);
+            let model = if cfg!(windows) { 1 } else { e.settings.get("bg_model").and_then(Value::as_i64).unwrap_or(0) };
+            // one model on Windows: nothing to choose
+            if cfg!(windows) && key == Some("bg_model") {
+                continue;
+            }
             if key == Some("bg_quality") && model != 0 {
                 continue;
             }
@@ -874,7 +881,7 @@ impl StudioWindow {
         self.exec(iid.settings(eid, settings), cx);
     }
 
-    /// The eyedropper: macOS's loupe picks a colour from anywhere on screen. Off air, the effect
+    /// The eyedropper: a loupe picks a colour from anywhere on screen. Off air, the effect
     /// being picked for is switched off meanwhile, so a key colour is picked from the picture
     /// before the key (on air, the picture stays as viewers see it).
     fn pick_colour(&mut self, iid: Owner, eid: Id, key: &'static str, cx: &mut Context<Self>) {

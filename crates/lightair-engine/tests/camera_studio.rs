@@ -10,9 +10,15 @@ use lightair_engine::{Engine, EngineConfig};
 #[test]
 fn camera_studio_module_loads_and_renders() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/modules/lightair-camera-fx");
-    if !dir.join("lightair-camera-fx.plugin").exists() {
-        eprintln!("lightair-camera-fx.plugin not built; run `cargo xtask modules`");
+    let built = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/modules/lightair-camera-fx");
+    // macOS: the .plugin bundle; Windows: OBS's layout
+    let (dir, module) = if cfg!(windows) {
+        (built.join("obs-plugins/64bit"), "lightair-camera-fx.dll")
+    } else {
+        (built, "lightair-camera-fx.plugin")
+    };
+    if !dir.join(module).exists() {
+        eprintln!("{module} not built; run `cargo xtask modules`");
         return;
     }
     let engine = Engine::start(EngineConfig {

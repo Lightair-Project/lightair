@@ -17,13 +17,27 @@ pub const KIND: &str = catalog::STUDIO_FILTER;
 /// development (found from the executable, also inside the development `Lightair.app`).
 pub fn plugin_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    exe.ancestors()
-        .map(|a| a.join("modules/lightair-camera-fx"))
-        .find(|dir| dir.join("lightair-camera-fx.plugin").exists())
+    // macOS: the .plugin bundle; Windows: OBS's layout (obs-plugins/64bit, data/obs-plugins)
+    let (dir, module) = if cfg!(windows) {
+        ("modules/lightair-camera-fx/obs-plugins/64bit", "lightair-camera-fx.dll")
+    } else {
+        ("modules/lightair-camera-fx", "lightair-camera-fx.plugin")
+    };
+    exe.ancestors().map(|a| a.join(dir)).find(|dir| dir.join(module).exists())
+}
+
+/// The module's data folder (presets, shaders, models).
+fn data_dir() -> Option<PathBuf> {
+    let dir = plugin_dir()?;
+    Some(if cfg!(windows) {
+        dir.parent()?.parent()?.join("data/obs-plugins/lightair-camera-fx")
+    } else {
+        dir.join("lightair-camera-fx.plugin/Contents/Resources")
+    })
 }
 
 fn resource(name: &str) -> Option<Value> {
-    let path = plugin_dir()?.join("lightair-camera-fx.plugin/Contents/Resources").join(name);
+    let path = data_dir()?.join(name);
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
