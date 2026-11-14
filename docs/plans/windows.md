@@ -100,7 +100,18 @@ The app and engine call these instead of OS APIs. A test per module runs on both
    Done: portable kinds (`lightair_core::kinds`: screen, camera, mic, desktop audio, app
    audio) with their own setting names; the engine maps them per platform
    (`lightair_engine::kinds`) and gives an input a new source when an edit maps it to another
-   libobs type; projects move to format 2 on open (and OBS imports arrive portable).
+   libobs type; projects move to format 2 on open (and OBS imports arrive portable). Game
+   capture is a fourth screen mode on Windows. Hardware encoders: NVENC, AMF and Quick Sync
+   by the same choices as VideoToolbox (H.264, HEVC; ProRes stays macOS-only, and the choice
+   says so). Audio: cpal opens WASAPI devices; libobs's monitoring is per platform already.
+
+   Not done, and why: the zero-copy preview. GPUI's Windows renderer draws no surfaces
+   (`draw_surfaces` is empty in gpui-pre-windows 0.3.12) and its `PaintSurface` carries only
+   a `CVPixelBuffer`, so DXGI shared textures need a GPUI change (a Windows surface holding a
+   shared NT handle, opened with `OpenSharedResource1` and drawn as a textured quad), made and
+   measured on a Windows machine. Until then Windows previews through the read-back path:
+   correct, one frame later, with a copy per frame. Running on Windows, recording, streaming
+   and Windows screenshots also wait for a Windows machine or the CI runner.
 3. **Parity:**
    - Camera Studio on ONNX/DirectML;
    - VST3 hosting with editors;

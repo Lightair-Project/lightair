@@ -1411,7 +1411,7 @@ impl MixerPanel {
                             source_item(track, to, app, label, me, on)
                         };
                         let mut menu = menu.item(PopupMenuItem::label("Microphones and interfaces"));
-                        let mut devices = vec![(String::new(), "Default mic (as set in macOS)".to_string())];
+                        let mut devices = vec![(String::new(), format!("Default mic (as set in {})", ui::OS))];
                         devices.extend(lightair_engine::devices::input_devices().into_iter().map(|d| {
                             let n = if d.channels == 1 { "1 input".to_string() } else { format!("{} inputs", d.channels) };
                             (d.name.clone(), format!("{} · {n}", d.name))

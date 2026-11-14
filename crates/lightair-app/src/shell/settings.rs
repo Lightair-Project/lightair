@@ -221,7 +221,7 @@ impl StudioWindow {
         if refused.contains(&action) {
             list.retain(|h| h.action != action);
             crate::hotkeys::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
-            self.hotkey_note = Some(format!("{} is taken by macOS or another app.", crate::hotkeys::display(&keys)));
+            self.hotkey_note = Some(format!("{} is taken by {} or another app.", crate::hotkeys::display(&keys), ui::OS));
         } else {
             self.hotkey_note = None;
         }
@@ -446,7 +446,7 @@ impl StudioWindow {
                 project_dir.as_ref().map(|d| d.to_string_lossy().into_owned()).as_deref(),
                 reveal_button("reveal-project", project_dir),
             )))
-            .child(note("General settings belong to this Mac. The rest are saved with the project."))
+            .child(note(&format!("General settings belong to this {}. The rest are saved with the project.", ui::MACHINE)))
     }
 
     fn audio_page(&self, cx: &mut Context<Self>) -> Div {
@@ -562,7 +562,11 @@ impl StudioWindow {
                     .child(row("Sample rate", Some("48 kHz suits video; 44.1 kHz matches music files."), rate_chips))
                     .child(row(
                         "Buffer",
-                        Some("Smaller: less delay when you monitor yourself. Larger: lighter on the Mac."),
+                        Some(if cfg!(windows) {
+                            "Smaller: less delay when you monitor yourself. Larger: lighter on the PC."
+                        } else {
+                            "Smaller: less delay when you monitor yourself. Larger: lighter on the Mac."
+                        }),
                         blocks,
                     ))
                     .when(rate != running, |g| {
@@ -765,6 +769,7 @@ impl StudioWindow {
                     .child(row(
                         "Encoder",
                         Some(match rec.encoder {
+                            VideoEncoder::H264 if cfg!(windows) => "Plays everywhere. Uses the graphics card's encoder.",
                             VideoEncoder::H264 => "Plays everywhere. Uses the Mac's media engine.",
                             VideoEncoder::Hevc => "Half the size at the same quality.",
                             VideoEncoder::ProRes => "For editing: big files, no quality loss.",

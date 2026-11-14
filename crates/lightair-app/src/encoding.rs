@@ -1,42 +1,32 @@
 //! From settings to encoders (docs/11-outputs-streaming-recording.md, "Encoding"): which libobs
-//! encoder a choice means on this Mac, the size it encodes at, and what Automatic picks for a
-//! destination.
+//! encoder a choice means on this machine, the size it encodes at, and what Automatic picks for
+//! a destination.
 
 use lightair_core::{Destination, Encoding, Format, Project, RecordingSettings, VideoEncoder};
-use lightair_engine::outputs::EncoderConfig;
+use lightair_engine::outputs::{
+    EncoderConfig, H264_ENCODERS, HEVC_ENCODERS, PRORES_ENCODERS, aac_encoder, first_available,
+};
 
 use crate::platforms;
 
-/// The libobs encoder for a choice, among those this Mac has; hardware H.264 (then x264) when
-/// the choice isn't available.
+/// The libobs encoder for a choice, among those this machine has; hardware H.264 (then x264)
+/// when the choice isn't available.
 pub fn encoder_id(available: &[String], choice: VideoEncoder) -> String {
-    let has = |id: &str| available.iter().any(|e| e == id);
-    let find = |ids: &[&str]| ids.iter().find(|id| has(id)).map(|id| id.to_string());
-    let h264 = || {
-        find(&["com.apple.videotoolbox.videoencoder.ave.avc", "com.apple.videotoolbox.videoencoder.h264", "obs_x264"])
-            .unwrap_or_else(|| "obs_x264".into())
-    };
+    let h264 = || first_available(available, H264_ENCODERS).unwrap_or_else(|| "obs_x264".into());
     match choice {
         VideoEncoder::H264 => h264(),
-        VideoEncoder::Hevc => {
-            find(&["com.apple.videotoolbox.videoencoder.ave.hevc", "com.apple.videotoolbox.videoencoder.hevc.vcp"])
-                .unwrap_or_else(h264)
-        }
-        VideoEncoder::ProRes => find(&[
-            "com.apple.videotoolbox.videoencoder.appleproreshw.422",
-            "com.apple.videotoolbox.videoencoder.prores-422",
-        ])
-        .unwrap_or_else(h264),
+        VideoEncoder::Hevc => first_available(available, HEVC_ENCODERS).unwrap_or_else(h264),
+        VideoEncoder::ProRes => first_available(available, PRORES_ENCODERS).unwrap_or_else(h264),
         VideoEncoder::X264 => "obs_x264".into(),
     }
 }
 
-/// Whether this Mac has an encoder for the choice.
+/// Whether this machine has an encoder for the choice.
 pub fn available(available: &[String], choice: VideoEncoder) -> bool {
     let id = encoder_id(available, choice);
     match choice {
         VideoEncoder::H264 => true,
-        VideoEncoder::Hevc => id.contains("hevc"),
+        VideoEncoder::Hevc => HEVC_ENCODERS.contains(&id.as_str()),
         VideoEncoder::ProRes => id.contains("prores"),
         VideoEncoder::X264 => available.iter().any(|e| e == "obs_x264"),
     }
@@ -93,7 +83,7 @@ pub fn for_recording(caps: &[String], settings: &RecordingSettings, canvas: &For
 }
 
 fn audio_id(caps: &[String]) -> String {
-    if caps.iter().any(|e| e == "CoreAudio_AAC") { "CoreAudio_AAC".into() } else { "ffmpeg_aac".into() }
+    aac_encoder(caps)
 }
 
 #[cfg(test)]
@@ -122,6 +112,22 @@ mod tests {
         let old = vec!["obs_x264".to_string(), "com.apple.videotoolbox.videoencoder.h264".to_string()];
         assert!(encoder_id(&old, VideoEncoder::Hevc).ends_with("h264"));
         assert!(!available(&old, VideoEncoder::Hevc));
+    }
+
+    #[test]
+    fn choices_map_to_a_pcs_encoders() {
+        let nvidia: Vec<String> =
+            ["obs_x264", "obs_nvenc_h264_tex", "obs_nvenc_hevc_tex", "ffmpeg_aac"].map(String::from).to_vec();
+        assert_eq!(encoder_id(&nvidia, VideoEncoder::H264), "obs_nvenc_h264_tex");
+        assert_eq!(encoder_id(&nvidia, VideoEncoder::Hevc), "obs_nvenc_hevc_tex");
+        assert!(available(&nvidia, VideoEncoder::Hevc));
+        // no ProRes in libobs on Windows: H.264, and the choice reads as unavailable
+        assert_eq!(encoder_id(&nvidia, VideoEncoder::ProRes), "obs_nvenc_h264_tex");
+        assert!(!available(&nvidia, VideoEncoder::ProRes));
+        assert_eq!(audio_id(&nvidia), "ffmpeg_aac");
+        let intel: Vec<String> = ["obs_x264", "obs_qsv11_v2"].map(String::from).to_vec();
+        assert_eq!(encoder_id(&intel, VideoEncoder::H264), "obs_qsv11_v2");
+        assert_eq!(encoder_id(&intel, VideoEncoder::Hevc), "obs_qsv11_v2", "no HEVC: H.264");
     }
 
     #[test]

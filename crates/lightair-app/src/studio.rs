@@ -697,7 +697,7 @@ impl Studio {
                 .collect(),
             encoder: encoder_ok.then(|| match encoders.video_encoder.as_str() {
                 "obs_x264" => "x264 (software)".to_string(),
-                _ => "Apple hardware H.264".to_string(),
+                id => format!("{} H.264", lightair_engine::outputs::encoder_maker(id)),
             }),
             encoders: formats.len() as u32,
             video_kbps: encoders.video_bitrate_kbps,
