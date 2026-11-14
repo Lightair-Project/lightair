@@ -35,7 +35,7 @@ pub enum MediaAction {
     Seek(i64),
 }
 
-fn state(s: sys::obs_media_state) -> MediaState {
+pub(crate) fn state(s: sys::obs_media_state) -> MediaState {
     match s {
         sys::OBS_MEDIA_STATE_PLAYING => MediaState::Playing,
         sys::OBS_MEDIA_STATE_OPENING => MediaState::Opening,

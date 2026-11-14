@@ -273,6 +273,8 @@ struct Shared {
     /// When set, renders this source (a scene that isn't on air: Studio mode's preview)
     /// instead of the canvas's program. Held "showing" so its inputs run.
     source: Mutex<Option<SourceRef>>,
+    /// Draw the source at its own size (a player), not in the canvas's coordinates.
+    own_size: AtomicBool,
 }
 
 struct CanvasRef(*mut sys::obs_canvas_t);
@@ -334,6 +336,7 @@ impl Preview {
             transfer: Mutex::new(transfer),
             canvas,
             source: Mutex::new(None),
+            own_size: AtomicBool::new(false),
         });
         unsafe { sys::obs_add_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&shared) as *mut c_void) };
         Self(Arc::new(Handle { shared }))
@@ -359,6 +362,12 @@ impl Preview {
     }
 
     /// The source shown instead of the program, if any (borrowed pointer, for comparison).
+    /// Draws the source at its own size (a player: the whole picture, whatever the canvas),
+    /// rather than where it sits on the canvas.
+    pub fn set_own_size(&self, own: bool) {
+        self.0.shared.own_size.store(own, Ordering::Relaxed);
+    }
+
     pub fn source(&self) -> Option<*mut sys::obs_source_t> {
         self.0.shared.source.lock().as_ref().map(|s| s.0)
     }
@@ -432,7 +441,10 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     let source = shared.source.lock();
     match (&*source, &shared.canvas) {
         (Some(src), _) => unsafe {
-            draw_with(base_w, base_h, pool.target, w, h, || sys::obs_source_video_render(src.0))
+            let (sw, sh) = (sys::obs_source_get_width(src.0), sys::obs_source_get_height(src.0));
+            let (cw, ch) =
+                if shared.own_size.load(Ordering::Relaxed) && sw > 0 && sh > 0 { (sw, sh) } else { (base_w, base_h) };
+            draw_with(cw, ch, pool.target, w, h, || sys::obs_source_video_render(src.0))
         },
         (None, None) => unsafe { draw_scaled(main, base_w, base_h, pool.target, w, h) },
         (None, Some(c)) => unsafe { draw_with(base_w, base_h, pool.target, w, h, || sys::obs_canvas_render(c.0)) },
@@ -459,6 +471,50 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
 pub fn frame_size(frame: &Frame) -> (usize, usize) {
     use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
     (CVPixelBufferGetWidth(frame), CVPixelBufferGetHeight(frame))
+}
+
+/// A frame shrunk to at most `max_width` pixels wide, as RGBA (thumbnails). The preview's
+/// YCbCr is full-range BT.601.
+pub fn frame_rgba(frame: &Frame, max_width: usize) -> Option<(usize, usize, Vec<u8>)> {
+    use objc2_core_video::{
+        CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight,
+        CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    };
+    let (w, h) = (CVPixelBufferGetWidth(frame), CVPixelBufferGetHeight(frame));
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let step = w.div_ceil(max_width.max(1)).max(1);
+    let (ow, oh) = (w / step, h / step);
+    unsafe {
+        if CVPixelBufferLockBaseAddress(frame, CVPixelBufferLockFlags::ReadOnly) != 0 {
+            return None;
+        }
+        let luma = CVPixelBufferGetBaseAddressOfPlane(frame, 0) as *const u8;
+        let chroma = CVPixelBufferGetBaseAddressOfPlane(frame, 1) as *const u8;
+        let out = (!luma.is_null() && !chroma.is_null()).then(|| {
+            let (ly, cy) = (CVPixelBufferGetBytesPerRowOfPlane(frame, 0), CVPixelBufferGetBytesPerRowOfPlane(frame, 1));
+            let mut rgba = Vec::with_capacity(ow * oh * 4);
+            for oy in 0..oh {
+                for ox in 0..ow {
+                    let (x, y) = (ox * step, oy * step);
+                    let yv = *luma.add(y * ly + x) as f32;
+                    let c = chroma.add((y / 2) * cy + (x / 2) * 2);
+                    let (cb, cr) = (*c as f32 - 128.0, *c.add(1) as f32 - 128.0);
+                    let q = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+                    rgba.extend_from_slice(&[
+                        q(yv + 1.402 * cr),
+                        q(yv - 0.344_136 * cb - 0.714_136 * cr),
+                        q(yv + 1.772 * cb),
+                        255,
+                    ]);
+                }
+            }
+            (ow, oh, rgba)
+        });
+        CVPixelBufferUnlockBaseAddress(frame, CVPixelBufferLockFlags::ReadOnly);
+        out
+    }
 }
 
 pub fn sample_ycbcr(frame: &Frame, fx: f32, fy: f32) -> Option<(u8, u8, u8)> {

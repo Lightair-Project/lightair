@@ -8,6 +8,7 @@ mod eyedropper;
 mod frame_view;
 mod geometry;
 mod hotkeys;
+mod library;
 mod mixer;
 #[cfg(target_os = "macos")]
 mod plugin_editor;

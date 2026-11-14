@@ -173,6 +173,12 @@ pub fn icon(name: &str) -> Icon {
     Icon::empty().path(SharedString::from(format!("icons/{name}.svg")))
 }
 
+/// A shortcut written with ⌘ ("cmd-z") as this platform binds it: ⌘ on macOS, Ctrl elsewhere.
+/// (Bindings are made once, at launch: the few rewritten strings live as long as the app.)
+pub fn key(keys: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") { keys } else { Box::leak(keys.replace("cmd-", "ctrl-").into_boxed_str()) }
+}
+
 /// The operating system, as people call it.
 pub const OS: &str = if cfg!(windows) { "Windows" } else { "macOS" };
 /// This computer, as people call it.

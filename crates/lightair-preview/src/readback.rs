@@ -119,6 +119,8 @@ struct Shared {
     frames: AtomicU64,
     canvas: Option<CanvasRef>,
     source: Mutex<Option<SourceRef>>,
+    /// Draw the source at its own size (a player), not in the canvas's coordinates.
+    own_size: AtomicBool,
 }
 
 struct CanvasRef(*mut sys::obs_canvas_t);
@@ -168,6 +170,7 @@ impl Preview {
             frames: AtomicU64::new(0),
             canvas,
             source: Mutex::new(None),
+            own_size: AtomicBool::new(false),
         });
         unsafe { sys::obs_add_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&shared) as *mut c_void) };
         Self(Arc::new(Handle { shared }))
@@ -185,6 +188,12 @@ impl Preview {
         });
         let old = std::mem::replace(&mut *self.0.shared.source.lock(), new);
         drop(old);
+    }
+
+    /// Draws the source at its own size (a player: the whole picture, whatever the canvas),
+    /// rather than where it sits on the canvas.
+    pub fn set_own_size(&self, own: bool) {
+        self.0.shared.own_size.store(own, Ordering::Relaxed);
     }
 
     pub fn source(&self) -> Option<*mut sys::obs_source_t> {
@@ -253,7 +262,10 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     let source = shared.source.lock();
     match (&*source, &shared.canvas) {
         (Some(src), _) => unsafe {
-            draw_with(base_w, base_h, pool.target, w, h, || sys::obs_source_video_render(src.0))
+            let (sw, sh) = (sys::obs_source_get_width(src.0), sys::obs_source_get_height(src.0));
+            let (cw, ch) =
+                if shared.own_size.load(Ordering::Relaxed) && sw > 0 && sh > 0 { (sw, sh) } else { (base_w, base_h) };
+            draw_with(cw, ch, pool.target, w, h, || sys::obs_source_video_render(src.0))
         },
         (None, None) => unsafe { draw_scaled(main, base_w, base_h, pool.target, w, h) },
         (None, Some(c)) => unsafe { draw_with(base_w, base_h, pool.target, w, h, || sys::obs_canvas_render(c.0)) },
@@ -268,6 +280,24 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
 /// A frame's pixel size.
 pub fn frame_size(frame: &Frame) -> (usize, usize) {
     (frame.width, frame.height)
+}
+
+/// A frame shrunk to at most `max_width` pixels wide, as RGBA (thumbnails).
+pub fn frame_rgba(frame: &Frame, max_width: usize) -> Option<(usize, usize, Vec<u8>)> {
+    let (w, h) = (frame.width, frame.height);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let step = w.div_ceil(max_width.max(1)).max(1);
+    let (ow, oh) = (w / step, h / step);
+    let mut rgba = Vec::with_capacity(ow * oh * 4);
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let i = (oy * step * w + ox * step) * 4;
+            rgba.extend_from_slice(&[frame.bgra[i + 2], frame.bgra[i + 1], frame.bgra[i], 255]);
+        }
+    }
+    Some((ow, oh, rgba))
 }
 
 /// The (Y, Cb, Cr) values (full-range BT.601, as the macOS path produces) at a point given as

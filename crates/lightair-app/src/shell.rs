@@ -91,14 +91,34 @@ actions!(
         Scene6,
         Scene7,
         Scene8,
-        Scene9
+        Scene9,
+        ShowLibrary,
+        ShowLive,
+        ShowEditor
     ]
 );
 
+/// The three places (docs/plans/screen-studio.md, "Library, Live, Editor").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    Library,
+    Live,
+    Editor,
+}
+
+/// The switcher's shortcuts: ⌃1–⌃3 on macOS (⌘1–⌘9 are scenes); Alt+1–3 on Windows, where
+/// Ctrl+1–9 are the scenes.
+const PLACE_KEYS: [&str; 3] = if cfg!(windows) { ["alt-1", "alt-2", "alt-3"] } else { ["ctrl-1", "ctrl-2", "ctrl-3"] };
+
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-z", Undo, Some("Studio")),
-        KeyBinding::new("cmd-shift-z", Redo, Some("Studio")),
+        KeyBinding::new(PLACE_KEYS[0], ShowLibrary, Some("Studio")),
+        KeyBinding::new(PLACE_KEYS[1], ShowLive, Some("Studio")),
+        KeyBinding::new(PLACE_KEYS[2], ShowEditor, Some("Studio")),
+    ]);
+    cx.bind_keys([
+        KeyBinding::new(crate::ui::key("cmd-z"), Undo, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-shift-z"), Redo, Some("Studio")),
         KeyBinding::new("backspace", DeleteSelection, Some("Studio")),
         KeyBinding::new("delete", DeleteSelection, Some("Studio")),
         KeyBinding::new("left", NudgeLeft, Some("Studio")),
@@ -107,41 +127,41 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", NudgeDown, Some("Studio")),
         KeyBinding::new("escape", Deselect, Some("Studio")),
         KeyBinding::new("enter", RenameSelection, Some("Studio")),
-        KeyBinding::new("cmd-k", OpenPalette, Some("Studio")),
-        KeyBinding::new("cmd-enter", Take, Some("Studio")),
-        KeyBinding::new("cmd-m", AddMarker, Some("Studio")),
-        KeyBinding::new("cmd-a", SelectAll, Some("Studio")),
-        KeyBinding::new("cmd-,", OpenSettings, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-k"), OpenPalette, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-enter"), Take, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-m"), AddMarker, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-a"), SelectAll, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-,"), OpenSettings, Some("Studio")),
         KeyBinding::new("e", ToggleRotateTool, Some("Studio")),
-        KeyBinding::new("cmd-shift-m", ToggleMics, Some("Studio")),
-        KeyBinding::new("cmd-g", GroupSelection, Some("Studio")),
-        KeyBinding::new("cmd-=", ZoomIn, Some("Studio")),
-        KeyBinding::new("cmd-+", ZoomIn, Some("Studio")),
-        KeyBinding::new("cmd--", ZoomOut, Some("Studio")),
-        KeyBinding::new("cmd-0", ZoomToFit, Some("Studio")),
-        KeyBinding::new("cmd-alt-0", ZoomToActual, Some("Studio")),
-        KeyBinding::new("cmd-c", CopySelection, Some("Studio")),
-        KeyBinding::new("cmd-x", CutSelection, Some("Studio")),
-        KeyBinding::new("cmd-v", PasteLayers, Some("Studio")),
-        KeyBinding::new("cmd-d", DuplicateSelection, Some("Studio")),
-        KeyBinding::new("cmd-shift-]", BringToFront, Some("Studio")),
-        KeyBinding::new("cmd-shift-[", SendToBack, Some("Studio")),
-        KeyBinding::new("cmd-]", BringForward, Some("Studio")),
-        KeyBinding::new("cmd-[", SendBackward, Some("Studio")),
-        KeyBinding::new("cmd-shift-h", ToggleLayerVisible, Some("Studio")),
-        KeyBinding::new("cmd-shift-l", ToggleLayerLocked, Some("Studio")),
-        KeyBinding::new("cmd-shift-g", UngroupSelection, Some("Studio")),
-        KeyBinding::new("cmd-shift-n", CreateEmpty, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-shift-m"), ToggleMics, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-g"), GroupSelection, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-="), ZoomIn, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-+"), ZoomIn, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd--"), ZoomOut, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-0"), ZoomToFit, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-alt-0"), ZoomToActual, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-c"), CopySelection, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-x"), CutSelection, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-v"), PasteLayers, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-d"), DuplicateSelection, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-shift-]"), BringToFront, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-shift-["), SendToBack, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-]"), BringForward, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-["), SendBackward, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-shift-h"), ToggleLayerVisible, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-shift-l"), ToggleLayerLocked, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-shift-g"), UngroupSelection, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-shift-n"), CreateEmpty, Some("Studio")),
         KeyBinding::new("alt-shift-n", CreateEmptyChild, Some("Studio")),
-        KeyBinding::new("cmd-1", Scene1, Some("Studio")),
-        KeyBinding::new("cmd-2", Scene2, Some("Studio")),
-        KeyBinding::new("cmd-3", Scene3, Some("Studio")),
-        KeyBinding::new("cmd-4", Scene4, Some("Studio")),
-        KeyBinding::new("cmd-5", Scene5, Some("Studio")),
-        KeyBinding::new("cmd-6", Scene6, Some("Studio")),
-        KeyBinding::new("cmd-7", Scene7, Some("Studio")),
-        KeyBinding::new("cmd-8", Scene8, Some("Studio")),
-        KeyBinding::new("cmd-9", Scene9, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-1"), Scene1, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-2"), Scene2, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-3"), Scene3, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-4"), Scene4, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-5"), Scene5, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-6"), Scene6, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-7"), Scene7, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-8"), Scene8, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-9"), Scene9, Some("Studio")),
     ]);
 }
 
@@ -252,6 +272,11 @@ pub struct StudioWindow {
     confirm_end: Option<Instant>,
     /// One preview per format (the primary one renders the main canvas).
     previews: HashMap<Id, Preview>,
+    /// Library, Live or Editor.
+    place: Place,
+    library: Entity<crate::library::Library>,
+    /// A program preview made for the Library's stills, and the stills it's for.
+    thumbnail_shot: Option<(Preview, Vec<crate::studio::ThumbnailRequest>)>,
     /// Screen bounds of each visible format's stage, from the last frame.
     stage_bounds: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     /// The format being edited (tabs), or all formats side by side.
@@ -397,7 +422,14 @@ impl StudioWindow {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
-                if this.update(cx, |this, cx| this.refresh_presence(cx)).is_err() {
+                if this
+                    .update(cx, |this, cx| {
+                        this.refresh_presence(cx);
+                        // (also when the window isn't drawing)
+                        this.take_thumbnails(cx);
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -434,8 +466,19 @@ impl StudioWindow {
         })
         .detach();
         let primary = studio.read(cx).project().primary_format().id;
+        let library = cx.new(|cx| crate::library::Library::new(studio.clone(), window, cx));
+        cx.observe(&library, |this, library, cx| {
+            if let Some(_item) = library.update(cx, |l, _| l.open_in_editor.take()) {
+                this.place = Place::Editor;
+            }
+            cx.notify();
+        })
+        .detach();
         Self {
             previews: HashMap::from([(primary, preview)]),
+            place: Place::Live,
+            library,
+            thumbnail_shot: None,
             stage_bounds: Rc::default(),
             active_format: Some(primary),
             side_by_side: false,
@@ -1519,6 +1562,7 @@ impl Render for StudioWindow {
         self.sync_crop_preview(cx);
         self.refresh_sizes(cx);
         self.sync_previews(cx);
+        self.take_thumbnails(cx);
         self.sync_layer_props(window, cx);
         let studio = self.studio.read(cx);
         let project = studio.project().clone();
@@ -1647,6 +1691,9 @@ impl Render for StudioWindow {
                     this.take(cx)
                 }
             }))
+            .on_action(cx.listener(|this, _: &ShowLibrary, _, cx| this.show_place(Place::Library, cx)))
+            .on_action(cx.listener(|this, _: &ShowLive, _, cx| this.show_place(Place::Live, cx)))
+            .on_action(cx.listener(|this, _: &ShowEditor, _, cx| this.show_place(Place::Editor, cx)))
             .size_full()
             .flex()
             .flex_col()
@@ -1654,7 +1701,11 @@ impl Render for StudioWindow {
             .text_color(tok::text())
             .text_size(px(13.))
             .child(self.title_bar(&project, cx))
-            .child(div().flex().flex_1().min_h_0().children(self.dock.clone()))
+            .child(match self.place {
+                Place::Live => div().flex().flex_1().min_h_0().children(self.dock.clone()),
+                Place::Library => div().flex().flex_1().min_h_0().child(self.library.clone()),
+                Place::Editor => div().flex().flex_1().min_h_0().child(editor_placeholder()),
+            })
             .child(self.status_bar(cx))
             .children(self.add_layer_overlay(cx))
             .children(self.effect_catalog_overlay(cx))
@@ -1666,7 +1717,113 @@ impl Render for StudioWindow {
     }
 }
 
+/// "ctrl-1" as the platform shows it: "⌃1", "Alt+1".
+fn key_label(key: &str) -> String {
+    let (m, k) = key.split_once('-').unwrap_or(("", key));
+    match (m, cfg!(windows)) {
+        ("ctrl", false) => format!("⌃{k}"),
+        ("alt", true) => format!("Alt+{k}"),
+        ("alt", false) => format!("⌥{k}"),
+        _ => format!("Ctrl+{k}"),
+    }
+}
+
+/// The Editor, until it arrives (docs/plans/screen-studio.md, phase 3).
+fn editor_placeholder() -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .size_full()
+        .child(ui::icon("scissors").size(px(36.)).text_color(tok::text_tertiary()))
+        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("The Editor is coming"))
+        .child(
+            div()
+                .max_w(px(420.))
+                .text_center()
+                .text_color(tok::text_secondary())
+                .child("Zooms, cuts, captions and layouts for your recordings. Until then, play and organise them in the Library."),
+        )
+}
+
 impl StudioWindow {
+    pub(crate) fn show_place(&mut self, place: Place, cx: &mut Context<Self>) {
+        self.place = place;
+        if place == Place::Library {
+            self.library.update(cx, |l, cx| l.reload(cx));
+        }
+        // the canvas previews rest while they aren't seen
+        for p in self.previews.values() {
+            p.set_active(place == Place::Live);
+        }
+        cx.notify();
+    }
+
+    /// Takes the Library's stills: a program preview, kept until it has drawn a few frames.
+    fn take_thumbnails(&mut self, cx: &mut Context<Self>) {
+        let wanted = self.studio.update(cx, |s, _| std::mem::take(&mut s.thumbnails));
+        if !wanted.is_empty() {
+            let shot = self.thumbnail_shot.get_or_insert_with(|| (Preview::attach(), Vec::new()));
+            shot.1.extend(wanted);
+        }
+        let Some((preview, _)) = &self.thumbnail_shot else { return };
+        if preview.frames() < 3 {
+            return;
+        }
+        let Some((preview, requests)) = self.thumbnail_shot.take() else { return };
+        let image = preview
+            .latest_frame()
+            .and_then(|f| lightair_preview::frame_rgba(&f, 480))
+            .and_then(|(w, h, rgba)| image::RgbaImage::from_raw(w as u32, h as u32, rgba));
+        let Some(image) = image else {
+            tracing::warn!("no program frame for the Library's stills");
+            return;
+        };
+        for r in requests {
+            if let Some(dir) = r.path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Err(e) = image.save_with_format(&r.path, image::ImageFormat::Png) {
+                tracing::warn!(%e, path = %r.path.display(), "couldn't write a Library still");
+            }
+        }
+        self.studio.update(cx, |s, _| s.library_version += 1);
+    }
+
+    /// Library · Live · Editor.
+    fn place_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tab = |id: &'static str, label: &'static str, place: Place, key: &'static str| {
+            let on = self.place == place;
+            div()
+                .id(id)
+                .px_2p5()
+                .py_0p5()
+                .rounded(px(6.))
+                .text_size(px(12.))
+                .cursor_pointer()
+                .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()).font_weight(FontWeight::MEDIUM))
+                .when(!on, |d| d.text_color(tok::text_secondary()))
+                .hover(|d| d.text_color(tok::text()))
+                .tooltip(move |w, cx| Tooltip::new(format!("{label} ({})", key_label(key))).build(w, cx))
+                .on_click(cx.listener(move |this, _, _, cx| this.show_place(place, cx)))
+                .child(label)
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .p_0p5()
+            .rounded(px(8.))
+            .bg(tok::bg_panel())
+            .border_1()
+            .border_color(tok::border())
+            .child(tab("place-library", "Library", Place::Library, PLACE_KEYS[0]))
+            .child(tab("place-live", "Live", Place::Live, PLACE_KEYS[1]))
+            .child(tab("place-editor", "Editor", Place::Editor, PLACE_KEYS[2]))
+    }
+
     fn title_bar(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         let studio = self.studio.read(cx);
         let stats = studio.stats;
@@ -1756,6 +1913,7 @@ impl StudioWindow {
             .border_b_1()
             .border_color(tok::border())
             .bg(tok::bg_app())
+            .child(self.place_switcher(cx))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(project.name.clone()))
             .when(streaming, |d| {
                 d.child(
