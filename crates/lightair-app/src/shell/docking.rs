@@ -239,6 +239,17 @@ impl StudioWindow {
             }
             Ok("palette") => self.open_palette(window, cx),
             Ok("library") => self.show_place(super::Place::Library, cx),
+            Ok("editor-latest") => {
+                // the project's newest recording, in the Editor
+                if let Some(dir) = self.studio.read(cx).project_dir() {
+                    let index = lightair_store::recordings::Index::load(&dir);
+                    if let Some(item) = index.newest_first().first() {
+                        let id = item.id;
+                        self.editor.update(cx, |e, cx| e.open(dir, id, cx));
+                        self.show_place(super::Place::Editor, cx);
+                    }
+                }
+            }
             Ok("screen-layouts") => {
                 // the layout scenes, the display blank (an app that isn't there), Screen on air
                 let p = self.studio.read(cx).project().clone();
