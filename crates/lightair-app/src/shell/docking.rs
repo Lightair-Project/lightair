@@ -334,6 +334,22 @@ impl StudioWindow {
                 self.show_place(super::Place::Editor, cx);
                 self.editor.update(cx, |e, cx| e.hook_trim(cx));
             }
+            Ok("editor-zooms") => {
+                // the newest recording in a project, then a zoom added on its zoom track
+                if let Some(dir) = self.studio.read(cx).project_dir() {
+                    let index = lightair_store::recordings::Index::load(&dir);
+                    if let Some(item) = index.newest_first().first() {
+                        let id = item.id;
+                        self.show_place(super::Place::Editor, cx);
+                        self.editor.update(cx, |e, cx| e.add_item(id, cx));
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(std::time::Duration::from_millis(2500)).await;
+                            let _ = this.update(cx, |this, cx| this.editor.update(cx, |e, cx| e.hook_zooms(cx)));
+                        })
+                        .detach();
+                    }
+                }
+            }
             Ok("editor-alone") => {
                 self.show_place(super::Place::Editor, cx);
                 self.editor.update(cx, |e, cx| e.hook_alone(cx));

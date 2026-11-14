@@ -30,12 +30,16 @@ impl Editor {
 
     /// Picks only `clip` (or nothing).
     pub(super) fn pick_only(&mut self, clip: Option<Id>) {
+        if clip.is_some() {
+            self.zoom_sel = None;
+        }
         self.picked = clip.into_iter().collect();
         self.selected = clip;
     }
 
     /// A click on a clip with ⌘ (add or take away) or ⇧ (the range from the last picked).
     pub(super) fn pick_click(&mut self, clip: Id, range: bool, cx: &mut Context<Self>) {
+        self.zoom_sel = None;
         let Some(seq) = self.seq().cloned() else { return };
         match (range, self.selected) {
             (true, Some(anchor)) if anchor != clip => {
@@ -84,6 +88,7 @@ impl Editor {
         let mut its = group.clone();
         its.sort();
         let just_its_link = now == its;
+        self.zoom_sel = None;
         if alone || !self.is_picked(clip) || (!self.linkage && just_its_link) {
             self.picked = if self.linkage && !alone { group } else { vec![clip] };
         }
@@ -116,6 +121,7 @@ impl Editor {
     }
 
     pub(super) fn begin_marquee(&mut self, at: Point<Pixels>, adding: bool) {
+        self.zoom_sel = None;
         let base = if adding { self.picked_clips() } else { Vec::new() };
         if !adding {
             self.pick_only(None);

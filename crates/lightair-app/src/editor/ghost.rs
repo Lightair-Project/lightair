@@ -61,6 +61,7 @@ impl Editor {
                     look: None,
                     transcript: None,
                     tracks: Vec::new(),
+                    zooms: None,
                 };
                 // a video's own sound keeps it on a picture track
                 if kind == MediaKind::Video {
@@ -107,11 +108,11 @@ impl Editor {
             Some(ti) => {
                 let above: f32 = seq.tracks.iter().take(ti).map(track_h).sum();
                 let h = track_h(&seq.tracks[ti]);
-                (RULER_H + above + 3.0, h - 6.0, false)
+                (self.tracks_top() + above + 3.0, h - 6.0, false)
             }
             // a new video track goes on top (shown over the ruler), a new audio one below
             None if g.kind == TrackKind::Video => (2.0, RULER_H - 4.0, true),
-            None => (RULER_H + rows + 3.0, AUDIO_H - 6.0, true),
+            None => (self.tracks_top() + rows + 3.0, AUDIO_H - 6.0, true),
         };
         let _ = b;
         // the clip's own pictures or sound in it
