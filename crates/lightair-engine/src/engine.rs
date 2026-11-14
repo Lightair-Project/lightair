@@ -124,6 +124,8 @@ pub struct EngineState {
     pub reconciler: crate::Reconciler,
     /// Running recordings and streams.
     pub outputs: crate::outputs::Outputs,
+    /// A Studio take's per-source recordings, until they've stopped.
+    pub take: Option<crate::take::Take>,
 }
 
 impl EngineState {
@@ -399,8 +401,9 @@ unsafe fn shutdown(state: EngineState) {
     // The render thread can hold a scene for one more frame after its channel is cleared, so
     // let a few frames pass and keep draining until nothing is left to destroy.
     crate::loudness::detach();
-    let EngineState { sources, scenes, mut reconciler, mut outputs } = state;
+    let EngineState { sources, scenes, mut reconciler, mut outputs, take } = state;
     outputs.shutdown();
+    drop(take);
     reconciler.clear();
     drop(scenes);
     drop(sources);
