@@ -28,6 +28,8 @@ pub struct Preferences {
     pub camera: CameraDefaults,
     /// Shortcuts that work while Lightair isn't in front.
     pub global_hotkeys: Vec<GlobalHotkey>,
+    /// What the record button records.
+    pub record_mode: RecordMode,
     /// The project open last: the one Lightair opens next.
     pub last_project: Option<PathBuf>,
 }
@@ -58,6 +60,17 @@ impl CameraDefaults {
     }
 }
 
+/// What the record button records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordMode {
+    /// The program, as it's on air.
+    #[default]
+    Program,
+    /// A Studio take: each source on its own, for the Editor.
+    Take,
+}
+
 /// A shortcut that works in any app: what it does and its keys ("cmd-shift-r").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GlobalHotkey {
@@ -79,6 +92,7 @@ impl Default for Preferences {
             camera: CameraDefaults::default(),
             global_hotkeys: Vec::new(),
             last_project: None,
+            record_mode: RecordMode::Program,
         }
     }
 }

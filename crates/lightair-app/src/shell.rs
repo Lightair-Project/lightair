@@ -1951,6 +1951,114 @@ impl StudioWindow {
         )
     }
 
+    /// The record button: starts what the mode says, stops whatever is recording.
+    pub(crate) fn record_click(&mut self, cx: &mut Context<Self>) {
+        let busy = {
+            let s = self.studio.read(cx);
+            s.is_taking() || s.is_recording()
+        };
+        if self.take_countdown.is_some() || self.studio.read(cx).is_taking() {
+            self.studio_take(cx);
+        } else if busy {
+            self.studio.update(cx, |s, cx| s.toggle_recording(cx));
+        } else {
+            match self.prefs.record_mode {
+                crate::prefs::RecordMode::Program => self.studio.update(cx, |s, cx| s.toggle_recording(cx)),
+                crate::prefs::RecordMode::Take => self.studio_take(cx),
+            }
+        }
+    }
+
+    /// [● Record | ⌄]: the record button, and the mode beside it.
+    fn record_control(&self, rec: &lightair_engine::outputs::OutputStatus, cx: &mut Context<Self>) -> AnyElement {
+        use crate::prefs::RecordMode;
+        use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+        let studio = self.studio.read(cx);
+        let clock = |t: u64| format!("{:02}:{:02}:{:02}", t / 3600, (t / 60) % 60, t % 60);
+        let mode = self.prefs.record_mode;
+        // (symbol, label, tooltip)
+        let (stop, label, tip): (bool, String, &str) = if let Some(t) = studio.take_elapsed() {
+            (true, clock(t.as_secs()), "Stop the Studio take")
+        } else if let Some(started) = self.take_countdown {
+            (true, format!("{}", 3u64.saturating_sub(started.elapsed().as_secs()).max(1)), "Cancel")
+        } else {
+            match rec.state {
+                OutputState::Active { since } | OutputState::Reconnecting { since } => {
+                    let time = clock(rec.recorded(since).as_secs());
+                    (true, if rec.paused { format!("❚❚ {time}") } else { time }, "Stop recording")
+                }
+                OutputState::Starting | OutputState::Stopping => (true, "…".into(), ""),
+                _ if studio.is_recording() => (true, "Audio".into(), "Stop recording"),
+                _ => match mode {
+                    RecordMode::Program => (false, "Record".into(), "Record the show as it's on air (⌘R)"),
+                    RecordMode::Take => (false, "Studio take".into(), "Record each screen, camera and the pointer, for the Editor (⌘R)"),
+                },
+            }
+        };
+        let active = stop;
+        let symbol = if stop {
+            div().size(px(9.)).rounded(px(2.)).bg(if active { rgb(0xFFFFFF).into() } else { tok::live() })
+        } else {
+            div().size(px(10.)).rounded_full().bg(tok::live())
+        };
+        let me = cx.entity().downgrade();
+        let main = div()
+            .id("record")
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .h_full()
+            .pl_2p5()
+            .pr_2()
+            .rounded_l(px(7.))
+            .cursor_pointer()
+            .when(active, |d| d.bg(tok::live()).text_color(rgb(0xFFFFFF)))
+            .when(!active, |d| d.hover(|d| d.bg(tok::bg_selected())))
+            .child(symbol)
+            .child(div().text_size(px(13.)).when(active, |d| d.font_family("Menlo")).child(label))
+            .when(!tip.is_empty(), |d| d.tooltip(move |w, cx| Tooltip::new(tip).build(w, cx)))
+            .on_click(cx.listener(|this, _, _, cx| this.record_click(cx)));
+        let chevron = Button::new("record-mode")
+            .icon(ui::icon("chevron-down"))
+            .xsmall()
+            .ghost()
+            .disabled(active)
+            .tooltip("What Record records")
+            .dropdown_menu(move |menu, _, _| {
+                let pick = |m: RecordMode| {
+                    let me = me.clone();
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        if let Some(me) = me.upgrade() {
+                            me.update(cx, |this, cx| {
+                                this.prefs.record_mode = m;
+                                let _ = crate::prefs::save_to(&crate::prefs::path(), &this.prefs);
+                                cx.notify();
+                            });
+                        }
+                    }
+                };
+                menu.item(PopupMenuItem::new("Record").icon(ui::icon("circle")).checked(mode == RecordMode::Program).on_click(pick(RecordMode::Program)))
+                    .item(
+                        PopupMenuItem::new("Studio take (for the Editor)")
+                            .icon(ui::icon("mouse-pointer-2"))
+                            .checked(mode == RecordMode::Take)
+                            .on_click(pick(RecordMode::Take)),
+                    )
+            });
+        div()
+            .flex()
+            .items_center()
+            .h(px(30.))
+            .rounded(px(8.))
+            .bg(tok::bg_panel())
+            .border_1()
+            .border_color(if active { tok::live() } else { tok::border() })
+            .child(main)
+            .child(div().w(px(1.)).h(px(16.)).bg(tok::border()))
+            .child(div().px_0p5().child(chevron))
+            .into_any_element()
+    }
+
     /// The project's name, as a menu of the projects to open, and New Project.
     fn project_picker(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
@@ -2031,42 +2139,10 @@ impl StudioWindow {
         let has_destination = project.outputs.destinations.iter().any(|d| d.enabled);
 
         let taking = studio.is_taking();
-        let take_button = match studio.take_elapsed() {
-            Some(t) => {
-                let t = t.as_secs();
-                Button::new("studio-take")
-                    .label(format!("■ Take {:02}:{:02}", t / 60, t % 60))
-                    .small()
-                    .danger()
-                    .tooltip("Stop the Studio take")
-            }
-            None if self.take_countdown.is_some() => {
-                Button::new("studio-take").label("Starting…").small().outline().tooltip("Click to cancel")
-            }
-            None => Button::new("studio-take")
-                .label("Studio take")
-                .icon(ui::icon("mouse-pointer-2"))
-                .small()
-                .outline()
-                .tooltip("Each screen and camera, the audio and the pointer, for the Editor"),
-        }
-        .on_click(cx.listener(|this, _, _, cx| this.studio_take(cx)));
         let rec_status = runtime().recording();
         let rec = rec_status.state.clone();
         let recording = matches!(rec, OutputState::Active { .. });
-        let record = match rec {
-            OutputState::Active { since } | OutputState::Reconnecting { since } => {
-                let t = rec_status.recorded(since).as_secs();
-                let time = format!("{:02}:{:02}:{:02}", t / 3600, (t / 60) % 60, t % 60);
-                let label = if rec_status.paused { format!("❚❚ {time}") } else { format!("● {time}") };
-                Button::new("record").label(label).small().danger().tooltip("Stop recording")
-            }
-            OutputState::Starting | OutputState::Stopping => {
-                Button::new("record").label("Record").small().outline().loading(true)
-            }
-            _ => Button::new("record").label("Record").small().outline().tooltip("Start recording"),
-        }
-        .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.toggle_recording(cx))));
+        let record = self.record_control(&rec_status, cx);
         let paused = rec_status.paused;
         let recording_tools = recording.then(|| {
             div()
@@ -2154,8 +2230,7 @@ impl StudioWindow {
             .child(self.performance(fps_color, cx))
             .child(go_live)
             .children(recording_tools.filter(|_| !taking))
-            .when(!taking, |d| d.child(record))
-            .child(take_button)
+            .child(record)
             .child({
                 let ready = self.studio.read(cx).clips_ready();
                 Button::new("clip")
