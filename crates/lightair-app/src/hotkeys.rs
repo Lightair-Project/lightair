@@ -18,6 +18,8 @@ pub enum GlobalAction {
     AddMarker,
     SaveClip,
     MuteMics,
+    /// The screen's zoom follows the pointer, or stops (a scene's screen look).
+    FollowZoom,
     Scene(u8),
 }
 
@@ -30,6 +32,7 @@ impl GlobalAction {
         GlobalAction::AddMarker,
         GlobalAction::SaveClip,
         GlobalAction::MuteMics,
+        GlobalAction::FollowZoom,
         GlobalAction::Scene(1),
         GlobalAction::Scene(2),
         GlobalAction::Scene(3),
@@ -46,6 +49,7 @@ impl GlobalAction {
             GlobalAction::AddMarker => "Add marker".into(),
             GlobalAction::SaveClip => "Save clip".into(),
             GlobalAction::MuteMics => "Mute or unmute microphones".into(),
+            GlobalAction::FollowZoom => "Zoom follows the pointer, or stops".into(),
             GlobalAction::Scene(n) => format!("Scene {n} on air"),
         }
     }

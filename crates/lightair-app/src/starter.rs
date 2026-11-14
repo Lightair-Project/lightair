@@ -35,9 +35,9 @@ pub fn starter_project() -> Project {
         Layer::new("Logo", logo.id, [(format.id, Layout::boxed(80.0, h - 240.0, 160.0, 160.0))]),
     ];
 
-    let mic = Input::new("Mic", lightair_core::kinds::MIC, json!({"device": "default"}));
+    let mic = Input::new(crate::mixer::SYSTEM_DEFAULT, lightair_core::kinds::MIC, json!({"device": "default"}));
     let desktop = Input::new("Desktop audio", lightair_core::kinds::DESKTOP_AUDIO, json!({}));
-    let mut mic_track = Track::new("Mic", mic.id);
+    let mut mic_track = Track::new(crate::mixer::SYSTEM_DEFAULT, mic.id);
     mic_track.effects = crate::mixer::voice_clarity();
     let desktop_track = Track::new("Desktop audio", desktop.id);
 

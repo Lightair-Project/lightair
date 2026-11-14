@@ -868,6 +868,10 @@ impl StudioWindow {
             A::AddMarker => self.studio.update(cx, |s, cx| s.add_marker(cx)),
             A::SaveClip => self.studio.update(cx, |s, cx| s.save_clip(cx)),
             A::MuteMics => self.studio.update(cx, |s, cx| s.toggle_mics(cx)),
+            A::FollowZoom => {
+                lightair_engine::cursor::toggle_follow();
+                cx.notify();
+            }
             A::Scene(n) => self.scene_shortcut(n.saturating_sub(1) as usize, window, cx),
         }
     }
