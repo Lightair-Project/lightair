@@ -185,10 +185,40 @@ impl Editor {
         if let Some(q) = self.selected.and_then(|c| self.placed_of(c)) {
             let (x, y) = to_px(q.center.0 - q.size.0 / 2.0, q.center.1 - q.size.1 / 2.0);
             let (w, h) = (q.size.0 * k, q.size.1 * k);
-            layer = layer.child(div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h)).border_1().border_color(tok::accent_primary()));
+            // grabbed to move it (an open hand; closed while it's dragged)
+            let moving = self.stage_drag.as_ref().is_some_and(|d| d.kind == StageKind::Move);
+            layer = layer.child(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .w(px(w))
+                    .h(px(h))
+                    .border_1()
+                    .border_color(tok::accent_primary())
+                    .when(!self.hiding, |d| d.cursor(if moving { CursorStyle::ClosedHand } else { CursorStyle::OpenHand })),
+            );
             if !self.hiding {
-                for (cx_, cy) in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)] {
-                    layer = layer.child(div().absolute().left(px(cx_ - 4.0)).top(px(cy - 4.0)).size(px(8.)).rounded(px(2.)).bg(rgb(0xFFFFFF)).border_1().border_color(tok::accent_primary()));
+                // corners scale it: the cursor along their diagonal
+                let corners = [
+                    (x, y, CursorStyle::ResizeUpLeftDownRight),
+                    (x + w, y, CursorStyle::ResizeUpRightDownLeft),
+                    (x, y + h, CursorStyle::ResizeUpRightDownLeft),
+                    (x + w, y + h, CursorStyle::ResizeUpLeftDownRight),
+                ];
+                for (cx_, cy, cursor) in corners {
+                    layer = layer.child(
+                        div()
+                            .absolute()
+                            .left(px(cx_ - 8.0))
+                            .top(px(cy - 8.0))
+                            .size(px(16.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor(cursor)
+                            .child(div().size(px(8.)).rounded(px(2.)).bg(rgb(0xFFFFFF)).border_1().border_color(tok::accent_primary())),
+                    );
                 }
             }
             // its hidden areas
