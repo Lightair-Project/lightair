@@ -990,6 +990,8 @@ impl MixerPanel {
             .pr_1()
             .border_b_1()
             .border_color(tok::border())
+            // the strip's corners (8, inside its 1 px border): a colour doesn't poke out of them
+            .rounded_t(px(7.))
             .when_some(head_bg, |d, bg| d.bg(bg))
             .child(
                 div()

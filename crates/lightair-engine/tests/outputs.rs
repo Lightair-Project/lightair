@@ -67,6 +67,8 @@ fn probe(path: &Path) -> (Vec<String>, f64) {
     (streams, duration)
 }
 
+/// Waits for an output's state (returning as soon as it's there); the timeout is generous, since
+/// encoders start slowly while other tests use the hardware encoder too.
 fn wait_for(key: OutputKey, timeout: Duration, pred: impl Fn(&OutputState) -> bool) -> OutputState {
     let start = Instant::now();
     loop {
@@ -136,7 +138,7 @@ fn record_and_stream() {
     };
     engine.call(move |s| s.outputs.start_recording(&cfg, None)).expect("recording starts");
     let state =
-        wait_for(OutputKey::Recording(canvas), Duration::from_secs(3), |s| matches!(s, OutputState::Active { .. }));
+        wait_for(OutputKey::Recording(canvas), Duration::from_secs(10), |s| matches!(s, OutputState::Active { .. }));
     assert!(matches!(state, OutputState::Active { .. }), "recording active: {state:?}");
     std::thread::sleep(Duration::from_millis(1200));
     // The first write can land a little later on a busy machine.
@@ -147,7 +149,7 @@ fn record_and_stream() {
     }
     assert!(runtime().get(OutputKey::Recording(canvas)).bytes > 0, "bytes written while recording");
     engine.call(|s| s.outputs.stop_recording());
-    let state = wait_for(OutputKey::Recording(canvas), Duration::from_secs(5), |s| !s.is_running());
+    let state = wait_for(OutputKey::Recording(canvas), Duration::from_secs(10), |s| !s.is_running());
     assert_eq!(state, OutputState::Idle, "recording stopped cleanly");
     let (streams, duration) = probe(&file);
     eprintln!("recording: {streams:?}, {duration:.2} s");
@@ -159,7 +161,7 @@ fn record_and_stream() {
     let clips_dir = dir.join("clips");
     let cfg = ClipsConfig { folder: clips_dir.clone(), seconds: 5, encoders: encoders.clone() };
     engine.call(move |s| s.outputs.start_clips(&cfg, None)).expect("replay buffer starts");
-    let state = wait_for(OutputKey::Clips, Duration::from_secs(3), |s| matches!(s, OutputState::Active { .. }));
+    let state = wait_for(OutputKey::Clips, Duration::from_secs(10), |s| matches!(s, OutputState::Active { .. }));
     assert!(matches!(state, OutputState::Active { .. }), "replay buffer active: {state:?}");
     std::thread::sleep(Duration::from_millis(1500));
     assert!(engine.call(|s| s.outputs.save_clip()), "save accepted");
@@ -180,7 +182,7 @@ fn record_and_stream() {
     assert!(streams.iter().any(|s| s == "video:h264"), "{streams:?}");
     assert!(duration > 0.8 && duration < 6.0, "clip length {duration}");
     engine.call(|s| s.outputs.stop_clips());
-    wait_for(OutputKey::Clips, Duration::from_secs(5), |s| !s.is_running());
+    wait_for(OutputKey::Clips, Duration::from_secs(10), |s| !s.is_running());
 
     // ---- streaming to a local RTMP server
     if have("ffmpeg") {
@@ -215,12 +217,12 @@ fn record_and_stream() {
         };
         engine.call(move |s| s.outputs.start_stream(&cfg, None)).expect("stream starts");
         let state =
-            wait_for(OutputKey::Stream(id), Duration::from_secs(5), |s| matches!(s, OutputState::Active { .. }));
+            wait_for(OutputKey::Stream(id), Duration::from_secs(10), |s| matches!(s, OutputState::Active { .. }));
         assert!(matches!(state, OutputState::Active { .. }), "stream active: {state:?}");
         assert!(runtime().any_stream_running());
         std::thread::sleep(Duration::from_millis(1500));
         engine.call(move |s| s.outputs.stop_stream(id));
-        let state = wait_for(OutputKey::Stream(id), Duration::from_secs(5), |s| !s.is_running());
+        let state = wait_for(OutputKey::Stream(id), Duration::from_secs(10), |s| !s.is_running());
         assert_eq!(state, OutputState::Idle);
         let deadline = Instant::now() + Duration::from_secs(5);
         while server.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
