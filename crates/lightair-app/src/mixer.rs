@@ -83,6 +83,8 @@ pub struct MixerPanel {
     sections: Rc<RefCell<HashMap<Id, f32>>>,
     /// The panel's height (measured as it's drawn): short panels get compact strips.
     panel_h: Rc<std::cell::Cell<f32>>,
+    /// A strip's name being edited.
+    renaming: Option<crate::rows::Renaming>,
     /// Displayed (decaying) peak per track and channel, plus the time of the last frame.
     display: HashMap<Id, [f32; 2]>,
     last_frame: Instant,
@@ -103,6 +105,7 @@ impl MixerPanel {
             knob_drag: None,
             sections: Rc::default(),
             panel_h: Rc::default(),
+            renaming: None,
             display: HashMap::new(),
             last_frame: Instant::now(),
             add_track_menu: false,
@@ -205,7 +208,7 @@ impl Render for MixerPanel {
                         }
                     })
                     .context_menu({
-                        let f = strip_menu(self.studio.downgrade(), menu);
+                        let f = strip_menu(self.studio.downgrade(), cx.entity().downgrade(), menu);
                         move |m, _, _| f(m)
                     })
                     .into_any_element();
@@ -511,6 +514,31 @@ impl MixerPanel {
                     this.knob_to(knob, ev.position.x, cx);
                 }),
             )
+    }
+
+    /// Edits a strip's name in place (Enter or clicking away keeps it; Escape doesn't).
+    pub fn start_rename(&mut self, strip: MixerStrip, window: &mut Window, cx: &mut Context<Self>) {
+        if strip == MixerStrip::Master {
+            return;
+        }
+        let project = self.studio.read(cx).project().clone();
+        let Some(name) = strip_views(&project).into_iter().find(|v| v.kind == strip).map(|v| v.name) else { return };
+        self.renaming = Some(crate::rows::Renaming::open(
+            crate::rows::RowTarget::Strip(strip),
+            &name,
+            window,
+            cx,
+            |this, commit, _, cx| this.finish_rename(commit, cx),
+        ));
+        cx.notify();
+    }
+
+    fn finish_rename(&mut self, commit: bool, cx: &mut Context<Self>) {
+        let Some(r) = self.renaming.take() else { return };
+        if commit && let Some(cmd) = r.command(cx) {
+            self.exec(cmd, cx);
+        }
+        cx.notify();
     }
 
     /// A strip's routing section, its height noted for lining the strips up.
@@ -874,7 +902,7 @@ impl MixerPanel {
         };
 
         // ---- header: the name, and its menu
-        let menu = strip_menu(self.studio.downgrade(), StripMenu::of(&project, view));
+        let menu = strip_menu(self.studio.downgrade(), cx.entity().downgrade(), StripMenu::of(&project, view));
         let header = div()
             .flex()
             .flex_none()
@@ -895,16 +923,39 @@ impl MixerPanel {
                         .child(b),
                 )
             }))
-            .child(
-                div()
+            .child(match self.renaming.as_ref().filter(|r| r.target == crate::rows::RowTarget::Strip(kind)) {
+                Some(r) => div()
+                    .id(("strip-rename", i))
+                    .flex_1()
+                    .min_w_0()
+                    .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                        if ev.keystroke.key == "escape" {
+                            this.finish_rename(false, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(gpui_kit::component::input::Input::new(&r.input).xsmall())
+                    .into_any_element(),
+                None => div()
+                    .id(("strip-name", i))
                     .flex_1()
                     .min_w_0()
                     .text_center()
                     .text_size(px(12.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .truncate()
-                    .child(view.name.clone()),
-            )
+                    .child(view.name.clone())
+                    .when(kind != MixerStrip::Master, |d| {
+                        d.on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                            if ev.click_count() == 2 {
+                                cx.stop_propagation();
+                                this.start_rename(kind, window, cx);
+                            }
+                        }))
+                    })
+                    .into_any_element(),
+            })
             // compact: how many effects are on (they open in the Inspector)
             .when(compact && !view.effects.is_empty(), |d| {
                 let on = view.effects.iter().filter(|e| e.2).count();
@@ -1491,6 +1542,8 @@ struct StripMenu {
     cue: Option<(bool, Command)>,
     reset: Option<Command>,
     remove: Option<(&'static str, Command)>,
+    /// The strip to rename (Program keeps its name).
+    rename: Option<MixerStrip>,
 }
 
 impl StripMenu {
@@ -1506,6 +1559,7 @@ impl StripMenu {
                 MixerStrip::Mix(mix) => Some(("Remove mix", Command::RemoveMix { mix })),
                 MixerStrip::Master => None,
             },
+            rename: (v.kind != MixerStrip::Master).then_some(v.kind),
         }
     }
 }
@@ -1513,6 +1567,7 @@ impl StripMenu {
 /// A strip's menu (its ⌄ and right-click): mute, listen, back to 0 dB, remove.
 fn strip_menu(
     studio: WeakEntity<Studio>,
+    me: WeakEntity<MixerPanel>,
     m: StripMenu,
 ) -> impl Fn(gpui_kit::component::menu::PopupMenu) -> gpui_kit::component::menu::PopupMenu + 'static {
     use gpui_kit::component::menu::PopupMenuItem;
@@ -1538,6 +1593,16 @@ fn strip_menu(
             menu = menu.item(
                 PopupMenuItem::new("Listen in headphones").icon(crate::ui::icon("headphones")).checked(on).on_click(run(cmd)),
             );
+        }
+        if let Some(strip) = m.rename {
+            let me = me.clone();
+            menu = menu.item(PopupMenuItem::new("Rename…").icon(crate::ui::icon("pencil")).on_click(
+                move |_, window, cx| {
+                    if let Some(me) = me.upgrade() {
+                        me.update(cx, |this, cx| this.start_rename(strip, window, cx));
+                    }
+                },
+            ));
         }
         menu = match m.reset.clone() {
             Some(cmd) => menu.item(PopupMenuItem::new("Reset to 0 dB").on_click(run(cmd))),

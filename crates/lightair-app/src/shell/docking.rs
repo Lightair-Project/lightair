@@ -448,6 +448,12 @@ impl StudioWindow {
                     }
                 }
             }
+            Ok("audio-rename") => {
+                // the first track's name, being edited on its strip
+                if let Some(t) = self.studio.read(cx).project().tracks.first().map(|t| t.id) {
+                    self.mixer.update(cx, |m, cx| m.start_rename(lightair_core::MixerStrip::Track(t), window, cx));
+                }
+            }
             Ok("audio-add") => {
                 // the mixer's add menu, open
                 self.mixer.update(cx, |m, cx| m.toggle_add_track(window, cx));
