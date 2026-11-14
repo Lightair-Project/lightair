@@ -81,6 +81,8 @@ impl Editor {
     /// Follows a drag over the timeline.
     pub(super) fn drag_over(&mut self, drag: &DraggedMedia, pos: Point<Pixels>, inside: bool, cx: &mut Context<Self>) {
         let ghost = if inside { self.ghost_for(drag, pos) } else { None };
+        // the card that follows the pointer gives way to the ghost
+        self.drag_hidden.set(ghost.is_some());
         if ghost != self.ghost {
             self.ghost = ghost;
             cx.notify();
@@ -176,7 +178,7 @@ impl Editor {
                 let Some(main) = this.seq().and_then(|s| s.tracks.iter().rposition(|t| t.kind == TrackKind::Video)) else { return };
                 let y = this.track_top(main).unwrap_or(0.0) + VIDEO_H / 2.0;
                 let x = f32::from(b.origin.x) + HEADER_W + this.x_of(26_000);
-                let drag = DraggedMedia { label: item.title.clone().into(), source: MediaSource::Item(item) };
+                let drag = DraggedMedia::new(item.title.clone(), MediaSource::Item(item), None, "film", &this.drag_hidden);
                 this.drag_over(&drag, point(px(x), px(y)), true, cx);
             });
         })

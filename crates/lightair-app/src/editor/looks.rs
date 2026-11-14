@@ -83,7 +83,11 @@ impl Editor {
     /// A card for a text style or shape: a sample, added at the playhead on a click or dragged
     /// onto a track.
     fn look_card(&self, id: SharedString, name: &'static str, sample: AnyElement, source: MediaSource, cx: &mut Context<Self>) -> Stateful<Div> {
-        let drag = DraggedMedia { label: name.into(), source: source.clone() };
+        let icon = match &source {
+            MediaSource::Content(Content::Shape(_), _) => "shapes",
+            _ => "type",
+        };
+        let drag = DraggedMedia::new(name, source.clone(), None, icon, &self.drag_hidden);
         div()
             .id(id)
             .flex()
@@ -138,7 +142,7 @@ impl Editor {
         for (n, e) in STICKERS.iter().enumerate() {
             let style = TextStyle { text: (*e).into(), size: 220.0 * k, color: 0xFFFFFF, bold: false, align: 1, background: None, outline: Some(0xFFFFFF), width: size.0 as f32 };
             let source = MediaSource::Content(Content::Text(style), Transform::default());
-            let drag = DraggedMedia { label: (*e).into(), source: source.clone() };
+            let drag = DraggedMedia::new("Sticker", source.clone(), None, *e, &self.drag_hidden);
             stickers = stickers.child(
                 div()
                     .id(("ed-stk", n))

@@ -70,19 +70,60 @@ enum Done {
 pub struct DraggedMedia {
     label: SharedString,
     source: MediaSource,
+    /// Its picture (a thumbnail), or an icon (a symbol name, or an emoji to show as it is).
+    thumb: Option<PathBuf>,
+    icon: SharedString,
+    /// Over the timeline, where its ghost shows instead.
+    hidden: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl DraggedMedia {
+    fn new(label: impl Into<SharedString>, source: MediaSource, thumb: Option<PathBuf>, icon: impl Into<SharedString>, hidden: &std::rc::Rc<std::cell::Cell<bool>>) -> Self {
+        DraggedMedia { label: label.into(), source, thumb, icon: icon.into(), hidden: hidden.clone() }
+    }
 }
 
 impl Render for DraggedMedia {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        if self.hidden.get() {
+            return div().into_any_element();
+        }
+        let icon = self.icon.clone();
+        let symbol = icon.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
         div()
-            .px_2()
-            .py_1()
-            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .p_1p5()
+            .pr_3()
+            .max_w(px(280.))
+            .rounded(px(8.))
             .bg(tok::bg_raised())
-            .border_1()
+            .border_2()
             .border_color(tok::accent_primary())
-            .text_size(px(12.))
-            .child(self.label.clone())
+            .shadow_lg()
+            .text_size(px(13.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(tok::text())
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(64.))
+                    .h(px(38.))
+                    .rounded(px(5.))
+                    .overflow_hidden()
+                    .bg(tok::bg_canvas_well())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .map(|d| match &self.thumb {
+                        Some(p) => d.child(img(p.clone()).size_full().object_fit(ObjectFit::Cover)),
+                        None if symbol => d.child(ui::icon(&icon).size(px(18.)).text_color(tok::text_secondary())),
+                        None => d.text_size(px(24.)).child(icon),
+                    }),
+            )
+            .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(self.label.clone()))
+            .into_any_element()
     }
 }
 
@@ -178,8 +219,10 @@ pub struct Editor {
     /// Sound while scrubbing: on, and the snippet playing (when it began).
     scrub_audio: bool,
     scrub: Option<(speaker::Speaker, std::time::Instant)>,
-    /// Where something dragged over the timeline would land.
+    /// Where something dragged over the timeline would land; and the dragged card hidden
+    /// meanwhile (it's on the timeline as the ghost).
     ghost: Option<ghost::Ghost>,
+    drag_hidden: std::rc::Rc<std::cell::Cell<bool>>,
     preview: Option<Picture>,
     wanted: Option<u64>,
     busy: bool,
@@ -361,6 +404,7 @@ impl Editor {
             scrub_audio: true,
             scrub: None,
             ghost: None,
+            drag_hidden: Default::default(),
             preview: None,
             wanted: None,
             busy: false,
@@ -1293,8 +1337,9 @@ impl Editor {
     }
 
     fn media_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let hidden = self.drag_hidden.clone();
         let card = |id: SharedString, title: String, detail: String, icon: &'static str, thumb: Option<PathBuf>, source: MediaSource, cx: &mut Context<Self>| {
-            let drag = DraggedMedia { label: title.clone().into(), source: source.clone() };
+            let drag = DraggedMedia::new(title.clone(), source.clone(), thumb.clone(), icon, &hidden);
             div()
                 .id(id.clone())
                 .flex()
@@ -1951,6 +1996,7 @@ impl Editor {
             }))
             .on_drop(cx.listener(|this, m: &DraggedMedia, w, cx| {
                 this.ghost = None;
+                this.drag_hidden.set(false);
                 let pos = w.mouse_position();
                 let t = this.time_at(pos.x).map(|t| this.snap(t as i64, None));
                 let track = this.track_at(pos.y);
@@ -1962,8 +2008,9 @@ impl Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.ghost.is_some() && !cx.has_active_drag() && std::env::var("LIGHTAIR_OPEN").as_deref() != Ok("editor-ghost") {
+        if !cx.has_active_drag() && std::env::var("LIGHTAIR_OPEN").as_deref() != Ok("editor-ghost") {
             self.ghost = None;
+            self.drag_hidden.set(false);
         }
         self.sync_text_input(window, cx);
         self.want_peaks();
