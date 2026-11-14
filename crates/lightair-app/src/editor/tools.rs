@@ -580,9 +580,9 @@ impl Editor {
                 this.snapping = !this.snapping;
                 cx.notify();
             })))
-            .child(toggle("ed-t-link", if self.linkage { "link" } else { "unlink" }, "Linkage: linked clips go together", self.linkage).on_click(cx.listener(|this, _, _, cx| {
-                this.linkage = !this.linkage;
-                cx.notify();
+            .child(toggle("ed-t-link", if self.linkage { "link" } else { "unlink" }, "Linkage: linked clips go together (⌥-drag moves one alone)", self.linkage).on_click(cx.listener(|this, _, _, cx| {
+                let on = !this.linkage;
+                this.set_linkage(on, cx)
             })))
             .child(toggle("ed-t-axis", "scan-line", "Preview axis: the player follows the pointer", self.axis).on_click(cx.listener(|this, _, _, cx| {
                 this.axis = !this.axis;
@@ -686,6 +686,43 @@ impl Editor {
                 this.drag_end(cx);
                 let after = this.seq().and_then(|s| s.clip(c.id)).map_or(0, |c| c.len_ms());
                 tracing::info!(before, after, "CHECK trim end by 100 points");
+            });
+        })
+        .detach();
+    }
+}
+
+impl Editor {
+    /// For the check hook: the first two video clips linked, then the second dragged 100 points
+    /// right three ways (as it is; with ⌥; linkage off), and where both went, logged.
+    pub fn hook_alone(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(b) = *this.timeline_bounds.borrow() else { return };
+                let ids: Vec<Id> = this.seq().and_then(|s| s.tracks.iter().find(|t| t.kind == TrackKind::Video)).map(|t| t.clips.iter().map(|c| c.id).collect()).unwrap_or_default();
+                let [a, second, ..] = ids[..] else { return };
+                let link = Id::new();
+                this.change(|s| [a, second].iter().for_each(|c| if let Some(c) = s.clip_mut(*c) { c.link = Some(link) }), cx);
+                for (way, alone, linkage) in [("linked", false, true), ("option", true, true), ("linkage off", false, false)] {
+                    this.pick_only(None);
+                    this.set_linkage(true, cx);
+                    // picked as a click would (with linkage, the pair), then linkage switched
+                    this.pick_for_drag(second, false);
+                    this.set_linkage(linkage, cx);
+                    let start = |this: &Self, c: Id| this.seq().and_then(|s| s.clip(c)).map_or(0, |c| c.start_ms);
+                    let (a0, s0) = (start(this, a), start(this, second));
+                    this.drag_alone = alone;
+                    this.pick_for_drag(second, alone);
+                    let x = f32::from(b.origin.x) + HEADER_W + this.x_of(s0) + 100.0;
+                    let y = this.track_top(this.seq().and_then(|s| s.find(second)).map_or(0, |f| f.0)).unwrap_or(0.0) + 20.0;
+                    this.begin_drag(Drag::Move { clip: second, grab_ms: 0 });
+                    this.drag_to(point(px(x), px(y)), cx);
+                    this.drag_end(cx);
+                    let (a1, s1) = (start(this, a), start(this, second));
+                    tracing::info!(way, other_moved = a1 as i64 - a0 as i64, dragged_moved = s1 as i64 - s0 as i64, "CHECK drag one of a linked pair");
+                }
+                this.set_linkage(true, cx);
             });
         })
         .detach();
