@@ -209,7 +209,7 @@ impl Render for MixerPanel {
                     })
                     .context_menu({
                         let f = strip_menu(self.studio.downgrade(), cx.entity().downgrade(), menu);
-                        move |m, _, _| f(m)
+                        move |m, window, cx| f(m, window, cx)
                     })
                     .into_any_element();
             if is_master {
@@ -903,88 +903,112 @@ impl MixerPanel {
 
         // ---- header: the name, and its menu
         let menu = strip_menu(self.studio.downgrade(), cx.entity().downgrade(), StripMenu::of(&project, view));
+        // the name is centred on the strip; the tag, effect count (left) and menu (right) sit
+        // over equal margins either side of it
+        let fx_chip = compact && !view.effects.is_empty();
+        let left_w: f32 = if view.badge.is_some() { 26.0 } else { 0.0 } + if fx_chip { 34.0 } else { 0.0 };
+        let side = left_w.max(24.0) + 6.0;
+        let (head_bg, head_fg) = match view.color {
+            Some(c) => {
+                let bg = strip_colour(c);
+                (Some(bg), if luminance(c) > 0.6 { tok::bg_app() } else { gpui_kit::white() })
+            }
+            None => (None, tok::text()),
+        };
+        let name_el = match self.renaming.as_ref().filter(|r| r.target == crate::rows::RowTarget::Strip(kind)) {
+            Some(r) => div()
+                .id(("strip-rename", i))
+                .w_full()
+                .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                    if ev.keystroke.key == "escape" {
+                        this.finish_rename(false, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(gpui_kit::component::input::Input::new(&r.input).xsmall())
+                .into_any_element(),
+            None => div()
+                .id(("strip-name", i))
+                .min_w_0()
+                .text_center()
+                .text_size(px(12.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(head_fg)
+                .truncate()
+                .child(view.name.clone())
+                .when(kind != MixerStrip::Master, |d| {
+                    d.on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                        if ev.click_count() == 2 {
+                            cx.stop_propagation();
+                            this.start_rename(kind, window, cx);
+                        }
+                    }))
+                })
+                .into_any_element(),
+        };
+        let mut left = div().flex().items_center().gap_1().pl_1();
+        if let Some(b) = view.badge {
+            left = left.child(
+                div()
+                    .text_size(px(8.5))
+                    .font_weight(FontWeight::BOLD)
+                    .whitespace_nowrap()
+                    .text_color(if head_bg.is_some() { head_fg.opacity(0.7) } else { tok::text_tertiary() })
+                    .child(b),
+            );
+        }
+        if fx_chip {
+            // compact: how many effects are on (they open in the Inspector)
+            let on = view.effects.iter().filter(|e| e.2).count();
+            let first = view.effects[0].0;
+            let open = request.clone();
+            left = left.child(
+                div()
+                    .id(("strip-fx-count", i))
+                    .flex_none()
+                    .px_1()
+                    .rounded(px(3.))
+                    .text_size(px(9.))
+                    .font_weight(FontWeight::BOLD)
+                    .cursor_pointer()
+                    .bg(if on > 0 { tok::bg_selected() } else { tok::bg_app() })
+                    .text_color(if on > 0 { tok::text_secondary() } else { tok::text_tertiary() })
+                    .child(format!("FX {on}"))
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        open(crate::studio::UiRequest::OpenEffect(kind, first), cx);
+                    }),
+            );
+        }
         let header = div()
+            .relative()
             .flex()
             .flex_none()
             .items_center()
             .h(px(30.))
-            .pl_2()
             .pr_1()
-            .gap_1()
             .border_b_1()
             .border_color(tok::border())
-            .child(div().w(px(24.)).flex_none().when_some(view.badge, |d, b| {
-                d.child(
-                    div()
-                        .text_size(px(8.5))
-                        .font_weight(FontWeight::BOLD)
-                        .whitespace_nowrap()
-                        .text_color(tok::text_tertiary())
-                        .child(b),
-                )
-            }))
-            .child(match self.renaming.as_ref().filter(|r| r.target == crate::rows::RowTarget::Strip(kind)) {
-                Some(r) => div()
-                    .id(("strip-rename", i))
-                    .flex_1()
-                    .min_w_0()
-                    .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                        if ev.keystroke.key == "escape" {
-                            this.finish_rename(false, cx);
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .child(gpui_kit::component::input::Input::new(&r.input).xsmall())
-                    .into_any_element(),
-                None => div()
-                    .id(("strip-name", i))
-                    .flex_1()
-                    .min_w_0()
-                    .text_center()
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .truncate()
-                    .child(view.name.clone())
-                    .when(kind != MixerStrip::Master, |d| {
-                        d.on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                            if ev.click_count() == 2 {
-                                cx.stop_propagation();
-                                this.start_rename(kind, window, cx);
-                            }
-                        }))
-                    })
-                    .into_any_element(),
-            })
-            // compact: how many effects are on (they open in the Inspector)
-            .when(compact && !view.effects.is_empty(), |d| {
-                let on = view.effects.iter().filter(|e| e.2).count();
-                let first = view.effects[0].0;
-                let open = request.clone();
-                d.child(
-                    div()
-                        .id(("strip-fx-count", i))
-                        .flex_none()
-                        .px_1()
-                        .rounded(px(3.))
-                        .text_size(px(9.))
-                        .font_weight(FontWeight::BOLD)
-                        .cursor_pointer()
-                        .bg(if on > 0 { tok::bg_selected() } else { tok::bg_app() })
-                        .text_color(if on > 0 { tok::text_secondary() } else { tok::text_tertiary() })
-                        .child(format!("FX {on}"))
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            open(crate::studio::UiRequest::OpenEffect(kind, first), cx);
-                        }),
-                )
-            })
+            .when_some(head_bg, |d, bg| d.bg(bg))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .px(px(side))
+                    .child(name_el),
+            )
+            .child(left)
+            .child(div().flex_1())
             .child(
                 gpui_kit::component::button::Button::new(("strip-chevron", i))
-                    .icon(ui::icon("chevron-down"))
+                    .icon(ui::icon("chevron-down").text_color(head_fg))
                     .ghost()
                     .xsmall()
-                    .dropdown_menu(move |m, _, _| menu(m)),
+                    .dropdown_menu(move |m, window, cx| menu(m, window, cx)),
             );
 
         // ---- effects: a dot to switch each on or off, its name, a button to open it; + adds one
@@ -1544,6 +1568,8 @@ struct StripMenu {
     remove: Option<(&'static str, Command)>,
     /// The strip to rename (Program keeps its name).
     rename: Option<MixerStrip>,
+    strip: MixerStrip,
+    color: Option<u32>,
 }
 
 impl StripMenu {
@@ -1560,6 +1586,8 @@ impl StripMenu {
                 MixerStrip::Master => None,
             },
             rename: (v.kind != MixerStrip::Master).then_some(v.kind),
+            strip: v.kind,
+            color: v.color,
         }
     }
 }
@@ -1569,9 +1597,14 @@ fn strip_menu(
     studio: WeakEntity<Studio>,
     me: WeakEntity<MixerPanel>,
     m: StripMenu,
-) -> impl Fn(gpui_kit::component::menu::PopupMenu) -> gpui_kit::component::menu::PopupMenu + 'static {
+) -> impl Fn(
+    gpui_kit::component::menu::PopupMenu,
+    &mut Window,
+    &mut Context<gpui_kit::component::menu::PopupMenu>,
+) -> gpui_kit::component::menu::PopupMenu
++ 'static {
     use gpui_kit::component::menu::PopupMenuItem;
-    move |mut menu| {
+    move |mut menu, window, cx| {
         let run = |cmd: Command| {
             let studio = studio.clone();
             move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -1603,6 +1636,38 @@ fn strip_menu(
                     }
                 },
             ));
+        }
+        // the header's colour
+        {
+            let (studio, strip, current) = (studio.clone(), m.strip, m.color);
+            menu = menu.submenu_with_icon(Some(crate::ui::icon("palette")), "Colour", window, cx, move |mut sub, _, _| {
+                let set = |color: Option<u32>| {
+                    let studio = studio.clone();
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        if let Some(s) = studio.upgrade() {
+                            s.update(cx, |s, cx| {
+                                let _ = s.execute(Command::SetStripColor { strip, color }, cx);
+                            });
+                        }
+                    }
+                };
+                sub = sub.item(PopupMenuItem::new("None").checked(current.is_none()).on_click(set(None)));
+                for &(name, c) in STRIP_COLOURS {
+                    sub = sub.item(
+                        PopupMenuItem::element(move |_, _| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().size(px(11.)).rounded_full().bg(strip_colour(c)))
+                                .child(name)
+                        })
+                        .checked(current == Some(c))
+                        .on_click(set(Some(c))),
+                    );
+                }
+                sub
+            });
         }
         menu = match m.reset.clone() {
             Some(cmd) => menu.item(PopupMenuItem::new("Reset to 0 dB").on_click(run(cmd))),
@@ -1637,6 +1702,8 @@ struct StripView {
     pan: Option<f32>,
     /// Gain before the effects.
     trim: Option<f32>,
+    /// The header's colour (0xRRGGBB).
+    color: Option<u32>,
 }
 
 /// A track's or bus's routing, as the strip shows it.
@@ -1977,6 +2044,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
             mix_to_program: None,
             pan: Some(t.pan),
             trim: Some(t.trim_db),
+            color: t.color,
         })
         .collect();
     v.extend(p.audio.buses.iter().map(|b| StripView {
@@ -1999,6 +2067,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         mix_to_program: None,
         pan: Some(b.pan),
         trim: Some(b.trim_db),
+        color: b.color,
     }));
     v.extend(p.audio.mixes.iter().map(|x| StripView {
         id: x.id,
@@ -2014,6 +2083,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         mix_to_program: Some(x.to_program),
         pan: Some(x.pan),
         trim: Some(x.trim_db),
+        color: x.color,
     }));
     // Program last: always the right-most strip
     let m = &p.audio.master;
@@ -2031,6 +2101,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         mix_to_program: None,
         pan: None,
         trim: Some(m.trim_db),
+        color: m.color,
     });
     v
 }
@@ -2043,6 +2114,34 @@ fn volume_cmd(p: &Project, kind: MixerStrip, db: f32) -> Option<Command> {
         MixerStrip::Mix(id) => Command::UpdateMix { mix: AudioMix { volume_db: db, ..p.audio.mix(id)?.clone() } },
         MixerStrip::Master => Command::UpdateMaster { master: Master { volume_db: db, ..p.audio.master.clone() } },
     })
+}
+
+/// Strip colours offered in its menu (0xRRGGBB): readable as a header with white or dark text.
+const STRIP_COLOURS: &[(&str, u32)] = &[
+    ("Red", 0xE5484D),
+    ("Orange", 0xF76B15),
+    ("Amber", 0xFFB224),
+    ("Green", 0x30A46C),
+    ("Teal", 0x12A594),
+    ("Blue", 0x0090FF),
+    ("Indigo", 0x3E63DD),
+    ("Purple", 0x8E4EC6),
+    ("Pink", 0xD6409F),
+    ("Grey", 0x8B8D98),
+];
+
+fn strip_colour(c: u32) -> Hsla {
+    Rgba { r: ((c >> 16) & 0xff) as f32 / 255.0, g: ((c >> 8) & 0xff) as f32 / 255.0, b: (c & 0xff) as f32 / 255.0, a: 1.0 }
+        .into()
+}
+
+/// Relative luminance (0..1): above about 0.6, dark text reads better on it.
+fn luminance(c: u32) -> f32 {
+    let ch = |v: u32| {
+        let x = (v & 0xff) as f32 / 255.0;
+        if x <= 0.04045 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * ch(c >> 16) + 0.7152 * ch(c >> 8) + 0.0722 * ch(c)
 }
 
 /// The command that puts a strip in headphones (the cue) or takes it out.
