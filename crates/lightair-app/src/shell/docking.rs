@@ -239,6 +239,20 @@ impl StudioWindow {
             }
             Ok("palette") => self.open_palette(window, cx),
             Ok("library") => self.show_place(super::Place::Library, cx),
+            Ok("screen-layouts") => {
+                // the layout scenes, the display blank (an app that isn't there), Screen on air
+                let p = self.studio.read(cx).project().clone();
+                if let Some(display) = p.inputs.values().find(|i| i.kind == lightair_core::kinds::SCREEN) {
+                    let s = serde_json::json!({"mode": lightair_core::kinds::APP, "app": "app.lightair.nothing"});
+                    self.exec(lightair_core::Command::SetInputSettings { input: display.id, settings: s }, cx);
+                }
+                self.add_screen_layouts(cx);
+                let p = self.studio.read(cx).project().clone();
+                if let Some(scene) = p.scenes.iter().find(|s| s.name == "Screen") {
+                    self.exec(lightair_core::Command::SetProgram { scene: Some(scene.id) }, cx);
+                    self.studio.update(cx, |s, _| s.select_scene(scene.id));
+                }
+            }
             Ok("studio-take") => {
                 // a 4-second take of the Main scene, its display pointed at an app that isn't
                 // there (nobody's screen in the files), into a folder beside the project
