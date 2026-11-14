@@ -3690,6 +3690,7 @@ dependencies = [
  "anyhow",
  "block2 0.6.2",
  "chrono",
+ "cpal",
  "futures-channel",
  "futures-util",
  "gpui-kit",
@@ -3706,6 +3707,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
  "parking_lot",
+ "rtrb",
  "serde",
  "serde_json",
  "tracing",
@@ -3799,6 +3801,7 @@ name = "lightair-render"
 version = "0.1.0"
 dependencies = [
  "cosmic-text",
+ "lightair-audio",
  "lightair-core",
  "lightair-store",
  "pollster",
