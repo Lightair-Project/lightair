@@ -80,13 +80,20 @@ impl StudioWindow {
                             .gap_2()
                             .child(note("Clicks need Input Monitoring for Lightair. Until it's on, zooms don't follow clicks and clicks aren't drawn."))
                             .child(
+                                // asks macOS (which lists Lightair in the pane, off), then shows
+                                // the pane to turn it on there
                                 Button::new("screen-input-monitoring")
-                                    .label("Open Settings")
+                                    .label("Allow in Settings…")
                                     .icon(ui::icon("external-link"))
                                     .xsmall()
                                     .outline()
-                                    .on_click(|_, _, _| lightair_platform::input::open_input_monitoring_settings()),
-                            ),
+                                    .on_click(|_, _, _| {
+                                        if !lightair_platform::input::request_listen() {
+                                            lightair_platform::input::open_input_monitoring_settings();
+                                        }
+                                    }),
+                            )
+                            .child(note("Switch Lightair on in the list. macOS may ask you to quit and reopen it.")),
                     ),
             );
         }
