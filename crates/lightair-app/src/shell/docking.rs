@@ -262,7 +262,7 @@ impl StudioWindow {
                 self.show_place(super::Place::Live, cx);
                 let scene = self.studio.read(cx).selected_scene;
                 if let Some(scene) = scene {
-                    let look = lightair_core::ScreenLook { zoom: lightair_core::ScreenLook::ZOOM_ALWAYS, ..Default::default() };
+                    let look = lightair_core::ScreenLook { zoom: lightair_core::ScreenLook::ZOOM_TOGGLE, ..Default::default() };
                     self.exec(lightair_core::Command::SetSceneScreen { scene, screen: Some(look) }, cx);
                     self.select_layer(None, cx);
                 }
