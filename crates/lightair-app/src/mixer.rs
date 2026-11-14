@@ -74,6 +74,8 @@ pub struct MixerPanel {
     /// Each strip's routing section height (measured as it's drawn): every strip's top is as
     /// tall as the tallest, so meters and faders line up across the mixer.
     sections: Rc<RefCell<HashMap<Id, f32>>>,
+    /// The panel's height (measured as it's drawn): short panels get compact strips.
+    panel_h: Rc<std::cell::Cell<f32>>,
     /// Displayed (decaying) peak per track and channel, plus the time of the last frame.
     display: HashMap<Id, [f32; 2]>,
     last_frame: Instant,
@@ -93,6 +95,7 @@ impl MixerPanel {
             knobs: Rc::default(),
             knob_drag: None,
             sections: Rc::default(),
+            panel_h: Rc::default(),
             display: HashMap::new(),
             last_frame: Instant::now(),
             add_track_menu: false,
@@ -161,6 +164,10 @@ impl Render for MixerPanel {
         let views = strip_views(&project);
         self.sections.borrow_mut().retain(|id, _| views.iter().any(|v| v.id == *id));
         let top_h = FX_H + self.sections.borrow().values().copied().fold(0.0, f32::max);
+        // a full strip (header, effects and routing, levels, source, borders and padding) or,
+        // when the panel is shorter, compact strips: name, meter, fader, Cue and Mute
+        let full_h = 30. + top_h + 196. + 40. + 2. + 16.;
+        let compact = (1.0..full_h).contains(&self.panel_h.get());
         for (i, view) in views.iter().enumerate() {
             // Meter ballistics: rise instantly, fall at 24 dB/s.
             let levels = meters().get(view.id).map(|c| c.levels());
@@ -171,7 +178,7 @@ impl Render for MixerPanel {
                 *value = if target > fallen { target } else { fallen.max(-90.0) };
             }
             let shown = *shown;
-            let strip = self.strip(i, view, shown, top_h, cx);
+            let strip = self.strip(i, view, shown, top_h, compact, cx);
             let menu = StripMenu::of(&project, view);
             let is_master = view.kind == MixerStrip::Master;
             if i > 0 && !is_master && views[i - 1].kind_order() != view.kind_order() {
@@ -207,11 +214,17 @@ impl Render for MixerPanel {
         }
         self.display.retain(|id, _| MixerStrip::find(&project, *id).is_some());
 
+        let panel_h = self.panel_h.clone();
         div()
             .id("mixer")
             .flex()
             .flex_col()
             .size_full()
+            .child(
+                canvas(move |b, _, _| panel_h.set(f32::from(b.size.height)), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 if ev.pressed_button != Some(MouseButton::Left) {
                     return;
@@ -829,7 +842,15 @@ impl MixerPanel {
         col
     }
 
-    fn strip(&self, i: usize, view: &StripView, shown: [f32; 2], top_h: f32, cx: &mut Context<Self>) -> impl IntoElement {
+    fn strip(
+        &self,
+        i: usize,
+        view: &StripView,
+        shown: [f32; 2],
+        top_h: f32,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let id = view.id;
         let kind = view.kind;
         let (muted, cue, volume) = (view.muted, view.cue, view.volume_db);
@@ -879,6 +900,29 @@ impl MixerPanel {
                     .truncate()
                     .child(view.name.clone()),
             )
+            // compact: how many effects are on (they open in the Inspector)
+            .when(compact && !view.effects.is_empty(), |d| {
+                let on = view.effects.iter().filter(|e| e.2).count();
+                let first = view.effects[0].0;
+                let open = request.clone();
+                d.child(
+                    div()
+                        .id(("strip-fx-count", i))
+                        .flex_none()
+                        .px_1()
+                        .rounded(px(3.))
+                        .text_size(px(9.))
+                        .font_weight(FontWeight::BOLD)
+                        .cursor_pointer()
+                        .bg(if on > 0 { tok::bg_selected() } else { tok::bg_app() })
+                        .text_color(if on > 0 { tok::text_secondary() } else { tok::text_tertiary() })
+                        .child(format!("FX {on}"))
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            open(crate::studio::UiRequest::OpenEffect(kind, first), cx);
+                        }),
+                )
+            })
             .child(
                 gpui_kit::component::button::Button::new(("strip-chevron", i))
                     .icon(ui::icon("chevron-down"))
@@ -1166,8 +1210,10 @@ impl MixerPanel {
             .items_center()
             .gap_1p5()
             .h_full()
-            .when_some(view.pan, |d, pan| d.child(self.rotary(i * 4, Knob::Pan(id), pan, "PAN", pan_text(pan), cx)))
-            .when_some(view.trim, |d, t| {
+            .when_some(view.pan.filter(|_| !compact), |d, pan| {
+                d.child(self.rotary(i * 4, Knob::Pan(id), pan, "PAN", pan_text(pan), cx))
+            })
+            .when_some(view.trim.filter(|_| !compact), |d, t| {
                 d.child(self.rotary(i * 4 + 1, Knob::Trim(id), t, "TRIM", format!("{t:+.1}"), cx))
             })
             .child(div().flex_1())
@@ -1190,7 +1236,7 @@ impl MixerPanel {
         let levels = div()
             .flex()
             .flex_1()
-            .min_h(px(196.))
+            .min_h(px(if compact { 110. } else { 196. }))
             .gap_2()
             .px_2()
             .py_2()
@@ -1206,7 +1252,7 @@ impl MixerPanel {
             .flex_none()
             .w(px(STRIP_W))
             .h_full()
-            .min_h(px(30. + top_h + 196. + 40.))
+            .min_h(px(if compact { 30. + 110. } else { 30. + top_h + 196. + 40. }))
             .rounded(px(8.))
             .overflow_hidden()
             .bg(tok::bg_raised())
@@ -1221,7 +1267,7 @@ impl MixerPanel {
             }))
             .child(header)
             // effects and routing: the same height on every strip
-            .child(
+            .when(!compact, |d| d.child(
                 div()
                     .flex()
                     .flex_col()
@@ -1232,10 +1278,14 @@ impl MixerPanel {
                         d.child(self.measured(id, self.channel(i, view, ch, &project, cx)))
                     })
                     .when_some(view.mix_to_program, |d, on| d.child(self.measured(id, self.mix_output(i, id, on, cx)))),
-            )
+            ))
             .child(levels)
                         // full width, centred in its row
-            .child(div().flex().flex_col().flex_none().justify_center().h(px(40.)).px_2().pb_1().child(self.strip_source(i, view, cx)))
+            .when(!compact, |d| {
+                d.child(
+                    div().flex().flex_col().flex_none().justify_center().h(px(40.)).px_2().pb_1().child(self.strip_source(i, view, cx)),
+                )
+            })
     }
 
     /// The strip's foot: a track's device (pick another here), or what the strip is.
