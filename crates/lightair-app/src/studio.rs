@@ -5,7 +5,7 @@
 //! the engine thread for reconciliation (docs/03-architecture.md, "Document flow").
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::{Context, SharedString};
@@ -114,11 +114,13 @@ pub struct Studio {
     pub library_version: u64,
     /// Multitrack audio files being recorded: their base name and paths.
     stems: Option<(String, Vec<std::path::PathBuf>)>,
+    /// What a new project starts as.
+    starter: fn() -> Project,
 }
 
 impl Studio {
-    pub fn open(engine: Arc<Engine>, dir: PathBuf, initial: impl FnOnce() -> Project) -> Self {
-        let (project, package, issue) = match lightair_store::Package::open(&dir, initial) {
+    pub fn open(engine: Arc<Engine>, dir: PathBuf, starter: fn() -> Project) -> Self {
+        let (project, package, issue) = match lightair_store::Package::open(&dir, starter) {
             Ok(opened) => {
                 let issue = (opened.recovered > 0)
                     .then(|| SharedString::from(format!("Recovered {} unsaved change(s)", opened.recovered)));
@@ -153,6 +155,7 @@ impl Studio {
             mic_history: Default::default(),
             last_clip: None,
             replays: Vec::new(),
+            starter,
         };
         studio.migrate();
         studio.rebuild_engine();
@@ -418,6 +421,68 @@ impl Studio {
     }
 
     /// Writes the project files and empties the journal (on a timer, on quit, after undo).
+    /// Opens another project in place of this one: this one is saved, the engine is rebuilt from
+    /// the other. Not while recording or live.
+    pub fn switch_to(&mut self, dir: &std::path::Path, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.is_recording() || self.take.is_some() || runtime().any_stream_running() {
+            return Err("Stop recording and streaming first.".into());
+        }
+        if self.project_dir().as_deref() == Some(dir) {
+            return Ok(());
+        }
+        let opened = lightair_store::Package::open(dir, self.starter).map_err(|e| e.to_string())?;
+        self.compact();
+        self.package = Some(opened.package);
+        self.doc = Document::new(opened.project);
+        self.migrate();
+        let project = self.doc.project().clone();
+        self.selected_scene = project.program.or(project.scenes.first().map(|s| s.id));
+        self.selected_layer = None;
+        self.also_selected.clear();
+        self.selected_track = None;
+        self.replays.clear();
+        self.refit = None;
+        self.mic_history.clear();
+        self.last_clip = None;
+        self.clips_seen = 0;
+        self.issue = (opened.recovered > 0).then(|| format!("Recovered {} unsaved change(s)", opened.recovered).into());
+        self.engine.call(move |s| {
+            s.outputs.stop_clips();
+            s.reconciler.rebuild(&project);
+        });
+        self.sync_clips();
+        self.library_version += 1;
+        // opened next time too (not by a copy started on a given project: tests, screenshots)
+        if std::env::var_os("LIGHTAIR_PROJECT").is_none() {
+            let mut prefs = crate::prefs::load_from(&crate::prefs::path());
+            prefs.last_project = Some(dir.to_path_buf());
+            let _ = crate::prefs::save_to(&crate::prefs::path(), &prefs);
+        }
+        cx.notify();
+        Ok(())
+    }
+
+    /// Makes a new project called `name` beside the open one (in the Projects folder), from the
+    /// starter, and returns its folder (not opened).
+    pub fn create_project(&self, name: &str) -> Result<PathBuf, String> {
+        let base = self.project_dir().and_then(|d| d.parent().map(Path::to_path_buf)).unwrap_or_else(lightair_platform::paths::projects_dir);
+        let clean: String = name.trim().chars().map(|c| if matches!(c, '/' | '\\' | ':') { '-' } else { c }).collect();
+        let clean = if clean.is_empty() { "Untitled".to_string() } else { clean };
+        let dir = (1..)
+            .map(|n| if n == 1 { base.join(format!("{clean}.lightair")) } else { base.join(format!("{clean} {n}.lightair")) })
+            .find(|d| !d.exists())
+            .unwrap_or_else(|| base.join(format!("{clean}.lightair")));
+        let starter = self.starter;
+        let name = name.trim().to_string();
+        lightair_store::Package::open(&dir, || {
+            let mut p = starter();
+            p.name = if name.is_empty() { "Untitled".into() } else { name };
+            p
+        })
+        .map_err(|e| e.to_string())?;
+        Ok(dir)
+    }
+
     pub fn compact(&mut self) {
         if let Some(pkg) = &mut self.package
             && let Err(e) = pkg.compact(self.doc.project())

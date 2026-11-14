@@ -239,6 +239,13 @@ impl StudioWindow {
             }
             Ok("palette") => self.open_palette(window, cx),
             Ok("library") => self.show_place(super::Place::Library, cx),
+            Ok(hook @ ("new-project" | "new-project-live")) => {
+                // a second project, made and opened in place, then the Library (or Live)
+                self.new_project("Second show", cx);
+                if hook == "new-project" {
+                    self.show_place(super::Place::Library, cx);
+                }
+            }
             Ok("editor-latest") => {
                 // the project's newest recording, in the Editor
                 if let Some(dir) = self.studio.read(cx).project_dir() {

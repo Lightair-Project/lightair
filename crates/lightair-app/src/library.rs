@@ -58,6 +58,11 @@ pub struct Library {
     note: Option<SharedString>,
     /// Asked for by "Open in Editor": the window switches to the Editor.
     pub open_in_editor: Option<(PathBuf, Id)>,
+    /// Asked for: open this project / make one with this name (the window does it).
+    pub open_project: Option<PathBuf>,
+    pub new_project: Option<String>,
+    /// The new project's name, being typed.
+    naming: Option<Entity<InputState>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -69,11 +74,16 @@ fn list_projects(current: Option<&Path>) -> Vec<ProjectEntry> {
         let v: serde_json::Value = serde_json::from_str(&text).ok()?;
         v["name"].as_str().map(String::from)
     };
-    let mut out: Vec<ProjectEntry> = std::fs::read_dir(lightair_platform::paths::projects_dir())
-        .into_iter()
-        .flatten()
-        .flatten()
+    // the Projects folder, and the open project's own folder (where its new projects go)
+    let mut folders = vec![lightair_platform::paths::projects_dir()];
+    if let Some(parent) = current.and_then(Path::parent).filter(|p| *p != folders[0]) {
+        folders.push(parent.to_path_buf());
+    }
+    let mut out: Vec<ProjectEntry> = folders
+        .iter()
+        .flat_map(|f| std::fs::read_dir(f).into_iter().flatten().flatten())
         .map(|e| e.path())
+        .filter(|d| d.extension().is_some_and(|e| e == "lightair"))
         .filter_map(|dir| Some(ProjectEntry { name: name_of(&dir)?, dir }))
         .collect();
     if let Some(cur) = current
@@ -158,6 +168,9 @@ impl Library {
             playing: None,
             note: None,
             open_in_editor: None,
+            open_project: None,
+            new_project: None,
+            naming: None,
             _subscriptions: subs,
         }
     }
@@ -348,7 +361,7 @@ impl Library {
         .detach();
     }
 
-    fn add_existing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_existing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.selected.clone().or_else(|| self.studio.read(cx).project_dir()) else { return };
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -388,6 +401,30 @@ impl Library {
         cx.notify();
     }
 
+    /// A field for the new project's name; Enter makes it, Escape (or leaving it empty) doesn't.
+    pub(crate) fn start_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
+        input.update(cx, |s, cx| s.focus(window, cx));
+        let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, _, cx| match ev {
+            InputEvent::PressEnter { .. } => {
+                let name = input.read(cx).value().trim().to_string();
+                this.naming = None;
+                if !name.is_empty() {
+                    this.new_project = Some(name);
+                }
+                cx.notify();
+            }
+            InputEvent::Blur if input.read(cx).value().trim().is_empty() => {
+                this.naming = None;
+                cx.notify();
+            }
+            _ => {}
+        });
+        self._subscriptions.push(sub);
+        self.naming = Some(input);
+        cx.notify();
+    }
+
     // ------------------------------------------------------------ view
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -420,23 +457,60 @@ impl Library {
         );
         list = list.child(
             div()
+                .flex()
+                .items_center()
                 .pt_3()
                 .pb_1()
-                .px_2()
-                .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(tok::text_tertiary())
-                .child("PROJECTS"),
+                .pl_2()
+                .child(div().flex_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child("PROJECTS"))
+                .child(
+                    ui::icon_button("lib-new-project", "plus", tok::text_secondary())
+                        .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("New project").build(w, cx))
+                        .on_click(cx.listener(|this, _, window, cx| this.start_new_project(window, cx))),
+                ),
         );
+        if let Some(input) = &self.naming {
+            list = list.child(div().px_1().pb_1().child(TextInput::new(input).small()));
+        }
+        let current = self.studio.read(cx).project_dir();
         for (n, p) in self.projects.iter().enumerate() {
             let dir = p.dir.clone();
             let on = self.selected.as_ref() == Some(&p.dir);
+            let open = current.as_ref() == Some(&p.dir);
+            let menu = {
+                let (me, dir) = (cx.entity().downgrade(), p.dir.clone());
+                move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+                    let (me2, dir2) = (me.clone(), dir.clone());
+                    menu.item(PopupMenuItem::new("Open project").icon(ui::icon("folder-open")).disabled(open).on_click(move |_, _, cx| {
+                        if let Some(me) = me2.upgrade() {
+                            me.update(cx, |this, cx| {
+                                this.open_project = Some(dir2.clone());
+                                cx.notify();
+                            });
+                        }
+                    }))
+                    .item(PopupMenuItem::new(if cfg!(windows) { "Show in Explorer" } else { "Show in Finder" }).icon(ui::icon("folder")).on_click({
+                        let dir = dir.clone();
+                        move |_, _, _| {
+                            let _ = lightair_platform::files::reveal(&dir);
+                        }
+                    }))
+                }
+            };
             list = list.child(
-                row(SharedString::from(format!("lib-project-{n}")), "folder", p.name.clone(), count(Some(&p.dir)), on)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                row(SharedString::from(format!("lib-project-{n}")), if open { "folder-open" } else { "folder" }, p.name.clone(), count(Some(&p.dir)), on)
+                    .when(open, |d| d.child(div().size(px(6.)).rounded_full().bg(tok::ok())))
+                    .tooltip(move |w, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(if open { "Open now" } else { "Double-click to open" }).build(w, cx)
+                    })
+                    .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                         this.selected = Some(dir.clone());
+                        if ev.click_count() >= 2 && !open {
+                            this.open_project = Some(dir.clone());
+                        }
                         cx.notify();
-                    })),
+                    }))
+                    .context_menu(menu),
             );
         }
         div()

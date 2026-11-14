@@ -18,6 +18,7 @@ use lightair_core::{
 use lightair_preview::Preview;
 use serde_json::json;
 
+pub(crate) mod app_menu;
 mod add_layer;
 mod assets;
 mod docking;
@@ -471,6 +472,12 @@ impl StudioWindow {
         let primary = studio.read(cx).project().primary_format().id;
         let library = cx.new(|cx| crate::library::Library::new(studio.clone(), window, cx));
         cx.observe(&library, |this, library, cx| {
+            if let Some(dir) = library.update(cx, |l, _| l.open_project.take()) {
+                this.open_project(dir, cx);
+            }
+            if let Some(name) = library.update(cx, |l, _| l.new_project.take()) {
+                this.new_project(&name, cx);
+            }
             if let Some((project, id)) = library.update(cx, |l, _| l.open_in_editor.take()) {
                 this.editor.update(cx, |e, cx| e.open(project, id, cx));
                 this.place = Place::Editor;
@@ -1574,7 +1581,7 @@ impl Render for StudioWindow {
         let studio = self.studio.read(cx);
         let project = studio.project().clone();
 
-        div()
+        self.menu_actions(div(), cx)
             .relative()
             .key_context("Studio")
             .track_focus(&self.focus)
@@ -1782,6 +1789,49 @@ impl StudioWindow {
             }
         }
         self.studio.update(cx, |s, _| s.library_version += 1);
+    }
+
+    /// Opens another project in this window (saved first; not while recording or live).
+    pub(crate) fn open_project(&mut self, dir: std::path::PathBuf, cx: &mut Context<Self>) {
+        let old = self.studio.read(cx).project().primary_format().id;
+        let result = self.studio.update(cx, |s, cx| s.switch_to(&dir, cx));
+        if let Err(e) = result {
+            self.studio.update(cx, |s, _| s.issue = Some(e.into()));
+            cx.notify();
+            return;
+        }
+        // the main canvas's preview belongs to the new primary format now
+        let new = self.studio.read(cx).project().primary_format().id;
+        if let Some(p) = self.previews.remove(&old) {
+            self.previews.retain(|_, _| false);
+            self.previews.insert(new, p);
+        }
+        self.active_format = Some(new);
+        self.crop_mode = None;
+        self.crop_leaving = false;
+        self.rotate_tool = false;
+        self.renaming = None;
+        self.source_picker = None;
+        self.add_layer = None;
+        self.marquee = None;
+        self.zoom = 1.0;
+        self.pan = (0.0, 0.0);
+        self.library.update(cx, |l, cx| l.reload(cx));
+        cx.notify();
+    }
+
+    /// Makes a project called `name` and opens it.
+    pub(crate) fn new_project(&mut self, name: &str, cx: &mut Context<Self>) {
+        match self.studio.read(cx).create_project(name) {
+            Ok(dir) => {
+                self.open_project(dir, cx);
+                self.show_place(Place::Live, cx);
+            }
+            Err(e) => {
+                self.studio.update(cx, |s, _| s.issue = Some(format!("Couldn't make the project: {e}").into()));
+                cx.notify();
+            }
+        }
     }
 
     /// Adds the screen recording scenes (screen, screen + camera, split, camera) on backdrops,
@@ -2034,6 +2084,7 @@ impl StudioWindow {
         };
 
         div()
+            .relative()
             .flex()
             .items_center()
             .h(px(44.))
@@ -2043,7 +2094,8 @@ impl StudioWindow {
             .border_b_1()
             .border_color(tok::border())
             .bg(tok::bg_app())
-            .child(self.place_switcher(cx))
+            // Library · Live · Editor, in the middle of the bar whatever is either side
+            .child(div().absolute().inset_0().flex().items_center().justify_center().child(self.place_switcher(cx)))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(project.name.clone()))
             .when(streaming, |d| {
                 d.child(

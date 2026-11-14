@@ -28,6 +28,8 @@ pub struct Preferences {
     pub camera: CameraDefaults,
     /// Shortcuts that work while Lightair isn't in front.
     pub global_hotkeys: Vec<GlobalHotkey>,
+    /// The project open last: the one Lightair opens next.
+    pub last_project: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +78,7 @@ impl Default for Preferences {
             audio_block: 256,
             camera: CameraDefaults::default(),
             global_hotkeys: Vec::new(),
+            last_project: None,
         }
     }
 }

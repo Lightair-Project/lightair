@@ -1245,6 +1245,21 @@ impl Reconciler {
     }
 
     /// Releases everything in dependency order (scenes before the inputs they use).
+    /// Everything from `project`, from scratch (another project opened): the main canvas takes
+    /// its primary format's size.
+    pub fn rebuild(&mut self, project: &Project) {
+        self.clear();
+        let patches = lightair_core::diff(&project.empty_like(), project);
+        self.apply(project, &patches);
+        let primary = project.primary_format();
+        let mut ovi = unsafe { std::mem::zeroed::<sys::obs_video_info>() };
+        let same = unsafe { sys::obs_get_video_info(&mut ovi) }
+            && (ovi.base_width, ovi.base_height, ovi.fps_num, ovi.fps_den) == (primary.width, primary.height, primary.fps_num, primary.fps_den.max(1));
+        if !same {
+            self.resize_format(primary);
+        }
+    }
+
     pub fn clear(&mut self) {
         self.release_inputs();
         if self.timers_tick {
