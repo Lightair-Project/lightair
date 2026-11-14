@@ -63,8 +63,7 @@ impl StudioWindow {
         let id = copy.id;
         self.exec(Command::AddScene { scene: copy, index: Some(index + 1) }, cx);
         self.studio.update(cx, |s, cx| {
-            s.selected_scene = Some(id);
-            s.selected_layer = None;
+            s.select_scene(id);
             cx.notify();
         });
     }
