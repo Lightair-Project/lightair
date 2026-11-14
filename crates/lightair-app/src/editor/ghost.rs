@@ -101,11 +101,11 @@ impl Editor {
         let pps = self.pps();
         let left = HEADER_W + self.x_of(g.start);
         let width = (g.len as f32 / 1000.0 * pps).max(6.0);
-        let rows: f32 = seq.tracks.iter().map(|t| if t.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H }).sum();
+        let rows: f32 = seq.tracks.iter().map(track_h).sum();
         let (top, height, fresh) = match g.track {
             Some(ti) => {
-                let above: f32 = seq.tracks.iter().take(ti).map(|t| if t.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H }).sum();
-                let h = if g.kind == TrackKind::Video { VIDEO_H } else { AUDIO_H };
+                let above: f32 = seq.tracks.iter().take(ti).map(track_h).sum();
+                let h = track_h(&seq.tracks[ti]);
                 (RULER_H + above + 3.0, h - 6.0, false)
             }
             // a new video track goes on top (shown over the ruler), a new audio one below
