@@ -184,8 +184,8 @@ impl StudioWindow {
                         .panel_view(panel_handle(mixer), cx)
                         .panel_view(panel_handle(assets), cx)
                         .active_index(usize::from(std::env::var("LIGHTAIR_OPEN").as_deref() == Ok("assets"))),
-                    // tall enough for a full channel strip
-                    Some(px(420.)),
+                    // tall enough for a full channel strip (taller for the audio screenshot hooks)
+                    Some(px(if std::env::var("LIGHTAIR_OPEN").is_ok_and(|h| h.starts_with("audio")) { 600. } else { 420. })),
                 ),
                 window,
                 cx,
