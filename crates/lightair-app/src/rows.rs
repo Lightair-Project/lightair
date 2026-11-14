@@ -11,6 +11,8 @@ use crate::ui::{self, tok};
 pub enum RowTarget {
     Scene(Id),
     Layer { scene: Id, layer: Id },
+    /// A mixer strip (track, bus or mix).
+    Strip(lightair_core::MixerStrip),
 }
 
 impl RowTarget {
@@ -18,6 +20,7 @@ impl RowTarget {
         match self {
             RowTarget::Scene(scene) => Command::RenameScene { scene, name },
             RowTarget::Layer { scene, layer } => Command::RenameLayer { scene, layer, name },
+            RowTarget::Strip(strip) => Command::RenameStrip { strip, name },
         }
     }
 }
