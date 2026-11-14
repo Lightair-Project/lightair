@@ -313,6 +313,11 @@ impl StudioWindow {
                 }
             }
             Ok("editor") => self.show_place(super::Place::Editor, cx),
+            Ok(hook @ ("editor-looks" | "editor-looks-2")) => {
+                self.show_place(super::Place::Editor, cx);
+                let second = hook == "editor-looks-2";
+                self.editor.update(cx, |e, cx| e.hook_looks(second, cx));
+            }
             Ok("library-record") => {
                 // a short recording (into a folder beside the project, not the user's), a
                 // marker, then the Library once it's in

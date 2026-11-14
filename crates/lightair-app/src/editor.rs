@@ -26,6 +26,10 @@ use lightair_store::recordings::{File as ItemFile, Index, Item, Kind};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 
+mod looks;
+use lightair_render::sequence::Content;
+use looks::{heading, hint, label};
+
 /// What the background work sends back.
 enum Done {
     Frame(u64, Vec<u8>, (u32, u32)),
@@ -34,6 +38,9 @@ enum Done {
     /// Media made from Library items or files (probing takes a moment): placed at the time, or
     /// (`None`) at the main track's end, or (`Some(u64::MAX)`) only kept in the project.
     Media(Vec<Media>, Option<u64>, Option<usize>),
+    /// Caption lines heard in the project's sound.
+    Captions(Result<Vec<(u64, u64, String)>, String>),
+    Downloaded(Result<(), String>),
 }
 
 /// A medium being dragged from the media panel.
@@ -64,6 +71,8 @@ enum MediaSource {
     Item(Item),
     /// Already in the project (imported).
     Media(Id),
+    /// Text or a shape (where it goes in the frame).
+    Content(Content, Transform),
 }
 
 /// A drag on the timeline.
@@ -77,10 +86,23 @@ enum Drag {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InspectorTab {
+    /// A made picture's words or shape.
+    Text,
     Video,
     Audio,
     Speed,
+    Filter,
+    Transition,
     Screen,
+}
+
+/// What the left panel shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeftTab {
+    Media,
+    Text,
+    Shapes,
+    Captions,
 }
 
 /// Pixels per second at zoom 1.
@@ -103,6 +125,9 @@ pub struct Editor {
     /// The sequence when a drag began (its undo step).
     drag_before: Option<Sequence>,
     renderer: Arc<Mutex<Option<SequenceRenderer>>>,
+    /// The sequence as last changed, for the renderer to take before its next frame (it may be
+    /// busy, or still being made, when the change happens).
+    pending: Arc<Mutex<Option<Sequence>>>,
     preview: Option<Arc<RenderImage>>,
     wanted: Option<u64>,
     busy: bool,
@@ -117,11 +142,24 @@ pub struct Editor {
     drag: Option<Drag>,
     timeline_bounds: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
     tab: InspectorTab,
+    left: LeftTab,
+    /// The selected text clip's words, being edited, and the sequence before typing began.
+    text_edit: Option<(Id, Entity<InputState>)>,
+    text_before: Option<Sequence>,
+    captioning: bool,
+    downloading: bool,
     naming: Option<(Option<Id>, Entity<InputState>)>,
     watching: bool,
     tx: mpsc::Sender<Done>,
     rx: mpsc::Receiver<Done>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// The renderer brought up to the sequence's last change, if there's one it hasn't taken.
+fn catch_up(r: &mut SequenceRenderer, pending: &Mutex<Option<Sequence>>) {
+    if let Some(seq) = pending.lock().unwrap().take() {
+        let _ = r.set(&seq);
+    }
 }
 
 /// RGBA → the BGRA GPUI draws.
@@ -202,6 +240,7 @@ impl Editor {
             redo: Vec::new(),
             drag_before: None,
             renderer: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(None)),
             preview: None,
             wanted: None,
             busy: false,
@@ -215,6 +254,11 @@ impl Editor {
             drag: None,
             timeline_bounds: Default::default(),
             tab: InspectorTab::Video,
+            left: LeftTab::Media,
+            text_edit: None,
+            text_before: None,
+            captioning: false,
+            downloading: false,
             naming: None,
             watching: false,
             tx,
@@ -285,6 +329,14 @@ impl Editor {
                                 this.studio.update(cx, |s, _| s.library_version += 1);
                             }
                             Done::Media(media, at, track) => this.take_media(media, at, track, cx),
+                            Done::Captions(r) => this.take_captions(r, cx),
+                            Done::Downloaded(r) => {
+                                this.downloading = false;
+                                this.note = Some(match r {
+                                    Ok(()) => "The speech model is ready: make captions now.".into(),
+                                    Err(e) => format!("The speech model couldn't be downloaded: {e}").into(),
+                                });
+                            }
                         }
                     }
                     this.pump();
@@ -317,12 +369,17 @@ impl Editor {
         self.preview = None;
         let seq = p.sequence.clone();
         self.project = Some(p);
-        let (r, tx) = (self.renderer.clone(), self.tx.clone());
+        *self.pending.lock().unwrap() = None;
+        let (r, tx, pending) = (self.renderer.clone(), self.tx.clone(), self.pending.clone());
         self.busy = true;
         std::thread::spawn(move || {
-            let mut made = SequenceRenderer::new(&seq).ok();
-            let frame = made.as_mut().map(|r| (r.frame(0), seq.size));
-            *r.lock().unwrap() = made;
+            let mut guard = r.lock().unwrap();
+            *guard = SequenceRenderer::new(&seq).ok();
+            let frame = guard.as_mut().map(|r| {
+                catch_up(r, &pending);
+                (r.frame(0), r.sequence().size)
+            });
+            drop(guard);
             let _ = match frame {
                 Some((f, size)) => tx.send(Done::Frame(0, f, size)),
                 None => tx.send(Done::Frame(0, Vec::new(), (0, 0))),
@@ -416,20 +473,7 @@ impl Editor {
     fn settle(&mut self, cx: &mut Context<Self>) {
         let (Some(ws), Some(p)) = (self.workspace.clone(), self.project.as_mut()) else { return };
         let _ = p.save(&ws);
-        let seq = p.sequence.clone();
-        if let Ok(mut r) = self.renderer.try_lock() {
-            if let Some(r) = r.as_mut() {
-                let _ = r.set(&seq);
-            }
-        } else {
-            // the renderer is busy: it takes the change on its next frame
-            let r = self.renderer.clone();
-            std::thread::spawn(move || {
-                if let Some(r) = r.lock().unwrap().as_mut() {
-                    let _ = r.set(&seq);
-                }
-            });
-        }
+        *self.pending.lock().unwrap() = Some(p.sequence.clone());
         self.request(self.playhead);
         cx.notify();
     }
@@ -485,6 +529,23 @@ impl Editor {
                 },
                 cx,
             ),
+            MediaSource::Content(content, place) => {
+                let at = at.unwrap_or(self.playhead);
+                let mut made = None;
+                self.change(
+                    |s| {
+                        let id = s.place_content_on(content, at, 3_000, track);
+                        if let Some(c) = s.clip_mut(id) {
+                            c.transform = place;
+                        }
+                        made = Some(id);
+                    },
+                    cx,
+                );
+                self.selected = made;
+                self.tab = InspectorTab::Text;
+                cx.notify();
+            }
             MediaSource::Item(item) => {
                 // reading the files takes a moment: off the window's thread
                 let tx = self.tx.clone();
@@ -553,11 +614,14 @@ impl Editor {
             return;
         }
         let Some(t) = self.wanted.take() else { return };
-        let (r, tx) = (self.renderer.clone(), self.tx.clone());
+        let (r, tx, pending) = (self.renderer.clone(), self.tx.clone(), self.pending.clone());
         self.busy = true;
         std::thread::spawn(move || {
             let mut guard = r.lock().unwrap();
-            let frame = guard.as_mut().map(|r| (r.frame(t), r.sequence().size));
+            let frame = guard.as_mut().map(|r| {
+                catch_up(r, &pending);
+                (r.frame(t), r.sequence().size)
+            });
             let _ = match frame {
                 Some((f, size)) => tx.send(Done::Frame(t, f, size)),
                 None => tx.send(Done::Frame(t, Vec::new(), (0, 0))),
@@ -575,11 +639,12 @@ impl Editor {
             self.playhead = 0;
         }
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (r, tx, from, flag) = (self.renderer.clone(), self.tx.clone(), self.playhead, stop.clone());
+        let (r, tx, from, flag, pending) = (self.renderer.clone(), self.tx.clone(), self.playhead, stop.clone(), self.pending.clone());
         self.playing = Some(stop);
         std::thread::spawn(move || {
             let mut guard = r.lock().unwrap();
             let Some(r) = guard.as_mut() else { return };
+            catch_up(r, &pending);
             let size = r.sequence().size;
             let start = std::time::Instant::now();
             r.play(from, |t, rgba| {
@@ -778,6 +843,8 @@ impl Editor {
             let _ = std::fs::create_dir_all(d);
         }
         let _ = e.save(&path);
+        // playback holds the renderer: stopped first
+        self.stop(cx);
         if let Some(r) = self.renderer.lock().unwrap().as_mut() {
             r.forget_take(media);
         }
@@ -1005,7 +1072,49 @@ impl Editor {
             let thumb = (m.kind == MediaKind::Image).then(|| m.path.clone());
             own = own.child(card(SharedString::from(format!("ed-imp-{n}")), m.name.clone(), short(m.duration_ms), icon, thumb, MediaSource::Media(m.id), cx));
         }
-        let heading = |t: &'static str| div().pt_2().pb_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child(t);
+        let tabs: [(&'static str, &'static str, LeftTab); 4] =
+            [("Media", "film", LeftTab::Media), ("Text", "type", LeftTab::Text), ("Shapes", "shapes", LeftTab::Shapes), ("Captions", "captions", LeftTab::Captions)];
+        let mut bar = div().flex().items_center().gap_0p5().px_2().h(px(48.)).border_b_1().border_color(tok::border());
+        for (n, (name, icon, tab)) in tabs.into_iter().enumerate() {
+            let on = self.left == tab;
+            bar = bar.child(
+                div()
+                    .id(("ed-left", n))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_0p5()
+                    .w(px(64.))
+                    .py_1()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_size(px(11.))
+                    .text_color(if on { tok::text() } else { tok::text_secondary() })
+                    .when(on, |d| d.bg(tok::bg_selected()))
+                    .hover(|d| d.bg(tok::bg_selected()))
+                    .child(ui::icon(icon).size(px(15.)))
+                    .child(name)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.left = tab;
+                        cx.notify();
+                    })),
+            );
+        }
+        let body = match self.left {
+            LeftTab::Media => div()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(div().flex_1().child(heading("THIS WORKSPACE")))
+                        .child(Button::new("ed-import").label("Import").icon(ui::icon("plus")).xsmall().outline().on_click(cx.listener(|this, _, w, cx| this.import(w, cx)))),
+                )
+                .child(if self.library.is_empty() { hint("Recordings, takes and clips appear here.") } else { grid })
+                .when(!imported.is_empty(), |d| d.child(heading("IMPORTED")).child(own)),
+            LeftTab::Text => self.text_tab(cx),
+            LeftTab::Shapes => self.shapes_tab(cx),
+            LeftTab::Captions => self.captions_tab(cx),
+        };
         div()
             .flex()
             .flex_col()
@@ -1014,31 +1123,8 @@ impl Editor {
             .border_r_1()
             .border_color(tok::border())
             .bg(tok::bg_panel())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .px_3()
-                    .h(px(36.))
-                    .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("Media"))
-                    .child(Button::new("ed-import").label("Import").icon(ui::icon("plus")).xsmall().outline().on_click(cx.listener(|this, _, w, cx| this.import(w, cx)))),
-            )
-            .child(
-                div()
-                    .id("ed-media")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px_3()
-                    .pb_3()
-                    .child(heading("THIS WORKSPACE"))
-                    .child(if self.library.is_empty() {
-                        div().text_size(px(12.)).text_color(tok::text_tertiary()).child("Recordings, takes and clips appear here.")
-                    } else {
-                        grid
-                    })
-                    .when(!imported.is_empty(), |d| d.child(heading("IMPORTED")).child(own)),
-            )
+            .child(bar)
+            .child(div().id("ed-media").flex_1().min_h_0().overflow_y_scroll().px_3().pb_3().pt_1().child(body))
     }
 
     fn player(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1092,47 +1178,51 @@ impl Editor {
     fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let clip = self.selected.and_then(|c| self.seq().and_then(|s| s.clip(c)).cloned());
         let media = clip.as_ref().and_then(|c| self.seq().and_then(|s| s.media(c.media)).cloned());
-        let label = |t: &'static str| div().pt_2().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child(t);
         let mut body = div().flex().flex_col().gap_2().p_3();
         match (clip, media) {
-            (Some(c), Some(m)) => {
-                let cid = c.id;
-                let take = m.take.is_some();
-                let tab = if !take && self.tab == InspectorTab::Screen { InspectorTab::Video } else { self.tab };
-                let mut tabs: Vec<(&'static str, InspectorTab)> = vec![("Video", InspectorTab::Video), ("Audio", InspectorTab::Audio), ("Speed", InspectorTab::Speed)];
-                if take {
-                    tabs.push(("Screen", InspectorTab::Screen));
-                }
-                if m.kind == MediaKind::Audio {
-                    tabs.retain(|t| t.1 != InspectorTab::Video);
-                }
-                body = body.child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().text_ellipsis().child(m.name.clone()));
-                body = body.child(self.chips("ed-tabs", &tabs, if m.kind == MediaKind::Audio && tab == InspectorTab::Video { InspectorTab::Audio } else { tab }, |this, t, cx| {
+            (Some(c), None) if c.content.is_some() => {
+                let name = match &c.content {
+                    Some(Content::Shape(_)) => "Shape",
+                    _ => "Text",
+                };
+                let tabs = [(name, InspectorTab::Text), ("Transform", InspectorTab::Video), ("Transition", InspectorTab::Transition)];
+                let tab = if tabs.iter().any(|t| t.1 == self.tab) { self.tab } else { InspectorTab::Text };
+                body = body.child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().text_ellipsis().child(c.content.as_ref().map(looks::content_name).unwrap_or_default()));
+                body = body.child(self.chips("ed-tabs", &tabs, tab, |this, t, cx| {
                     this.tab = t;
                     cx.notify();
                 }, cx));
-                let tf = c.transform;
-                let set = move |this: &mut Self, f: &dyn Fn(&mut Transform), cx: &mut Context<Self>| {
-                    this.change(
-                        |s| {
-                            if let Some(c) = s.clip_mut(cid) {
-                                f(&mut c.transform);
-                            }
-                        },
-                        cx,
-                    )
+                body = match tab {
+                    InspectorTab::Video => self.transform_section(&c, body, cx),
+                    InspectorTab::Transition => self.transition_section(&c, body, cx),
+                    _ => self.content_section(&c, body, cx),
                 };
-                match if m.kind == MediaKind::Audio && tab == InspectorTab::Video { InspectorTab::Audio } else { tab } {
-                    InspectorTab::Video => {
-                        body = body
-                            .child(label("TRANSFORM"))
-                            .child(self.stepper("ed-scale", "Scale", format!("{:.0}%", tf.scale * 100.0), move |this, d, cx| set(this, &|t| t.scale = (t.scale + d * 0.05).clamp(0.05, 10.0), cx), cx))
-                            .child(self.stepper("ed-x", "Position X", format!("{:.0}", tf.x), move |this, d, cx| set(this, &|t| t.x += d * 10.0, cx), cx))
-                            .child(self.stepper("ed-y", "Position Y", format!("{:.0}", tf.y), move |this, d, cx| set(this, &|t| t.y += d * 10.0, cx), cx))
-                            .child(self.stepper("ed-rot", "Rotate", format!("{:.0}°", tf.rotation), move |this, d, cx| set(this, &|t| t.rotation += d * 5.0, cx), cx))
-                            .child(self.stepper("ed-op", "Opacity", format!("{:.0}%", tf.opacity * 100.0), move |this, d, cx| set(this, &|t| t.opacity = (t.opacity + d * 0.1).clamp(0.0, 1.0), cx), cx))
-                            .child(Button::new("ed-reset").label("Reset").icon(ui::icon("rotate-ccw")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| set(this, &|t| *t = Transform::default(), cx))));
-                    }
+            }
+            (Some(c), Some(m)) => {
+                let take = m.take.is_some();
+                let audio = m.kind == MediaKind::Audio;
+                let mut tabs: Vec<(&'static str, InspectorTab)> = Vec::new();
+                if !audio {
+                    tabs.push(("Video", InspectorTab::Video));
+                }
+                tabs.extend([("Audio", InspectorTab::Audio), ("Speed", InspectorTab::Speed)]);
+                if !audio {
+                    tabs.extend([("Filter", InspectorTab::Filter), ("Transition", InspectorTab::Transition)]);
+                }
+                if take {
+                    tabs.push(("Screen", InspectorTab::Screen));
+                }
+                let tab = if tabs.iter().any(|t| t.1 == self.tab) { self.tab } else { tabs[0].1 };
+                body = body.child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().text_ellipsis().child(m.name.clone()));
+                body = body.child(self.chips("ed-tabs", &tabs, tab, |this, t, cx| {
+                    this.tab = t;
+                    cx.notify();
+                }, cx));
+                let cid = c.id;
+                match tab {
+                    InspectorTab::Text | InspectorTab::Video => body = self.transform_section(&c, body, cx),
+                    InspectorTab::Filter => body = self.filter_section(&c, body, cx),
+                    InspectorTab::Transition => body = self.transition_section(&c, body, cx),
                     InspectorTab::Audio => {
                         body = body
                             .child(label("VOLUME"))
@@ -1306,11 +1396,12 @@ impl Editor {
                 .px_1()
                 .border_r_1()
                 .border_color(tok::border())
-                .child(div().w(px(24.)).text_size(px(11.)).text_color(tok::text_tertiary()).child(name))
+                .child(div().w(px(24.)).text_size(px(11.)).text_color(tok::text_tertiary()).child(if track.captions { "CC".to_string() } else { name }))
                 .when(track.kind == TrackKind::Video, |d| d.child(toggle(if track.hidden { "eye-off" } else { "eye" }, track.hidden, 0, |t| t.hidden = !t.hidden, cx)))
                 .child(toggle(if track.muted { "volume-x" } else { "volume-2" }, track.muted, 1, |t| t.muted = !t.muted, cx))
                 .child(toggle(if track.locked { "lock" } else { "lock-open" }, track.locked, 2, |t| t.locked = !t.locked, cx));
             let mut lane = div().relative().flex_1().h_full().overflow_hidden();
+            let mut badges = Vec::new();
             for c in &track.clips {
                 let m = seq.media(c.media);
                 let left = self.x_of(c.start_ms);
@@ -1319,11 +1410,38 @@ impl Editor {
                     continue;
                 }
                 let selected = self.selected == Some(c.id);
-                let colour = match (track.kind, m.and_then(|m| m.take.as_ref())) {
-                    (TrackKind::Audio, _) => rgb(0x1E4E8C),
-                    (_, Some(_)) => rgb(0x6D28D9),
+                let colour = match (track.kind, &c.content, m.and_then(|m| m.take.as_ref())) {
+                    (TrackKind::Audio, _, _) => rgb(0x1E4E8C),
+                    (_, Some(Content::Text(_)), _) => rgb(0xB45309),
+                    (_, Some(Content::Shape(_)), _) => rgb(0xBE185D),
+                    (_, _, Some(_)) => rgb(0x6D28D9),
                     _ => rgb(0x0E7C86),
                 };
+                let title = match (&c.content, m) {
+                    (Some(content), _) => looks::content_name(content),
+                    (None, Some(m)) => m.name.clone(),
+                    (None, None) => "Missing".into(),
+                };
+                let pps_ = pps;
+                let diamonds: Vec<f32> = c.keyframes.iter().map(|k| k.at_ms as f32 / 1000.0 * pps_).collect();
+                // a transition straddles the cut before the clip
+                if let Some(tn) = c.transition {
+                    let half = tn.duration_ms as f32 / 2000.0 * pps;
+                    badges.push(
+                        div()
+                            .absolute()
+                            .top(px(VIDEO_H / 2.0 - 9.0))
+                            .left(px(left - half.max(7.0)))
+                            .w(px((half * 2.0).max(14.0)))
+                            .h(px(18.))
+                            .rounded(px(4.))
+                            .bg(rgba(0xFFFFFFD0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(ui::icon("blend").size(px(11.)).text_color(rgb(0x111111))),
+                    );
+                }
                 let (cid, start, locked) = (c.id, c.start_ms, track.locked);
                 lane = lane.child(
                     div()
@@ -1348,11 +1466,14 @@ impl Editor {
                                 .flex()
                                 .gap_2()
                                 .whitespace_nowrap()
-                                .child(m.map_or("Missing".into(), |m| m.name.clone()))
+                                .child(title)
                                 .child(div().opacity(0.7).child(short(c.len_ms())))
                                 .when((c.speed - 1.0).abs() > 0.01, |d| d.child(div().opacity(0.8).child(format!("{}×", c.speed))))
                                 .when(c.muted, |d| d.child(ui::icon("volume-x").size(px(11.)))),
                         )
+                        .children(diamonds.into_iter().map(|x| {
+                            div().absolute().bottom(px(2.)).left(px(x - 5.0)).child(ui::icon("diamond").size(px(10.)).text_color(rgb(0xFDE68A)))
+                        }))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
@@ -1380,6 +1501,7 @@ impl Editor {
                         ),
                 );
             }
+            let lane = lane.children(badges);
             rows = rows.child(
                 div()
                     .flex()
@@ -1445,7 +1567,8 @@ impl Editor {
 }
 
 impl Render for Editor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_text_input(window, cx);
         // the media panel lists the workspace's Library as it is now
         let v = self.studio.read(cx).library_version;
         if self.library_seen != Some(v) {
