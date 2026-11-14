@@ -176,15 +176,14 @@ pub fn icon(name: &str) -> Icon {
 /// Icon for an input type (docs/06-design-system.md, Iconography).
 pub fn input_icon(kind: &str) -> &'static str {
     match kind {
-        "screen_capture" | "display_capture" => "monitor",
-        "window_capture" => "app-window",
-        "macos-avcapture" | "macos-avcapture-fast" | "av_capture_input_v2" | "av_capture_input" => "camera",
+        lightair_core::kinds::SCREEN => "monitor",
+        lightair_core::kinds::CAMERA => "camera",
         "image_source" | "slideshow" => "image",
         "text_ft2_source_v2" => "type",
         "color_source_v3" => "square",
         "ffmpeg_source" | "vlc_source" => "clapperboard",
         "lightair_timer" => "timer",
-        "coreaudio_input_capture" | "sck_audio_capture" => "mic",
+        lightair_core::kinds::MIC | lightair_core::kinds::DESKTOP_AUDIO | lightair_core::kinds::APP_AUDIO => "mic",
         _ => "layers",
     }
 }

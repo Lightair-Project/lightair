@@ -366,6 +366,17 @@ fn gizmo_radius(l: &Layout, scale: f32) -> f32 {
 }
 const SNAP_PX: f32 = 8.0;
 
+
+/// A new display capture: the main display (macOS names it; Windows takes the primary one), with
+/// the pointer, without Lightair's own windows.
+pub(crate) fn display_settings() -> serde_json::Value {
+    let mut settings = json!({"mode": lightair_core::kinds::DISPLAY, "cursor": true, "hide_obs": true});
+    if let Some(uuid) = lightair_engine::displays::main_display_uuid() {
+        settings["display"] = uuid.into();
+    }
+    settings
+}
+
 impl StudioWindow {
     pub fn new(studio: Entity<Studio>, preview: Preview, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe_in(&studio, window, |this, studio, window, cx| {
@@ -1370,7 +1381,7 @@ impl StudioWindow {
     /// default, the input starts with the Beauty effect.
     fn add_camera(&mut self, label: &str, uid: &str, cx: &mut Context<Self>) {
         let defaults = self.prefs.camera;
-        self.add_input_layer(label, "macos-avcapture", defaults.settings(uid), (1280.0, 720.0), cx);
+        self.add_input_layer(label, lightair_core::kinds::CAMERA, defaults.settings(uid), (1280.0, 720.0), cx);
         let project = self.studio.read(cx).project().clone();
         if defaults.studio_on
             && let Some(input) = project.inputs.values().find(|i| i.settings["device"] == uid && i.effects.is_empty())

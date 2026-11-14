@@ -46,15 +46,13 @@ impl Default for CameraDefaults {
 }
 
 impl CameraDefaults {
-    /// A new camera's settings: its device, sized by the preset for `height`.
+    /// A new camera's settings (`lightair_core::kinds::CAMERA`): its device, at `height`.
     pub fn settings(&self, device: &str) -> serde_json::Value {
-        let preset = match self.height {
-            Some(720) => "AVCaptureSessionPreset1280x720",
-            Some(1080) => "AVCaptureSessionPreset1920x1080",
-            Some(2160) => "AVCaptureSessionPreset3840x2160",
-            _ => "AVCaptureSessionPresetHigh",
-        };
-        serde_json::json!({"device": device, "use_preset": true, "preset": preset})
+        let mut s = serde_json::json!({ "device": device });
+        if let Some(h) = self.height {
+            s["height"] = h.into();
+        }
+        s
     }
 }
 

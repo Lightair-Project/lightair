@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn a_project_mixer_becomes_the_engine_graph() {
         let mut p = Project::new("Show");
-        let mic = Input::new("Mic", "coreaudio_input_capture", json!({}));
+        let mic = Input::new("Mic", lightair_core::kinds::MIC, json!({}));
         let bus = Bus::new("Guests");
         let phones = AudioMix::new("Headphones");
         let mut t = Track::new("Host", mic.id);

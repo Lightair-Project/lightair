@@ -8,6 +8,7 @@ pub mod audio;
 pub mod audio_host;
 pub mod devices;
 pub mod displays;
+pub mod kinds;
 mod engine;
 mod log;
 pub mod loudness;
