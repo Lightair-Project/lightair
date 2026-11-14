@@ -359,6 +359,13 @@ Each phase ships with tests and screenshots, like the audio plan.
 
    *Tests:* index entries written on every finished recording, clip and stem set; a moved file is
    found by Locate; trash never deletes outright. *Screenshots:* Library by project, empty state.
+
+   Done (14 November 2026): `lightair_store::recordings` (the index, Locate, Duplicate, Move to
+   project, Trash through the platform's bin only, Add existing with MP4/MOV lengths); recordings
+   register when they start and again when they finish (split files, markers, multitrack files,
+   length, a still of the program); clips when saved; the switcher (⌃1–⌃3 on macOS, Alt+1–3 on
+   Windows, where Ctrl+1–9 are scenes); the Library view and its player (a private media source
+   heard through monitoring). Imported files get no still yet (a card shows its kind instead).
 2. **Studio take and a drawn cursor (live):**
    - input recorder;
    - takes (raw tracks, crash-safe, markers, pause), in the Library;

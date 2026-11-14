@@ -27,6 +27,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 parking_lot.workspace = true
 futures-channel = "0.3"
+# Library thumbnails (PNG); elsewhere than macOS, the preview's frames as images (frame_view.rs).
+image = { version = "0.25", default-features = false, features = ["png"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # Plugin editor windows, the macOS camera effects panel.
@@ -36,9 +38,6 @@ objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString"] }
 
-# The preview's frames as images (frame_view.rs), where there's no zero-copy path yet.
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-image = { version = "0.25", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

@@ -238,6 +238,27 @@ impl StudioWindow {
                 self.open_settings(page, cx);
             }
             Ok("palette") => self.open_palette(window, cx),
+            Ok("library") => self.show_place(super::Place::Library, cx),
+            Ok("editor") => self.show_place(super::Place::Editor, cx),
+            Ok("library-record") => {
+                // a short recording (into a folder beside the project, not the user's), a
+                // marker, then the Library once it's in
+                let mut settings = self.studio.read(cx).project().outputs.recording.clone();
+                if let Some(dir) = self.studio.read(cx).project_dir().and_then(|d| d.parent().map(|p| p.join("shot-recordings"))) {
+                    settings.folder = Some(dir);
+                }
+                self.exec(lightair_core::Command::SetRecordingSettings { settings }, cx);
+                self.studio.update(cx, |s, cx| s.toggle_recording(cx));
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                    let _ = this.update(cx, |this, cx| this.studio.update(cx, |s, cx| s.add_marker(cx)));
+                    cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                    let _ = this.update(cx, |this, cx| this.studio.update(cx, |s, cx| s.toggle_recording(cx)));
+                    cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                    let _ = this.update(cx, |this, cx| this.show_place(super::Place::Library, cx));
+                })
+                .detach();
+            }
             Ok("perf") => self.perf_open = true,
             Ok("two-canvases") => self.add_format(lightair_core::Format::vertical(), cx),
             Ok("dests") => {

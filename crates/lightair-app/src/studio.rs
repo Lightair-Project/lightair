@@ -15,6 +15,27 @@ use lightair_engine::outputs::{
 };
 use lightair_engine::{Engine, Stats};
 use lightair_store::Package;
+use lightair_store::recordings::{self, File as ItemFile, Index, Item, Kind, Marker};
+
+/// A recording on its way into the Library (docs/plans/screen-studio.md, "Library"). Its entry
+/// is written when it starts (so a crash still leaves it findable) and again when it finishes.
+struct Pending {
+    project: PathBuf,
+    item: Item,
+    /// The canvases recorded, with the format name that tells their files apart.
+    canvases: Vec<(Id, Option<String>)>,
+    stopped: bool,
+    /// Multitrack files still being written.
+    stems: bool,
+    thumbnail_due: Option<std::time::Instant>,
+}
+
+/// A still for the Library: the program as it is now, written to `path` (by the window, which
+/// has the preview).
+#[derive(Debug, Clone)]
+pub struct ThumbnailRequest {
+    pub path: PathBuf,
+}
 
 /// What a panel (the mixer) asks the window to show.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,6 +73,12 @@ pub struct Studio {
     mic_history: std::collections::HashMap<Id, std::collections::VecDeque<f32>>,
     /// Imported layers whose size was guessed, waiting for their sources to report a size.
     refit: Option<(Vec<lightair_store::EstimatedLayer>, std::time::Instant)>,
+    /// The recording on its way into the Library.
+    pending: Option<Pending>,
+    /// Stills the window should take for the Library.
+    pub thumbnails: Vec<ThumbnailRequest>,
+    /// Bumped when a project's recordings index changes (the Library reloads).
+    pub library_version: u64,
     /// Multitrack audio files being recorded: their base name and paths.
     stems: Option<(String, Vec<std::path::PathBuf>)>,
 }
@@ -84,6 +111,9 @@ impl Studio {
             clips_seen: 0,
             recent_lagged: 0,
             refit: None,
+            pending: None,
+            thumbnails: Vec::new(),
+            library_version: 0,
             stems: None,
             mic_history: Default::default(),
             last_clip: None,
@@ -426,6 +456,17 @@ impl Studio {
             let name = status.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
             self.issue = Some(format!("Clip saved: {}", name.unwrap_or_default()).into());
             self.last_clip = status.path.clone();
+            if let (Some(dir), Some(path)) = (self.project_dir(), status.path.clone()) {
+                let seconds = self.project().outputs.clips.seconds as u64;
+                let started = chrono::Utc::now().timestamp_millis() - seconds as i64 * 1000;
+                let title = format!("Clip · {}", chrono::Local::now().format("%-d %b, %H:%M:%S"));
+                let mut item = Item::new(Kind::Clip, title, vec![ItemFile { path, format: None }], started);
+                item.duration_ms = Some(seconds * 1000);
+                let thumb = recordings::thumbnails_dir(&dir).join(format!("{}.png", item.id));
+                item.thumbnail = Some(thumb.clone());
+                self.thumbnails.push(ThumbnailRequest { path: thumb });
+                self.index_add(&dir, item);
+            }
         }
     }
 
@@ -435,6 +476,13 @@ impl Studio {
 
     pub fn toggle_recording(&mut self, cx: &mut Context<Self>) {
         if self.is_recording() {
+            let status = runtime().recording();
+            if let Some(p) = &mut self.pending {
+                p.stopped = true;
+                if let OutputState::Active { since } | OutputState::Reconnecting { since } = status.state {
+                    p.item.duration_ms = Some(status.recorded(since).as_millis() as u64);
+                }
+            }
             self.engine.post(|s| s.outputs.stop_recording());
             self.finish_stems(cx);
             return;
@@ -454,13 +502,39 @@ impl Studio {
         // Make the journal durable before outputs start (docs/14, "Saving, autosave & recovery").
         self.flush();
         // Multitrack audio files (and, audio only, the program) beside the video.
+        let mut stems = false;
         if settings.multitrack || settings.audio_only {
             let (p, folder, base) = (project.clone(), self.recording_folder(), format!("Lightair {stamp}"));
             let program = settings.audio_only;
             match self.engine.call(move |s| s.reconciler.start_stems(&p, &folder, &base, program)) {
-                Ok(files) => self.stems = Some((format!("Lightair {stamp}"), files)),
+                Ok(files) => {
+                    self.stems = Some((format!("Lightair {stamp}"), files));
+                    stems = true;
+                }
                 Err(e) => self.issue = Some(format!("Multitrack audio didn't start: {e}").into()),
             }
+        }
+        // its Library entry
+        if let Some(dir) = self.project_dir() {
+            let kind = if settings.audio_only { Kind::Multitrack } else { Kind::Recording };
+            let title = format!("{} · {}", project.name, chrono::Local::now().format("%-d %b, %H:%M"));
+            let mut item = Item::new(kind, title, Vec::new(), chrono::Utc::now().timestamp_millis());
+            let thumbnail_due = (!settings.audio_only).then(|| {
+                item.thumbnail = Some(recordings::thumbnails_dir(&dir).join(format!("{}.png", item.id)));
+                std::time::Instant::now() + std::time::Duration::from_secs(3)
+            });
+            self.pending = Some(Pending {
+                project: dir,
+                item,
+                canvases: if settings.audio_only {
+                    Vec::new()
+                } else {
+                    targets.iter().map(|c| (*c, several.then(|| project.format(*c).map(|f| f.name.clone()).unwrap_or_default()))).collect()
+                },
+                stopped: false,
+                stems,
+                thumbnail_due,
+            });
         }
         if settings.audio_only {
             cx.notify();
@@ -473,6 +547,10 @@ impl Studio {
                 None => format!("Lightair {stamp}.{}", container.extension()),
             };
             let Some(format) = project.format(canvas) else { continue };
+            let path = self.recording_folder().join(&name);
+            if let Some(p) = &mut self.pending {
+                p.item.files.push(ItemFile { path, format: label.clone() });
+            }
             let cfg = RecordingConfig {
                 canvas,
                 path: self.recording_folder().join(name),
@@ -496,7 +574,62 @@ impl Studio {
                 }
             });
         }
+        if let Some(p) = &self.pending {
+            let (dir, item) = (p.project.clone(), p.item.clone());
+            self.index_add(&dir, item);
+        }
         cx.notify();
+    }
+
+    /// Writes an item to a project's recordings index (and tells the Library).
+    fn index_add(&mut self, project: &std::path::Path, item: Item) {
+        if let Err(e) = Index::add_to(project, item) {
+            tracing::warn!(%e, "couldn't write the recordings index");
+        }
+        self.library_version += 1;
+    }
+
+    /// Follows the recording on its way into the Library: split files as they start, the
+    /// still, and its entry once every output and the multitrack files are done.
+    fn track_recording(&mut self) {
+        let Some(p) = &mut self.pending else { return };
+        for (canvas, label) in &p.canvases {
+            if let Some(path) = runtime().get(OutputKey::Recording(*canvas)).path
+                && !p.item.files.iter().any(|f| f.path == path)
+            {
+                p.item.files.push(ItemFile { path, format: label.clone() });
+            }
+        }
+        if p.thumbnail_due.is_some_and(|t| t <= std::time::Instant::now()) {
+            p.thumbnail_due = None;
+            if let Some(path) = p.item.thumbnail.clone() {
+                self.thumbnails.push(ThumbnailRequest { path });
+            }
+        }
+        let Some(p) = &self.pending else { return };
+        let running = p.canvases.iter().any(|(c, _)| runtime().get(OutputKey::Recording(*c)).state.is_running());
+        if !p.stopped || p.stems || running {
+            return;
+        }
+        let Some(mut p) = self.pending.take() else { return };
+        // a still that never came (stopped within seconds): none
+        if p.thumbnail_due.is_some() {
+            p.item.thumbnail = None;
+        }
+        // files that were never written (it failed to start)
+        p.item.files.retain(|f| f.path.exists());
+        if p.item.files.is_empty() {
+            let mut index = Index::load(&p.project);
+            index.items.retain(|i| i.id != p.item.id);
+            let _ = index.save(&p.project);
+            self.library_version += 1;
+            return;
+        }
+        if p.item.duration_ms.is_none() {
+            p.item.duration_ms = p.item.files.iter().find_map(|f| recordings::mp4_duration_ms(&f.path));
+        }
+        let (dir, item) = (p.project, p.item);
+        self.index_add(&dir, item);
     }
 
     pub fn pause_recording(&mut self, cx: &mut Context<Self>) {
@@ -528,7 +661,16 @@ impl Studio {
         });
         let path = self.recording_folder().join(format!("{base}.multitrack.json"));
         if let Ok(text) = serde_json::to_string_pretty(&sidecar) {
-            let _ = std::fs::write(path, text);
+            let _ = std::fs::write(&path, text);
+        }
+        if let Some(p) = &mut self.pending {
+            p.item.files.extend(report.files.iter().map(|f| ItemFile { path: f.clone(), format: None }));
+            p.item.files.push(ItemFile { path, format: None });
+            if p.item.kind == Kind::Multitrack {
+                p.item.duration_ms = Some(report.frames * 1000 / report.sample_rate.max(1) as u64);
+            }
+            p.stems = false;
+            p.stopped = true;
         }
         self.issue = Some(format!("Recorded {} audio files", report.files.len()).into());
         cx.notify();
@@ -537,6 +679,14 @@ impl Studio {
     pub fn add_marker(&mut self, cx: &mut Context<Self>) {
         let n = runtime().recording().markers + 1;
         let ok = self.engine.call(move |s| s.outputs.add_marker(&format!("Marker {n}")));
+        let status = runtime().recording();
+        if ok
+            && let Some(p) = &mut self.pending
+            && let OutputState::Active { since } = status.state
+        {
+            let at_ms = status.recorded(since).as_millis() as u64;
+            p.item.markers.push(Marker { at_ms, label: format!("Marker {n}") });
+        }
         self.issue = Some(if ok {
             format!("Marker {n} added").into()
         } else {
@@ -630,6 +780,7 @@ impl Studio {
         });
         self.check_outputs();
         self.announce_clips();
+        self.track_recording();
         let stats = lightair_engine::read_stats();
         self.recent_lagged = stats.lagged_frames.saturating_sub(self.stats.lagged_frames);
         self.stats = stats;
