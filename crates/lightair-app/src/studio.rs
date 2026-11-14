@@ -640,7 +640,7 @@ impl Studio {
         let p = self.project();
         p.tracks
             .iter()
-            .filter(|t| p.inputs.get(&t.input).is_some_and(|i| i.kind == "coreaudio_input_capture"))
+            .filter(|t| p.inputs.get(&t.input).is_some_and(|i| i.kind == lightair_core::kinds::MIC))
             .map(|t| (t.id, t.name.clone()))
             .collect()
     }

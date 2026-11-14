@@ -6,7 +6,6 @@ use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{Command, Id, Layer, Layout};
-use serde_json::json;
 
 use super::StudioWindow;
 use crate::ui::{self, tok};
@@ -76,13 +75,7 @@ impl StudioWindow {
     fn pick(&mut self, kind: Kind, window: &mut Window, cx: &mut Context<Self>) {
         match kind {
             Kind::Camera => {
-                // OBS 33's camera source can't list devices without an instance; the legacy
-                // source lists the same AVFoundation device ids.
-                self.camera_devices = self
-                    .studio
-                    .read(cx)
-                    .engine()
-                    .call(|_| lightair_engine::obs::property_items("av_capture_input_v2", "device"));
+                self.camera_devices = self.studio.read(cx).engine().call(|_| lightair_engine::kinds::cameras());
                 if let Some(a) = &mut self.add_layer {
                     a.step = Step::Cameras;
                 }
@@ -90,11 +83,7 @@ impl StudioWindow {
                 return;
             }
             Kind::Display => {
-                let mut settings = json!({"type": 0, "show_cursor": true, "hide_obs": true});
-                if let Some(uuid) = lightair_engine::displays::main_display_uuid() {
-                    settings["display_uuid"] = uuid.into();
-                }
-                self.add_input_layer("Display", "screen_capture", settings, (1920.0, 1080.0), cx)
+                self.add_input_layer("Display", lightair_core::kinds::SCREEN, super::display_settings(), (1920.0, 1080.0), cx)
             }
             Kind::Image => self.add_image(window, cx),
             Kind::Video => self.add_video(window, cx),

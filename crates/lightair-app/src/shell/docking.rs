@@ -311,7 +311,7 @@ impl StudioWindow {
             Ok("source") => {
                 let input = {
                     let s = self.studio.read(cx);
-                    s.project().inputs.values().find(|i| i.kind == "screen_capture").map(|i| i.id)
+                    s.project().inputs.values().find(|i| i.kind == lightair_core::kinds::SCREEN).map(|i| i.id)
                 };
                 if let Some(id) = input {
                     self.open_source_picker(id, window, cx);

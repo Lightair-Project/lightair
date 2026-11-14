@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use lightair_engine::Engine;
-use lightair_engine::obs::{Data, Scene, Source, property_items};
+use lightair_engine::obs::{Data, Scene, Source};
 
 pub fn run(engine: &Engine, what: &str) {
     match what {
@@ -16,13 +16,15 @@ pub fn run(engine: &Engine, what: &str) {
 
 fn camera(engine: &Engine) {
     let report = engine.call(|s| {
-        let devices = property_items("av_capture_input_v2", "device");
+        let devices = lightair_engine::kinds::cameras();
         let Some((name, uid)) = devices.into_iter().find(|(n, _)| !n.contains("Virtual") && !n.contains("VCam")) else {
             return "no camera device".to_string();
         };
-        let mut d = Data::new();
-        d.set_str("device", &uid);
-        let Some(cam) = Source::create("macos-avcapture", "Self-test camera", Some(&d)) else {
+        let Some((kind, settings)) = lightair_engine::kinds::resolve(lightair_core::kinds::CAMERA, &serde_json::json!({ "device": uid }))
+        else {
+            return "no camera source on this platform".into();
+        };
+        let Some(cam) = Source::create(kind, "Self-test camera", Some(&Data::from_json(&settings))) else {
             return "could not create the camera source".into();
         };
         let mut look = Data::new();

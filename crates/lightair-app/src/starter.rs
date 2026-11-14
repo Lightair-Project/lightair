@@ -14,11 +14,7 @@ pub fn starter_project() -> Project {
         "color_source_v3",
         json!({"color": 0xFF1B1B1Cu32, "width": format.width, "height": format.height}),
     );
-    let mut display_settings = json!({"type": 0, "show_cursor": true, "hide_obs": true});
-    if let Some(uuid) = lightair_engine::displays::main_display_uuid() {
-        display_settings["display_uuid"] = uuid.into();
-    }
-    let display = Input::new("Main display", "screen_capture", display_settings);
+    let display = Input::new("Main display", lightair_core::kinds::SCREEN, crate::shell::display_settings());
     let icon_path = brand_icon();
     let logo = Input::new("Lightair logo", "image_source", json!({"file": icon_path.to_string_lossy()}));
 
@@ -39,8 +35,8 @@ pub fn starter_project() -> Project {
         Layer::new("Logo", logo.id, [(format.id, Layout::boxed(80.0, h - 240.0, 160.0, 160.0))]),
     ];
 
-    let mic = Input::new("Mic", "coreaudio_input_capture", json!({"device_id": "default"}));
-    let desktop = Input::new("Desktop audio", "sck_audio_capture", json!({"type": 0}));
+    let mic = Input::new("Mic", lightair_core::kinds::MIC, json!({"device": "default"}));
+    let desktop = Input::new("Desktop audio", lightair_core::kinds::DESKTOP_AUDIO, json!({}));
     let mut mic_track = Track::new("Mic", mic.id);
     mic_track.effects = crate::mixer::voice_clarity();
     let desktop_track = Track::new("Desktop audio", desktop.id);

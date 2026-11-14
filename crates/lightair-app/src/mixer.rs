@@ -11,11 +11,14 @@ use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{AudioMix, Bus, Command, Effect, Id, Input, Master, MixerStrip, Project, Route, Send, Track};
+use lightair_core::{AudioMix, Bus, Command, Effect, Id, Input, Master, MixerStrip, Project, Route, Send, Track, kinds};
 use lightair_engine::meters::meters;
 use serde_json::json;
 
 use crate::studio::Studio;
+
+/// What desktop audio takes, in this platform's words.
+const EVERYTHING: &str = if cfg!(windows) { "Everything the PC plays" } else { "Everything the Mac plays" };
 use crate::ui::{self, tok};
 
 const STRIP_W: f32 = 166.0;
@@ -357,11 +360,11 @@ impl MixerPanel {
                     this.add_track("Mic", lightair_engine::devices::DEVICE_KIND, json!({"device": ""}), voice_clarity(), cx)
                 },
             )))
-            .child(entry("add-desktop", "volume-2", "Desktop audio", "Everything the Mac plays").on_click(cx.listener(
-                |this, _, _, cx| this.add_track("Desktop audio", "sck_audio_capture", json!({"type": 0}), vec![], cx),
+            .child(entry("add-desktop", "volume-2", "Desktop audio", EVERYTHING).on_click(cx.listener(
+                |this, _, _, cx| this.add_track("Desktop audio", kinds::DESKTOP_AUDIO, json!({}), vec![], cx),
             )))
             .child(entry("add-app", "app-window", "App audio", "One app: a game, music, a call").on_click(cx.listener(
-                |this, _, _, cx| this.add_track("App audio", "sck_audio_capture", json!({"type": 1}), vec![], cx),
+                |this, _, _, cx| this.add_track("App audio", kinds::APP_AUDIO, json!({}), vec![], cx),
             )));
 
         let mixer = column()
@@ -1870,7 +1873,7 @@ struct StripSource {
 enum Source {
     /// An audio interface the engine opens ("" for the system default).
     Device(String),
-    /// Everything the Mac plays.
+    /// Everything the computer plays.
     Desktop,
     /// One app (its bundle id; "" until one is chosen).
     App(String),
@@ -1882,10 +1885,8 @@ impl Source {
     fn of(i: &Input) -> Self {
         match i.kind.as_str() {
             lightair_engine::devices::DEVICE_KIND => Source::Device(i.settings["device"].as_str().unwrap_or("").into()),
-            "sck_audio_capture" if i.settings["type"].as_i64() == Some(1) => {
-                Source::App(i.settings["application"].as_str().unwrap_or("").into())
-            }
-            "sck_audio_capture" => Source::Desktop,
+            kinds::APP_AUDIO => Source::App(i.settings["app"].as_str().unwrap_or("").into()),
+            kinds::DESKTOP_AUDIO => Source::Desktop,
             _ => Source::Other,
         }
     }
@@ -1898,8 +1899,8 @@ impl Source {
                 lightair_engine::devices::DEVICE_KIND,
                 json!({ "device": d }),
             ),
-            Source::Desktop => ("Desktop audio".into(), "sck_audio_capture", json!({ "type": 0 })),
-            Source::App(b) => (app_name.to_string(), "sck_audio_capture", json!({ "type": 1, "application": b })),
+            Source::Desktop => ("Desktop audio".into(), kinds::DESKTOP_AUDIO, json!({})),
+            Source::App(b) => (app_name.to_string(), kinds::APP_AUDIO, json!({ "app": b })),
             Source::Other => (String::new(), "", json!({})),
         }
     }

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Id, Input};
+use lightair_core::{Command, Id, Input, kinds};
 use serde_json::{Value, json};
 
 use super::StudioWindow;
@@ -20,18 +20,9 @@ pub(super) struct SourcePicker {
     _events: Subscription,
 }
 
-/// The list setting that picks the source for an input kind (screen capture depends on its mode).
+/// The setting that picks the source for an input kind (screen capture depends on its mode).
 pub(super) fn device_key(kind: &str, settings: &Value) -> Option<&'static str> {
-    match kind {
-        "macos-avcapture" | "macos-avcapture-fast" | "av_capture_input_v2" | "av_capture_input" => Some("device"),
-        "screen_capture" => Some(match settings["type"].as_i64().unwrap_or(0) {
-            1 => "window",
-            2 => "application",
-            _ => "display_uuid",
-        }),
-        "coreaudio_input_capture" | "coreaudio_output_capture" => Some("device_id"),
-        _ => None,
-    }
+    kinds::device_key(kind, settings)
 }
 
 fn file_key(kind: &str) -> Option<&'static str> {
@@ -62,7 +53,21 @@ const HIDDEN_APPS: &[&str] = &[
     "TextInputMenuAgent",
     "Lightair",
     "lightair",
+    // Windows
+    "Program Manager",
+    "explorer.exe",
+    "TextInputHost.exe",
+    "ApplicationFrameHost.exe",
+    "lightair.exe",
 ];
+
+/// "[App] Title" (macOS) or "[app.exe]: Title" (Windows): the app and the window's title.
+fn app_and_title(label: &str) -> (String, String) {
+    match label.strip_prefix('[').and_then(|r| r.split_once(']')) {
+        Some((app, title)) => (app.trim().to_string(), title.trim_start_matches(':').trim().to_string()),
+        None => (String::new(), label.to_string()),
+    }
+}
 
 /// One choice, split for display: what it is (title), what it belongs to or measures (detail).
 #[derive(Clone)]
@@ -74,7 +79,7 @@ pub(super) struct Choice {
 }
 
 /// Turns libobs's labels into titles: "[App] Window title" for windows, "Name: WxH @ x,y" for
-/// displays. Drops placeholders and system windows.
+/// displays. Drops placeholders and system windows. (`key` is the portable setting.)
 pub(super) fn choices(key: &str, options: &[(String, Value)]) -> Vec<Choice> {
     let mut out = Vec::new();
     for (label, value) in options {
@@ -84,25 +89,25 @@ pub(super) fn choices(key: &str, options: &[(String, Value)]) -> Vec<Choice> {
         }
         let choice = match key {
             "window" => {
-                let (app, title) = match label.strip_prefix('[').and_then(|r| r.split_once("] ")) {
-                    Some((app, title)) => (app.trim().to_string(), title.trim().to_string()),
-                    None => (String::new(), label.to_string()),
-                };
+                let (app, title) = app_and_title(label);
                 if HIDDEN_APPS.contains(&app.as_str()) || title.is_empty() {
                     continue;
                 }
                 Choice { title, detail: app.clone(), group: app, value: value.clone() }
             }
-            "display_uuid" => {
+            "display" => {
                 let (name, rest) = label.split_once(": ").unwrap_or((label, ""));
                 let size = rest.split(" @").next().unwrap_or("").replace('x', " × ");
                 Choice { title: name.to_string(), detail: size, group: String::new(), value: value.clone() }
             }
-            "application" => {
-                if HIDDEN_APPS.contains(&label) {
+            "app" => {
+                // Windows lists the app's windows: the app is what's shown
+                let (app, title) = app_and_title(label);
+                let (app, detail) = if app.is_empty() { (title, String::new()) } else { (app, title) };
+                if HIDDEN_APPS.contains(&app.as_str()) {
                     continue;
                 }
-                Choice { title: label.to_string(), detail: String::new(), group: String::new(), value: value.clone() }
+                Choice { title: app.trim_end_matches(".exe").to_string(), detail, group: String::new(), value: value.clone() }
             }
             _ => Choice { title: label.to_string(), detail: String::new(), group: String::new(), value: value.clone() },
         };
@@ -123,7 +128,16 @@ impl StudioWindow {
         if !refresh && let Some(list) = self.source_cache.borrow().get(&cache_key) {
             return list.clone();
         }
-        let list = self.studio.read(cx).engine().call(move |s| s.reconciler.input_options(input, key));
+        // the setting's name in the platform's libobs source
+        let obs_key = self
+            .studio
+            .read(cx)
+            .project()
+            .inputs
+            .get(&input)
+            .and_then(|i| lightair_engine::kinds::libobs_key(&i.kind, key))
+            .unwrap_or(key);
+        let list = self.studio.read(cx).engine().call(move |s| s.reconciler.input_options(input, obs_key));
         self.source_cache.borrow_mut().insert(cache_key, list.clone());
         list
     }
@@ -282,10 +296,11 @@ impl StudioWindow {
             .collect();
         let icon = source_icon(&input.kind, &input.settings);
         let title = match key {
-            "device" => "Choose a camera",
-            "display_uuid" => "Choose a display",
+            "device" if input.kind == kinds::CAMERA => "Choose a camera",
+            "device" => "Choose a microphone",
+            "display" => "Choose a display",
             "window" => "Choose a window",
-            "application" => "Choose an app",
+            "app" => "Choose an app",
             _ => "Choose an input",
         };
 
@@ -367,18 +382,18 @@ impl StudioWindow {
             body = body.child(grid);
         }
 
-        let mode = (input.kind == "screen_capture").then(|| {
-            let m = input.settings["type"].as_i64().unwrap_or(0);
+        let mode = (input.kind == kinds::SCREEN).then(|| {
+            let m = input.settings["mode"].as_i64().unwrap_or(kinds::DISPLAY);
             self.segmented(
                 "capture-mode",
-                [(0, "Display"), (1, "Window"), (2, "App")]
+                [(kinds::DISPLAY, "Display"), (kinds::WINDOW, "Window"), (kinds::APP, "App")]
                     .into_iter()
                     .map(|(v, label)| {
                         (
                             label,
                             Command::SetInputSettings {
                                 input: id,
-                                settings: merged(&input.settings, "type", json!(v)),
+                                settings: merged(&input.settings, "mode", json!(v)),
                             },
                             m == v,
                         )
@@ -446,9 +461,9 @@ impl StudioWindow {
 
 fn source_icon(kind: &str, settings: &Value) -> &'static str {
     match kind {
-        "screen_capture" => match settings["type"].as_i64().unwrap_or(0) {
-            1 => "app-window",
-            2 => "layout-grid",
+        kinds::SCREEN => match settings["mode"].as_i64().unwrap_or(kinds::DISPLAY) {
+            kinds::WINDOW => "app-window",
+            kinds::APP => "layout-grid",
             _ => "monitor",
         },
         _ => ui::input_icon(kind),
@@ -477,7 +492,14 @@ mod tests {
             "system windows and Lightair are hidden"
         );
         let displays = [("Built-in Retina Display: 3024x1964 @ 0,0".to_string(), json!("uuid"))];
-        let d = &choices("display_uuid", &displays)[0];
+        let d = &choices("display", &displays)[0];
         assert_eq!((d.title.as_str(), d.detail.as_str()), ("Built-in Retina Display", "3024 × 1964"));
+
+        // Windows's window_capture labels
+        let windows = [("[chrome.exe]: Lightair docs".to_string(), json!("a:b:chrome.exe"))];
+        let c = &choices("window", &windows)[0];
+        assert_eq!((c.group.as_str(), c.title.as_str()), ("chrome.exe", "Lightair docs"));
+        let a = &choices("app", &windows)[0];
+        assert_eq!((a.title.as_str(), a.detail.as_str()), ("chrome", "Lightair docs"));
     }
 }

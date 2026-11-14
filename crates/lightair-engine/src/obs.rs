@@ -20,6 +20,12 @@ impl Data {
         Self(NonNull::new(unsafe { sys::obs_data_create() }).expect("obs_data_create"))
     }
     /// Takes ownership of an `obs_data_t` reference (e.g. from `obs_data_create_from_json`).
+    /// Settings from JSON (an object; anything else gives empty settings).
+    pub fn from_json(value: &serde_json::Value) -> Self {
+        let json = std::ffi::CString::new(value.to_string()).unwrap_or_default();
+        Self::from_raw(unsafe { sys::obs_data_create_from_json(json.as_ptr()) }).unwrap_or_default()
+    }
+
     pub fn from_raw(ptr: *mut sys::obs_data_t) -> Option<Self> {
         NonNull::new(ptr).map(Self)
     }

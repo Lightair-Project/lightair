@@ -6,7 +6,6 @@
 //! libobs objects are named by their Lightair id, so user-facing names never collide.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::CString;
 
 use libobs_sys as sys;
 use lightair_core::catalog::lower;
@@ -124,31 +123,23 @@ impl Reconciler {
         if transition_changed || formats_added {
             self.prepare_transitions();
         }
+        let mut recreated = false;
         for patch in patches {
             match patch {
                 Patch::FormatAdded(_) | Patch::FormatRemoved(_) => {}
                 Patch::FormatChanged(format) => self.resize_format(format),
-                Patch::InputAdded(input) => {
-                    let settings = data_from_json(&input.settings);
-                    let timer = input.kind == TIMER_KIND;
-                    let kind = if timer { TIMER_SOURCE } else { input.kind.as_str() };
-                    match Source::create(kind, &input.id.to_string(), Some(&settings)) {
-                        Some(src) => {
-                            if timer {
-                                self.timers.add(input.id, src.as_ptr(), &input.settings);
-                                self.ensure_timers_tick();
-                            }
-                            let chain = unsafe { chain_build(src.as_ptr(), &lower(&input.effects)) };
-                            self.input_effects.insert(input.id, chain);
-                            self.inputs.insert(input.id, src);
-                        }
-                        None => tracing::warn!(kind = input.kind, name = input.name, "could not create input"),
-                    }
-                }
+                Patch::InputAdded(input) => self.create_input(input),
                 Patch::InputChanged { before, after } => {
-                    if let Some(src) = self.inputs.get(&after.id) {
+                    // a portable kind that plays as another libobs type now (Windows: a
+                    // display capture becoming a window capture)
+                    if crate::kinds::libobs_kind(&before.kind, &before.settings)
+                        != crate::kinds::libobs_kind(&after.kind, &after.settings)
+                    {
+                        self.recreate_input(after, project);
+                        recreated = true;
+                    } else if let Some(src) = self.inputs.get(&after.id) {
                         if before.settings != after.settings {
-                            src.update(&data_from_json(&after.settings));
+                            src.update(&data_from_json(&input_settings(after)));
                             if after.kind == TIMER_KIND {
                                 self.timers.configure(after.id, &after.settings);
                             }
@@ -157,18 +148,7 @@ impl Reconciler {
                         unsafe { chain_update(src.as_ptr(), chain, &lower(&before.effects), &lower(&after.effects)) };
                     }
                 }
-                Patch::InputRemoved(id) => {
-                    self.timers.remove(*id);
-                    if self.held.remove(id)
-                        && let Some(src) = self.inputs.get(id)
-                    {
-                        unsafe { sys::obs_source_dec_showing(src.as_ptr()) };
-                    }
-                    if let (Some(src), Some(mut chain)) = (self.inputs.get(id), self.input_effects.remove(id)) {
-                        unsafe { chain_remove(src.as_ptr(), &mut chain) };
-                    }
-                    self.inputs.remove(id);
-                }
+                Patch::InputRemoved(id) => self.destroy_input(*id),
                 // libobs draws the flattened hierarchy: pictures only, in world terms (a parent
                 // moving changes its children's world layouts, so they update too).
                 Patch::SceneAdded(scene) => {
@@ -215,7 +195,7 @@ impl Reconciler {
                 Patch::AudioSetup => {}
             }
         }
-        let audio_changed = patches.iter().any(|p| {
+        let audio_changed = recreated || patches.iter().any(|p| {
             matches!(
                 p,
                 Patch::TrackAdded(_)
@@ -489,6 +469,81 @@ impl Reconciler {
         self.scenes.retain(|(_, f), _| *f != id);
         self.canvases.remove(&id);
         self.formats.retain(|f| *f != id);
+    }
+
+    /// Makes an input's libobs source (as this platform plays its kind) and its effects.
+    fn create_input(&mut self, input: &lightair_core::Input) {
+        let timer = input.kind == TIMER_KIND;
+        let resolved = crate::kinds::resolve(&input.kind, &input.settings);
+        let kind = match &resolved {
+            _ if timer => TIMER_SOURCE,
+            Some((id, _)) => id,
+            None => input.kind.as_str(),
+        };
+        let settings = data_from_json(resolved.as_ref().map_or(&input.settings, |(_, s)| s));
+        match Source::create(kind, &input.id.to_string(), Some(&settings)) {
+            Some(src) => {
+                if timer {
+                    self.timers.add(input.id, src.as_ptr(), &input.settings);
+                    self.ensure_timers_tick();
+                }
+                let chain = unsafe { chain_build(src.as_ptr(), &lower(&input.effects)) };
+                self.input_effects.insert(input.id, chain);
+                self.inputs.insert(input.id, src);
+            }
+            None => tracing::warn!(kind, name = input.name, "could not create input"),
+        }
+    }
+
+    fn destroy_input(&mut self, id: Id) {
+        self.timers.remove(id);
+        if self.held.remove(&id)
+            && let Some(src) = self.inputs.get(&id)
+        {
+            unsafe { sys::obs_source_dec_showing(src.as_ptr()) };
+        }
+        if let (Some(src), Some(mut chain)) = (self.inputs.get(&id), self.input_effects.remove(&id)) {
+            unsafe { chain_remove(src.as_ptr(), &mut chain) };
+        }
+        self.inputs.remove(&id);
+    }
+
+    /// A new source for an input whose libobs type changed, put back in every scene that shows
+    /// it (the audio engine takes it again when audio syncs).
+    fn recreate_input(&mut self, input: &lightair_core::Input, project: &Project) {
+        let id = input.id;
+        let scenes: Vec<lightair_core::Scene> = project.scenes.iter().map(|s| s.flatten()).collect();
+        let using: Vec<(Id, Id)> = scenes
+            .iter()
+            .flat_map(|s| s.layers.iter().filter(|l| l.input == Some(id)).map(move |l| (s.id, l.id)))
+            .collect();
+        for (scene, layer) in &using {
+            for format in self.formats.clone() {
+                self.masks.remove(&(*scene, format, *layer));
+                if let Some(item) = self.items.remove(&(*scene, format, *layer)) {
+                    unsafe { sys::obs_sceneitem_remove(item.0) };
+                }
+            }
+        }
+        if let Some(host) = self.audio.as_mut() {
+            host.release(id);
+        }
+        let held = self.held.contains(&id);
+        self.destroy_input(id);
+        self.create_input(input);
+        if held && let Some(src) = self.inputs.get(&id) {
+            unsafe { sys::obs_source_inc_showing(src.as_ptr()) };
+            self.held.insert(id);
+        }
+        for scene in &scenes {
+            for (index, layer) in scene.layers.iter().enumerate().filter(|(_, l)| l.input == Some(id)) {
+                for format in self.formats.clone() {
+                    if self.scenes.contains_key(&(scene.id, format)) {
+                        self.add_layer(scene.id, format, layer, index);
+                    }
+                }
+            }
+        }
     }
 
     fn add_scene_in(&mut self, scene: &lightair_core::Scene, format: Id) {
@@ -1002,6 +1057,13 @@ impl Reconciler {
     /// What libobs actually holds, read back from libobs (not from our maps): per scene and
     /// format, the items bottom-to-top with source, position, bounds, rotation and visibility.
     /// Used to check that incremental reconciliation and a full rebuild produce identical state.
+    /// The libobs source type an input plays as (diagnostics and tests).
+    pub fn input_type(&self, input: Id) -> Option<String> {
+        let src = self.inputs.get(&input)?;
+        let id = unsafe { sys::obs_source_get_id(src.as_ptr()) };
+        (!id.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(id) }.to_string_lossy().into_owned())
+    }
+
     pub fn describe(&self) -> Vec<String> {
         unsafe extern "C" fn each(
             _: *mut sys::obs_scene_t,
@@ -1484,8 +1546,11 @@ fn transition_source(
     }
 }
 
+/// An input's settings as its libobs source takes them (portable kinds translated).
+fn input_settings(input: &lightair_core::Input) -> serde_json::Value {
+    crate::kinds::resolve(&input.kind, &input.settings).map_or_else(|| input.settings.clone(), |(_, s)| s)
+}
+
 fn data_from_json(value: &serde_json::Value) -> Data {
-    let json = CString::new(value.to_string()).unwrap_or_default();
-    let ptr = unsafe { sys::obs_data_create_from_json(json.as_ptr()) };
-    Data::from_raw(ptr).unwrap_or_default()
+    Data::from_json(value)
 }
