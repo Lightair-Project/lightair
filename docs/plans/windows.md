@@ -123,6 +123,17 @@ The app and engine call these instead of OS APIs. A test per module runs on both
 
    *Done when:* every feature in docs/02's catalog is marked for both platforms or has a stated
    one-platform reason.
+
+   Done: Camera Studio's Windows build (`cmake/windows.cmake`: the ONNX backends, ONNX Runtime
+   and DirectML from Microsoft's NuGet packages, OBS's module layout; MediaPipe segmentation
+   on Windows); VST3 editors in Win32 windows (phase 1); Lightair's own eyedropper
+   (`lightair_platform::pick_color`: a snapshot of every display with a loupe); running apps
+   (phase 1); docs/02 lists the one-platform features and why.
+
+   Not done here: Windows Studio Effects (reading a camera's effect state needs its Media
+   Foundation extended controls, and a camera that has them); the virtual camera, installer,
+   signing and updates are not built on macOS either and come with docs/15's distribution work
+   for both platforms at once.
 4. **Ongoing:** every new feature (the Screen Studio plan first) is built with both backends, and
    CI gates on both.
 

@@ -36,6 +36,12 @@ bool obs_module_load(void)
 {
 	makeup_presets_load();
 	presets_load();
+#ifdef _WIN32
+	/* ONNX Runtime (with DirectML) ships in the module's data folder */
+	char *ort = obs_module_file("onnxruntime.dll");
+	face_tracker_set_runtime_library(ort);
+	bfree(ort);
+#endif
 	obs_register_source(&beauty_filter_info);
 	obs_register_source(&shape_mask_info);
 	obs_register_source(&transform3d_info);

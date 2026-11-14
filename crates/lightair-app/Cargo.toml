@@ -29,13 +29,12 @@ parking_lot.workspace = true
 futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
-# The eyedropper (NSColorSampler), plugin editor windows, the macOS camera effects panel.
+# Plugin editor windows, the macOS camera effects panel.
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSColor", "NSColorSampler", "NSColorSpace"] }
 
 # The preview's frames as images (frame_view.rs), where there's no zero-copy path yet.
 [target.'cfg(not(target_os = "macos"))'.dependencies]

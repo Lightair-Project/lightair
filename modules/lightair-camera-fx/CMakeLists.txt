@@ -1,7 +1,15 @@
 # Lightair Camera Studio (docs/09-camera-studio.md): a libobs module built in-tree.
-# Builds lightair-camera-fx.plugin against the pinned libobs headers. Development builds link an
+# macOS: lightair-camera-fx.plugin, tracking and segmentation on Core ML, linked against an
 # installed OBS 33's libobs.framework (OBS_APP), like the rest of Lightair (IMPLEMENTATION.md).
+# Windows: lightair-camera-fx.dll, the same on ONNX Runtime with DirectML, linked against
+# OBS_DIR's obs.lib, laid out as OBS lays out its modules (windows.cmake).
 cmake_minimum_required(VERSION 3.24)
+# (WIN32 is only known after project(); the host is: Lightair builds natively on Windows)
+if(CMAKE_HOST_WIN32)
+  project(lightair-camera-fx VERSION 0.1.0 LANGUAGES C CXX)
+  include(cmake/windows.cmake)
+  return()
+endif()
 project(lightair-camera-fx VERSION 0.1.0 LANGUAGES C CXX OBJC OBJCXX)
 
 set(CMAKE_C_STANDARD 17)

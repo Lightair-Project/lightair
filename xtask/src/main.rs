@@ -64,12 +64,15 @@ fn modules() -> anyhow::Result<()> {
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
         let build = root.join("target/modules").join(&name);
         let mut configure = Command::new("cmake");
-        configure.arg("-S").arg(&dir).arg("-B").arg(&build).args(["-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo"]);
-        if cfg!(target_os = "macos") {
-            configure.arg("-DCMAKE_OSX_ARCHITECTURES=arm64");
+        configure.arg("-S").arg(&dir).arg("-B").arg(&build);
+        if cfg!(windows) {
+            // Visual Studio's generator (Ninja needs a developer prompt for MSVC)
+            configure.args(["-A", "x64"]);
+        } else {
+            configure.args(["-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo", "-DCMAKE_OSX_ARCHITECTURES=arm64"]);
         }
         run(&mut configure)?;
-        run(Command::new("cmake").arg("--build").arg(&build))?;
+        run(Command::new("cmake").arg("--build").arg(&build).args(["--config", "RelWithDebInfo"]))?;
     }
     Ok(())
 }

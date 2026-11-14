@@ -1,0 +1,81 @@
+# Camera Studio on Windows (docs/plans/windows.md, phase 3): the ONNX backends
+# (tracker/backend-onnx.cpp, tracker/segmenter.cpp) on ONNX Runtime with the DirectML execution
+# provider, any DirectX 12 GPU, CPU as fallback. The runtime is loaded at module load from the
+# module's data folder (module-main.c), so it can't clash with another plugin's copy.
+#
+# Output, as OBS lays out modules (what Lightair's engine looks for, runtime.rs):
+#   <build>/obs-plugins/64bit/lightair-camera-fx.dll
+#   <build>/data/obs-plugins/lightair-camera-fx/  (shaders, presets, models, onnxruntime.dll, DirectML.dll)
+
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(ROOT "${CMAKE_SOURCE_DIR}/../..")
+set(OBS_SRC "${ROOT}/third_party/obs-studio")
+set(SIMDE_DIR "${ROOT}/third_party/simde")
+set(OBS_DIR "$ENV{OBS_DIR}" CACHE PATH "OBS build or install whose obs.lib Lightair links")
+if(NOT OBS_DIR)
+  set(OBS_DIR "C:/Program Files/obs-studio")
+endif()
+set(DEPS "${CMAKE_SOURCE_DIR}/.deps")
+
+# Microsoft's NuGet packages: headers, onnxruntime.dll, DirectML.dll.
+set(ORT_VERSION 1.20.1)
+set(DML_VERSION 1.15.4)
+function(nuget name version dir)
+  if(NOT EXISTS "${dir}/.done")
+    set(pkg "${DEPS}/${name}.${version}.nupkg")
+    file(DOWNLOAD "https://www.nuget.org/api/v2/package/${name}/${version}" "${pkg}" STATUS st TLS_VERIFY ON)
+    list(GET st 0 code)
+    if(NOT code EQUAL 0)
+      message(FATAL_ERROR "could not download ${name} ${version}: ${st}")
+    endif()
+    file(ARCHIVE_EXTRACT INPUT "${pkg}" DESTINATION "${dir}")
+    file(TOUCH "${dir}/.done")
+  endif()
+endfunction()
+nuget(Microsoft.ML.OnnxRuntime.DirectML ${ORT_VERSION} "${DEPS}/ort")
+nuget(Microsoft.AI.DirectML ${DML_VERSION} "${DEPS}/dml")
+
+set(GEN "${CMAKE_BINARY_DIR}/generated")
+file(WRITE "${GEN}/obsconfig.h" "#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n")
+
+add_library(lightair-camera-fx MODULE
+  src/module-main.c
+  src/beauty-filter.c
+  src/face-geometry.c
+  src/makeup.c
+  src/grade.c
+  src/presets.c
+  src/fx-layers.c
+  src/shape-mask.c
+  src/transform3d.c
+  src/fx-filter.c
+  src/tracker/tracker-core.cpp
+  src/tracker/tracker-util.cpp
+  src/tracker/pigment-calib.cpp
+  src/tracker/mediapipe.cpp
+  src/tracker/backend-onnx.cpp
+  src/tracker/onnx-common.cpp
+  src/tracker/segmenter.cpp
+)
+target_compile_definitions(lightair-camera-fx PRIVATE BEAUTY_HAVE_LIBOBS PLUGIN_VERSION="${PROJECT_VERSION}"
+  _USE_MATH_DEFINES NOMINMAX)
+target_include_directories(lightair-camera-fx PRIVATE "${OBS_SRC}/libobs" "${GEN}" "${SIMDE_DIR}" src src/tracker
+  "${DEPS}/ort/build/native/include")
+target_link_directories(lightair-camera-fx PRIVATE "${OBS_DIR}/lib" "${OBS_DIR}/bin/64bit")
+target_link_libraries(lightair-camera-fx PRIVATE obs dxgi)
+set_target_properties(lightair-camera-fx PROPERTIES PREFIX ""
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/obs-plugins/64bit"
+  LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/obs-plugins/64bit"
+  LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/obs-plugins/64bit")
+
+# The module's data: everything in data/ except the Core ML packages, plus the runtime.
+set(DATA_OUT "${CMAKE_BINARY_DIR}/data/obs-plugins/lightair-camera-fx")
+add_custom_command(TARGET lightair-camera-fx POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/data" "${DATA_OUT}"
+  COMMAND "${CMAKE_COMMAND}" -E rm -rf "${DATA_OUT}/models/coreml"
+  COMMAND "${CMAKE_COMMAND}" -E copy "${DEPS}/ort/runtimes/win-x64/native/onnxruntime.dll" "${DATA_OUT}/"
+  COMMAND "${CMAKE_COMMAND}" -E copy "${DEPS}/dml/bin/x64-win/DirectML.dll" "${DATA_OUT}/"
+  VERBATIM)

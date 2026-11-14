@@ -244,6 +244,10 @@ static void beauty_update(void *data, obs_data_t *settings)
 
 	f->bg_mode = (int)obs_data_get_int(settings, "bg_mode");
 	f->bg_model = (int)obs_data_get_int(settings, "bg_model");
+#ifndef __APPLE__
+	/* Apple Vision and macOS's own effect are macOS's: elsewhere the mask is MediaPipe's */
+	f->bg_model = 1;
+#endif
 	f->bg_quality = (int)obs_data_get_int(settings, "bg_quality");
 	f->bg_show_mask = obs_data_get_bool(settings, "bg_show_mask");
 	f->bg_blur = (float)obs_data_get_int(settings, "bg_blur") / 100.0f;
