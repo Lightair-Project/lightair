@@ -1494,8 +1494,7 @@ impl StudioWindow {
         let id = scene.id;
         self.exec(Command::AddScene { scene, index: None }, cx);
         self.studio.update(cx, |s, cx| {
-            s.selected_scene = Some(id);
-            s.selected_layer = None;
+            s.select_scene(id);
             cx.notify();
         });
     }
@@ -2023,8 +2022,7 @@ impl StudioWindow {
                     }
                     let studio_mode = this.studio_mode;
                     this.studio.update(cx, |s, cx| {
-                        s.selected_scene = Some(id);
-                        s.selected_layer = None;
+                        s.select_scene(id);
                         if studio_mode {
                             cx.notify();
                         } else {
@@ -2039,7 +2037,7 @@ impl StudioWindow {
                     MouseButton::Right,
                     cx.listener(move |this, _, _, cx| {
                         this.studio.update(cx, |s, cx| {
-                            s.selected_scene = Some(id);
+                            s.select_scene(id);
                             cx.notify();
                         })
                     }),

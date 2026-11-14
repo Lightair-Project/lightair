@@ -734,6 +734,14 @@ impl Studio {
         self.selected_layer.into_iter().chain(self.also_selected.iter().copied()).collect()
     }
 
+    /// Selects a scene for editing: the Inspector shows the scene (no layer or mixer strip).
+    pub fn select_scene(&mut self, scene: Id) {
+        self.selected_scene = Some(scene);
+        self.selected_layer = None;
+        self.also_selected.clear();
+        self.selected_track = None;
+    }
+
     /// Selects a mixer track for the Inspector (and clears the layer selection).
     pub fn select_track(&mut self, track: Option<Id>) {
         self.selected_track = track;

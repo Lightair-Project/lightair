@@ -186,8 +186,7 @@ impl StudioWindow {
             Scene(id) => {
                 let studio_mode = self.studio_mode;
                 self.studio.update(cx, |s, cx| {
-                    s.selected_scene = Some(id);
-                    s.selected_layer = None;
+                    s.select_scene(id);
                     if studio_mode {
                         cx.notify();
                     } else {
