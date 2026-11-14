@@ -89,8 +89,8 @@ fn recent_clicks() -> Vec<(Instant, f32, f32)> {
 
 // ------------------------------------------------------------------ following, on a key
 
-/// The zoom following the pointer, whatever the scene's look says (a shortcut turns it on and
-/// off again); every screen with a look.
+/// Zoomed in, following the pointer, on looks whose zoom is "toggle" (a shortcut turns it on
+/// and off again).
 static FOLLOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Turns following on or off: whether it's on now.
@@ -430,8 +430,12 @@ unsafe extern "C" fn tick(data: *mut c_void, seconds: f32) {
 fn zoom_tick(f: &mut Filter, dt: f32) {
     let target = unsafe { sys::obs_filter_get_target(f.context) };
     let size = if target.is_null() { (0, 0) } else { unsafe { (sys::obs_source_get_base_width(target), sys::obs_source_get_base_height(target)) } };
-    // the shortcut: always in, following (only on a scene's look, not the catalog's pointer)
-    let mode = if following() && is_look(f) { 2 } else { f.look.zoom };
+    // toggle: in, following, while the shortcut has it on; else out
+    let mode = match f.look.zoom {
+        3 if following() => 2,
+        3 => 1,
+        m => m,
+    };
     if mode == 0 || size.0 == 0 || size.1 == 0 {
         f.cam = None;
         f.zoom_until = None;
@@ -453,8 +457,10 @@ fn zoom_tick(f: &mut Filter, dt: f32) {
     if clicked {
         f.zoom_until = Some(now + Duration::from_secs_f32(f.look.zoom_hold));
     }
-    let zoomed = match mode {
-        2 => true,
+    let zoomed = match (mode, f.look.zoom) {
+        (2, _) => true,
+        // toggled out: clicks don't zoom
+        (_, 3) => false,
         _ => f.zoom_until.is_some_and(|u| u > now),
     };
     let want = if zoomed { f.look.zoom_scale } else { 1.0 };
@@ -462,11 +468,6 @@ fn zoom_tick(f: &mut Filter, dt: f32) {
     cam_step(cam, want, pointer, size, f.look.zoom_motion, dt, clicked && !was_in && mode == 1);
 }
 
-/// Whether the filter is a scene's look (named for it by the reconciler).
-fn is_look(f: &Filter) -> bool {
-    let name = unsafe { sys::obs_source_get_name(f.context) };
-    !name.is_null() && unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes().starts_with(b"screen-look:")
-}
 
 /// Draws `tex` with its hot spot at `at`, `size` pixels square, turned by `angle` degrees.
 unsafe fn draw(t: &Textures, tex: *mut sys::gs_texture_t, at: (f32, f32), size: f32, hot: (f32, f32), angle: f32, opacity: f32) {

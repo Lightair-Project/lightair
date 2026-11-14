@@ -107,6 +107,7 @@ impl StudioWindow {
                     ("Off", set(ScreenLook { zoom: ScreenLook::ZOOM_OFF, ..look }), look.zoom == ScreenLook::ZOOM_OFF),
                     ("On clicks", set(ScreenLook { zoom: ScreenLook::ZOOM_CLICKS, ..look }), look.zoom == ScreenLook::ZOOM_CLICKS),
                     ("Always", set(ScreenLook { zoom: ScreenLook::ZOOM_ALWAYS, ..look }), look.zoom == ScreenLook::ZOOM_ALWAYS),
+                    ("Toggle", set(ScreenLook { zoom: ScreenLook::ZOOM_TOGGLE, ..look }), look.zoom == ScreenLook::ZOOM_TOGGLE),
                 ],
                 cx,
             ));
@@ -132,14 +133,14 @@ impl StudioWindow {
                     cx,
                 ),
             ));
-            body = body.child(note(if look.zoom == ScreenLook::ZOOM_CLICKS {
-                "Zooms in where you click and follows the pointer, then back out once you stop clicking."
-            } else {
-                "Always zoomed in, the view following the pointer."
+            body = body.child(note(match look.zoom {
+                ScreenLook::ZOOM_CLICKS => "Zooms in where you click and follows the pointer, then back out once you stop clicking.",
+                ScreenLook::ZOOM_TOGGLE => "Press the key to zoom in and follow the pointer; press it again to zoom back out.",
+                _ => "Always zoomed in, the view following the pointer.",
             }));
         }
-        // ---- following on a key: always in, following the pointer, until pressed again
-        {
+        // ---- toggle: its key, and whether it's in now
+        if look.zoom == ScreenLook::ZOOM_TOGGLE {
             let keys = self.prefs.global_hotkeys.iter().find(|h| h.action == crate::hotkeys::GlobalAction::FollowZoom).map(|h| crate::hotkeys::display(&h.keys));
             let following = lightair_engine::cursor::following();
             let control = div()
@@ -169,7 +170,7 @@ impl StudioWindow {
                 .when(following, |d| {
                     d.child(
                         Button::new("screen-follow-stop")
-                            .label("Following · Stop")
+                            .label("Zoomed in · Out")
                             .xsmall()
                             .outline()
                             .on_click(cx.listener(|_, _, _, cx| {
@@ -178,9 +179,7 @@ impl StudioWindow {
                             })),
                     )
                 });
-            body = body.child(row("Follow key", control)).child(note(
-                "Press it to zoom in and follow the pointer, whatever the zoom above says; press it again to go back.",
-            ));
+            body = body.child(row("Key", control));
         }
         // ---- pointer
         body = body

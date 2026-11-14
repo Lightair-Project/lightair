@@ -542,7 +542,7 @@ impl StudioWindow {
                 .items_center()
                 .gap_2()
                 .child(div().flex_none().child(crate::ui::icon("audio-lines").size(px(16.)).text_color(tok::text_secondary())))
-                .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().font_weight(FontWeight::SEMIBOLD).child(crate::mixer::track_name(project, track))),
+                .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().font_weight(FontWeight::SEMIBOLD).child(track.name.clone())),
         )
         .children(project.inputs.get(&track.input).and_then(|i| self.source_section(&i.clone(), cx)))
         .children(self.track_channels(project, track, cx))

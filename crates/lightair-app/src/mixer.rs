@@ -1930,22 +1930,6 @@ fn source_item(
 /// The microphone the OS is set to use (macOS's or Windows' default input).
 pub(crate) const SYSTEM_DEFAULT: &str = "System Default";
 
-/// Names a track was given for its source rather than by the user (it takes a new source's).
-const AUTO_NAMES: [&str; 4] = ["Mic", "Microphone", SYSTEM_DEFAULT, "Default mic"];
-
-/// Whether an input listens to the OS's default microphone.
-fn default_mic(i: &lightair_core::Input) -> bool {
-    let device = i.settings.get("device").and_then(|d| d.as_str()).unwrap_or("");
-    (i.kind == lightair_engine::devices::DEVICE_KIND || i.kind == kinds::MIC) && (device.is_empty() || device == "default")
-}
-
-/// A track's name as shown: one on the OS's default microphone still called "Mic" (as tracks
-/// were) is "System Default".
-pub(crate) fn track_name(p: &Project, t: &Track) -> String {
-    let auto = AUTO_NAMES.contains(&t.name.as_str());
-    if auto && p.inputs.get(&t.input).is_some_and(|i| default_mic(i)) { SYSTEM_DEFAULT.into() } else { t.name.clone() }
-}
-
 /// The apps that are open (the Dock's or taskbar's), name and capture id, by name; not
 /// Lightair itself.
 fn running_apps() -> Vec<(String, String)> {
@@ -1962,7 +1946,8 @@ fn source_cmd(p: &Project, track: Id, to: &Source, app_name: &str) -> Option<Com
     if kind.is_empty() {
         return None;
     }
-    let renamed = |t: &Track| if t.name == old.name || AUTO_NAMES.contains(&t.name.as_str()) { name.clone() } else { t.name.clone() };
+    // (a name the user gave it stays)
+    let renamed = |t: &Track| if t.name == old.name { name.clone() } else { t.name.clone() };
     let mut commands = Vec::new();
     let mut new_track = Track { channels: lightair_core::TrackChannels::All, ..(**t).clone() };
     new_track.name = renamed(t);
@@ -2024,7 +2009,7 @@ fn strip_views(p: &Project) -> Vec<StripView> {
         .map(|t| StripView {
             id: t.id,
             kind: MixerStrip::Track(t.id),
-            name: track_name(p, t),
+            name: t.name.clone(),
             volume_db: t.volume_db,
             muted: t.muted,
             cue: Some(t.cue),
