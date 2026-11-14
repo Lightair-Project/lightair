@@ -3,7 +3,6 @@
 //! filter, transition and keyframe controls.
 
 use super::*;
-use gpui_kit::component::Disableable;
 use lightair_render::sequence::{Clip, Content, Filter, Keyframe, ShapeKind, ShapeStyle, TextStyle, Transition, TransitionKind};
 
 /// Colours offered for words and shapes.
@@ -507,115 +506,78 @@ impl Editor {
 
     /// Position, scale, rotation and opacity at the playhead, and the clip's keyframes.
     pub(super) fn transform_section(&self, c: &Clip, body: Div, cx: &mut Context<Self>) -> Div {
+        use std::rc::Rc;
         let cid = c.id;
-        let t = self.playhead;
-        let tf = c.transform_at(t);
-        let set = move |this: &mut Self, f: &dyn Fn(&mut Transform), cx: &mut Context<Self>| {
-            let at = this.playhead;
-            this.change(
-                |s| {
-                    if let Some(c) = s.clip_mut(cid) {
-                        let mut tr = c.transform_at(at);
-                        f(&mut tr);
-                        c.set_transform_at(at, tr);
-                    }
-                },
-                cx,
-            )
-        };
-        let inside = c.start_ms <= t && t < c.end_ms();
-        let rel = t.saturating_sub(c.start_ms);
-        let here = c.keyframes.iter().any(|k| k.at_ms.abs_diff(rel) < 40);
-        let prev = c.keyframes.iter().rev().find(|k| k.at_ms + 40 < rel).map(|k| c.start_ms + k.at_ms);
-        let next = c.keyframes.iter().find(|k| k.at_ms > rel + 40).map(|k| c.start_ms + k.at_ms);
-        let keys = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                ui::icon_button("ed-kprev", "chevron-left", if prev.is_some() { tok::text_secondary() } else { tok::text_tertiary() })
-                    .on_click(cx.listener(move |this, _, _, cx| if let Some(p) = prev { this.seek(p, cx) })),
-            )
-            .child(
-                Button::new("ed-key")
-                    .label(if here { "Remove keyframe" } else { "Add keyframe" })
-                    .icon(ui::icon("diamond"))
-                    .xsmall()
-                    .outline()
-                    .disabled(!inside)
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_keyframe(cid, cx))),
-            )
-            .child(
-                ui::icon_button("ed-knext", "chevron-right", if next.is_some() { tok::text_secondary() } else { tok::text_tertiary() })
-                    .on_click(cx.listener(move |this, _, _, cx| if let Some(n) = next { this.seek(n, cx) })),
-            );
-        body.child(label("TRANSFORM"))
-            .child(self.stepper("ed-scale", "Scale", format!("{:.0}%", tf.scale * 100.0), move |this, d, cx| set(this, &|t| t.scale = (t.scale + d * 0.05).clamp(0.05, 10.0), cx), cx))
-            .child(self.stepper("ed-x", "Position X", format!("{:.0}", tf.x), move |this, d, cx| set(this, &|t| t.x += d * 10.0, cx), cx))
-            .child(self.stepper("ed-y", "Position Y", format!("{:.0}", tf.y), move |this, d, cx| set(this, &|t| t.y += d * 10.0, cx), cx))
-            .child(self.stepper("ed-rot", "Rotate", format!("{:.0}°", tf.rotation), move |this, d, cx| set(this, &|t| t.rotation += d * 5.0, cx), cx))
-            .child(self.stepper("ed-op", "Opacity", format!("{:.0}%", tf.opacity * 100.0), move |this, d, cx| set(this, &|t| t.opacity = (t.opacity + d * 0.1).clamp(0.0, 1.0), cx), cx))
+        let inside = c.start_ms <= self.playhead && self.playhead < c.end_ms();
+        body.child(self.keyed_title(c, "TRANSFORM", &lightair_render::keys::TRANSFORM, cx))
+            .child(self.keyed(c, "scale", "Scale", Rc::new(|v| format!("{:.0}%", v * 100.0)), 0.05, (0.05, 10.0), cx))
+            .child(self.keyed(c, "x", "Position X", Rc::new(|v| format!("{v:.0}")), 10.0, (-20_000.0, 20_000.0), cx))
+            .child(self.keyed(c, "y", "Position Y", Rc::new(|v| format!("{v:.0}")), 10.0, (-20_000.0, 20_000.0), cx))
+            .child(self.keyed(c, "rotation", "Rotate", Rc::new(|v| format!("{v:.0}°")), 5.0, (-3_600.0, 3_600.0), cx))
+            .child(self.keyed(c, "opacity", "Opacity", Rc::new(|v| format!("{:.0}%", v * 100.0)), 0.1, (0.0, 1.0), cx))
             .child(Button::new("ed-reset").label("Reset").icon(ui::icon("rotate-ccw")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
                 this.change(
                     |s| {
                         if let Some(c) = s.clip_mut(cid) {
                             c.transform = Transform::default();
                             c.keyframes.clear();
+                            for p in lightair_render::keys::TRANSFORM {
+                                c.anim.remove(p);
+                            }
                         }
                     },
                     cx,
                 )
             })))
-            .child(label("KEYFRAMES"))
-            .child(keys)
-            .child(hint(match (c.keyframes.len(), inside) {
-                (_, false) => "Move the playhead over the clip to set its keyframes.".to_string(),
-                (0, _) => "Add a keyframe, move the playhead, then change the transform: it moves between them.".to_string(),
-                (n, _) => format!("{n} keyframes: changes above set the one at the playhead."),
+            .child(hint(if inside {
+                "◇ keys a value at the playhead; with keys, a change sets the one there. The ◇ by the title keys them all."
+            } else {
+                "Move the playhead over the clip to key its values."
             }))
             .map(|b| self.fades_section(c, b, cx))
     }
 
-    fn toggle_keyframe(&mut self, clip: Id, cx: &mut Context<Self>) {
-        let t = self.playhead;
-        self.change(
-            |s| {
-                let Some(c) = s.clip_mut(clip) else { return };
-                let rel = t.saturating_sub(c.start_ms).min(c.len_ms());
-                if let Some(i) = c.keyframes.iter().position(|k| k.at_ms.abs_diff(rel) < 40) {
-                    let gone = c.keyframes.remove(i);
-                    if c.keyframes.is_empty() {
-                        c.transform = gone.transform;
-                    }
-                } else {
-                    let transform = c.transform_at(t);
-                    c.keyframes.push(Keyframe { at_ms: rel, transform });
-                    c.keyframes.sort_by_key(|k| k.at_ms);
-                }
-            },
-            cx,
-        );
-    }
 
     pub(super) fn filter_section(&self, c: &Clip, body: Div, cx: &mut Context<Self>) -> Div {
         let cid = c.id;
         let f = c.filter;
-        let current = Filter::PRESETS.iter().position(|p| p.1 == f).map_or(-1, |i| i as i32);
-        let presets: Vec<(&'static str, i32)> = Filter::PRESETS.iter().enumerate().map(|(i, p)| (p.0, i as i32)).collect();
-        let set = move |this: &mut Self, g: &dyn Fn(&mut Filter), cx: &mut Context<Self>| this.change(|s| if let Some(c) = s.clip_mut(cid) { g(&mut c.filter) }, cx);
-        let pct = |v: f32| format!("{:+.0}", v * 100.0);
+        // the filter is chosen in the media panel's Filters; here, how it's set
+        let name = match Filter::PRESETS.iter().find(|p| p.1 == f) {
+            Some((n, _)) => (*n).to_string(),
+            None => "Custom".to_string(),
+        };
+        use std::rc::Rc;
         body.child(label("FILTER"))
-            .child(self.chips("ed-fpre", &presets, current, move |this, v, cx| {
-                let p = Filter::PRESETS[v as usize].1;
-                set(this, &|f| *f = p, cx)
-            }, cx))
-            .child(label("ADJUST"))
-            .child(self.stepper("ed-fb", "Brightness", pct(f.brightness), move |this, d, cx| set(this, &|f| f.brightness = (f.brightness + d * 0.05).clamp(-1.0, 1.0), cx), cx))
-            .child(self.stepper("ed-fc", "Contrast", pct(f.contrast - 1.0), move |this, d, cx| set(this, &|f| f.contrast = (f.contrast + d * 0.05).clamp(0.0, 2.0), cx), cx))
-            .child(self.stepper("ed-fs", "Saturation", pct(f.saturation - 1.0), move |this, d, cx| set(this, &|f| f.saturation = (f.saturation + d * 0.1).clamp(0.0, 2.0), cx), cx))
-            .child(self.stepper("ed-ft", "Warmth", pct(f.temperature), move |this, d, cx| set(this, &|f| f.temperature = (f.temperature + d * 0.1).clamp(-1.0, 1.0), cx), cx))
-            .child(self.stepper("ed-fv", "Vignette", format!("{:.0}", f.vignette * 100.0), move |this, d, cx| set(this, &|f| f.vignette = (f.vignette + d * 0.1).clamp(0.0, 1.0), cx), cx))
-            .child(self.stepper("ed-fbl", "Blur", format!("{:.0}", f.blur * 100.0), move |this, d, cx| set(this, &|f| f.blur = (f.blur + d * 0.1).clamp(0.0, 1.0), cx), cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().text_size(px(12.)).child(name))
+                    .when(!f.is_none(), |d| {
+                        d.child(Button::new("ed-fclear").label("Reset").xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
+                            this.change(
+                                |s| {
+                                    if let Some(c) = s.clip_mut(cid) {
+                                        c.filter = Filter::default();
+                                        for p in lightair_render::keys::FILTER {
+                                            c.anim.remove(p);
+                                        }
+                                    }
+                                },
+                                cx,
+                            )
+                        })))
+                    }),
+            )
+            .child(hint("Choose one in the Filters tab on the left."))
+            .child(self.keyed_title(c, "ADJUST", &lightair_render::keys::FILTER, cx))
+            .child(self.keyed(c, "brightness", "Brightness", Rc::new(|v| format!("{:+.0}", v * 100.0)), 0.05, (-1.0, 1.0), cx))
+            .child(self.keyed(c, "contrast", "Contrast", Rc::new(|v| format!("{:+.0}", (v - 1.0) * 100.0)), 0.05, (0.0, 2.0), cx))
+            .child(self.keyed(c, "saturation", "Saturation", Rc::new(|v| format!("{:+.0}", (v - 1.0) * 100.0)), 0.1, (0.0, 2.0), cx))
+            .child(self.keyed(c, "temperature", "Warmth", Rc::new(|v| format!("{:+.0}", v * 100.0)), 0.1, (-1.0, 1.0), cx))
+            .child(self.keyed(c, "vignette", "Vignette", Rc::new(|v| format!("{:.0}", v * 100.0)), 0.1, (0.0, 1.0), cx))
+            .child(self.keyed(c, "blur", "Blur", Rc::new(|v| format!("{:.0}", v * 100.0)), 0.1, (0.0, 1.0), cx))
     }
 
     pub(super) fn transition_section(&self, c: &Clip, body: Div, cx: &mut Context<Self>) -> Div {
@@ -625,20 +587,21 @@ impl Editor {
             return body.child(label("TRANSITION")).child(hint("A transition plays across a cut: put this clip right after another on its track."));
         };
         let longest = (prev.len_ms().min(c.len_ms())).max(100);
-        let kinds: [(&'static str, Option<TransitionKind>); 5] = [
-            ("None", None),
-            ("Crossfade", Some(TransitionKind::Crossfade)),
-            ("Dip to black", Some(TransitionKind::DipToBlack)),
-            ("Slide", Some(TransitionKind::Slide)),
-            ("Zoom", Some(TransitionKind::Zoom)),
-        ];
         let kind = c.transition.map(|t| t.kind);
         let dur = c.transition.map_or(500, |t| t.duration_ms);
         let set = move |this: &mut Self, kind: Option<TransitionKind>, dur: u64, cx: &mut Context<Self>| {
             this.change(|s| if let Some(c) = s.clip_mut(cid) { c.transition = kind.map(|kind| Transition { kind, duration_ms: dur.min(longest) }) }, cx)
         };
         body.child(label("TRANSITION FROM THE CLIP BEFORE"))
-            .child(self.chips("ed-tk", &kinds, kind, move |this, v, cx| set(this, v, dur, cx), cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().text_size(px(12.)).child(kind.map_or("None", TransitionKind::name)))
+                    .when(kind.is_some(), |d| d.child(Button::new("ed-tnone").label("Remove").icon(ui::icon("x")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| set(this, None, dur, cx))))),
+            )
+            .child(hint("Choose one in the Transitions tab on the left."))
             .when(kind.is_some(), |d| {
                 d.child(label("LENGTH")).child(self.chips(
                     "ed-td",

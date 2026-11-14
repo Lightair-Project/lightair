@@ -15,31 +15,7 @@ impl Editor {
 
     pub(super) fn effects_section(&self, c: &Clip, mut body: Div, cx: &mut Context<Self>) -> Div {
         let cid = c.id;
-        let me = cx.entity().downgrade();
-        let add = Button::new("ed-fx-add").label("Add effect").icon(ui::icon("plus")).xsmall().outline().dropdown_menu(move |mut menu, _, _| {
-            for cat in catalog::Category::ALL {
-                let defs: Vec<_> = catalog::CATALOG.iter().filter(|d| d.kind.starts_with("fx.") && d.category == cat).collect();
-                if defs.is_empty() {
-                    continue;
-                }
-                menu = menu.label(cat.name());
-                for d in defs {
-                    let me = me.clone();
-                    let (kind, settings) = (d.kind, d.defaults());
-                    menu = menu.item(PopupMenuItem::new(d.name).icon(ui::icon(d.icon)).on_click(move |_, _, cx| {
-                        let settings = settings.clone();
-                        if let Some(me) = me.upgrade() {
-                            me.update(cx, |this, cx| this.set_effects(cid, |e| e.push(ClipEffect { kind: kind.into(), settings, on: true }), cx));
-                        }
-                    }));
-                }
-            }
-            menu
-        });
-        body = body.child(label("EFFECTS")).child(div().flex().child(add));
-        if c.effects.is_empty() {
-            return body.child(hint("The Live effects (VHS, glow, blur, swirl, duotone…) on this clip's picture, run in order."));
-        }
+        body = body.child(label("EFFECTS")).child(hint("Run in order. Add more from the Effects tab on the left."));
         for (n, e) in c.effects.iter().enumerate() {
             let Some(def) = catalog::def(&e.kind) else { continue };
             let on = e.on;
@@ -55,15 +31,33 @@ impl Editor {
                 })))
                 .child(ui::icon_button(("ed-fx-up", n), "arrow-up", if n > 0 { tok::text_secondary() } else { tok::text_tertiary() }).on_click(cx.listener(move |this, _, _, cx| {
                     if n > 0 {
-                        this.set_effects(cid, |e| e.swap(n, n - 1), cx)
+                        this.change(
+                            |s| {
+                                if let Some(c) = s.clip_mut(cid) {
+                                    c.effects.swap(n, n - 1);
+                                    renumber_keys(c, |k| if k == n { Some(n - 1) } else if k == n - 1 { Some(n) } else { Some(k) });
+                                }
+                            },
+                            cx,
+                        )
                     }
                 })))
                 .child(ui::icon_button(("ed-fx-del", n), "x", tok::text_secondary()).on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_effects(cid, |e| {
-                        if n < e.len() {
-                            e.remove(n);
-                        }
-                    }, cx)
+                    this.change(
+                        |s| {
+                            if let Some(c) = s.clip_mut(cid)
+                                && n < c.effects.len()
+                            {
+                                c.effects.remove(n);
+                                renumber_keys(c, |k| match k.cmp(&n) {
+                                    std::cmp::Ordering::Less => Some(k),
+                                    std::cmp::Ordering::Equal => None,
+                                    std::cmp::Ordering::Greater => Some(k - 1),
+                                });
+                            }
+                        },
+                        cx,
+                    )
                 })));
             body = body.child(head);
             let settings = serde_json::Value::Object(e.settings.clone());
@@ -71,16 +65,10 @@ impl Editor {
                 let id = n * 16 + k;
                 match *control {
                     Control::Slider(sl) => {
-                        let v = sl.value(&settings);
-                        let step = (sl.max - sl.min) / 20.0;
-                        body = body.child(self.stepper_dyn(("ed-fx-s", id), sl.label, sl.display(v), move |this, d, cx| {
-                            this.set_effects(cid, |e| {
-                                if let Some(x) = e.get_mut(n) {
-                                    let cur = x.settings.get(sl.key).and_then(serde_json::Value::as_f64).unwrap_or(sl.default);
-                                    x.settings.insert(sl.key.into(), sl.json(cur + d as f64 * step));
-                                }
-                            }, cx)
-                        }, cx));
+                        // keyable, as every number is
+                        let _ = (id, &settings);
+                        let step = ((sl.max - sl.min) / 20.0) as f32;
+                        body = body.child(self.keyed(c, format!("fx.{n}.{}", sl.key), sl.label, std::rc::Rc::new(move |v| sl.display(v as f64)), step, (sl.min as f32, sl.max as f32), cx));
                     }
                     Control::Choice { key, label: name, options, default } => {
                         let cur = settings.get(key).cloned().unwrap_or(default.json());
@@ -143,13 +131,26 @@ impl Editor {
         body
     }
 
-    /// A stepper whose id is made at run time (one per effect control).
-    fn stepper_dyn(&self, id: (&'static str, usize), name: &'static str, value: String, step: impl Fn(&mut Self, f32, &mut Context<Self>) + Copy + 'static, cx: &mut Context<Self>) -> Div {
-        self.field(SharedString::from(format!("{}-{}", id.0, id.1)), name, value, std::rc::Rc::new(step), cx)
-    }
-
     fn chips_dyn<T: Copy + PartialEq + 'static>(&self, id: (&'static str, usize), options: &[(&'static str, T)], current: T, on: impl Fn(&mut Self, T, &mut Context<Self>) + Copy + 'static, cx: &mut Context<Self>) -> Div {
         self.segmented(SharedString::from(format!("{}-{}", id.0, id.1)), options, current, on, cx)
+    }
+}
+
+/// An effect's keys ("fx.<n>.…") follow it to its new place (`None`: it's gone).
+fn renumber_keys(c: &mut Clip, to: impl Fn(usize) -> Option<usize>) {
+    let old = std::mem::take(&mut c.anim);
+    for (p, keys) in old {
+        let moved = p.strip_prefix("fx.").and_then(|rest| rest.split_once('.')).and_then(|(n, k)| n.parse::<usize>().ok().map(|n| (n, k.to_string())));
+        match moved {
+            Some((n, k)) => {
+                if let Some(m) = to(n) {
+                    c.anim.insert(format!("fx.{m}.{k}"), keys);
+                }
+            }
+            None => {
+                c.anim.insert(p, keys);
+            }
+        }
     }
 }
 

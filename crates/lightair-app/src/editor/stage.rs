@@ -43,7 +43,7 @@ impl Editor {
     }
 
     /// A window point in result pixels.
-    fn to_result(&self, p: Point<Pixels>) -> Option<(f32, f32)> {
+    pub(super) fn to_result(&self, p: Point<Pixels>) -> Option<(f32, f32)> {
         let (o, k, off) = self.stage()?;
         Some(((f32::from(p.x - o.x) - off.0) / k, (f32::from(p.y - o.y) - off.1) / k))
     }
@@ -54,7 +54,7 @@ impl Editor {
     }
 
     /// The topmost picture under a point (result pixels).
-    fn picture_at(&self, p: (f32, f32)) -> Option<Placed> {
+    pub(super) fn picture_at(&self, p: (f32, f32)) -> Option<Placed> {
         self.placed.iter().rev().find(|q| (p.0 - q.center.0).abs() <= q.size.0 / 2.0 && (p.1 - q.center.1).abs() <= q.size.1 / 2.0).copied()
     }
 
@@ -129,7 +129,13 @@ impl Editor {
         if let Some(pr) = &mut self.project
             && let Some(c) = pr.sequence.clip_mut(d.clip)
         {
-            c.set_transform_at(t, tr);
+            // each value that changed, as a property: its key at the playhead when it's keyed
+            let now = c.transform_at(t);
+            for (p, a, b) in [("x", now.x, tr.x), ("y", now.y, tr.y), ("scale", now.scale, tr.scale)] {
+                if a != b {
+                    kit::set_prop(c, p, t, b);
+                }
+            }
             self.pending.lock().unwrap().seq = Some(pr.sequence.clone());
         }
         self.request(t);

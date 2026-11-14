@@ -3,7 +3,6 @@
 //! sound and cleaning up voices (made on a thread, then mixed in their place).
 
 use super::*;
-use gpui_kit::component::Disableable;
 use lightair_render::sequence::{Clip, VoiceClean, VolumeKey};
 
 /// Voice clean-up strengths offered: (name, amount; negative: off).
@@ -172,57 +171,14 @@ impl Editor {
         let t = self.playhead;
         let on_video = self.seq().and_then(|s| s.find(cid)).is_some_and(|(ti, _)| self.seq().is_some_and(|s| s.tracks[ti].kind == TrackKind::Video));
         let detachable = on_video && !m.audio.is_empty() && !c.muted;
-        let inside = c.start_ms <= t && t < c.end_ms();
-        let rel = t.saturating_sub(c.start_ms);
-        let here = c.volume_keys.iter().any(|k| k.at_ms.abs_diff(rel) < 40);
-        let prev = c.volume_keys.iter().rev().find(|k| k.at_ms + 40 < rel).map(|k| c.start_ms + k.at_ms);
-        let next = c.volume_keys.iter().find(|k| k.at_ms > rel + 40).map(|k| c.start_ms + k.at_ms);
-        let keys = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                ui::icon_button("ed-vprev", "chevron-left", if prev.is_some() { tok::text_secondary() } else { tok::text_tertiary() })
-                    .on_click(cx.listener(move |this, _, _, cx| if let Some(p) = prev { this.seek(p, cx) })),
-            )
-            .child(
-                Button::new("ed-vkey")
-                    .label(if here { "Remove volume key" } else { "Add volume key" })
-                    .icon(ui::icon("diamond"))
-                    .xsmall()
-                    .outline()
-                    .disabled(!inside)
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_volume_key(cid, cx))),
-            )
-            .child(
-                ui::icon_button("ed-vnext", "chevron-right", if next.is_some() { tok::text_secondary() } else { tok::text_tertiary() })
-                    .on_click(cx.listener(move |this, _, _, cx| if let Some(n) = next { this.seek(n, cx) })),
-            );
         let voice = c.voice.map_or(-1, |v| (v.amount * 100.0).round() as i32);
         let podcast = c.voice.is_some_and(|v| v.podcast);
-        let shown = c.volume_at(t.clamp(c.start_ms, c.end_ms().saturating_sub(1)));
+        let _ = t;
         body.child(label("VOLUME"))
-            .child(self.stepper("ed-vol", "Volume", format!("{:.0}%", shown * 100.0), move |this, d, cx| {
-                let at = this.playhead;
-                this.change(
-                    |s| {
-                        if let Some(c) = s.clip_mut(cid) {
-                            let v = (c.volume_at(at) + d * 0.1).clamp(0.0, 4.0);
-                            c.set_volume_at(at, (v * 10.0).round() / 10.0);
-                        }
-                    },
-                    cx,
-                )
-            }, cx))
+            .child(self.keyed(c, "volume", "Volume", std::rc::Rc::new(|v| format!("{:.0}%", v * 100.0)), 0.1, (0.0, 4.0), cx))
             .child(self.chips("ed-mute", &[("Sound on", false), ("Muted", true)], c.muted, move |this, v, cx| {
                 this.change(|s| if let Some(c) = s.clip_mut(cid) { c.muted = v }, cx)
             }, cx))
-            .child(keys)
-            .child(hint(match (c.volume_keys.len(), inside) {
-                (_, false) => "Move the playhead over the clip to set its volume keys.".to_string(),
-                (0, _) => "Volume keys make the sound rise and fall: add one, move, change the volume.".to_string(),
-                (n, _) => format!("{n} volume keys: the volume above sets the one at the playhead."),
-            }))
             .map(|b| self.fades_section(c, b, cx))
             .child(label("UNDER VOICES"))
             .child(self.chips("ed-duck", &[("As it is", false), ("Turned down", true)], c.duck, move |this, v, cx| {
@@ -288,26 +244,6 @@ impl Editor {
             .child(hint("From and to black and silence: the picture and its sound together."))
     }
 
-    fn toggle_volume_key(&mut self, clip: Id, cx: &mut Context<Self>) {
-        let t = self.playhead;
-        self.change(
-            |s| {
-                let Some(c) = s.clip_mut(clip) else { return };
-                let rel = t.saturating_sub(c.start_ms).min(c.len_ms());
-                if let Some(i) = c.volume_keys.iter().position(|k| k.at_ms.abs_diff(rel) < 40) {
-                    let gone = c.volume_keys.remove(i);
-                    if c.volume_keys.is_empty() {
-                        c.volume = gone.volume;
-                    }
-                } else {
-                    let volume = c.volume_at(t);
-                    c.volume_keys.push(VolumeKey { at_ms: rel, volume });
-                    c.volume_keys.sort_by_key(|k| k.at_ms);
-                }
-            },
-            cx,
-        );
-    }
 }
 
 impl Editor {
