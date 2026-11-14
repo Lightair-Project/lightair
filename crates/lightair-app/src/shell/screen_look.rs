@@ -3,6 +3,8 @@
 //! pointer and clicks are drawn on them. The engine puts it on every screen capture in the
 //! scene (`lightair_engine::cursor`).
 
+use gpui_kit::component::Sizable;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::slider::Slider;
 use gpui_kit::*;
 use lightair_core::{Command, Project, Scene, ScreenLook};
@@ -29,7 +31,8 @@ fn slider_row(name: &'static str, slider: Slider, value: String) -> Div {
 }
 
 fn note(text: &'static str) -> Div {
-    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(text)
+    // (min_w_0: in a row, it wraps instead of running past the edge)
+    div().min_w_0().text_size(px(11.)).text_color(tok::text_tertiary()).child(text)
 }
 
 impl StudioWindow {
@@ -54,6 +57,38 @@ impl StudioWindow {
         }
         if screens == 0 {
             body = body.child(note("Add a screen to this scene: it zooms and draws the pointer there."));
+        }
+        // clicks (for the zoom and their effects) need the OS to let Lightair see them
+        let wants_clicks = look.zoom == ScreenLook::ZOOM_CLICKS || (look.cursor && look.clicks > 0);
+        if wants_clicks && !lightair_platform::input::can_listen() {
+            body = body.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .p_2()
+                    .rounded(px(6.))
+                    .bg(tok::bg_raised())
+                    .child(div().flex_none().pt(px(1.)).child(ui::icon("info").size(px(14.)).text_color(tok::text_secondary())))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .items_start()
+                            .gap_2()
+                            .child(note("Clicks need Input Monitoring for Lightair. Until it's on, zooms don't follow clicks and clicks aren't drawn."))
+                            .child(
+                                Button::new("screen-input-monitoring")
+                                    .label("Open Settings")
+                                    .icon(ui::icon("external-link"))
+                                    .xsmall()
+                                    .outline()
+                                    .on_click(|_, _, _| lightair_platform::input::open_input_monitoring_settings()),
+                            ),
+                    ),
+            );
         }
         // ---- zoom
         body = body
@@ -154,19 +189,6 @@ impl StudioWindow {
                     ],
                     cx,
                 ));
-        }
-        // clicks (for the zoom and their effects) need the OS to let Lightair see them
-        let wants_clicks = look.zoom == ScreenLook::ZOOM_CLICKS || (look.cursor && look.clicks > 0);
-        if wants_clicks && !lightair_platform::input::can_listen() {
-            body = body.child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_1p5()
-                    .pt_1()
-                    .child(ui::icon("info").size(px(13.)).text_color(tok::text_tertiary()))
-                    .child(note("Clicks need Input Monitoring for Lightair (System Settings › Privacy & Security). Until then, zooms wait for none and clicks aren't drawn.")),
-            );
         }
         body
     }

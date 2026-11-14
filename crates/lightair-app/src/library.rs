@@ -1167,7 +1167,7 @@ impl Render for Library {
                                     .flex()
                                     .items_center()
                                     .gap_3()
-                                    .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(title))
+                                    .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(title))
                                     .when(size > 0, |d| d.child(div().text_size(px(12.)).text_color(tok::text_tertiary()).child(bytes_label(size))))
                                     .child(div().flex_1())
                                     .child(div().w(px(280.)).child(TextInput::new(&self.search).small())),

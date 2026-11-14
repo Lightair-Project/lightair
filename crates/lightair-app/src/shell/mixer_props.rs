@@ -296,9 +296,12 @@ impl StudioWindow {
                             .flex()
                             .items_center()
                             .justify_between()
+                            .gap_3()
                             .py_1()
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .flex()
                                     .flex_col()
                                     .child(div().text_size(px(12.)).child("Into Program too"))
