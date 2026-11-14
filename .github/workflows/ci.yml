@@ -1,0 +1,74 @@
+# Lightair builds and tests on both platforms (docs/plans/windows.md).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # libobs from the pinned submodule (the same version the bindings come from), without
+      # OBS's own UI, browser source or scripting.
+      - name: libobs cache
+        id: obs-cache
+        uses: actions/cache@v4
+        with:
+          path: obs
+          key: obs-windows-${{ hashFiles('.git/modules/third_party/obs-studio/HEAD') }}-v1
+
+      - name: Build libobs
+        if: steps.obs-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: third_party/obs-studio
+        run: |
+          cmake --preset windows-x64 `
+            -DENABLE_UI=OFF -DENABLE_BROWSER=OFF -DENABLE_SCRIPTING=OFF -DENABLE_VST=OFF `
+            -DENABLE_AJA=OFF -DENABLE_VLC=OFF
+          cmake --build --preset windows-x64 --config RelWithDebInfo
+          cmake --install build_x64 --config RelWithDebInfo --prefix "$env:GITHUB_WORKSPACE/obs"
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE/obs/lib" | Out-Null
+          Copy-Item build_x64/libobs/RelWithDebInfo/obs.lib "$env:GITHUB_WORKSPACE/obs/lib/"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: ffmpeg (the recording tests read files back with ffprobe)
+        run: choco install ffmpeg -y --no-progress
+
+      - name: Clippy
+        env:
+          OBS_DIR: ${{ github.workspace }}/obs
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        env:
+          OBS_DIR: ${{ github.workspace }}/obs
+        run: cargo xtask test
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Checking needs only libobs's headers (the submodule); running needs an OBS.app, which
+      # the macOS tests run against on a development Mac.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

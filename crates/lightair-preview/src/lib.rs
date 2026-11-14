@@ -1,14 +1,21 @@
-//! Zero-copy canvas preview (docs/04-engine-libobs.md#preview-rendering).
+//! Canvas preview (docs/04-engine-libobs.md#preview-rendering).
 //!
-//! libobs renders the program canvas into a small pool of IOSurface-backed textures on its
-//! graphics thread; the UI takes the newest finished buffer as a `CVPixelBuffer` and hands it
-//! to GPUI's `surface()` element. No pixels are copied on the CPU.
+//! libobs renders the canvas, scaled to the preview's size, on its graphics thread; the UI takes
+//! the newest finished frame. On macOS frames are IOSurface-backed `CVPixelBuffer`s for GPUI's
+//! `surface()` element, with no pixel copied on the CPU (`mac`). Elsewhere (Windows today) frames
+//! are read back to memory and shown as images (`readback`), until a zero-copy path replaces it.
 //!
 //! Threading: the render callback runs on libobs's graphics thread. It never waits on the UI;
 //! the only shared lock is held for a pointer swap.
 
+mod render;
+
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(not(target_os = "macos"))]
+mod readback;
 
 #[cfg(target_os = "macos")]
 pub use mac::{Frame, Preview, frame_size, sample_ycbcr};
+#[cfg(not(target_os = "macos"))]
+pub use readback::{CpuFrame, Frame, Preview, frame_size, sample_ycbcr};

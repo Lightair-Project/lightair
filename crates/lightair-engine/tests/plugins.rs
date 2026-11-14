@@ -1,4 +1,5 @@
 //! Audio Unit hosting against Apple's own units (always installed): scan, load, process, state.
+#![cfg(target_os = "macos")]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

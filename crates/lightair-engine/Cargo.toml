@@ -24,8 +24,17 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parking_lot.workspace = true
 cpal = "0.16"
 base64 = "0.22"
-block2 = "0.6"
 vst3 = "0.3"
+lightair-platform.workspace = true
+
+# Audio Units, and VST3 bundles loaded through CoreFoundation
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+
+# VST3 modules (DLLs) on Windows
+[target.'cfg(windows)'.dependencies]
+libloading = "0.8"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
 
 [dev-dependencies]
 rtrb = "0.3"

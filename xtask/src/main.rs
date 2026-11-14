@@ -3,6 +3,9 @@
 //!   cargo xtask modules    configure and build every in-tree libobs module (modules/*)
 //!   cargo xtask bundle     assemble target/debug/Lightair.app for development (macOS)
 //!   cargo xtask dev        link OBS's helper programs next to target/debug for `cargo run`
+//!
+//! On Windows, OBS_DIR names the OBS build or install whose libobs Lightair links and runs
+//! (docs/plans/windows.md); the tests run with its `bin/64bit` on PATH.
 //!   cargo xtask test [filter]  build every test program, then run them all at once
 
 use std::path::{Path, PathBuf};
@@ -10,6 +13,38 @@ use std::process::Command;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+}
+
+/// Links `to` at `link` (Windows: copies it; symbolic links need developer mode there).
+fn link_file(to: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(to, link);
+    #[cfg(not(unix))]
+    return std::fs::copy(to, link).map(|_| ());
+}
+
+/// OBS's mux helper (clips and MKV recordings), from the OBS Lightair runs with.
+fn obs_mux() -> PathBuf {
+    if cfg!(windows) {
+        obs_bin().join("obs-ffmpeg-mux.exe")
+    } else {
+        PathBuf::from(std::env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into()))
+            .join("Contents/MacOS/obs-ffmpeg-mux")
+    }
+}
+
+/// Windows: the folder holding obs.dll (OBS_DIR's `bin/64bit`).
+fn obs_bin() -> PathBuf {
+    let dir = std::env::var("OBS_DIR").unwrap_or_else(|_| r"C:\Program Files\obs-studio".into());
+    PathBuf::from(dir).join("bin").join("64bit")
+}
+
+/// Lower priority for this process and its children, so the machine stays responsive.
+fn be_polite() {
+    #[cfg(unix)]
+    unsafe {
+        setpriority(0, 0, 10)
+    };
 }
 
 fn run(cmd: &mut Command) -> anyhow::Result<()> {
@@ -28,12 +63,12 @@ fn modules() -> anyhow::Result<()> {
         }
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
         let build = root.join("target/modules").join(&name);
-        run(Command::new("cmake").arg("-S").arg(&dir).arg("-B").arg(&build).args([
-            "-G",
-            "Ninja",
-            "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
-            "-DCMAKE_OSX_ARCHITECTURES=arm64",
-        ]))?;
+        let mut configure = Command::new("cmake");
+        configure.arg("-S").arg(&dir).arg("-B").arg(&build).args(["-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo"]);
+        if cfg!(target_os = "macos") {
+            configure.arg("-DCMAKE_OSX_ARCHITECTURES=arm64");
+        }
+        run(&mut configure)?;
         run(Command::new("cmake").arg("--build").arg(&build))?;
     }
     Ok(())
@@ -64,6 +99,7 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 /// terminal, for camera and microphone access), with OBS's frameworks and plugins linked in
 /// from an installed OBS 33 (docs/15-platform-distribution-licensing.md, "Building").
 fn bundle() -> anyhow::Result<()> {
+    anyhow::ensure!(cfg!(target_os = "macos"), "the .app bundle is for macOS; on Windows, `cargo xtask dev`");
     let root = root();
     run(Command::new("cargo").current_dir(&root).args(["build", "-p", "lightair-app"]))?;
     let obs = PathBuf::from(std::env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into()));
@@ -74,7 +110,7 @@ fn bundle() -> anyhow::Result<()> {
     }
     std::fs::copy(root.join("target/debug/lightair"), app.join("MacOS/lightair"))?;
     // libobs runs this helper (from next to the executable) to write clips and MKV recordings.
-    std::os::unix::fs::symlink(obs.join("Contents/MacOS/obs-ffmpeg-mux"), app.join("MacOS/obs-ffmpeg-mux"))?;
+    link_file(&obs.join("Contents/MacOS/obs-ffmpeg-mux"), &app.join("MacOS/obs-ffmpeg-mux"))?;
     std::fs::write(app.join("Info.plist"), INFO_PLIST)?;
     let icns = root.join("branding/final/icon/Lightair.icns");
     if icns.exists() {
@@ -91,7 +127,7 @@ fn bundle() -> anyhow::Result<()> {
             if name_str.starts_with("OBS Helper") {
                 continue;
             }
-            std::os::unix::fs::symlink(entry.path(), to.join(&name))?;
+            link_file(&entry.path(), &to.join(&name))?;
         }
     }
     // Sign the bundle itself so macOS privacy settings identify Lightair. Nested OBS code keeps
@@ -120,12 +156,12 @@ fn bundle() -> anyhow::Result<()> {
 
 /// Links OBS's helper programs next to the debug binary (development without the bundle).
 fn dev() -> anyhow::Result<()> {
-    let obs = PathBuf::from(std::env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into()));
+    let mux = obs_mux();
     for dir in [root().join("target/debug"), root().join("target/debug/deps")] {
         std::fs::create_dir_all(&dir)?;
-        let link = dir.join("obs-ffmpeg-mux");
+        let link = dir.join(mux.file_name().unwrap());
         if !link.exists() {
-            std::os::unix::fs::symlink(obs.join("Contents/MacOS/obs-ffmpeg-mux"), &link)?;
+            link_file(&mux, &link)?;
         }
     }
     Ok(())
@@ -175,7 +211,7 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
     let started = Instant::now();
     // Polite: the build and the tests run at a lower priority, so the Mac stays responsive
     // (typing elsewhere keeps up) while they run.
-    unsafe { setpriority(0, 0, 10) };
+    be_polite();
     let mut build = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .args(["test", "--workspace", "--no-run", "--message-format=json-render-diagnostics"])
         .current_dir(root())
@@ -215,8 +251,7 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
     // every build's leftovers (hundreds of thousands of files), which costs seconds per program.
     // The recording tests need OBS's mux helper next to the program.
     let run_dir = root().join("target/test-run");
-    let mux = PathBuf::from(std::env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into()))
-        .join("Contents/MacOS/obs-ffmpeg-mux");
+    let mux = obs_mux();
     for bin in &mut bins {
         let file = bin.exe.file_name().unwrap().to_owned();
         let dir = run_dir.join(&file);
@@ -226,9 +261,9 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
         if std::fs::hard_link(&bin.exe, &linked).is_err() {
             std::fs::copy(&bin.exe, &linked)?;
         }
-        let helper = dir.join("obs-ffmpeg-mux");
+        let helper = dir.join(mux.file_name().unwrap());
         if !helper.exists() && mux.exists() {
-            let _ = std::os::unix::fs::symlink(&mux, &helper);
+            let _ = link_file(&mux, &helper);
         }
         bin.exe = linked;
     }
@@ -290,7 +325,17 @@ fn run_tests(
                     let next = queue.lock().unwrap().pop_front();
                     let Some(bin) = next else { break };
                     let t = Instant::now();
-                    let out = Command::new(&bin.exe)
+                    let mut cmd = Command::new(&bin.exe);
+                    // Windows finds obs.dll (and libobs its data) through PATH
+                    if cfg!(windows) {
+                        let path = std::env::var_os("PATH").unwrap_or_default();
+                        let mut dirs = vec![obs_bin()];
+                        dirs.extend(std::env::split_paths(&path));
+                        if let Ok(joined) = std::env::join_paths(dirs) {
+                            cmd.env("PATH", joined);
+                        }
+                    }
+                    let out = cmd
                         .args(&args)
                         .current_dir(&bin.dir)
                         .env("CARGO_MANIFEST_DIR", &bin.dir)
@@ -334,6 +379,7 @@ fn run_tests(
     }
 }
 
+#[cfg(unix)]
 unsafe extern "C" {
     /// POSIX: (PRIO_PROCESS = 0, this process = 0, niceness). Children inherit it.
     fn setpriority(which: i32, who: u32, prio: i32) -> i32;

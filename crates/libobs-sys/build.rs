@@ -29,8 +29,21 @@ fn main() {
 
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-env-changed=OBS_APP");
+    println!("cargo:rerun-if-env-changed=OBS_DIR");
 
-    let bindings = bindgen::Builder::default()
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    // Checking the Windows build from a Mac: there are no Windows SDK headers here, so the
+    // headers are read as arm64 macOS (a `char*` va_list, as on Windows). Good enough to
+    // type-check Windows code (`cargo check`); never for a real Windows build, which runs bindgen
+    // natively (MSVC, LLVM).
+    let cross_check = target_os == "windows" && !cfg!(windows);
+    let mut builder = bindgen::Builder::default();
+    if cross_check {
+        println!("cargo:warning=libobs bindings read as arm64 macOS: for checking the Windows build only");
+        builder = builder.clang_arg("--target=arm64-apple-darwin");
+    }
+
+    let bindings = builder
         .header(manifest.join("wrapper.h").to_string_lossy())
         .clang_arg(format!("-I{}", libobs.display()))
         .clang_arg(format!("-I{}", include_dir.display()))
@@ -50,10 +63,23 @@ fn main() {
         .expect("bindgen failed for libobs");
     bindings.write_to_file(out.join("bindings.rs")).expect("write bindings");
 
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        let obs_app = env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into());
-        println!("cargo:rustc-link-search=framework={obs_app}/Contents/Frameworks");
-        println!("cargo:rustc-link-lib=framework=libobs");
-        println!("cargo:obs_app={obs_app}");
+    match target_os.as_str() {
+        "macos" => {
+            let obs_app = env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into());
+            println!("cargo:rustc-link-search=framework={obs_app}/Contents/Frameworks");
+            println!("cargo:rustc-link-lib=framework=libobs");
+            println!("cargo:obs_app={obs_app}");
+        }
+        // Windows: libobs's import library from the submodule's build (or an OBS install of the
+        // same version): `OBS_DIR\lib` or `OBS_DIR\bin\64bit` holding `obs.lib`.
+        "windows" if !cross_check => {
+            let obs_dir = env::var("OBS_DIR").unwrap_or_else(|_| r"C:\Program Files\obs-studio".into());
+            for sub in ["lib", r"bin\64bit"] {
+                println!("cargo:rustc-link-search=native={obs_dir}\\{sub}");
+            }
+            println!("cargo:rustc-link-lib=dylib=obs");
+            println!("cargo:obs_dir={obs_dir}");
+        }
+        _ => {}
     }
 }

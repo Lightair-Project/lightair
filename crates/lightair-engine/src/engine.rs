@@ -13,6 +13,8 @@ use crate::runtime::Runtime;
 pub enum Graphics {
     OpenGl,
     Metal,
+    /// Windows.
+    D3D11,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,13 +48,12 @@ pub struct EngineConfig {
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
         Self {
             canvas: (1920, 1080),
             output: (1920, 1080),
             fps: (60, 1),
             sample_rate: 48_000,
-            graphics: Graphics::OpenGl,
+            graphics: if cfg!(windows) { Graphics::D3D11 } else { Graphics::OpenGl },
             modules: Modules::Auto,
             allowed_modules: crate::DEFAULT_MODULES
                 .iter()
@@ -60,7 +61,7 @@ impl Default for EngineConfig {
                 .map(|s| s.to_string())
                 .collect(),
             locale: "en-US".into(),
-            module_config_dir: home.join("Library/Application Support/Lightair/plugin_config"),
+            module_config_dir: lightair_platform::paths::data_dir().join("plugin_config"),
             extra_plugin_dirs: Vec::new(),
         }
     }
@@ -245,7 +246,7 @@ unsafe fn bootstrap(cfg: &EngineConfig) -> Result<(Runtime, Capabilities, String
     }
     crate::loudness::attach(cfg.sample_rate, 2);
 
-    let module = c(&runtime.graphics_module(cfg.graphics == Graphics::Metal).to_string_lossy());
+    let module = c(&runtime.graphics_module(cfg.graphics).to_string_lossy());
     let mut video = sys::obs_video_info {
         graphics_module: module.as_ptr(),
         fps_num: cfg.fps.0,
@@ -301,11 +302,11 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
                 tracing::warn!("some core modules failed to load");
             }
         }
-        Modules::Directory(dir) => unsafe { load_plugin_dir(&dir) },
+        Modules::Directory(dir) => unsafe { load_plugin_dir(runtime, &dir) },
         Modules::Auto | Modules::None => {}
     }
     for dir in &cfg.extra_plugin_dirs {
-        unsafe { load_plugin_dir(dir) };
+        unsafe { load_plugin_dir(runtime, dir) };
     }
     unsafe {
         sys::obs_post_load_modules();
@@ -315,10 +316,11 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
     crate::audio_host::register_types();
 }
 
-/// Loads every `<module>.plugin` in `dir` (subject to the safe-module allowlist).
-unsafe fn load_plugin_dir(dir: &std::path::Path) {
-    let bin = c(&format!("{}/%module%.plugin/Contents/MacOS/", dir.display()));
-    let data = c(&format!("{}/%module%.plugin/Contents/Resources/", dir.display()));
+/// Loads every module in `dir` (subject to the safe-module allowlist): `<module>.plugin` bundles
+/// on macOS, `<module>.dll` on Windows.
+unsafe fn load_plugin_dir(runtime: &Runtime, dir: &std::path::Path) {
+    let (bin, data) = runtime.module_patterns(dir);
+    let (bin, data) = (c(&bin), c(&data));
     let mut info = sys::obs_runtime_module_info {
         path_info: sys::obs_runtime_module_path { binary: bin.as_ptr(), data: data.as_ptr() },
         type_: sys::OBS_MODULE_TYPE_PLUGIN,

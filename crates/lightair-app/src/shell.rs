@@ -2385,7 +2385,7 @@ impl StudioWindow {
             .child(match frame {
                 Some(f) => match (self.mapping(project, fid), self.stage_bounds.borrow().get(&fid).copied()) {
                     // Placed where the canvas is (zoomed and panned).
-                    (Some((ox, oy, s)), Some(b)) => surface(f)
+                    (Some((ox, oy, s)), Some(b)) => crate::frame_view::frame(f)
                         .absolute()
                         .left(px(ox - f32::from(b.origin.x)))
                         .top(px(oy - f32::from(b.origin.y)))
@@ -2393,7 +2393,7 @@ impl StudioWindow {
                         .h(px(format.height as f32 * s))
                         .object_fit(ObjectFit::Fill)
                         .into_any_element(),
-                    _ => surface(f).absolute().size_full().object_fit(ObjectFit::Contain).into_any_element(),
+                    _ => crate::frame_view::frame(f).absolute().size_full().object_fit(ObjectFit::Contain).into_any_element(),
                 },
                 None => div()
                     .absolute()
@@ -2992,7 +2992,7 @@ impl StudioWindow {
                     .border_color(tok::live())
                     .bg(tok::bg_canvas_well())
                     .when_some(frame, |d, frame| {
-                        d.child(surface(frame).absolute().size_full().object_fit(ObjectFit::Contain))
+                        d.child(crate::frame_view::frame(frame).absolute().size_full().object_fit(ObjectFit::Contain))
                     }),
             )
             .child(

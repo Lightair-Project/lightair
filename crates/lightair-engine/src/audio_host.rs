@@ -277,42 +277,6 @@ pub static STEM_OVERRUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 struct OutPtr([*mut sys::obs_source_t; OUT_MIXES + 1]);
 unsafe impl Send for OutPtr {}
 
-/// Asks macOS to schedule this thread as real-time audio, as CoreAudio's I/O threads are: a slot
-/// every `period`, up to half of it to compute, done within the period. Without it, a busy Mac
-/// (encoding, a game) can starve the mixer and the stream drops out. Not fatal if refused.
-fn real_time(period: Duration) {
-    #[repr(C)]
-    struct Timebase {
-        numer: u32,
-        denom: u32,
-    }
-    #[repr(C)]
-    struct TimeConstraint {
-        period: u32,
-        computation: u32,
-        constraint: u32,
-        preemptible: i32,
-    }
-    unsafe extern "C" {
-        fn mach_timebase_info(info: *mut Timebase) -> i32;
-        fn mach_thread_self() -> u32;
-        fn thread_policy_set(thread: u32, flavor: u32, info: *mut TimeConstraint, count: u32) -> i32;
-    }
-    const TIME_CONSTRAINT_POLICY: u32 = 2;
-    const TIME_CONSTRAINT_COUNT: u32 = 4;
-    unsafe {
-        let mut tb = Timebase { numer: 0, denom: 0 };
-        mach_timebase_info(&mut tb);
-        let abs = |d: Duration| (d.as_nanos() as f64 * tb.denom.max(1) as f64 / tb.numer.max(1) as f64) as u32;
-        let mut policy =
-            TimeConstraint { period: abs(period), computation: abs(period / 2), constraint: abs(period), preemptible: 1 };
-        let rc = thread_policy_set(mach_thread_self(), TIME_CONSTRAINT_POLICY, &mut policy, TIME_CONSTRAINT_COUNT);
-        if rc != 0 {
-            tracing::warn!(rc, "the audio thread runs without real-time scheduling");
-        }
-    }
-}
-
 fn rt_loop(
     mut renderer: la::Renderer,
     mut commands: rtrb::Consumer<ToRt>,
@@ -330,7 +294,11 @@ fn rt_loop(
     let mut stems_paused = false;
     let mut stems_started = false;
     let period = Duration::from_secs_f64(block as f64 / sample_rate as f64);
-    real_time(period);
+    // real-time scheduling (Mach time constraint on macOS, MMCSS "Pro Audio" on Windows): without
+    // it a busy computer can starve the mixer and the stream drops out
+    if !lightair_platform::realtime::promote_audio_thread(period) {
+        tracing::warn!("the audio thread runs without real-time scheduling");
+    }
     let start = Instant::now();
     let mut blocks = 0u64;
     let anchor = unsafe { sys::os_gettime_ns() };

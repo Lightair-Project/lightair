@@ -379,7 +379,7 @@ impl Studio {
             .recording
             .folder
             .clone()
-            .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("Movies/Lightair"))
+            .unwrap_or_else(lightair_platform::paths::recordings_dir)
     }
 
     /// Keeps the replay buffer running exactly when clips are on.
@@ -789,9 +789,5 @@ impl Studio {
 
 /// Free space on the volume holding `path` (or its nearest existing parent), in GB.
 fn free_gb(path: &std::path::Path) -> Option<f64> {
-    use std::os::unix::ffi::OsStrExt;
-    let existing = path.ancestors().find(|p| p.exists())?;
-    let c = std::ffi::CString::new(existing.as_os_str().as_bytes()).ok()?;
-    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as f64 * st.f_frsize as f64 / 1e9)
+    lightair_platform::files::free_bytes(path).map(|b| b as f64 / 1e9)
 }
