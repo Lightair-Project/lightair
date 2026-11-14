@@ -79,6 +79,11 @@ pub struct Editor {
     exporting: Option<f32>,
     selected_clip: Option<usize>,
     selected_zoom: Option<usize>,
+    selected_mask: Option<usize>,
+    /// Hide area: drawing a mask on the preview, and where the drag began.
+    masking: bool,
+    drag_from: Option<Point<Pixels>>,
+    preview_bounds: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
     tx: mpsc::Sender<Done>,
     rx: mpsc::Receiver<Done>,
     /// The timeline's place on screen, for clicks.
@@ -128,6 +133,10 @@ impl Editor {
             exporting: None,
             selected_clip: None,
             selected_zoom: None,
+            selected_mask: None,
+            masking: false,
+            drag_from: None,
+            preview_bounds: Default::default(),
             tx,
             rx,
             track: Default::default(),
@@ -353,6 +362,42 @@ impl Editor {
         }
         self.busy = false;
         cx.notify();
+    }
+
+    /// The preview's points as the result's pixels (the frame is drawn fitted, centred).
+    fn result_px(&self, p: Point<Pixels>, size: (u32, u32)) -> Option<(f32, f32)> {
+        let b = (*self.preview_bounds.borrow())?;
+        let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
+        let k = (bw / size.0 as f32).min(bh / size.1 as f32);
+        let (ox, oy) = ((bw - size.0 as f32 * k) / 2.0, (bh - size.1 as f32 * k) / 2.0);
+        Some(((f32::from(p.x - b.origin.x) - ox) / k, (f32::from(p.y - b.origin.y) - oy) / k))
+    }
+
+    /// A hidden area from a drag on the preview, for 3 seconds from the playhead.
+    fn add_mask(&mut self, from: Point<Pixels>, to: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(o) = &self.open else { return };
+        let size = o.edit.size;
+        let (Some(a), Some(b)) = (self.result_px(from, size), self.result_px(to, size)) else { return };
+        let t = self.playhead;
+        let corners = {
+            let Ok(guard) = o.renderer.try_lock() else { return };
+            let Some(r) = guard.as_ref() else { return };
+            (r.screen_point(a, t), r.screen_point(b, t))
+        };
+        let (Some(p), Some(q)) = corners else {
+            self.note = Some("Drag over the screen to hide part of it.".into());
+            cx.notify();
+            return;
+        };
+        let (x, y, w, h) = (p.0.min(q.0), p.1.min(q.1), (p.0 - q.0).abs(), (p.1 - q.1).abs());
+        if w < 0.005 || h < 0.005 {
+            return;
+        }
+        let start = timeline::source_at(&o.edit, t).unwrap_or(0);
+        let end = o.edit.clips.iter().map(|c| c.end_ms).max().unwrap_or(start);
+        self.masking = false;
+        self.change(|e| e.masks.push(lightair_render::edit::Mask { start_ms: start, end_ms: (start + 3_000).min(end), x, y, w, h }), cx);
+        self.selected_mask = self.open.as_ref().map(|o| o.edit.masks.len() - 1);
     }
 
     /// Transcribes the item's audio on the computer.
@@ -622,6 +667,34 @@ impl Editor {
                     })),
             );
         }
+        let mut masks = div().relative().h(px(22.)).w_full();
+        for (n, m) in e.masks.iter().enumerate() {
+            let (Some(a), Some(b)) = (timeline::result_at(e, m.start_ms), timeline::result_at(e, m.end_ms.saturating_sub(1))) else { continue };
+            let on = self.selected_mask == Some(n);
+            masks = masks.child(
+                div()
+                    .id(("ed-mask", n))
+                    .absolute()
+                    .top_0()
+                    .h_full()
+                    .left(relative(a as f32 / total))
+                    .w(relative((b.saturating_sub(a)).max(1) as f32 / total))
+                    .px_1()
+                    .rounded(px(6.))
+                    .border_2()
+                    .border_color(if on { tok::accent_primary() } else { tok::bg_app() })
+                    .bg(rgba(0x6B728080))
+                    .text_size(px(11.))
+                    .overflow_hidden()
+                    .child("Hidden")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.selected_mask = Some(n);
+                        this.selected_zoom = None;
+                        this.selected_clip = None;
+                        cx.notify();
+                    })),
+            );
+        }
         let lane = |label: &'static str, content: Div| {
             div().flex().items_center().gap_2().child(div().w(px(56.)).flex_none().text_size(px(11.)).text_color(tok::text_tertiary()).child(label)).child(content)
         };
@@ -648,6 +721,7 @@ impl Editor {
             ).child(div().absolute().top_0().h_full().left(relative(head)).w(px(2.)).bg(tok::live())).child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!("{} / {}", clock(self.playhead), clock(o.duration))))))
             .child(lane("Clips", clips.flex_1()))
             .child(lane("Zooms", zooms.flex_1()))
+            .when(!e.masks.is_empty(), |d| d.child(lane("Hidden", masks.flex_1())))
     }
 
     fn tools(&self, o: &Open, cx: &mut Context<Self>) -> impl IntoElement {
@@ -663,6 +737,18 @@ impl Editor {
             .child(Button::new("ed-zoom-add").label("Add zoom").icon(ui::icon("zoom-in")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
                 this.change(|e| e.zooms.push(Zoom { start_ms: source, end_ms: source + 3_000, scale: zoom::DEFAULT_SCALE, focus: Focus::Pointer, auto: false }), cx)
             })))
+            .child(
+                Button::new("ed-mask")
+                    .label(if self.masking { "Drag over the area…" } else { "Hide area" })
+                    .icon(ui::icon("eye-off"))
+                    .xsmall()
+                    .map(|b| if self.masking { b.primary() } else { b.ghost() })
+                    .tooltip("Blocks out passwords, keys or messages for a while")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.masking = !this.masking;
+                        cx.notify();
+                    })),
+            )
             .child(Button::new("ed-zoom-auto").label("Auto zooms").icon(ui::icon("sparkles")).xsmall().ghost().on_click(cx.listener(|this, _, _, cx| {
                 let Some(o) = &this.open else { return };
                 let Some(log) = o.source.log.as_ref().and_then(|p| lightair_store::input_log::Log::read(p).ok()) else {
@@ -717,6 +803,24 @@ impl Editor {
                     this.change(|e| {
                         if e.clips.len() > 1 && n < e.clips.len() {
                             e.clips.remove(n);
+                        }
+                    }, cx)
+                })));
+        }
+        if let Some(n) = self.selected_mask.filter(|n| *n < o.edit.masks.len()) {
+            let m = o.edit.masks[n];
+            row = row
+                .child(self.chips("ed-mlen", &[("1 s", 1_000u64), ("3 s", 3_000), ("10 s", 10_000), ("To the end", u64::MAX)], if m.end_ms >= o.edit.clips.iter().map(|c| c.end_ms).max().unwrap_or(0) { u64::MAX } else { m.end_ms - m.start_ms }, move |e, v| {
+                    let end = e.clips.iter().map(|c| c.end_ms).max().unwrap_or(0);
+                    if let Some(m) = e.masks.get_mut(n) {
+                        m.end_ms = if v == u64::MAX { end } else { (m.start_ms + v).min(end) };
+                    }
+                }, cx))
+                .child(Button::new("ed-mask-del").label("Show again").icon(ui::icon("eye")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
+                    this.selected_mask = None;
+                    this.change(|e| {
+                        if n < e.masks.len() {
+                            e.masks.remove(n);
                         }
                     }, cx)
                 })));
@@ -812,7 +916,22 @@ impl Render for Editor {
                                     .rounded(px(8.))
                                     .overflow_hidden()
                                     .bg(tok::bg_canvas_well())
-                                    .when_some(self.preview.clone(), |d, img_| d.child(img(ImageSource::Render(img_)).absolute().size_full().object_fit(ObjectFit::Contain))),
+                                    .when(self.masking, |d| d.cursor_crosshair())
+                                    .child({
+                                        let b = self.preview_bounds.clone();
+                                        canvas(move |bounds, _, _| *b.borrow_mut() = Some(bounds), |_, _, _, _| {}).absolute().size_full()
+                                    })
+                                    .when_some(self.preview.clone(), |d, img_| d.child(img(ImageSource::Render(img_)).absolute().size_full().object_fit(ObjectFit::Contain)))
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, _| {
+                                        if this.masking {
+                                            this.drag_from = Some(ev.position);
+                                        }
+                                    }))
+                                    .on_mouse_up(MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _, cx| {
+                                        if let Some(from) = this.drag_from.take() {
+                                            this.add_mask(from, ev.position, cx);
+                                        }
+                                    })),
                             )
                             .child(self.tools(&o, cx))
                             .child(self.timeline(&o, cx)),
