@@ -138,7 +138,7 @@ impl Reconciler {
                         self.recreate_input(after, project);
                         recreated = true;
                     } else if let Some(src) = self.inputs.get(&after.id) {
-                        if before.settings != after.settings {
+                        if before.settings != after.settings || draws_pointer(before) != draws_pointer(after) {
                             src.update(&data_from_json(&input_settings(after)));
                             if after.kind == TIMER_KIND {
                                 self.timers.configure(after.id, &after.settings);
@@ -480,7 +480,7 @@ impl Reconciler {
             Some((id, _)) => id,
             None => input.kind.as_str(),
         };
-        let settings = data_from_json(resolved.as_ref().map_or(&input.settings, |(_, s)| s));
+        let settings = data_from_json(&input_settings(input));
         match Source::create(kind, &input.id.to_string(), Some(&settings)) {
             Some(src) => {
                 if timer {
@@ -1548,7 +1548,21 @@ fn transition_source(
 
 /// An input's settings as its libobs source takes them (portable kinds translated).
 fn input_settings(input: &lightair_core::Input) -> serde_json::Value {
-    crate::kinds::resolve(&input.kind, &input.settings).map_or_else(|| input.settings.clone(), |(_, s)| s)
+    let mut s = crate::kinds::resolve(&input.kind, &input.settings).map_or_else(|| input.settings.clone(), |(_, s)| s);
+    // Lightair draws the pointer: the capture's own goes (every platform's name for it)
+    if draws_pointer(input)
+        && let Some(o) = s.as_object_mut()
+    {
+        for key in ["show_cursor", "capture_cursor", "cursor"] {
+            o.insert(key.into(), false.into());
+        }
+    }
+    s
+}
+
+/// Whether an input has the drawn pointer on.
+fn draws_pointer(input: &lightair_core::Input) -> bool {
+    input.effects.iter().any(|e| e.enabled && e.kind == crate::cursor::KIND)
 }
 
 fn data_from_json(value: &serde_json::Value) -> Data {

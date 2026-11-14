@@ -6,6 +6,7 @@
 
 pub mod audio;
 pub mod audio_host;
+pub mod cursor;
 pub mod devices;
 pub mod displays;
 pub mod kinds;

@@ -1591,6 +1591,7 @@ fn category_icon(c: Category) -> &'static str {
         Category::Blur => "droplet",
         Category::Distort => "waves-horizontal",
         Category::Keying => "square-dashed",
+        Category::Screen => "monitor",
         Category::Voice => "mic-vocal",
         Category::Dynamics => "chevrons-down-up",
         Category::Tone => "sliders-vertical",

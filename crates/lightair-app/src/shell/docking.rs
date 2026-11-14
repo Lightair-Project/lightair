@@ -239,6 +239,24 @@ impl StudioWindow {
             }
             Ok("palette") => self.open_palette(window, cx),
             Ok("library") => self.show_place(super::Place::Library, cx),
+            Ok("cursor") => {
+                // the drawn pointer, big, on the background colour (not on a screen capture: no
+                // one's screen in the picture)
+                let p = self.studio.read(cx).project().clone();
+                if let Some(bg) = p.inputs.values().find(|i| i.name == "Background") {
+                    let mut e = lightair_core::catalog::def(lightair_core::catalog::CURSOR_KIND).unwrap().create();
+                    e.settings["size"] = serde_json::json!(4.0);
+                    e.settings["idle_s"] = serde_json::json!(0.0);
+                    self.exec(lightair_core::Command::AddInputEffect { input: bg.id, effect: e, index: None }, cx);
+                }
+                // the logo sits where the pointer usually is
+                if let Some(scene) = p.program.and_then(|s| p.scene(s)) {
+                    let f = p.primary_format().id;
+                    for l in scene.layers.iter().filter(|l| l.name == "Logo") {
+                        self.exec(lightair_core::Command::SetLayerVisible { scene: scene.id, layer: l.id, format: f, visible: false }, cx);
+                    }
+                }
+            }
             Ok("editor") => self.show_place(super::Place::Editor, cx),
             Ok("library-record") => {
                 // a short recording (into a folder beside the project, not the user's), a
