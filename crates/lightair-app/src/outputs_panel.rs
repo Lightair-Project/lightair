@@ -67,6 +67,8 @@ pub struct OutputsPanel {
     studio: Entity<Studio>,
     setup: Option<Setup>,
     focus: FocusHandle,
+    /// The recording drive's free space.
+    disk: crate::storage::DiskWatch,
 }
 
 pub fn elapsed(since: Instant) -> String {
@@ -232,7 +234,7 @@ fn toggle(id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
 impl OutputsPanel {
     pub fn new(studio: Entity<Studio>, cx: &mut Context<Self>) -> Self {
         cx.observe(&studio, |_, _, cx| cx.notify()).detach();
-        Self { studio, setup: None, focus: cx.focus_handle() }
+        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default() }
     }
 
     /// Asks for a vertical canvas, to send once it's there.
@@ -1075,6 +1077,64 @@ impl Render for OutputsPanel {
                     }),
             );
         }
+        // The recording drive: free space (moving live while recording) and, once it can tell,
+        // how long it lasts at the rate it's going down.
+        let recording = workspace.canvases.iter().any(|f| runtime().get(OutputKey::Recording(f.id)).state.is_running());
+        self.disk.poll(&folder, recording, Instant::now(), lightair_platform::files::space);
+        let storage = self.disk.space.map(|(free, total)| {
+            let left = self.disk.time_left().filter(|_| recording);
+            let low = |warn_secs: u64, warn_bytes: u64| {
+                left.is_some_and(|d| d.as_secs() < warn_secs) || (recording && free < warn_bytes)
+            };
+            let colour = if low(5 * 60, 2_000_000_000) {
+                tok::error()
+            } else if low(30 * 60, 10_000_000_000) {
+                tok::warn()
+            } else if recording {
+                tok::accent_primary()
+            } else {
+                tok::text_tertiary()
+            };
+            let used = if total > 0 { 1.0 - free as f32 / total as f32 } else { 0.0 };
+            let detail = match left {
+                Some(d) => crate::storage::left(d),
+                None => format!("of {}", crate::storage::bytes(total, false)),
+            };
+            let tip = format!("Recordings are saved to {}", folder.display());
+            div()
+                .id("recording-storage")
+                .mx_2()
+                .px_2()
+                .py_1p5()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .text_size(px(11.))
+                        .child(ui::icon("hard-drive").size(px(12.)).text_color(tok::text_tertiary()))
+                        .child(
+                            div()
+                                .when(recording, |d| d.font_family("Menlo"))
+                                .text_color(if recording { colour } else { tok::text_secondary() })
+                                .child(format!("{} free", crate::storage::bytes(free, recording))),
+                        )
+                        .child(div().flex_1())
+                        .child(div().text_color(if left.is_some() { colour } else { tok::text_tertiary() }).child(detail)),
+                )
+                .child(
+                    div()
+                        .h(px(3.))
+                        .w_full()
+                        .rounded_full()
+                        .bg(tok::border())
+                        .child(div().h_full().rounded_full().bg(colour).w(relative(used.clamp(0.0, 1.0)))),
+                )
+                .tooltip(ui::tip(tip))
+        });
         let open_folder = folder.clone();
         let show_recordings = ui::icon_button("open-recordings", "folder-open", tok::text_secondary())
             .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Show recordings").build(w, cx))
@@ -1220,6 +1280,7 @@ impl Render for OutputsPanel {
                 ),
             )
             .child(recordings)
+            .children(storage)
             .child(
                 div().flex().items_center().justify_between().pr_3().child(section_label("STREAMING")).child(
                     Button::new("add-destination")

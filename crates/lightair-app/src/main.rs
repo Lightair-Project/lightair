@@ -28,6 +28,7 @@ mod secrets;
 mod selftest;
 mod shell;
 mod starter;
+mod storage;
 mod studio;
 #[cfg(target_os = "macos")]
 mod system_effects;
