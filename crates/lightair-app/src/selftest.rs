@@ -334,6 +334,14 @@ fn web(engine: &Engine) {
         std::thread::sleep(Duration::from_millis(8));
         if start.elapsed() >= Duration::from_secs(next) {
             next += 1;
+            // halfway: the box resized (a window-like resize: the page lays out at the new size)
+            if next == 5 {
+                engine.call(|s| {
+                    if let Some(page) = s.sources.get("page") {
+                        page.update(&Data::from_json(&serde_json::json!({"width": 1000, "height": 700})));
+                    }
+                });
+            }
             let (w, h) = engine.call(|s| s.sources.get("page").map_or((0, 0), |c| (c.width(), c.height())));
             let colour = preview.latest_frame().and_then(|f| lightair_preview::sample_ycbcr(&f, 0.3, 0.3));
             let peak = f32::from_bits(WEB_PEAK.swap(0, std::sync::atomic::Ordering::Relaxed));

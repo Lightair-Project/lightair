@@ -650,7 +650,10 @@ impl StudioWindow {
         };
         let sizes = SIZES
             .iter()
-            .map(|(label, _, (w, h))| (*label, set(&[("width", json!(w)), ("height", json!(h))]), (*w, *h) == (width, height)))
+            .map(|(label, _, (w, h))| {
+                let page = set(&[("width", json!(w)), ("height", json!(h))]);
+                (*label, self.with_web_box(page, (*w, *h), cx), (*w, *h) == (width, height))
+            })
             .collect();
         let rates = [30i64, 60]
             .into_iter()
@@ -678,6 +681,28 @@ impl StudioWindow {
         })
         .child(label("Frame rate"))
         .child(self.segmented("web-fps", rates, cx))
+    }
+
+    /// `page` (a web page's new size, `w × h`) with the selected object's box resized to match
+    /// on the canvas shown, around its centre: the box is the page's window.
+    fn with_web_box(&self, page: Command, (w, h): (i64, i64), cx: &mut Context<Self>) -> Command {
+        let studio = self.studio.read(cx);
+        let workspace = studio.workspace();
+        let canvas = self.canvas_id(workspace);
+        let layout = studio.selected_scene.and_then(|scene| {
+            let sc = workspace.scene(scene)?;
+            let object = studio.selected_object?;
+            let world = sc.world(object, canvas)?;
+            let c = world.crop;
+            let (bw, bh) = ((w - (c.left + c.right) as i64).max(16) as f32, (h - (c.top + c.bottom) as i64).max(16) as f32);
+            let (cx_, cy_) = (world.x + world.width / 2.0, world.y + world.height / 2.0);
+            let resized = lightair_core::Layout { x: cx_ - bw / 2.0, y: cy_ - bh / 2.0, width: bw, height: bh, ..world };
+            Some(Command::SetLayout { scene, object, canvas, layout: sc.local(object, canvas, &resized)? })
+        });
+        match layout {
+            Some(layout) => Command::Batch { label: "Resize web page".into(), commands: vec![page, layout] },
+            None => page,
+        }
     }
 
     fn colour_section(&self, source: &Source, cx: &mut Context<Self>) -> impl IntoElement {

@@ -216,6 +216,36 @@ mod imp {
         }
     }
 
+    /// Chromium's cache (cookies, storage): one folder, which only one Chromium can use at a
+    /// time. Another Lightair running alongside (a second copy, a test) gets one of its own,
+    /// removed by a later start once that copy has gone.
+    fn cache_dir() -> std::path::PathBuf {
+        let temp = std::env::temp_dir();
+        let shared = temp.join("lightair-web");
+        #[cfg(target_os = "macos")]
+        {
+            let alive = |pid: i32| pid > 0 && unsafe { libc::kill(pid, 0) } == 0;
+            let me = std::process::id() as i32;
+            // (Chromium's lock: a link to "host-pid")
+            let holder = std::fs::read_link(shared.join("SingletonLock"))
+                .ok()
+                .and_then(|t| t.to_string_lossy().rsplit('-').next().and_then(|p| p.parse::<i32>().ok()));
+            if holder.is_some_and(|pid| pid != me && alive(pid)) {
+                for entry in std::fs::read_dir(&temp).into_iter().flatten().flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if let Some(pid) = name.strip_prefix("lightair-web-").and_then(|p| p.parse::<i32>().ok())
+                        && pid != me
+                        && !alive(pid)
+                    {
+                        let _ = std::fs::remove_dir_all(entry.path());
+                    }
+                }
+                return temp.join(format!("lightair-web-{me}"));
+            }
+        }
+        shared
+    }
+
     /// Starts Chromium (the first time a page is opened): false where it isn't bundled.
     fn start() -> bool {
         if STARTED.load(Ordering::Relaxed) {
@@ -247,7 +277,7 @@ mod imp {
             settings.framework_dir_path = CefString::from(frameworks.join("Chromium Embedded Framework.framework").to_string_lossy().as_ref());
             settings.main_bundle_path = CefString::from(bundle.to_string_lossy().as_ref());
         }
-        let cache = std::env::temp_dir().join("lightair-web");
+        let cache = cache_dir();
         settings.root_cache_path = CefString::from(cache.to_string_lossy().as_ref());
         let mut app = LightairApp::new();
         let ok = initialize(Some(args.as_main_args()), Some(&settings), Some(&mut app), std::ptr::null_mut()) == 1;
