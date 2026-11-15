@@ -2288,6 +2288,7 @@ impl StudioWindow {
         let workspace = studio.workspace();
         let shown = studio.virtual_camera_canvas.and_then(|c| workspace.canvas(c)).unwrap_or_else(|| workspace.primary_canvas());
         let shown_name = shown.name.clone();
+        let listed = studio.virtual_camera_name;
         let canvases: Vec<(Id, String, bool)> = workspace.canvases.iter().map(|c| (c.id, c.name.clone(), c.id == shown.id)).collect();
         let several = canvases.len() > 1;
         let on = matches!(state, OutputState::Active { .. });
@@ -2297,7 +2298,7 @@ impl StudioWindow {
             _ => None,
         };
         let tip: SharedString = if on {
-            format!("Virtual camera on, showing {shown_name}. Apps list it as “OBS Virtual Camera”. Click to stop.").into()
+            format!("Virtual camera on, showing {shown_name}. In other apps, choose “{listed}”. Click to stop.").into()
         } else if busy {
             "Virtual camera starting…".into()
         } else if let Some(e) = &failed {
@@ -2357,7 +2358,7 @@ impl StudioWindow {
                     }));
                 }
             }
-            menu.separator().item(PopupMenuItem::label("Apps list it as “OBS Virtual Camera”"))
+            menu.separator().item(PopupMenuItem::label(format!("In other apps: “{listed}”")))
         });
         div()
             .flex()

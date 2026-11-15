@@ -1,0 +1,44 @@
+# Lightair Virtual Camera (macOS): a camera extension ("Lightair Virtual Camera" in other apps)
+# and the app that installs it. Built and signed by `cargo xtask virtual-camera` (XcodeGen, then
+# xcodebuild with automatic signing: the team comes from the keychain's Apple Development
+# certificate, LIGHTAIR_TEAM overrides; nothing about the team is kept here). The project is
+# generated in target/virtual-camera; LIGHTAIR_VC_SRC (set by xtask) is this folder.
+name: LightairVirtualCamera
+options:
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+targets:
+  Extension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: Extension
+        excludes: ["Info.plist", "Extension.entitlements"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.lightair.virtual-camera.extension
+        PRODUCT_NAME: app.lightair.virtual-camera.extension
+        INFOPLIST_FILE: $(LIGHTAIR_VC_SRC)/Extension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: $(LIGHTAIR_VC_SRC)/Extension/Extension.entitlements
+  Installer:
+    type: application
+    platform: macOS
+    sources:
+      - path: Installer
+        excludes: ["Info.plist", "Installer.entitlements"]
+    dependencies:
+      - target: Extension
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.lightair.virtual-camera
+        PRODUCT_NAME: Lightair Virtual Camera
+        INFOPLIST_FILE: $(LIGHTAIR_VC_SRC)/Installer/Info.plist
+        CODE_SIGN_ENTITLEMENTS: $(LIGHTAIR_VC_SRC)/Installer/Installer.entitlements

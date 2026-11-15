@@ -136,6 +136,9 @@ pub struct Studio {
     pub last_clip: Option<PathBuf>,
     /// The canvas the virtual camera shows (`None`: the primary one).
     pub virtual_camera_canvas: Option<Id>,
+    /// What other apps call the virtual camera (whose extension is installed), looked up when it
+    /// starts.
+    pub virtual_camera_name: &'static str,
     replays: Vec<(Id, Id, Id)>,
     /// Microphone tracks' loudest peak (dBFS) for each of the last ten seconds.
     mic_history: std::collections::HashMap<Id, std::collections::VecDeque<f32>>,
@@ -195,6 +198,7 @@ impl Studio {
             mic_history: Default::default(),
             last_clip: None,
             virtual_camera_canvas: None,
+            virtual_camera_name: VIRTUAL_CAMERA_NAMES[0],
             replays: Vec::new(),
             starter,
         };
@@ -593,6 +597,7 @@ impl Studio {
     }
 
     fn start_virtual_camera(&mut self) {
+        self.virtual_camera_name = virtual_camera_name();
         let canvas = self.virtual_camera_canvas.filter(|c| self.workspace().canvas(*c).is_some());
         self.engine.post(move |s| {
             let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
@@ -1362,4 +1367,14 @@ impl Studio {
 /// Free space on the volume holding `path` (or its nearest existing parent), in GB.
 fn free_gb(path: &std::path::Path) -> Option<f64> {
     lightair_platform::files::free_bytes(path).map(|b| b as f64 / 1e9)
+}
+
+/// The virtual cameras Lightair sends to, by their device ids, and what apps call them: its own
+/// (modules/lightair-virtual-camera), else OBS's (as lightair-camera-fx's virtualcam.m picks).
+const VIRTUAL_CAMERAS: [&str; 1] = ["2DF109AC-DE07-42DF-A0D7-098033FFE986"];
+pub const VIRTUAL_CAMERA_NAMES: [&str; 2] = ["Lightair Virtual Camera", "OBS Virtual Camera"];
+
+fn virtual_camera_name() -> &'static str {
+    let ours = lightair_engine::kinds::cameras().iter().any(|(_, uid)| VIRTUAL_CAMERAS.iter().any(|v| uid.eq_ignore_ascii_case(v)));
+    VIRTUAL_CAMERA_NAMES[usize::from(!ours)]
 }

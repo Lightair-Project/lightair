@@ -1,6 +1,7 @@
-// Lightair's virtual camera (macOS): a libobs output that sends a canvas to the OBS Virtual
-// Camera system extension, so other apps (Zoom, Meet, FaceTime, a browser) can pick Lightair's
-// picture as a camera.
+// Lightair's virtual camera (macOS): a libobs output that sends a canvas to a camera extension,
+// so other apps (Zoom, Meet, FaceTime, a browser) can pick Lightair's picture as a camera:
+// Lightair's own ("Lightair Virtual Camera", modules/lightair-virtual-camera) when it's
+// installed, else OBS's ("OBS Virtual Camera").
 //
 // OBS's own mac-virtualcam output can't run here: before it sends a frame it asks macOS to
 // activate the extension, and that only succeeds from inside OBS.app's bundle. Sending frames
@@ -43,6 +44,9 @@ static void virtualcam_destroy(void *data)
 {
 	bfree(data);
 }
+
+/* Lightair Virtual Camera's device (LightairCameraDeviceUUID in its extension's Info.plist). */
+static NSString *const LIGHTAIR_CAMERA_UUID = @"2DF109AC-DE07-42DF-A0D7-098033FFE986";
 
 /* The OBS Virtual Camera's device UUID, from OBS's plugin (next to Lightair's, or in OBS.app). */
 static NSString *camera_uuid(void)
@@ -106,12 +110,15 @@ static bool virtualcam_start(void *data)
 {
 	struct virtualcam *v = data;
 	@autoreleasepool {
-		NSString *uuid = camera_uuid();
-		v->device = uuid ? find_camera(uuid) : 0;
+		v->device = find_camera(LIGHTAIR_CAMERA_UUID);
+		if (!v->device) {
+			NSString *obs = camera_uuid();
+			v->device = obs ? find_camera(obs) : 0;
+		}
 		if (!v->device) {
 			obs_output_set_last_error(
 				v->output,
-				"The virtual camera isn't installed. Open OBS once and click Start Virtual Camera there: macOS installs it for every app.");
+				"The virtual camera isn't installed. Open “Lightair Virtual Camera” in Applications to install it.");
 			return false;
 		}
 		CMIOObjectPropertyAddress address = {kCMIODevicePropertyStreams, kCMIOObjectPropertyScopeGlobal,
