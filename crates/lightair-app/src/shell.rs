@@ -343,6 +343,9 @@ pub struct StudioWindow {
     pan: (f32, f32),
     /// The performance panel under the FPS readout is open.
     perf_open: bool,
+    /// Whether macOS's Backgrounds picture was last made green (Background removal on macOS's
+    /// model); `None` before the first look.
+    green_screen: Option<bool>,
     /// A pan drag: where the pointer started and the pan then.
     panning: Option<(Point<Pixels>, (f32, f32))>,
     /// Space is held: dragging the canvas pans it.
@@ -588,6 +591,7 @@ impl StudioWindow {
             selected_asset: None,
             zoom: 1.0,
             pan: (0.0, 0.0),
+            green_screen: None,
             perf_open: false,
             panning: None,
             space_down: false,

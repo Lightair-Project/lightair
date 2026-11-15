@@ -6,6 +6,7 @@ mod crop_view;
 mod effects;
 mod face_tracking;
 mod fx;
+mod green_key;
 mod hierarchy;
 mod key_colour;
 mod resize_canvas;

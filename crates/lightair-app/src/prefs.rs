@@ -37,6 +37,9 @@ pub struct Preferences {
     /// The workspace open last: the one Lightair opens next.
     #[serde(alias = "last_project")]
     pub last_workspace: Option<PathBuf>,
+    /// macOS's Backgrounds picture for Lightair before Background removal set it to green (put
+    /// back when nothing keys the green any more; `system_effects`).
+    pub macos_background_before: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +102,7 @@ impl Default for Preferences {
             global_shortcuts: Vec::new(),
             last_workspace: None,
             record_mode: RecordMode::Program,
+            macos_background_before: None,
         }
     }
 }
