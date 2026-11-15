@@ -316,7 +316,7 @@ fn web(engine: &Engine) {
     }
     println!("SELFTEST Chromium bundled: {}", lightair_web::available());
     engine.call(|s| {
-        let url = "data:text/html,<html><body style='margin:0;background:%23ff00ff'><script>const c=new AudioContext();const o=c.createOscillator();o.connect(c.destination);o.start();</script></body></html>";
+        let url = "data:text/html,<html><body style='margin:0;background:%23ff00ff'><div style='position:fixed;left:0;top:0;width:300px;height:100%25;background:%23000'></div><script>const c=new AudioContext();const o=c.createOscillator();o.connect(c.destination);o.start();</script></body></html>";
         let settings = Data::from_json(&serde_json::json!({"url": url, "width": 1920, "height": 1080, "fps": 30}));
         let src = ObsSource::create(lightair_engine::web::KIND, "Self-test page", Some(&settings)).unwrap();
         unsafe { lightair_engine::sys::obs_source_add_audio_capture_callback(src.as_ptr(), Some(web_audio), std::ptr::null_mut()) };
@@ -335,6 +335,14 @@ fn web(engine: &Engine) {
         if start.elapsed() >= Duration::from_secs(next) {
             next += 1;
             // halfway: the box resized (a window-like resize: the page lays out at the new size)
+            if next == 6 {
+                // then zoomed to 200%: the 300 px strip covers 600 pixels
+                engine.call(|s| {
+                    if let Some(page) = s.sources.get("page") {
+                        page.update(&Data::from_json(&serde_json::json!({"zoom": 200})));
+                    }
+                });
+            }
             if next == 5 {
                 engine.call(|s| {
                     if let Some(page) = s.sources.get("page") {
@@ -343,9 +351,11 @@ fn web(engine: &Engine) {
                 });
             }
             let (w, h) = engine.call(|s| s.sources.get("page").map_or((0, 0), |c| (c.width(), c.height())));
-            let colour = preview.latest_frame().and_then(|f| lightair_preview::sample_ycbcr(&f, 0.3, 0.3));
+            let frame = preview.latest_frame();
+            let colour = frame.as_ref().and_then(|f| lightair_preview::sample_ycbcr(f, 0.3, 0.3));
+            let at_768 = frame.as_ref().and_then(|f| lightair_preview::sample_ycbcr(f, 0.4, 0.3));
             let peak = f32::from_bits(WEB_PEAK.swap(0, std::sync::atomic::Ordering::Relaxed));
-            println!("SELFTEST {} s: page {w}x{h}, program YCbCr {colour:?} (magenta is about 73/227/244), sound peak {peak:.3}", next - 1);
+            println!("SELFTEST {} s: page {w}x{h}, program YCbCr {colour:?}, at x 768 {at_768:?} (magenta is about 73/227/244), sound peak {peak:.3}", next - 1);
         }
     }
 }

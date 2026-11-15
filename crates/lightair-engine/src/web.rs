@@ -3,7 +3,8 @@
 //! libobs as they're painted, like a camera's; its sound goes to libobs too (Chromium doesn't
 //! play it), so it reaches the mixer like any other source's.
 //!
-//! Settings: `url`; `width`, `height` (the page's size in CSS pixels, and the frame's); `fps`.
+//! Settings: `url`; `width`, `height` (the frame's size: the page's in CSS pixels at 100%);
+//! `fps`; `zoom` (percent, as a browser's).
 
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::Arc;
@@ -33,6 +34,7 @@ fn options(settings: *mut sys::obs_data_t) -> lightair_web::PageOptions {
             width: sys::obs_data_get_int(settings, c"width".as_ptr()).clamp(16, 7680) as u32,
             height: sys::obs_data_get_int(settings, c"height".as_ptr()).clamp(16, 7680) as u32,
             fps: sys::obs_data_get_int(settings, c"fps".as_ptr()).clamp(1, 60) as u32,
+            zoom: sys::obs_data_get_int(settings, c"zoom".as_ptr()).clamp(25, 500) as f32 / 100.0,
         }
     }
 }
@@ -139,6 +141,7 @@ unsafe extern "C" fn get_defaults(settings: *mut sys::obs_data_t) {
         sys::obs_data_set_default_int(settings, c"width".as_ptr(), 1920);
         sys::obs_data_set_default_int(settings, c"height".as_ptr(), 1080);
         sys::obs_data_set_default_int(settings, c"fps".as_ptr(), 30);
+        sys::obs_data_set_default_int(settings, c"zoom".as_ptr(), 100);
     }
 }
 
