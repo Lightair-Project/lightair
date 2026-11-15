@@ -1051,7 +1051,12 @@ impl Render for OutputsPanel {
                     )
                     .child(two_lines(
                         if several { format!("{} {}", f.name, aspect_label(f)) } else { "Recording".into() },
-                        format!("{container} · {folder_name}"),
+                        // while recording: the file's size so far, growing
+                        if running && st.bytes > 0 {
+                            format!("{container} · {}", crate::storage::bytes(st.bytes, true))
+                        } else {
+                            format!("{container} · {folder_name}")
+                        },
                     ))
                     .child(status(state))
                     .when(several, |d| {
