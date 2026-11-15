@@ -364,7 +364,7 @@ fn web(engine: &Engine) {
             let colour = frame.as_ref().and_then(|f| lightair_preview::sample_ycbcr(f, 0.3, 0.3));
             let at_768 = frame.as_ref().and_then(|f| lightair_preview::sample_ycbcr(f, 0.4, 0.3));
             let peak = f32::from_bits(WEB_PEAK.swap(0, std::sync::atomic::Ordering::Relaxed));
-            println!("SELFTEST {} s: page {w}x{h}, program YCbCr {colour:?}, at x 768 {at_768:?} (magenta is about 73/227/244), sound peak {peak:.3}", next - 1);
+            println!("SELFTEST {} s: page {w}x{h}, program YCbCr {colour:?}, at x 768 {at_768:?} (magenta is about 105/212/234: full-range BT.601), sound peak {peak:.3}", next - 1);
         }
     }
 }
