@@ -13,7 +13,7 @@ use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{
-    Command, Direction, Canvas, Id, Input, Layer, Layout, Workspace, Scene, TransitionKind, TransitionSettings,
+    Command, Direction, Canvas, Id, Source, Layer, Layout, Workspace, Scene, TransitionKind, TransitionSettings,
 };
 use lightair_preview::Preview;
 use serde_json::json;
@@ -248,7 +248,7 @@ struct Drag {
     moved: bool,
 }
 
-/// Inputs' pixel sizes and when they were last read.
+/// Sources' pixel sizes and when they were last read.
 type SizeCache = (Option<Instant>, HashMap<Id, (u32, u32)>);
 
 /// A source's list choices: (label, setting value).
@@ -296,7 +296,7 @@ pub struct StudioWindow {
     drag: Option<Drag>,
     guides: Guides,
     add_menu: bool,
-    /// Inspector sections the user collapsed, slider states, and the input/effect whose looks
+    /// Inspector sections the user collapsed, slider states, and the source/effect whose looks
     /// dialog is open.
     collapsed: RefCell<std::collections::HashSet<&'static str>>,
     sliders: RefCell<HashMap<String, inspector::BoundSlider>>,
@@ -347,9 +347,9 @@ pub struct StudioWindow {
     panning: Option<(Point<Pixels>, (f32, f32))>,
     /// Space is held: dragging the canvas pans it.
     space_down: bool,
-    /// Inputs' pixel sizes, refreshed a few times a second: frames and handles hug the picture.
+    /// Sources' pixel sizes, refreshed a few times a second: frames and handles hug the picture.
     sizes: RefCell<SizeCache>,
-    /// The source picker, and fetched source lists per (input, setting).
+    /// The source picker, and fetched source lists per (source, setting).
     source_picker: Option<source::SourcePicker>,
     source_cache: RefCell<HashMap<(Id, &'static str), SourceOptions>>,
     /// The Add Layer picker, while open.
@@ -977,7 +977,7 @@ impl StudioWindow {
             // The frame hugs the picture: handles sit on it, and a drag snaps the box to it.
             let l = &frame;
             let size =
-                sel.input.and_then(|i| self.sizes.borrow().1.get(&i).copied()).map(|(w, h)| (w as f32, h as f32));
+                sel.source.and_then(|i| self.sizes.borrow().1.get(&i).copied()).map(|(w, h)| (w as f32, h as f32));
             let handle = self.handle_at(l, (x, y), s, ev.modifiers.alt, size.is_some());
             if handle == Some(Handle::Tilt) && ev.click_count == 2 {
                 // Double-click the 3D knob: flat again.
@@ -1137,7 +1137,7 @@ impl StudioWindow {
                 let frame = self.frame_of(scene, layer, canvas)?;
                 let (_, _, s) = self.mapping(&workspace, canvas)?;
                 let p = self.pointer.map(|(_, p)| p)?;
-                let has_size = layer.input.is_some_and(|i| self.sizes.borrow().1.contains_key(&i));
+                let has_size = layer.source.is_some_and(|i| self.sizes.borrow().1.contains_key(&i));
                 self.handle_at(&frame, p, s, ev.modifiers.alt, has_size)
             });
             let gizmo = match hover {
@@ -1447,12 +1447,12 @@ impl StudioWindow {
     }
 
     // ------------------------------------------------------------ adding things
-    fn add_input_layer(&mut self, name: &str, kind: &str, settings: serde_json::Value, size: (f32, f32), cx: &mut Context<Self>) {
-        self.add_input_layer_id(name, kind, settings, size, cx);
+    fn add_source_layer(&mut self, name: &str, kind: &str, settings: serde_json::Value, size: (f32, f32), cx: &mut Context<Self>) {
+        self.add_source_layer_id(name, kind, settings, size, cx);
     }
 
-    /// Adds an input and a layer showing it to the selected scene: the input's id.
-    fn add_input_layer_id(
+    /// Adds a source and a layer showing it to the selected scene: the source's id.
+    fn add_source_layer_id(
         &mut self,
         name: &str,
         kind: &str,
@@ -1474,29 +1474,29 @@ impl StudioWindow {
                 (f.id, Layout::boxed((f.width as f32 - lw) / 2.0, (f.height as f32 - lh) / 2.0, lw, lh))
             })
             .collect();
-        let input = Input::new(name, kind, settings);
-        let input_id = input.id;
-        let layer = Layer::new(name, input.id, layouts);
+        let source = Source::new(name, kind, settings);
+        let source_id = source.id;
+        let layer = Layer::new(name, source.id, layouts);
         let layer_id = layer.id;
         let cmd = Command::Batch {
             label: format!("Add {name}"),
-            commands: vec![Command::AddInput { input }, Command::AddLayer { scene, layer, index: None }],
+            commands: vec![Command::AddSource { source }, Command::AddLayer { scene, layer, index: None }],
         };
         self.exec(cmd, cx);
         self.select_layer(Some(layer_id), cx);
-        Some(input_id)
+        Some(source_id)
     }
 
     /// A camera layer, set up with the camera defaults (Settings › Camera): with Beauty on by
-    /// default, the input starts with the Beauty effect.
+    /// default, the source starts with the Beauty effect.
     fn add_camera(&mut self, label: &str, uid: &str, cx: &mut Context<Self>) {
         let defaults = self.prefs.camera;
-        let input = self.add_input_layer_id(label, lightair_core::kinds::CAMERA, defaults.settings(uid), (1280.0, 720.0), cx);
+        let source = self.add_source_layer_id(label, lightair_core::kinds::CAMERA, defaults.settings(uid), (1280.0, 720.0), cx);
         if defaults.studio_on
-            && let Some(input) = input
+            && let Some(source) = source
             && let Some(beauty) = lightair_core::catalog::def("studio.beauty")
         {
-            let cmd = Command::AddInputEffect { input, effect: beauty.create(), index: None };
+            let cmd = Command::AddSourceEffect { source, effect: beauty.create(), index: None };
             self.exec(cmd, cx);
         }
     }
@@ -1510,7 +1510,7 @@ impl StudioWindow {
             let Some(path): Option<PathBuf> = paths.into_iter().next() else { return };
             let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Image".into());
             let _ = this.update(cx, |this, cx| {
-                this.add_input_layer(&name, "image_source", json!({"file": path.to_string_lossy()}), (640.0, 360.0), cx)
+                this.add_source_layer(&name, "image_source", json!({"file": path.to_string_lossy()}), (640.0, 360.0), cx)
             });
         })
         .detach();
@@ -1523,7 +1523,7 @@ impl StudioWindow {
             "color1": 0xFFFFFFFFu32,
             "color2": 0xFFFFFFFFu32,
         });
-        self.add_input_layer("Text", "text_ft2_source_v2", settings, (720.0, 180.0), cx)
+        self.add_source_layer("Text", "text_ft2_source_v2", settings, (720.0, 180.0), cx)
     }
 
     /// A 5-minute countdown that starts when its scene goes on air.
@@ -1536,12 +1536,12 @@ impl StudioWindow {
             "color1": 0xFFFFFFFFu32,
             "color2": 0xFFFFFFFFu32,
         });
-        self.add_input_layer("Countdown", lightair_engine::timers::TIMER_KIND, settings, (560.0, 200.0), cx)
+        self.add_source_layer("Countdown", lightair_engine::timers::TIMER_KIND, settings, (560.0, 200.0), cx)
     }
 
     fn add_colour(&mut self, cx: &mut Context<Self>) {
         let settings = json!({"color": 0xFF4A3BFFu32, "width": 400, "height": 400});
-        self.add_input_layer("Colour", "color_source_v3", settings, (400.0, 400.0), cx)
+        self.add_source_layer("Colour", "color_source_v3", settings, (400.0, 400.0), cx)
     }
 
     /// A video file layer: plays when its scene goes on air, loops by default.
@@ -1560,7 +1560,7 @@ impl StudioWindow {
                 "restart_on_activate": true,
             });
             let _ = this
-                .update(cx, |this, cx| this.add_input_layer(&name, "ffmpeg_source", settings, (1920.0, 1080.0), cx));
+                .update(cx, |this, cx| this.add_source_layer(&name, "ffmpeg_source", settings, (1920.0, 1080.0), cx));
         })
         .detach();
     }
@@ -1996,16 +1996,16 @@ impl StudioWindow {
         use lightair_core::kinds;
         let workspace = self.studio.read(cx).workspace().clone();
         let mut commands = Vec::new();
-        let screen = match workspace.inputs.values().find(|i| i.kind == kinds::SCREEN) {
+        let screen = match workspace.sources.values().find(|i| i.kind == kinds::SCREEN) {
             Some(i) => i.id,
             None => {
-                let input = lightair_core::Input::new("Display", kinds::SCREEN, display_settings());
-                let id = input.id;
-                commands.push(Command::AddInput { input });
+                let source = lightair_core::Source::new("Display", kinds::SCREEN, display_settings());
+                let id = source.id;
+                commands.push(Command::AddSource { source });
                 id
             }
         };
-        let camera = workspace.inputs.values().find(|i| i.kind == kinds::CAMERA).map(|i| i.id);
+        let camera = workspace.sources.values().find(|i| i.kind == kinds::CAMERA).map(|i| i.id);
         let (_, _, dw, dh) = lightair_platform::input::main_display();
         let sources = lightair_core::screen_layouts::Sources {
             screen,
@@ -2422,7 +2422,7 @@ impl StudioWindow {
     fn refresh_sizes(&self, cx: &mut Context<Self>) {
         let stale = self.sizes.borrow().0.is_none_or(|t| t.elapsed().as_millis() > 250);
         if stale {
-            let sizes = self.studio.read(cx).engine().call(|s| s.reconciler.input_sizes());
+            let sizes = self.studio.read(cx).engine().call(|s| s.reconciler.source_sizes());
             *self.sizes.borrow_mut() = (Some(Instant::now()), sizes);
         }
     }
@@ -2449,7 +2449,7 @@ impl StudioWindow {
                 ..bounds.unwrap_or(Layout::boxed(px_ - 20.0, py_ - 20.0, 40.0, 40.0))
             });
         }
-        let size = layer.input.and_then(|i| self.sizes.borrow().1.get(&i).copied()).map(|(w, h)| (w as f32, h as f32));
+        let size = layer.source.and_then(|i| self.sizes.borrow().1.get(&i).copied()).map(|(w, h)| (w as f32, h as f32));
         let mut frame = geo::content_rect(&world, size);
         frame.visible = scene.shown(layer.id, canvas);
         Some(frame)
@@ -3164,12 +3164,12 @@ impl StudioWindow {
                 // part as a ghost (drawn by the engine); the shape's outline; handles on it.
                 let crop_view = cropping.then(|| {
                     // The full frame needs the source's size; the shape and handles don't.
-                    let input = studio
+                    let source = studio
                         .selected_scene
                         .and_then(|id| workspace.scene(id))
                         .and_then(|sc| sc.layer(lid))
-                        .and_then(|layer| layer.input);
-                    let size = input.and_then(|i| studio.engine().call(move |s| s.reconciler.input_size(i)));
+                        .and_then(|layer| layer.source);
+                    let size = source.and_then(|i| studio.engine().call(move |s| s.reconciler.source_size(i)));
                     let full = size.map(|(w, h)| geo::outline(&l.uncropped((w as f32, h as f32))).map(to_stage));
                     let shape: Vec<(f32, f32)> = geo::shape_outline(&l).into_iter().map(to_stage).collect();
                     let (corners, edges) = geo::crop_handles(&l);

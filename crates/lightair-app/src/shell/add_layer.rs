@@ -83,7 +83,7 @@ impl StudioWindow {
                 return;
             }
             Kind::Display => {
-                self.add_input_layer("Display", lightair_core::kinds::SCREEN, super::display_settings(), (1920.0, 1080.0), cx)
+                self.add_source_layer("Display", lightair_core::kinds::SCREEN, super::display_settings(), (1920.0, 1080.0), cx)
             }
             Kind::Image => self.add_image(window, cx),
             Kind::Video => self.add_video(window, cx),
@@ -94,13 +94,13 @@ impl StudioWindow {
         self.close_add_layer(window, cx);
     }
 
-    /// Reuses an input already in the show as a new layer in this scene.
-    fn add_existing(&mut self, input: Id, window: &mut Window, cx: &mut Context<Self>) {
+    /// Reuses a source already in the show as a new layer in this scene.
+    fn add_existing(&mut self, source: Id, window: &mut Window, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
         let Some(scene) = studio.selected_scene else { return };
-        let Some(i) = workspace.inputs.get(&input) else { return };
-        let size = studio.engine().call(move |s| s.reconciler.input_size(input)).unwrap_or((1280, 720));
+        let Some(i) = workspace.sources.get(&source) else { return };
+        let size = studio.engine().call(move |s| s.reconciler.source_size(source)).unwrap_or((1280, 720));
         let (w, h) = (size.0 as f32, size.1 as f32);
         let layouts: Vec<(Id, Layout)> = workspace
             .canvases
@@ -111,7 +111,7 @@ impl StudioWindow {
                 (f.id, Layout::boxed((f.width as f32 - lw) / 2.0, (f.height as f32 - lh) / 2.0, lw, lh))
             })
             .collect();
-        let layer = Layer::new(i.name.clone(), input, layouts);
+        let layer = Layer::new(i.name.clone(), source, layouts);
         let id = layer.id;
         self.exec(Command::AddLayer { scene, layer, index: None }, cx);
         self.select_layer(Some(id), cx);
@@ -189,25 +189,25 @@ impl StudioWindow {
                     body = body.child(heading(group)).child(grid);
                 }
                 // Sources already in the show but not in this scene: reuse them.
-                let in_scene: Vec<Id> = scene.iter().flat_map(|s| s.layers.iter().filter_map(|l| l.input)).collect();
+                let in_scene: Vec<Id> = scene.iter().flat_map(|s| s.layers.iter().filter_map(|l| l.source)).collect();
                 let audio_only = lightair_core::kinds::is_audio;
                 let existing: Vec<_> = workspace
-                    .inputs
+                    .sources
                     .values()
                     .filter(|i| !in_scene.contains(&i.id) && !audio_only(&i.kind))
-                    .filter(|i| workspace.scenes.iter().any(|s| s.layers.iter().any(|l| l.input == Some(i.id))))
+                    .filter(|i| workspace.scenes.iter().any(|s| s.layers.iter().any(|l| l.source == Some(i.id))))
                     .filter(|i| matches(&query, &[&i.name, &i.kind]))
                     .cloned()
                     .collect();
                 if !existing.is_empty() {
                     let mut grid = div().grid().grid_cols(2).gap_1();
-                    for (i, input) in existing.into_iter().enumerate() {
-                        let id = input.id;
+                    for (i, source) in existing.into_iter().enumerate() {
+                        let id = source.id;
                         grid = grid.child(
                             card(
                                 ("existing", i).into(),
-                                ui::input_icon(&input.kind),
-                                input.name.clone(),
+                                ui::source_icon(&source.kind),
+                                source.name.clone(),
                                 "Already in the show".into(),
                             )
                             .on_click(cx.listener(move |this, _, window, cx| this.add_existing(id, window, cx))),

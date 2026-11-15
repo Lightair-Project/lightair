@@ -16,7 +16,7 @@ struct LayerFacts {
     has_parent: bool,
     visible: bool,
     locked: bool,
-    /// The input whose source (display, camera, window…) can be changed.
+    /// The source whose source (display, camera, window…) can be changed.
     device: Option<Id>,
 }
 
@@ -32,8 +32,8 @@ impl StudioWindow {
         let layer = studio.selected_layer.and_then(|id| scene.layer(id))?;
         let canvas = self.canvas_id(workspace);
         let device = layer
-            .input
-            .and_then(|i| workspace.inputs.get(&i))
+            .source
+            .and_then(|i| workspace.sources.get(&i))
             .filter(|i| super::source::device_key(&i.kind, &i.settings).is_some())
             .map(|i| i.id);
         Some(LayerFacts {
@@ -48,7 +48,7 @@ impl StudioWindow {
 
     // ------------------------------------------------------------ what the menus do
 
-    /// A copy of a scene right after it: the same inputs, new layers.
+    /// A copy of a scene right after it: the same sources, new layers.
     pub(super) fn duplicate_scene(&mut self, scene: Id, cx: &mut Context<Self>) {
         let workspace = self.studio.read(cx).workspace().clone();
         let Some(index) = workspace.scene_index(scene) else { return };
@@ -232,12 +232,12 @@ pub(super) fn layer_menu(
     if f.count == 1 {
         menu = menu.menu("Rename", Box::new(RenameSelection));
     }
-    if let Some(input) = f.device.filter(|_| f.count == 1) {
+    if let Some(source) = f.device.filter(|_| f.count == 1) {
         let s = shell.clone();
         menu =
             menu.item(PopupMenuItem::new("Change source…").icon(ui::icon("monitor")).on_click(move |_, window, cx| {
                 if let Some(s) = s.upgrade() {
-                    s.update(cx, |w, cx| w.open_source_picker(input, window, cx));
+                    s.update(cx, |w, cx| w.open_source_picker(source, window, cx));
                 }
             }));
     }

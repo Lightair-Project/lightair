@@ -1,7 +1,7 @@
 //! The Move transition (docs/07-scenes-layers-canvas.md, "Move transition details").
 //!
 //! Switching from scene A to scene B builds a temporary scene in each canvas's canvas: B's
-//! layers that match a layer in A (same input first, then same name) start at A's layout and
+//! layers that match a layer in A (same source first, then same name) start at A's layout and
 //! glide to B's; layers only in B fade in; layers only in A fade out. A libobs tick callback
 //! drives the glide every frame; when it finishes, each canvas cuts to B (which now looks
 //! identical) and the temporary scenes are released on the engine thread.
@@ -45,13 +45,13 @@ pub(crate) struct MoveAnim {
 
 unsafe impl Send for MoveAnim {}
 
-/// Which layer in `from` a layer of `to` continues: the one showing the same input, else the
+/// Which layer in `from` a layer of `to` continues: the one showing the same source, else the
 /// one with the same link (`Layer::link`). Never by name: two layers called "Logo" needn't be
 /// the same thing.
 pub(crate) fn match_layer<'a>(from: &'a DocScene, layer: &lightair_core::Layer) -> Option<&'a lightair_core::Layer> {
-    let same_input = |l: &&lightair_core::Layer| layer.input.is_some() && l.input == layer.input;
+    let same_source = |l: &&lightair_core::Layer| layer.source.is_some() && l.source == layer.source;
     let same_link = |l: &&lightair_core::Layer| layer.link.is_some() && l.link == layer.link;
-    from.layers.iter().find(same_input).or_else(|| from.layers.iter().find(same_link))
+    from.layers.iter().find(same_source).or_else(|| from.layers.iter().find(same_link))
 }
 
 fn ease_in_out(t: f32) -> f32 {

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Clip, Command, Id, Input, Layer, Layout, Workspace};
+use lightair_core::{Clip, Command, Id, Source, Layer, Layout, Workspace};
 use serde_json::json;
 
 use super::StudioWindow;
@@ -413,7 +413,7 @@ impl StudioWindow {
                         (1280.0, 720.0),
                     ),
                 };
-                let input = Input::new(&name, kind, settings);
+                let source = Source::new(&name, kind, settings);
                 let layouts: Vec<(Id, Layout)> = workspace
                     .canvases
                     .iter()
@@ -426,11 +426,11 @@ impl StudioWindow {
                         Some((f.id, world.to_local(&scene.frame_of(parent, f.id)?)))
                     })
                     .collect();
-                let mut layer = Layer::new(&name, input.id, layouts);
+                let mut layer = Layer::new(&name, source.id, layouts);
                 layer.parent = parent;
                 let id = layer.id;
                 (
-                    vec![Command::AddInput { input }, Command::AddLayer { scene: scene.id, layer, index }],
+                    vec![Command::AddSource { source }, Command::AddLayer { scene: scene.id, layer, index }],
                     Some(id),
                     format!("Add {name}"),
                 )

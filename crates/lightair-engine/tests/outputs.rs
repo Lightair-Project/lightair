@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, Track, diff};
+use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, Track, diff};
 use lightair_engine::outputs::{
     ClipsConfig, Container, OutputKey, OutputState, RecordingConfig, StreamConfig, default_encoders, runtime,
 };
@@ -105,8 +105,8 @@ fn record_and_stream() {
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
     let mut doc = Document::new(Workspace::new("Outputs"));
     let canvas = doc.workspace().primary_canvas().id;
-    let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
-    let tone = Input::new(
+    let colour = Source::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
+    let tone = Source::new(
         "Tone",
         "ffmpeg_source",
         json!({"local_file": wav.to_string_lossy(), "looping": true, "is_local_file": true}),
@@ -115,8 +115,8 @@ fn record_and_stream() {
     scene.layers.push(Layer::new("Colour", colour.id, [(canvas, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));
     let track = Track::new("Tone", tone.id);
     for cmd in [
-        Command::AddInput { input: colour },
-        Command::AddInput { input: tone },
+        Command::AddSource { source: colour },
+        Command::AddSource { source: tone },
         Command::AddScene { scene, index: None },
         Command::AddTrack { track, index: None },
     ] {

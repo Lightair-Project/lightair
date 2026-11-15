@@ -25,14 +25,14 @@ use std::sync::Arc;
 /// libobs state owned on behalf of the document.
 ///
 /// Every document scene exists once per canvas: one libobs scene in that canvas's canvas,
-/// all sharing the same input sources (docs/07-scenes-layers-canvas.md, "Formats").
+/// all sharing the same source sources (docs/07-scenes-layers-canvas.md, "Formats").
 #[derive(Default)]
 pub struct Reconciler {
-    inputs: HashMap<Id, ObsSource>,
-    /// Input effect chains (Camera Studio, colour correction, …).
-    input_effects: HashMap<Id, Chain>,
+    sources: HashMap<Id, ObsSource>,
+    /// Source effect chains (Camera Studio, colour correction, …).
+    source_effects: HashMap<Id, Chain>,
     /// Screen captures zoomed and given a drawn pointer by their scene's `ScreenLook` (the
-    /// pointer filter, last on the input, and the settings it was given).
+    /// pointer filter, last on the source, and the settings it was given).
     screen_looks: HashMap<Id, (ObsSource, serde_json::Value)>,
     /// Canvases for additional canvases. The primary canvas uses libobs's main canvas.
     obs_canvases: HashMap<Id, ObsCanvas>,
@@ -40,7 +40,7 @@ pub struct Reconciler {
     scenes: HashMap<(Id, Id), ObsScene>,
     /// Scene items are owned by their scene; (scene, canvas, layer) → item.
     items: HashMap<(Id, Id, Id), ItemPtr>,
-    /// Shaped layers: the item above is a one-item group; this is the input's item inside it
+    /// Shaped layers: the item above is a one-item group; this is the source's item inside it
     /// (carrying the crop) and the shape mask on the group.
     masks: HashMap<(Id, Id, Id), Masked>,
     /// The layer being cropped (scene, canvas, layer): shown whole and unshaped meanwhile.
@@ -66,16 +66,16 @@ pub struct Reconciler {
     /// The running Move, driven by a libobs tick callback.
     anim: Arc<Mutex<Option<MoveAnim>>>,
     tick_registered: bool,
-    /// Inputs held "showing" off air (e.g. to learn their size), released with `release_inputs`.
+    /// Sources held "showing" off air (e.g. to learn their size), released with `release_sources`.
     held: HashSet<Id>,
-    /// Countdown/stopwatch/clock inputs, driven by their own tick callback.
+    /// Countdown/stopwatch/clock sources, driven by their own tick callback.
     timers: Arc<Timers>,
     timers_tick: bool,
 }
 
 /// libobs state for one mixer track: its output channel, volume meter and effect filters.
 struct TrackState {
-    input: Id,
+    source: Id,
     /// Output channel (1..64) that keeps the track's source mixed when it isn't in a scene.
     channel: u32,
     volmeter: VolmeterPtr,
@@ -90,7 +90,7 @@ unsafe impl Send for VolmeterPtr {}
 struct ItemPtr(*mut sys::obs_sceneitem_t);
 unsafe impl Send for ItemPtr {}
 
-/// The inside of a layer drawn through Lightair's filters: the input's item in the group, the
+/// The inside of a layer drawn through Lightair's filters: the source's item in the group, the
 /// shape mask, and the flip/3D transform (applied in that order).
 pub(crate) struct Masked {
     pub inner: *mut sys::obs_sceneitem_t,
@@ -131,28 +131,28 @@ impl Reconciler {
             match patch {
                 Patch::CanvasAdded(_) | Patch::CanvasRemoved(_) => {}
                 Patch::CanvasChanged(canvas) => self.resize_canvas(canvas),
-                Patch::InputAdded(input) => self.create_input(input),
-                Patch::InputChanged { before, after } => {
+                Patch::SourceAdded(source) => self.create_source(source),
+                Patch::SourceChanged { before, after } => {
                     // a portable kind that plays as another libobs type now (Windows: a
                     // display capture becoming a window capture)
                     if crate::kinds::libobs_kind(&before.kind, &before.settings)
                         != crate::kinds::libobs_kind(&after.kind, &after.settings)
                     {
-                        self.recreate_input(after, workspace);
+                        self.recreate_source(after, workspace);
                         recreated = true;
-                    } else if let Some(src) = self.inputs.get(&after.id) {
+                    } else if let Some(src) = self.sources.get(&after.id) {
                         if before.settings != after.settings || draws_pointer(before) != draws_pointer(after) {
                             let drawn = self.screen_looks.get(&after.id).is_some_and(|(_, s)| s["hide_capture"] == true);
-                            src.update(&data_from_json(&input_settings(after, drawn)));
+                            src.update(&data_from_json(&source_settings(after, drawn)));
                             if after.kind == TIMER_KIND {
                                 self.timers.configure(after.id, &after.settings);
                             }
                         }
-                        let chain = self.input_effects.entry(after.id).or_default();
+                        let chain = self.source_effects.entry(after.id).or_default();
                         unsafe { chain_update(src.as_ptr(), chain, &lower(&before.effects), &lower(&after.effects)) };
                     }
                 }
-                Patch::InputRemoved(id) => self.destroy_input(*id),
+                Patch::SourceRemoved(id) => self.destroy_source(*id),
                 // libobs draws the flattened hierarchy: pictures only, in world terms (a parent
                 // moving changes its children's world layouts, so they update too).
                 Patch::SceneAdded(scene) => {
@@ -206,9 +206,9 @@ impl Reconciler {
                     | Patch::TrackChanged { .. }
                     | Patch::TrackRemoved(_)
                     | Patch::AudioSetup
-                    | Patch::InputAdded(_)
-                    | Patch::InputRemoved(_)
-            ) || matches!(p, Patch::InputChanged { after, .. } if after.kind == crate::devices::DEVICE_KIND)
+                    | Patch::SourceAdded(_)
+                    | Patch::SourceRemoved(_)
+            ) || matches!(p, Patch::SourceChanged { after, .. } if after.kind == crate::devices::DEVICE_KIND)
         });
         if audio_changed {
             self.sync_audio(workspace);
@@ -220,9 +220,9 @@ impl Reconciler {
                     | Patch::SceneChanged { .. }
                     | Patch::SceneRemoved(_)
                     | Patch::ProgramChanged(_)
-                    | Patch::InputAdded(_)
-                    | Patch::InputChanged { .. }
-                    | Patch::InputRemoved(_)
+                    | Patch::SourceAdded(_)
+                    | Patch::SourceChanged { .. }
+                    | Patch::SourceRemoved(_)
             )
         });
         if screens_changed || recreated {
@@ -239,29 +239,29 @@ impl Reconciler {
         for scene in on_air.into_iter().chain(workspace.scenes.iter()) {
             let Some(look) = scene.screen else { continue };
             for layer in &scene.layers {
-                let Some(input) = layer.input.and_then(|i| workspace.inputs.get(&i)) else { continue };
-                if is_screen(input) {
-                    want.entry(input.id).or_insert(look);
+                let Some(source) = layer.source.and_then(|i| workspace.sources.get(&i)) else { continue };
+                if is_screen(source) {
+                    want.entry(source.id).or_insert(look);
                 }
             }
         }
         // gone: the filter off, the capture's own pointer back
         let gone: Vec<Id> = self.screen_looks.keys().copied().filter(|id| !want.contains_key(id)).collect();
         for id in gone {
-            if let (Some((filter, was)), Some(src)) = (self.screen_looks.remove(&id), self.inputs.get(&id)) {
+            if let (Some((filter, was)), Some(src)) = (self.screen_looks.remove(&id), self.sources.get(&id)) {
                 unsafe { sys::obs_source_filter_remove(src.as_ptr(), filter.as_ptr()) };
-                if let Some(input) = workspace.inputs.get(&id).filter(|i| !draws_pointer(i))
+                if let Some(source) = workspace.sources.get(&id).filter(|i| !draws_pointer(i))
                     && was["hide_capture"] == true
                 {
-                    src.update(&data_from_json(&input_settings(input, false)));
+                    src.update(&data_from_json(&source_settings(source, false)));
                 }
             }
         }
         for (id, look) in want {
-            let (Some(src), Some(input)) = (self.inputs.get(&id), workspace.inputs.get(&id)) else { continue };
+            let (Some(src), Some(source)) = (self.sources.get(&id), workspace.sources.get(&id)) else { continue };
             let settings = screen_look_settings(&look);
             // drawn before (a new filter: as the capture was made, with its own pointer)
-            let hid = self.screen_looks.get(&id).map_or(draws_pointer(input), |(_, s)| s["hide_capture"] == true || draws_pointer(input));
+            let hid = self.screen_looks.get(&id).map_or(draws_pointer(source), |(_, s)| s["hide_capture"] == true || draws_pointer(source));
             match self.screen_looks.get_mut(&id) {
                 Some((_, was)) if *was == settings => {}
                 Some((filter, was)) => {
@@ -280,10 +280,10 @@ impl Reconciler {
             // the capture's own pointer, hidden while Lightair draws one (only when that changes:
             // a capture given new settings may start again)
             let hide = look.cursor || look.cursor_hidden;
-            if hid != (hide || draws_pointer(input)) {
-                src.update(&data_from_json(&input_settings(input, hide)));
+            if hid != (hide || draws_pointer(source)) {
+                src.update(&data_from_json(&source_settings(source, hide)));
             }
-            // last, so it zooms what the input's effects made
+            // last, so it zooms what the source's effects made
             if let Some((filter, _)) = self.screen_looks.get(&id) {
                 unsafe { sys::obs_source_filter_set_order(src.as_ptr(), filter.as_ptr(), sys::OBS_ORDER_MOVE_BOTTOM) };
             }
@@ -295,7 +295,7 @@ impl Reconciler {
         std::env::var("LIGHTAIR_LEGACY_AUDIO").map_or(true, |v| v != "1")
     }
 
-    /// Brings the audio engine up to date: captures every track's input, releases inputs no
+    /// Brings the audio engine up to date: captures every track's source, releases sources no
     /// track uses, and plays the workspace's mixer.
     fn sync_audio(&mut self, workspace: &Workspace) {
         if !Self::engine_audio() || (workspace.tracks.is_empty() && self.audio.is_none()) {
@@ -313,26 +313,26 @@ impl Reconciler {
         if let Err(e) = host.set_monitor(monitor) {
             tracing::warn!(%e, "direct monitoring unavailable; libobs monitors the cue");
         }
-        let wanted: HashSet<Id> = workspace.tracks.iter().map(|t| t.input).collect();
-        let is_device = |id: &Id| workspace.inputs.get(id).is_some_and(|i| i.kind == crate::devices::DEVICE_KIND);
+        let wanted: HashSet<Id> = workspace.tracks.iter().map(|t| t.source).collect();
+        let is_device = |id: &Id| workspace.sources.get(id).is_some_and(|i| i.kind == crate::devices::DEVICE_KIND);
         let stale: Vec<Id> = host.captured().filter(|i| !wanted.contains(i) || is_device(i)).collect();
-        for input in stale {
-            host.release(input);
+        for source in stale {
+            host.release(source);
         }
         let stale: Vec<Id> = host.open_devices().filter(|i| !wanted.contains(i)).collect();
-        for input in stale {
-            host.close_device(input);
+        for source in stale {
+            host.close_device(source);
         }
-        for input in &wanted {
-            let Some(i) = workspace.inputs.get(input) else { continue };
+        for source in &wanted {
+            let Some(i) = workspace.sources.get(source) else { continue };
             if i.kind == crate::devices::DEVICE_KIND {
                 // an interface: the engine opens it itself, every channel
                 let device = i.settings["device"].as_str().unwrap_or("");
-                if let Err(e) = host.open_device(*input, device) {
+                if let Err(e) = host.open_device(*source, device) {
                     tracing::warn!(%e, device, "couldn't open the audio input");
                 }
-            } else if let Some(src) = self.inputs.get(input) {
-                host.capture(*input, src);
+            } else if let Some(src) = self.sources.get(source) {
+                host.capture(*source, src);
             }
         }
         host.set(crate::audio::spec(workspace));
@@ -454,9 +454,9 @@ impl Reconciler {
         Some(self.audio.as_mut()?.test_monitor(src))
     }
 
-    /// An input the caller feeds (tests): `channels` interleaved frames, like an interface.
-    pub fn audio_test_input(&mut self, input: Id, channels: u16) -> Option<rtrb::Producer<f32>> {
-        Some(self.audio.as_mut()?.test_input(input, channels))
+    /// A source the caller feeds (tests): `channels` interleaved frames, like an interface.
+    pub fn audio_test_input(&mut self, source: Id, channels: u16) -> Option<rtrb::Producer<f32>> {
+        Some(self.audio.as_mut()?.test_input(source, channels))
     }
 
     /// Stops the multitrack files; what they hold.
@@ -552,54 +552,54 @@ impl Reconciler {
         self.canvases.retain(|f| *f != id);
     }
 
-    /// Makes an input's libobs source (as this platform plays its kind) and its effects.
-    fn create_input(&mut self, input: &lightair_core::Input) {
-        let timer = input.kind == TIMER_KIND;
-        let resolved = crate::kinds::resolve(&input.kind, &input.settings);
+    /// Makes a source's libobs source (as this platform plays its kind) and its effects.
+    fn create_source(&mut self, source: &lightair_core::Source) {
+        let timer = source.kind == TIMER_KIND;
+        let resolved = crate::kinds::resolve(&source.kind, &source.settings);
         let kind = match &resolved {
             _ if timer => TIMER_SOURCE,
             Some((id, _)) => id,
-            None => input.kind.as_str(),
+            None => source.kind.as_str(),
         };
-        let settings = data_from_json(&input_settings(input, false));
-        match ObsSource::create(kind, &input.id.to_string(), Some(&settings)) {
+        let settings = data_from_json(&source_settings(source, false));
+        match ObsSource::create(kind, &source.id.to_string(), Some(&settings)) {
             Some(src) => {
                 if timer {
-                    self.timers.add(input.id, src.as_ptr(), &input.settings);
+                    self.timers.add(source.id, src.as_ptr(), &source.settings);
                     self.ensure_timers_tick();
                 }
-                let chain = unsafe { chain_build(src.as_ptr(), &lower(&input.effects)) };
-                self.input_effects.insert(input.id, chain);
-                self.inputs.insert(input.id, src);
+                let chain = unsafe { chain_build(src.as_ptr(), &lower(&source.effects)) };
+                self.source_effects.insert(source.id, chain);
+                self.sources.insert(source.id, src);
             }
-            None => tracing::warn!(kind, name = input.name, "could not create input"),
+            None => tracing::warn!(kind, name = source.name, "could not create input"),
         }
     }
 
-    fn destroy_input(&mut self, id: Id) {
+    fn destroy_source(&mut self, id: Id) {
         self.timers.remove(id);
         if self.held.remove(&id)
-            && let Some(src) = self.inputs.get(&id)
+            && let Some(src) = self.sources.get(&id)
         {
             unsafe { sys::obs_source_dec_showing(src.as_ptr()) };
         }
-        if let (Some(src), Some(mut chain)) = (self.inputs.get(&id), self.input_effects.remove(&id)) {
+        if let (Some(src), Some(mut chain)) = (self.sources.get(&id), self.source_effects.remove(&id)) {
             unsafe { chain_remove(src.as_ptr(), &mut chain) };
         }
-        if let (Some(src), Some((filter, _))) = (self.inputs.get(&id), self.screen_looks.remove(&id)) {
+        if let (Some(src), Some((filter, _))) = (self.sources.get(&id), self.screen_looks.remove(&id)) {
             unsafe { sys::obs_source_filter_remove(src.as_ptr(), filter.as_ptr()) };
         }
-        self.inputs.remove(&id);
+        self.sources.remove(&id);
     }
 
-    /// A new source for an input whose libobs type changed, put back in every scene that shows
+    /// A new source for a source whose libobs type changed, put back in every scene that shows
     /// it (the audio engine takes it again when audio syncs).
-    fn recreate_input(&mut self, input: &lightair_core::Input, workspace: &Workspace) {
-        let id = input.id;
+    fn recreate_source(&mut self, source: &lightair_core::Source, workspace: &Workspace) {
+        let id = source.id;
         let scenes: Vec<lightair_core::Scene> = workspace.scenes.iter().map(|s| s.flatten()).collect();
         let using: Vec<(Id, Id)> = scenes
             .iter()
-            .flat_map(|s| s.layers.iter().filter(|l| l.input == Some(id)).map(move |l| (s.id, l.id)))
+            .flat_map(|s| s.layers.iter().filter(|l| l.source == Some(id)).map(move |l| (s.id, l.id)))
             .collect();
         for (scene, layer) in &using {
             for canvas in self.canvases.clone() {
@@ -613,14 +613,14 @@ impl Reconciler {
             host.release(id);
         }
         let held = self.held.contains(&id);
-        self.destroy_input(id);
-        self.create_input(input);
-        if held && let Some(src) = self.inputs.get(&id) {
+        self.destroy_source(id);
+        self.create_source(source);
+        if held && let Some(src) = self.sources.get(&id) {
             unsafe { sys::obs_source_inc_showing(src.as_ptr()) };
             self.held.insert(id);
         }
         for scene in &scenes {
-            for (index, layer) in scene.layers.iter().enumerate().filter(|(_, l)| l.input == Some(id)) {
+            for (index, layer) in scene.layers.iter().enumerate().filter(|(_, l)| l.source == Some(id)) {
                 for canvas in self.canvases.clone() {
                     if self.scenes.contains_key(&(scene.id, canvas)) {
                         self.add_layer(scene.id, canvas, layer, index);
@@ -647,9 +647,9 @@ impl Reconciler {
     }
 
     /// The canvas behind a canvas, as a new strong reference (for previews).
-    /// The libobs source of an input (borrowed; valid while the input exists).
-    pub(crate) fn input_ptr(&self, input: Id) -> Option<*mut sys::obs_source_t> {
-        self.inputs.get(&input).map(|s| s.as_ptr())
+    /// The libobs source of a source (borrowed; valid while the source exists).
+    pub(crate) fn source_ptr(&self, source: Id) -> Option<*mut sys::obs_source_t> {
+        self.sources.get(&source).map(|s| s.as_ptr())
     }
 
     /// Shows a layer whole while it's being cropped (crop mode), or `None` to end it. The
@@ -680,31 +680,31 @@ impl Reconciler {
         self.update_layer(scene, canvas, &l, index);
     }
 
-    /// Whether the input's face effects see a face right now (`None`: it has none running).
-    pub fn face_present(&self, input: Id) -> Option<bool> {
-        self.studio_query(input, c"face_present")
+    /// Whether the source's face effects see a face right now (`None`: it has none running).
+    pub fn face_present(&self, source: Id) -> Option<bool> {
+        self.studio_query(source, c"face_present")
     }
 
-    /// Turns one of an input's effect filters on or off in libobs only, leaving the document
+    /// Turns one of a source's effect filters on or off in libobs only, leaving the document
     /// alone (the eyedropper shows the picture without the effect being picked for). `filter` is
     /// the lowered chain's id: the effect's own, or `catalog::STUDIO_ID` for face effects.
-    pub fn set_filter_live(&self, input: Id, filter: Id, enabled: bool) {
-        if let Some(chain) = self.input_effects.get(&input)
+    pub fn set_filter_live(&self, source: Id, filter: Id, enabled: bool) {
+        if let Some(chain) = self.source_effects.get(&source)
             && let Some((_, f)) = chain.iter().find(|(id, _)| *id == filter)
         {
             unsafe { sys::obs_source_set_enabled(f.as_ptr(), enabled) };
         }
     }
 
-    /// Whether the input's Camera Studio sees a person (for the background effects' hint);
+    /// Whether the source's Camera Studio sees a person (for the background effects' hint);
     /// `None` when it has no Camera Studio running.
-    pub fn person_present(&self, input: Id) -> Option<bool> {
-        self.studio_query(input, c"person_present")
+    pub fn person_present(&self, source: Id) -> Option<bool> {
+        self.studio_query(source, c"person_present")
     }
 
-    /// Calls a `void name(out bool present)` proc on the input's enabled Camera Studio filter.
-    fn studio_query(&self, input: Id, name: &std::ffi::CStr) -> Option<bool> {
-        let chain = self.input_effects.get(&input)?;
+    /// Calls a `void name(out bool present)` proc on the source's enabled Camera Studio filter.
+    fn studio_query(&self, source: Id, name: &std::ffi::CStr) -> Option<bool> {
+        let chain = self.source_effects.get(&source)?;
         chain.iter().find_map(|(_, filter)| unsafe {
             let id = std::ffi::CStr::from_ptr(sys::obs_source_get_id(filter.as_ptr()));
             if id.to_bytes() != b"lightair_camera_studio" || !sys::obs_source_enabled(filter.as_ptr()) {
@@ -729,11 +729,11 @@ impl Reconciler {
         })
     }
 
-    /// Starts inputs as if they were on screen (captures open, media loads) without putting
-    /// them on air, until `release_inputs`.
-    pub fn hold_inputs(&mut self, inputs: &[Id]) {
-        for id in inputs {
-            if let Some(src) = self.inputs.get(id)
+    /// Starts sources as if they were on screen (captures open, media loads) without putting
+    /// them on air, until `release_sources`.
+    pub fn hold_sources(&mut self, sources: &[Id]) {
+        for id in sources {
+            if let Some(src) = self.sources.get(id)
                 && self.held.insert(*id)
             {
                 unsafe { sys::obs_source_inc_showing(src.as_ptr()) };
@@ -741,20 +741,20 @@ impl Reconciler {
         }
     }
 
-    pub fn release_inputs(&mut self) {
+    pub fn release_sources(&mut self) {
         for id in std::mem::take(&mut self.held) {
-            if let Some(src) = self.inputs.get(&id) {
+            if let Some(src) = self.sources.get(&id) {
                 unsafe { sys::obs_source_dec_showing(src.as_ptr()) };
             }
         }
     }
 
-    /// The choices an input offers for a list setting (a camera's devices, a display capture's
-    /// displays or windows, a microphone's devices): (label, value). Read from the input itself,
+    /// The choices a source offers for a list setting (a camera's devices, a display capture's
+    /// displays or windows, a microphone's devices): (label, value). Read from the source itself,
     /// with its current settings applied, since some sources fill their lists only then.
-    pub fn input_options(&self, input: Id, property: &str) -> Vec<(String, serde_json::Value)> {
+    pub fn source_options(&self, source: Id, property: &str) -> Vec<(String, serde_json::Value)> {
         let mut out = Vec::new();
-        let Some(src) = self.inputs.get(&input) else { return out };
+        let Some(src) = self.sources.get(&source) else { return out };
         let name = std::ffi::CString::new(property).unwrap_or_default();
         unsafe {
             let props = sys::obs_source_properties(src.as_ptr());
@@ -793,14 +793,14 @@ impl Reconciler {
         out
     }
 
-    /// Every input's pixel size that's known (for the editor's frames and handles).
-    pub fn input_sizes(&self) -> HashMap<Id, (u32, u32)> {
-        self.inputs.keys().filter_map(|id| self.input_size(*id).map(|s| (*id, s))).collect()
+    /// Every source's pixel size that's known (for the editor's frames and handles).
+    pub fn source_sizes(&self) -> HashMap<Id, (u32, u32)> {
+        self.sources.keys().filter_map(|id| self.source_size(*id).map(|s| (*id, s))).collect()
     }
 
-    /// An input's pixel size, once it has one (async sources report it after their first frame).
-    pub fn input_size(&self, input: Id) -> Option<(u32, u32)> {
-        let src = self.inputs.get(&input)?;
+    /// A source's pixel size, once it has one (async sources report it after their first frame).
+    pub fn source_size(&self, source: Id) -> Option<(u32, u32)> {
+        let src = self.sources.get(&source)?;
         let (w, h) = unsafe { (sys::obs_source_get_width(src.as_ptr()), sys::obs_source_get_height(src.as_ptr())) };
         (w > 0 && h > 0).then_some((w, h))
     }
@@ -957,7 +957,7 @@ impl Reconciler {
                 .collect();
             // Layers leaving: at the bottom, fading out.
             for l in scene_a.layers.iter().filter(|l| !used.contains(&l.id)) {
-                let (Some(lo), Some(input)) = (l.layouts.get(&canvas), l.input.and_then(|i| self.inputs.get(&i)))
+                let (Some(lo), Some(source)) = (l.layouts.get(&canvas), l.source.and_then(|i| self.sources.get(&i)))
                 else {
                     continue;
                 };
@@ -965,7 +965,7 @@ impl Reconciler {
                     continue;
                 }
                 let Some((item, masked)) =
-                    (unsafe { add_item(temp.as_ptr(), input, Some(lo), &format!("{}", l.id), false) })
+                    (unsafe { add_item(temp.as_ptr(), source, Some(lo), &format!("{}", l.id), false) })
                 else {
                     continue;
                 };
@@ -978,7 +978,7 @@ impl Reconciler {
             }
             // B's layers: gliding from A's layout when they continue, fading in otherwise.
             for (l, m) in scene_b.layers.iter().zip(&matches) {
-                let (Some(to), Some(input)) = (l.layouts.get(&canvas), l.input.and_then(|i| self.inputs.get(&i)))
+                let (Some(to), Some(source)) = (l.layouts.get(&canvas), l.source.and_then(|i| self.sources.get(&i)))
                 else {
                     continue;
                 };
@@ -987,7 +987,7 @@ impl Reconciler {
                 }
                 // The shape (if any) is B's: a layer gliding into a circle is a circle on the way.
                 let Some((item, masked)) =
-                    (unsafe { add_item(temp.as_ptr(), input, Some(to), &format!("{}", l.id), false) })
+                    (unsafe { add_item(temp.as_ptr(), source, Some(to), &format!("{}", l.id), false) })
                 else {
                     continue;
                 };
@@ -1026,17 +1026,17 @@ impl Reconciler {
         }
     }
 
-    pub fn timer_action(&self, input: Id, action: TimerAction) {
-        self.timers.action(input, action);
+    pub fn timer_action(&self, source: Id, action: TimerAction) {
+        self.timers.action(source, action);
     }
 
-    pub fn timer_status(&self, input: Id) -> Option<TimerStatus> {
-        self.timers.status(input)
+    pub fn timer_status(&self, source: Id) -> Option<TimerStatus> {
+        self.timers.status(source)
     }
 
     /// The text a timer is showing.
-    pub fn timer_text(&self, input: Id) -> Option<String> {
-        self.timers.text(input)
+    pub fn timer_text(&self, source: Id) -> Option<String> {
+        self.timers.text(source)
     }
 
     /// Countdowns that ended since the last call (their end actions are the app's to run).
@@ -1068,8 +1068,8 @@ impl Reconciler {
     }
 
     fn add_layer(&mut self, scene: Id, canvas: Id, layer: &Layer, index: usize) {
-        let (Some(obs_scene), Some(input)) =
-            (self.scenes.get(&(scene, canvas)), layer.input.and_then(|i| self.inputs.get(&i)))
+        let (Some(obs_scene), Some(source)) =
+            (self.scenes.get(&(scene, canvas)), layer.source.and_then(|i| self.sources.get(&i)))
         else {
             tracing::warn!(%scene, layer = %layer.id, "layer references a missing scene or input");
             return;
@@ -1078,7 +1078,7 @@ impl Reconciler {
         let key = (scene, canvas, layer.id);
         let filtered = self.crop_preview == Some(key);
         let Some((item, masked)) =
-            (unsafe { add_item(obs_scene.as_ptr(), input, layout, &format!("{}:{canvas}", layer.id), filtered) })
+            (unsafe { add_item(obs_scene.as_ptr(), source, layout, &format!("{}:{canvas}", layer.id), filtered) })
         else {
             return;
         };
@@ -1107,7 +1107,7 @@ impl Reconciler {
         }
         unsafe {
             sys::obs_sceneitem_set_locked(item.0, layer.locked);
-            let size = previewing.then(|| layer.input.and_then(|i| self.input_size(i))).flatten();
+            let size = previewing.then(|| layer.source.and_then(|i| self.source_size(i))).flatten();
             match layer.layouts.get(&canvas) {
                 // Being cropped: the whole picture, where it would sit uncropped, with the shape
                 // in the crop window and the rest as a ghost that fades in.
@@ -1143,34 +1143,34 @@ impl Reconciler {
     /// Used to check that incremental reconciliation and a full rebuild produce identical state.
     /// What a Studio take records: the screens and cameras in the program (visible in the
     /// primary canvas), each once, with its live source.
-    pub fn take_sources(&self, workspace: &Workspace) -> Vec<(lightair_core::Input, *mut sys::obs_source_t)> {
+    pub fn take_sources(&self, workspace: &Workspace) -> Vec<(lightair_core::Source, *mut sys::obs_source_t)> {
         let Some(scene) = workspace.program.and_then(|p| workspace.scene(p)) else { return Vec::new() };
         let canvas = workspace.primary_canvas().id;
-        let mut out: Vec<(lightair_core::Input, *mut sys::obs_source_t)> = Vec::new();
+        let mut out: Vec<(lightair_core::Source, *mut sys::obs_source_t)> = Vec::new();
         for layer in scene.flatten().layers {
             let visible = layer.layouts.get(&canvas).is_none_or(|l| l.visible);
-            let Some(input) = layer.input.and_then(|i| workspace.inputs.get(&i)) else { continue };
+            let Some(source) = layer.source.and_then(|i| workspace.sources.get(&i)) else { continue };
             if !visible
-                || !matches!(input.kind.as_str(), lightair_core::kinds::SCREEN | lightair_core::kinds::CAMERA)
-                || out.iter().any(|(i, _)| i.id == input.id)
+                || !matches!(source.kind.as_str(), lightair_core::kinds::SCREEN | lightair_core::kinds::CAMERA)
+                || out.iter().any(|(i, _)| i.id == source.id)
             {
                 continue;
             }
-            if let Some(src) = self.inputs.get(&input.id) {
-                out.push(((**input).clone(), src.as_ptr()));
+            if let Some(src) = self.sources.get(&source.id) {
+                out.push(((**source).clone(), src.as_ptr()));
             }
         }
         out
     }
 
-    /// An input's live source (borrowed), for tests and the take.
-    pub fn input_source(&self, input: Id) -> Option<*mut sys::obs_source_t> {
-        self.input_ptr(input)
+    /// A source's live source (borrowed), for tests and the take.
+    pub fn source_source(&self, source: Id) -> Option<*mut sys::obs_source_t> {
+        self.source_ptr(source)
     }
 
-    /// The libobs source type an input plays as (diagnostics and tests).
-    pub fn input_type(&self, input: Id) -> Option<String> {
-        let src = self.inputs.get(&input)?;
+    /// The libobs source type a source plays as (diagnostics and tests).
+    pub fn source_type(&self, source: Id) -> Option<String> {
+        let src = self.sources.get(&source)?;
         let id = unsafe { sys::obs_source_get_id(src.as_ptr()) };
         (!id.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(id) }.to_string_lossy().into_owned())
     }
@@ -1218,7 +1218,7 @@ impl Reconciler {
 
     // ------------------------------------------------------------ audio tracks
     fn add_track(&mut self, track: &Track) {
-        let Some(source) = self.inputs.get(&track.input) else {
+        let Some(source) = self.sources.get(&track.source) else {
             tracing::warn!(track = track.name, "track references a missing input");
             return;
         };
@@ -1241,7 +1241,7 @@ impl Reconciler {
                 vm
             };
             let mut state =
-                TrackState { input: track.input, channel, volmeter: VolmeterPtr(vm), meter, filters: vec![] };
+                TrackState { source: track.source, channel, volmeter: VolmeterPtr(vm), meter, filters: vec![] };
             if Self::engine_audio() {
                 // levels, mute and the engine's effects are the engine's; plugin filters stay
                 state.filters = chain_build(src, &libobs_effects(&track.effects));
@@ -1254,12 +1254,12 @@ impl Reconciler {
     }
 
     fn update_track(&mut self, before: &Track, after: &Track) {
-        if before.input != after.input {
+        if before.source != after.source {
             self.remove_track(after.id);
             self.add_track(after);
             return;
         }
-        let (Some(state), Some(source)) = (self.tracks.get_mut(&after.id), self.inputs.get(&after.input)) else {
+        let (Some(state), Some(source)) = (self.tracks.get_mut(&after.id), self.sources.get(&after.source)) else {
             return;
         };
         let src = source.as_ptr();
@@ -1280,7 +1280,7 @@ impl Reconciler {
                 sys::obs_volmeter_destroy(state.volmeter.0);
             }
             sys::obs_set_output_source(state.channel, std::ptr::null_mut());
-            if let Some(source) = self.inputs.get(&state.input) {
+            if let Some(source) = self.sources.get(&state.source) {
                 chain_remove(source.as_ptr(), &mut state.filters);
                 sys::obs_source_set_monitoring_enabled(source.as_ptr(), false);
             }
@@ -1325,10 +1325,10 @@ impl Reconciler {
 
     /// Number of live libobs objects (tests and diagnostics).
     pub fn counts(&self) -> (usize, usize, usize) {
-        (self.inputs.len(), self.scenes.len(), self.items.len())
+        (self.sources.len(), self.scenes.len(), self.items.len())
     }
 
-    /// Releases everything in dependency order (scenes before the inputs they use).
+    /// Releases everything in dependency order (scenes before the sources they use).
     /// Everything from `workspace`, from scratch (another workspace opened): the main canvas takes
     /// its primary canvas's size.
     pub fn rebuild(&mut self, workspace: &Workspace) {
@@ -1345,7 +1345,7 @@ impl Reconciler {
     }
 
     pub fn clear(&mut self) {
-        self.release_inputs();
+        self.release_sources();
         if self.timers_tick {
             unsafe { sys::obs_remove_tick_callback(Some(on_timers_tick), tick_param(&self.timers)) };
             self.timers_tick = false;
@@ -1366,8 +1366,8 @@ impl Reconciler {
             unsafe { sys::obs_canvas_set_channel(obs_canvas.as_ptr(), 0, std::ptr::null_mut()) };
         }
         self.transitions.clear();
-        for (id, mut chain) in self.input_effects.drain() {
-            if let Some(src) = self.inputs.get(&id) {
+        for (id, mut chain) in self.source_effects.drain() {
+            if let Some(src) = self.sources.get(&id) {
                 unsafe { chain_remove(src.as_ptr(), &mut chain) };
             }
         }
@@ -1376,7 +1376,7 @@ impl Reconciler {
         self.scenes.clear();
         self.obs_canvases.clear();
         self.canvases.clear();
-        self.inputs.clear();
+        self.sources.clear();
         self.program = None;
         // libobs destroys sources on its own thread. Wait until it has, so whatever is built
         // next gets the same names (a name still in use gets " 2" added). The render thread
@@ -1470,19 +1470,19 @@ fn transform_settings(l: &Layout) -> serde_json::Value {
     serde_json::json!({"flip_h": l.flip_h, "flip_v": l.flip_v, "tilt_x": l.tilt_x, "tilt_y": l.tilt_y})
 }
 
-/// Adds `input` to `scene` as a layer's item. A shaped layer becomes a one-item group: the input
+/// Adds `source` to `scene` as a layer's item. A shaped layer becomes a one-item group: the source
 /// sits inside (carrying the crop) and the shape mask is on the group, so the shape is cut from
 /// the cropped picture and belongs to this layer alone.
 pub(crate) unsafe fn add_item(
     scene: *mut sys::obs_scene_t,
-    input: &ObsSource,
+    source: &ObsSource,
     layout: Option<&Layout>,
     name: &str,
     always_filtered: bool,
 ) -> Option<(*mut sys::obs_sceneitem_t, Option<Masked>)> {
     unsafe {
         let Some(layout) = layout.filter(|l| always_filtered || l.needs_filters()) else {
-            let item = sys::obs_scene_add(scene, input.as_ptr());
+            let item = sys::obs_scene_add(scene, source.as_ptr());
             return (!item.is_null()).then_some((item, None));
         };
         let group_name = std::ffi::CString::new(format!("shape {name} {}", Id::new())).unwrap_or_default();
@@ -1490,7 +1490,7 @@ pub(crate) unsafe fn add_item(
         if group.is_null() {
             return None;
         }
-        let inner = sys::obs_scene_add(sys::obs_sceneitem_group_get_scene(group), input.as_ptr());
+        let inner = sys::obs_scene_add(sys::obs_sceneitem_group_get_scene(group), source.as_ptr());
         let shape = layout.shape.unwrap_or(lightair_core::Shape::new(lightair_core::ShapeKind::Rounded));
         let filter = ObsSource::create_private(
             "lightair_shape_mask",
@@ -1500,7 +1500,7 @@ pub(crate) unsafe fn add_item(
         let Some(filter) = filter else {
             tracing::warn!("shape mask unavailable (is the Lightair module loaded?)");
             sys::obs_sceneitem_remove(group);
-            let item = sys::obs_scene_add(scene, input.as_ptr());
+            let item = sys::obs_scene_add(scene, source.as_ptr());
             return (!item.is_null()).then_some((item, None));
         };
         let group_source = sys::obs_sceneitem_get_source(group);
@@ -1627,7 +1627,7 @@ unsafe extern "C" fn on_levels(
     param: *mut std::ffi::c_void,
     magnitude: *const f32,
     peak: *const f32,
-    _input_peak: *const f32,
+    _source_peak: *const f32,
 ) {
     let cell = unsafe { &*(param as *const MeterCell) };
     let n = sys::MAX_AUDIO_CHANNELS as usize;
@@ -1672,13 +1672,13 @@ fn transition_source(
     }
 }
 
-/// An input's settings as its libobs source takes them (portable kinds translated).
-/// An input's libobs settings; `drawn`: its scene's look draws the pointer (so the capture's
+/// A source's settings as its libobs source takes them (portable kinds translated).
+/// A source's libobs settings; `drawn`: its scene's look draws the pointer (so the capture's
 /// own goes, as with the drawn pointer effect).
-fn input_settings(input: &lightair_core::Input, drawn: bool) -> serde_json::Value {
-    let mut s = crate::kinds::resolve(&input.kind, &input.settings).map_or_else(|| input.settings.clone(), |(_, s)| s);
+fn source_settings(source: &lightair_core::Source, drawn: bool) -> serde_json::Value {
+    let mut s = crate::kinds::resolve(&source.kind, &source.settings).map_or_else(|| source.settings.clone(), |(_, s)| s);
     // Lightair draws the pointer: the capture's own goes (every platform's name for it)
-    if (drawn || draws_pointer(input))
+    if (drawn || draws_pointer(source))
         && let Some(o) = s.as_object_mut()
     {
         for key in ["show_cursor", "capture_cursor", "cursor"] {
@@ -1688,10 +1688,10 @@ fn input_settings(input: &lightair_core::Input, drawn: bool) -> serde_json::Valu
     s
 }
 
-/// Whether an input is a screen capture (a display, a window, an app or a game).
-fn is_screen(input: &lightair_core::Input) -> bool {
-    input.kind == lightair_core::kinds::SCREEN
-        || matches!(input.kind.as_str(), "screen_capture" | "display_capture" | "monitor_capture" | "window_capture" | "game_capture")
+/// Whether a source is a screen capture (a display, a window, an app or a game).
+fn is_screen(source: &lightair_core::Source) -> bool {
+    source.kind == lightair_core::kinds::SCREEN
+        || matches!(source.kind.as_str(), "screen_capture" | "display_capture" | "monitor_capture" | "window_capture" | "game_capture")
 }
 
 /// A `ScreenLook` as the pointer filter's settings.
@@ -1716,9 +1716,9 @@ fn screen_look_settings(l: &lightair_core::ScreenLook) -> serde_json::Value {
     })
 }
 
-/// Whether an input has the drawn pointer on.
-fn draws_pointer(input: &lightair_core::Input) -> bool {
-    input.effects.iter().any(|e| e.enabled && e.kind == crate::cursor::KIND)
+/// Whether a source has the drawn pointer on.
+fn draws_pointer(source: &lightair_core::Source) -> bool {
+    source.effects.iter().any(|e| e.enabled && e.kind == crate::cursor::KIND)
 }
 
 fn data_from_json(value: &serde_json::Value) -> Data {

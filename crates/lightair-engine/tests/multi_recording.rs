@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Canvas, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Canvas, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::outputs::{Container, OutputKey, RecordingConfig, default_encoders, runtime};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -50,7 +50,7 @@ fn two_canvases_record_together() {
     let landscape = doc.workspace().primary_canvas().id;
     let vertical = Canvas { width: 360, height: 640, ..Canvas::vertical() };
     let vid = vertical.id;
-    let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 640}));
+    let colour = Source::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 640}));
     let mut scene = Scene::new("Main");
     scene.layers.push(Layer::new(
         "Colour",
@@ -60,7 +60,7 @@ fn two_canvases_record_together() {
     let scene_id = scene.id;
     for cmd in [
         Command::AddCanvas { canvas: vertical },
-        Command::AddInput { input: colour },
+        Command::AddSource { source: colour },
         Command::AddScene { scene, index: None },
         Command::SetProgram { scene: Some(scene_id) },
     ] {

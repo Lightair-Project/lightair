@@ -46,18 +46,18 @@ fn imported_collection_reconciles() {
     std::thread::sleep(std::time::Duration::from_millis(200));
     let described = engine.call(|s| s.reconciler.describe());
     eprintln!("{described:#?}");
-    let (inputs, scenes, items) = engine.call(|s| s.reconciler.counts());
-    assert_eq!((inputs, scenes), (3, 2), "inputs and scenes exist in libobs");
+    let (sources, scenes, items) = engine.call(|s| s.reconciler.counts());
+    assert_eq!((sources, scenes), (3, 2), "inputs and scenes exist in libobs");
     assert_eq!(items, 4);
 
     // The board's size was guessed (1920x1080); the image is 1800x1700. Hold it showing off
     // air, read the real size, and refit.
     let est = report.estimated.iter().find(|e| e.layout.width == 192.0).expect("board was estimated").clone();
-    let input = est.input;
-    engine.call(move |s| s.reconciler.hold_inputs(&[input]));
+    let source = est.source;
+    engine.call(move |s| s.reconciler.hold_sources(&[source]));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let size = loop {
-        if let Some(size) = engine.call(move |s| s.reconciler.input_size(input)) {
+        if let Some(size) = engine.call(move |s| s.reconciler.source_size(source)) {
             break size;
         }
         assert!(std::time::Instant::now() < deadline, "image reports its size");
@@ -66,7 +66,7 @@ fn imported_collection_reconciles() {
     assert_eq!(size, (1800, 1700));
     let fixed = est.refit(size);
     assert_eq!((fixed.x, fixed.y, fixed.width, fixed.height), (10.0, 20.0, 180.0, 170.0));
-    engine.call(|s| s.reconciler.release_inputs());
+    engine.call(|s| s.reconciler.release_sources());
 
     // Undo removes everything it added.
     let change = doc.undo().unwrap();

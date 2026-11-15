@@ -184,8 +184,8 @@ pub const OS: &str = if cfg!(windows) { "Windows" } else { "macOS" };
 /// This computer, as people call it.
 pub const MACHINE: &str = if cfg!(windows) { "PC" } else { "Mac" };
 
-/// Icon for an input type (docs/06-design-system.md, Iconography).
-pub fn input_icon(kind: &str) -> &'static str {
+/// Icon for a source type (docs/06-design-system.md, Iconography).
+pub fn source_icon(kind: &str) -> &'static str {
     match kind {
         lightair_core::kinds::SCREEN => "monitor",
         lightair_core::kinds::CAMERA => "camera",

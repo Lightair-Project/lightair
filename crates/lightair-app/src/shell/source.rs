@@ -1,5 +1,5 @@
 //! The Inspector's Source section and its picker: which camera, display, window, app,
-//! microphone or file a layer shows. Changing it changes the input, so it changes in every scene
+//! microphone or file a layer shows. Changing it changes the source, so it changes in every scene
 //! that uses it.
 
 use std::path::PathBuf;
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Id, Input, kinds};
+use lightair_core::{Command, Id, Source, kinds};
 use serde_json::{Value, json};
 
 use super::StudioWindow;
@@ -15,12 +15,12 @@ use crate::ui::{self, tok};
 
 /// The open source picker.
 pub(super) struct SourcePicker {
-    input: Id,
+    source: Id,
     search: Entity<InputState>,
     _events: Subscription,
 }
 
-/// The setting that picks the source for an input kind (screen capture depends on its mode).
+/// The setting that picks the source for a source kind (screen capture depends on its mode).
 pub(super) fn device_key(kind: &str, settings: &Value) -> Option<&'static str> {
     kinds::device_key(kind, settings)
 }
@@ -119,12 +119,12 @@ pub(super) fn choices(key: &str, options: &[(String, Value)]) -> Vec<Choice> {
 impl StudioWindow {
     fn source_options(
         &self,
-        input: Id,
+        source: Id,
         key: &'static str,
         refresh: bool,
         cx: &mut Context<Self>,
     ) -> Vec<(String, Value)> {
-        let cache_key = (input, key);
+        let cache_key = (source, key);
         if !refresh && let Some(list) = self.source_cache.borrow().get(&cache_key) {
             return list.clone();
         }
@@ -133,16 +133,16 @@ impl StudioWindow {
             .studio
             .read(cx)
             .workspace()
-            .inputs
-            .get(&input)
+            .sources
+            .get(&source)
             .and_then(|i| lightair_engine::kinds::libobs_key(&i.kind, key))
             .unwrap_or(key);
-        let list = self.studio.read(cx).engine().call(move |s| s.reconciler.input_options(input, obs_key));
+        let list = self.studio.read(cx).engine().call(move |s| s.reconciler.source_options(source, obs_key));
         self.source_cache.borrow_mut().insert(cache_key, list.clone());
         list
     }
 
-    fn replace_file(&mut self, input: Id, key: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    fn replace_file(&mut self, source: Id, key: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         let paths =
             cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
         cx.spawn_in(window, async move |this, cx| {
@@ -150,15 +150,15 @@ impl StudioWindow {
             let Some(path): Option<PathBuf> = paths.into_iter().next() else { return };
             let _ = this.update(cx, |this, cx| {
                 let workspace = this.studio.read(cx).workspace().clone();
-                let Some(i) = workspace.inputs.get(&input) else { return };
+                let Some(i) = workspace.sources.get(&source) else { return };
                 let settings = merged(&i.settings, key, json!(path.to_string_lossy()));
-                this.exec(Command::SetInputSettings { input, settings }, cx);
+                this.exec(Command::SetSourceSettings { source, settings }, cx);
             });
         })
         .detach();
     }
 
-    pub(super) fn open_source_picker(&mut self, input: Id, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_source_picker(&mut self, source: Id, window: &mut Window, cx: &mut Context<Self>) {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         search.update(cx, |s, cx| s.focus(window, cx));
         let events = cx.subscribe_in(&search, window, |_, _, ev: &InputEvent, _, cx| {
@@ -168,12 +168,12 @@ impl StudioWindow {
         });
         // Fresh lists: windows come and go.
         let workspace = self.studio.read(cx).workspace().clone();
-        if let Some(i) = workspace.inputs.get(&input)
+        if let Some(i) = workspace.sources.get(&source)
             && let Some(key) = device_key(&i.kind, &i.settings)
         {
-            self.source_options(input, key, true, cx);
+            self.source_options(source, key, true, cx);
         }
-        self.source_picker = Some(SourcePicker { input, search, _events: events });
+        self.source_picker = Some(SourcePicker { source, search, _events: events });
         cx.notify();
     }
 
@@ -183,11 +183,11 @@ impl StudioWindow {
         cx.notify();
     }
 
-    /// The label for an input's current source, from the cached list.
-    fn current_source(&self, input: &Input, cx: &mut Context<Self>) -> Option<(String, String)> {
-        let key = device_key(&input.kind, &input.settings)?;
-        let current = input.settings[key].clone();
-        let list = choices(key, &self.source_options(input.id, key, false, cx));
+    /// The label for a source's current source, from the cached list.
+    fn current_source(&self, source: &Source, cx: &mut Context<Self>) -> Option<(String, String)> {
+        let key = device_key(&source.kind, &source.settings)?;
+        let current = source.settings[key].clone();
+        let list = choices(key, &self.source_options(source.id, key, false, cx));
         Some(match list.into_iter().find(|c| c.value == current) {
             Some(c) => (c.title, c.detail),
             None if current.is_null() || current == json!("") || current == json!(0) => {
@@ -197,31 +197,31 @@ impl StudioWindow {
         })
     }
 
-    /// The Source section for an input, if its kind has a choosable source.
-    pub(super) fn source_section(&self, input: &Input, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let id = input.id;
-        if let Some(key) = file_key(&input.kind) {
-            let path = input.settings[key].as_str().unwrap_or("");
+    /// The Source section for a source, if its kind has a choosable source.
+    pub(super) fn source_section(&self, source: &Source, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = source.id;
+        if let Some(key) = file_key(&source.kind) {
+            let path = source.settings[key].as_str().unwrap_or("");
             let name =
                 std::path::Path::new(path).file_name().map_or("No file".into(), |n| n.to_string_lossy().into_owned());
             return Some(
                 self.section("Source", None, cx)
                     .child(
-                        self.source_chip("source-file", ui::input_icon(&input.kind), name, String::new(), "Replace…")
+                        self.source_chip("source-file", ui::source_icon(&source.kind), name, String::new(), "Replace…")
                             .on_click(cx.listener(move |this, _, window, cx| this.replace_file(id, key, window, cx))),
                     )
                     .into_any_element(),
             );
         }
-        let (title, detail) = self.current_source(input, cx)?;
-        let icon = source_icon(&input.kind, &input.settings);
+        let (title, detail) = self.current_source(source, cx)?;
+        let icon = source_icon(&source.kind, &source.settings);
         // a whole display: Lightair's own windows in it or not (in, for a tutorial on Lightair)
-        let display = input.kind == kinds::SCREEN && input.settings["mode"].as_i64().unwrap_or(kinds::DISPLAY) == kinds::DISPLAY;
-        let shows_lightair = !input.settings["hide_obs"].as_bool().unwrap_or(false);
+        let display = source.kind == kinds::SCREEN && source.settings["mode"].as_i64().unwrap_or(kinds::DISPLAY) == kinds::DISPLAY;
+        let shows_lightair = !source.settings["hide_obs"].as_bool().unwrap_or(false);
         let toggle = display.then(|| {
-            let mut settings = input.settings.clone();
+            let mut settings = source.settings.clone();
             settings["hide_obs"] = (shows_lightair).into();
-            let cmd = lightair_core::Command::SetInputSettings { input: id, settings };
+            let cmd = lightair_core::Command::SetSourceSettings { source: id, settings };
             div()
                 .flex()
                 .items_center()
@@ -306,30 +306,30 @@ impl StudioWindow {
     pub(super) fn source_picker_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let picker = self.source_picker.as_ref()?;
         let workspace = self.studio.read(cx).workspace().clone();
-        let input = workspace.inputs.get(&picker.input)?.clone();
-        let key = device_key(&input.kind, &input.settings)?;
-        let id = input.id;
+        let source = workspace.sources.get(&picker.source)?.clone();
+        let key = device_key(&source.kind, &source.settings)?;
+        let id = source.id;
         let query = picker.search.read(cx).value().to_lowercase();
-        let current = input.settings[key].clone();
+        let current = source.settings[key].clone();
         let list: Vec<Choice> = choices(key, &self.source_options(id, key, false, cx))
             .into_iter()
             .filter(|c| {
                 query.is_empty() || c.title.to_lowercase().contains(&query) || c.detail.to_lowercase().contains(&query)
             })
             .collect();
-        let icon = source_icon(&input.kind, &input.settings);
+        let icon = source_icon(&source.kind, &source.settings);
         let title = match key {
-            "device" if input.kind == kinds::CAMERA => "Choose a camera",
+            "device" if source.kind == kinds::CAMERA => "Choose a camera",
             "device" => "Choose a microphone",
             "display" => "Choose a display",
             "window" => "Choose a window",
             "app" => "Choose an app",
-            _ => "Choose an input",
+            _ => "Choose a source",
         };
 
         let card = |i: usize, c: &Choice, cx: &mut Context<Self>| {
             let selected = c.value == current;
-            let settings = merged(&input.settings, key, c.value.clone());
+            let settings = merged(&source.settings, key, c.value.clone());
             div()
                 .id(("source-choice", i))
                 .flex()
@@ -366,7 +366,7 @@ impl StudioWindow {
                 )
                 .when(selected, |d| d.child(ui::icon("check").size(px(14.)).text_color(tok::accent_primary())))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.exec(Command::SetInputSettings { input: id, settings: settings.clone() }, cx);
+                    this.exec(Command::SetSourceSettings { source: id, settings: settings.clone() }, cx);
                     this.close_source_picker(window, cx);
                 }))
         };
@@ -405,8 +405,8 @@ impl StudioWindow {
             body = body.child(grid);
         }
 
-        let mode = (input.kind == kinds::SCREEN).then(|| {
-            let m = input.settings["mode"].as_i64().unwrap_or(kinds::DISPLAY);
+        let mode = (source.kind == kinds::SCREEN).then(|| {
+            let m = source.settings["mode"].as_i64().unwrap_or(kinds::DISPLAY);
             self.segmented(
                 "capture-mode",
                 [(kinds::DISPLAY, "Display"), (kinds::WINDOW, "Window"), (kinds::APP, "App"), (kinds::GAME, "Game")]
@@ -416,9 +416,9 @@ impl StudioWindow {
                     .map(|(v, label)| {
                         (
                             label,
-                            Command::SetInputSettings {
-                                input: id,
-                                settings: merged(&input.settings, "mode", json!(v)),
+                            Command::SetSourceSettings {
+                                source: id,
+                                settings: merged(&source.settings, "mode", json!(v)),
                             },
                             m == v,
                         )
@@ -477,7 +477,7 @@ impl StudioWindow {
                                         .whitespace_nowrap()
                                         .text_size(px(11.))
                                         .text_color(tok::text_tertiary())
-                                        .child(format!("for {}", input.name)),
+                                        .child(format!("for {}", source.name)),
                                 ),
                         )
                         .children(mode)
@@ -497,7 +497,7 @@ fn source_icon(kind: &str, settings: &Value) -> &'static str {
             kinds::APP => "layout-grid",
             _ => "monitor",
         },
-        _ => ui::input_icon(kind),
+        _ => ui::source_icon(kind),
     }
 }
 

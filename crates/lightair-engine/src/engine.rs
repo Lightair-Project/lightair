@@ -97,7 +97,7 @@ pub enum EngineError {
 /// Source, filter, transition, encoder, output and service types available on this machine.
 #[derive(Debug, Clone, Default)]
 pub struct Capabilities {
-    pub inputs: Vec<String>,
+    pub sources: Vec<String>,
     pub filters: Vec<String>,
     pub transitions: Vec<String>,
     pub encoders: Vec<String>,
@@ -278,7 +278,7 @@ unsafe fn bootstrap(cfg: &EngineConfig) -> Result<(Runtime, Capabilities, String
     let capabilities = discover(cfg);
     tracing::info!(
         version,
-        inputs = capabilities.inputs.len(),
+        sources = capabilities.sources.len(),
         encoders = capabilities.encoders.len(),
         modules = capabilities.modules.len(),
         "engine ready"
@@ -364,7 +364,7 @@ fn discover(_cfg: &EngineConfig) -> Capabilities {
     }
     unsafe { sys::obs_enum_modules(Some(collect), &mut modules as *mut _ as *mut _) };
     Capabilities {
-        inputs: enumerate(sys::obs_enum_input_types),
+        sources: enumerate(sys::obs_enum_source_types),
         filters: enumerate(sys::obs_enum_filter_types),
         transitions: enumerate(sys::obs_enum_transition_types),
         encoders: enumerate(sys::obs_enum_encoder_types),

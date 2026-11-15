@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Fit, Canvas, Id, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Fit, Canvas, Id, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, frame_size, sample_ycbcr};
 use serde_json::json;
@@ -35,14 +35,14 @@ fn the_main_canvas_resizes_live() {
     workspace.canvases[0] = Canvas { width: 320, height: 180, ..workspace.canvases[0].clone() };
     let mut doc = Document::new(workspace);
     let f = doc.workspace().primary_canvas().id;
-    let r = Input::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 64, "height": 64}));
+    let r = Source::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 64, "height": 64}));
     let rid = r.id;
     let mut scene = Scene::new("Main");
     let sid = Id::new();
     scene.id = sid;
     scene.layers =
         vec![Layer::new("Red", rid, [(f, Layout { fit: Fit::Stretch, ..Layout::boxed(0.0, 0.0, 320.0, 180.0) })])];
-    apply(&engine, &mut doc, Command::AddInput { input: r });
+    apply(&engine, &mut doc, Command::AddSource { source: r });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
     assert_eq!(frame_size(&settled(&preview)), (320, 180));

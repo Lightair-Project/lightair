@@ -62,7 +62,7 @@ impl Drop for Data {
     }
 }
 
-/// A strong reference to an `obs_source_t` (input, filter, transition or scene source).
+/// A strong reference to an `obs_source_t` (source, filter, transition or scene source).
 pub struct ObsSource(NonNull<sys::obs_source_t>);
 unsafe impl Send for ObsSource {}
 
@@ -227,7 +227,7 @@ impl Drop for ObsCanvas {
 }
 
 /// Items of a list property of a source type, as (label, value) — e.g. the camera devices of
-/// `av_capture_input_v2`'s `device` property. Call on the engine thread.
+/// `av_capture_source_v2`'s `device` property. Call on the engine thread.
 pub fn property_items(source_type: &str, property: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     unsafe {

@@ -3,7 +3,7 @@
 //! abruptly keeps what was written).
 //!
 //! - **Screens** are recorded from a capture of their own, with the cursor off and no effects:
-//!   the Editor draws the pointer again from the take's input log.
+//!   the Editor draws the pointer again from the take's source log.
 //! - **Cameras** are recorded as they look (their effects on).
 //!
 //! Each file comes from a private canvas the size of its source, holding just that source.
@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use lightair_core::{Id, Input, kinds};
+use lightair_core::{Id, Source, kinds};
 use serde_json::json;
 
 use crate::obs::{ObsCanvas, Data, ObsScene, ObsSource};
@@ -25,7 +25,7 @@ pub struct Track {
     pub name: String,
     /// A screen (else a camera): what it is, apart from its name.
     pub screen: bool,
-    pub input: Id,
+    pub source: Id,
     pub file: PathBuf,
     pub width: u32,
     pub height: u32,
@@ -52,9 +52,9 @@ fn even(v: u32) -> u32 {
 }
 
 impl Take {
-    /// Starts recording `sources` (inputs and their live sources) into `folder`.
+    /// Starts recording `sources` (sources and their live sources) into `folder`.
     pub fn start(
-        sources: Vec<(Input, *mut sys::obs_source_t)>,
+        sources: Vec<(Source, *mut sys::obs_source_t)>,
         folder: &Path,
         fps: (u32, u32),
         outputs: &mut Outputs,
@@ -64,14 +64,14 @@ impl Take {
         let mut parts = Vec::new();
         let mut tracks = Vec::new();
         let (mut screens, mut cameras) = (0, 0);
-        for (input, live) in sources {
-            let screen = input.kind == kinds::SCREEN;
+        for (source, live) in sources {
+            let screen = source.kind == kinds::SCREEN;
             // the screen without the cursor or effects; the camera as it is
             let own = if screen {
-                let mut settings = input.settings.clone();
+                let mut settings = source.settings.clone();
                 settings["cursor"] = json!(false);
-                let Some((kind, s)) = crate::kinds::resolve(&input.kind, &settings) else { continue };
-                ObsSource::create_private(kind, &format!("take:{}", input.id), Some(&Data::from_json(&s)))
+                let Some((kind, s)) = crate::kinds::resolve(&source.kind, &settings) else { continue };
+                ObsSource::create_private(kind, &format!("take:{}", source.id), Some(&Data::from_json(&s)))
             } else {
                 None
             };
@@ -111,7 +111,7 @@ impl Take {
             };
             let video = crate::outputs::VideoOutput(unsafe { sys::obs_canvas_get_video(obs_canvas.as_ptr()) });
             outputs.start_recording(&cfg, Some(video))?;
-            tracks.push(Track { name, screen, input: input.id, file, width: w, height: h });
+            tracks.push(Track { name, screen, source: source.id, file, width: w, height: h });
             parts.push(Part { key, _own: own, _scene: scene, _canvas: obs_canvas });
         }
         if parts.is_empty() {

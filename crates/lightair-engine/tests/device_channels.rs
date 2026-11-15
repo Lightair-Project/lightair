@@ -1,11 +1,11 @@
-//! Interface channels: an 8-input device, one track per channel (or a pair): each track hears
+//! Interface channels: an 8-source device, one track per channel (or a pair): each track hears
 //! only its channel(s).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Input, Workspace, Route, Track, TrackChannels, diff};
+use lightair_core::{Command, Document, Source, Workspace, Route, Track, TrackChannels, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -20,8 +20,8 @@ fn each_track_takes_its_channels() {
         let workspace = change.after.clone();
         engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     };
-    // an interface input (no such device here: the test feeds it)
-    let iface = Input::new("Interface", "lightair_audio_device", json!({"device": "Lightair test interface"}));
+    // an interface source (no such device here: the test feeds it)
+    let iface = Source::new("Interface", "lightair_audio_device", json!({"device": "Lightair test interface"}));
     let iid = iface.id;
     let mut vox = Track::new("Vox", iid);
     vox.channels = TrackChannels::Mono(5);
@@ -30,7 +30,7 @@ fn each_track_takes_its_channels() {
     keys.channels = TrackChannels::Stereo(2, 7);
     keys.route = Route::None; // only measured on its own strip
     let keys_id = keys.id;
-    apply(&mut doc, Command::AddInput { input: iface });
+    apply(&mut doc, Command::AddSource { source: iface });
     apply(&mut doc, Command::AddTrack { track: vox, index: None });
     apply(&mut doc, Command::AddTrack { track: keys, index: None });
 

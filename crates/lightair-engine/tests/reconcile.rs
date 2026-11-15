@@ -1,7 +1,7 @@
 //! Reconciler idempotence (docs/04-engine-libobs.md, "Reconciler"): applying the edits one by
 //! one must leave libobs in exactly the same state as rebuilding from the final document.
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -13,8 +13,8 @@ fn incremental_reconcile_matches_full_rebuild() {
 
     let mut doc = Document::new(Workspace::new("Test"));
     let canvas = doc.workspace().primary_canvas().id;
-    let red = Input::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 400, "height": 300}));
-    let blue = Input::new("Blue", "color_source_v3", json!({"color": 0xFFFF0000u32, "width": 400, "height": 300}));
+    let red = Source::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 400, "height": 300}));
+    let blue = Source::new("Blue", "color_source_v3", json!({"color": 0xFFFF0000u32, "width": 400, "height": 300}));
     let (red_id, blue_id) = (red.id, blue.id);
     let main = Scene::new("Main");
     let brb = Scene::new("BRB");
@@ -25,8 +25,8 @@ fn incremental_reconcile_matches_full_rebuild() {
     let (l1_id, l2_id) = (l1.id, l2.id);
 
     let edits = vec![
-        Command::AddInput { input: red },
-        Command::AddInput { input: blue },
+        Command::AddSource { source: red },
+        Command::AddSource { source: blue },
         Command::AddScene { scene: main, index: None },
         Command::AddScene { scene: brb, index: None },
         Command::AddLayer { scene: main_id, layer: l1, index: None },
@@ -40,8 +40,8 @@ fn incremental_reconcile_matches_full_rebuild() {
         },
         Command::MoveLayer { scene: main_id, layer: l2_id, to: 0 },
         Command::SetLayerVisible { scene: main_id, layer: l1_id, canvas, visible: false },
-        Command::SetInputSettings {
-            input: blue_id,
+        Command::SetSourceSettings {
+            source: blue_id,
             settings: json!({"color": 0xFF00FF00u32, "width": 800, "height": 600}),
         },
         Command::SetProgram { scene: Some(brb_id) },

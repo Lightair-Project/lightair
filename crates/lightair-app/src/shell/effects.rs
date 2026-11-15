@@ -13,7 +13,7 @@ use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::catalog::{self, Category, Control, EffectDef, Needs, Presets, Slider as SliderDef};
-use lightair_core::{Command, Effect, Id, Input};
+use lightair_core::{Command, Effect, Id, Source};
 use serde_json::{Value, json};
 
 use super::StudioWindow;
@@ -23,7 +23,7 @@ use crate::ui::{self, tok};
 /// Whose effects these are: a source's (video) or a mixer track's (audio).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Owner {
-    Input(Id),
+    Source(Id),
     Track(Id),
     /// A bus, mix or the master.
     Strip(lightair_core::MixerStrip),
@@ -32,28 +32,28 @@ pub(super) enum Owner {
 impl Owner {
     fn add(self, effect: Effect, index: Option<usize>) -> Command {
         match self {
-            Owner::Input(input) => Command::AddInputEffect { input, effect, index },
+            Owner::Source(source) => Command::AddSourceEffect { source, effect, index },
             Owner::Track(track) => Command::AddEffect { track, effect, index },
             Owner::Strip(strip) => Command::AddStripEffect { strip, effect, index },
         }
     }
     fn remove(self, effect: Id) -> Command {
         match self {
-            Owner::Input(input) => Command::RemoveInputEffect { input, effect },
+            Owner::Source(source) => Command::RemoveSourceEffect { source, effect },
             Owner::Track(track) => Command::RemoveEffect { track, effect },
             Owner::Strip(strip) => Command::RemoveStripEffect { strip, effect },
         }
     }
     fn enable(self, effect: Id, enabled: bool) -> Command {
         match self {
-            Owner::Input(input) => Command::SetInputEffectEnabled { input, effect, enabled },
+            Owner::Source(source) => Command::SetSourceEffectEnabled { source, effect, enabled },
             Owner::Track(track) => Command::SetEffectEnabled { track, effect, enabled },
             Owner::Strip(strip) => Command::SetStripEffectEnabled { strip, effect, enabled },
         }
     }
     fn settings(self, effect: Id, settings: Value) -> Command {
         match self {
-            Owner::Input(input) => Command::SetInputEffectSettings { input, effect, settings },
+            Owner::Source(source) => Command::SetSourceEffectSettings { source, effect, settings },
             Owner::Track(track) => Command::SetEffectSettings { track, effect, settings },
             Owner::Strip(strip) => Command::SetStripEffectSettings { strip, effect, settings },
         }
@@ -61,7 +61,7 @@ impl Owner {
     /// Its effects and name.
     fn find(self, workspace: &lightair_core::Workspace) -> Option<(String, Vec<Effect>)> {
         match self {
-            Owner::Input(id) => workspace.inputs.get(&id).map(|i| (i.name.clone(), i.effects.clone())),
+            Owner::Source(id) => workspace.sources.get(&id).map(|i| (i.name.clone(), i.effects.clone())),
             Owner::Track(id) => workspace.track(id).map(|t| (t.name.clone(), t.effects.clone())),
             Owner::Strip(lightair_core::MixerStrip::Bus(id)) => {
                 workspace.audio.bus(id).map(|b| (b.name.clone(), b.effects.clone()))
@@ -74,14 +74,14 @@ impl Owner {
         }
     }
     fn audio(self) -> bool {
-        !matches!(self, Owner::Input(_))
+        !matches!(self, Owner::Source(_))
     }
 
     /// Where its effects live, for dragging them.
     fn home(self) -> crate::effect_drag::Home {
         use crate::effect_drag::Home;
         match self {
-            Owner::Input(id) => Home::Input(id),
+            Owner::Source(id) => Home::Source(id),
             Owner::Track(id) => Home::Strip(lightair_core::MixerStrip::Track(id)),
             Owner::Strip(s) => Home::Strip(s),
         }
@@ -155,8 +155,8 @@ const SWATCHES: &[u32] = &[
 impl StudioWindow {
     // ------------------------------------------------------------ the stack
 
-    pub(super) fn effects_section(&self, input: &Input, cx: &mut Context<Self>) -> AnyElement {
-        self.effect_stack(Owner::Input(input.id), &input.effects, cx)
+    pub(super) fn effects_section(&self, source: &Source, cx: &mut Context<Self>) -> AnyElement {
+        self.effect_stack(Owner::Source(source.id), &source.effects, cx)
     }
 
     /// A bus's, mix's or the master's effects.
@@ -211,7 +211,7 @@ impl StudioWindow {
             );
         }
         let presence = match iid {
-            Owner::Input(id) => self.presence.get(&id).copied().unwrap_or_default(),
+            Owner::Source(id) => self.presence.get(&id).copied().unwrap_or_default(),
             Owner::Track(_) | Owner::Strip(_) => Presence::default(),
         };
         for (i, e) in effects.iter().enumerate() {
@@ -824,22 +824,22 @@ impl StudioWindow {
     /// from the Inspector's render, which has the window the pickers need.
     pub(super) fn ensure_colour_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let input = studio
+        let source = studio
             .selected_layer
             .and_then(|l| studio.selected_scene.and_then(|s| studio.workspace().scene(s)).and_then(|s| s.layer(l)))
-            .and_then(|l| l.input)
-            .and_then(|i| studio.workspace().inputs.get(&i).cloned());
-        let Some(input) = input else {
+            .and_then(|l| l.source)
+            .and_then(|i| studio.workspace().sources.get(&i).cloned());
+        let Some(source) = source else {
             self.colour_pickers.clear();
             return;
         };
         let mut wanted = Vec::new();
-        for e in &input.effects {
+        for e in &source.effects {
             let Some(d) = catalog::def(&e.kind) else { continue };
             for c in d.controls {
                 if let Control::Colour { key, default, .. } = *c {
                     let v = e.settings.get(key).and_then(Value::as_u64).map_or(default, |v| v as u32);
-                    wanted.push((input.id, e.id, key, v));
+                    wanted.push((source.id, e.id, key, v));
                 }
             }
         }
@@ -859,7 +859,7 @@ impl StudioWindow {
                     }
                     let events = cx.subscribe_in(&state, window, move |this, _, ev: &ColorPickerEvent, _, cx| {
                         if let ColorPickerEvent::Change(Some(c)) = ev {
-                            this.set_effect_colour(Owner::Input(iid), eid, key, abgr_of_hsla(*c), cx);
+                            this.set_effect_colour(Owner::Source(iid), eid, key, abgr_of_hsla(*c), cx);
                         }
                     });
                     self.colour_pickers.insert(k, ColourPicker { state, shown: v, _events: events });
@@ -893,11 +893,11 @@ impl StudioWindow {
         let filter = if effect.kind.starts_with("studio.") { catalog::STUDIO_ID } else { eid };
         let restore = catalog::lower(&effects).iter().find(|f| f.id == filter).is_some_and(|f| f.enabled);
         // only a source's effect can be switched off live (a track's colour has no picture)
-        let Owner::Input(input) = iid else { return };
+        let Owner::Source(source) = iid else { return };
         let on_air = runtime().any_stream_running() || runtime().any_recording_running();
         let engine = self.studio.read(cx).engine().clone();
         if !on_air {
-            engine.call(move |s| s.reconciler.set_filter_live(input, filter, false));
+            engine.call(move |s| s.reconciler.set_filter_live(source, filter, false));
         }
         let picked = crate::eyedropper::pick();
         cx.spawn(async move |this, cx| {
@@ -911,7 +911,7 @@ impl StudioWindow {
                 }
             };
             if !on_air {
-                engine.call(move |s| s.reconciler.set_filter_live(input, filter, restore));
+                engine.call(move |s| s.reconciler.set_filter_live(source, filter, restore));
             }
             if let Some(rgb) = result {
                 let _ = this.update(cx, |this, cx| {
@@ -963,27 +963,27 @@ impl StudioWindow {
     /// cards' hints). Cheap; called on a timer while the Inspector shows face effects.
     pub(super) fn refresh_presence(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let Some(input) = studio
+        let Some(source) = studio
             .selected_layer
             .and_then(|l| studio.selected_scene.and_then(|s| studio.workspace().scene(s)).and_then(|s| s.layer(l)))
-            .and_then(|l| l.input)
+            .and_then(|l| l.source)
         else {
             return;
         };
         let wants = studio
             .workspace()
-            .inputs
-            .get(&input)
+            .sources
+            .get(&source)
             .is_some_and(|i| i.effects.iter().any(|e| e.enabled && e.kind.starts_with("studio.")));
         if !wants {
             return;
         }
         let p = studio.engine().call(move |s| Presence {
-            face: s.reconciler.face_present(input),
-            person: s.reconciler.person_present(input),
+            face: s.reconciler.face_present(source),
+            person: s.reconciler.person_present(source),
         });
-        if self.presence.get(&input) != Some(&p) {
-            self.presence.insert(input, p);
+        if self.presence.get(&source) != Some(&p) {
+            self.presence.insert(source, p);
             cx.notify();
         }
     }
@@ -1012,20 +1012,20 @@ impl StudioWindow {
     }
 
     /// Adds an effect from the catalog (a face effect already in the stack opens instead).
-    fn add_from_catalog(&mut self, input: Owner, def: &'static EffectDef, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_from_catalog(&mut self, source: Owner, def: &'static EffectDef, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = self.studio.read(cx).workspace().clone();
-        let Some((_, effects)) = input.find(&workspace) else { return };
+        let Some((_, effects)) = source.find(&workspace) else { return };
         if def.is_studio()
             && let Some(e) = effects.iter().find(|e| e.kind == def.kind)
         {
             self.props.open_effect = Some(e.id);
             if !e.enabled {
-                self.exec(input.enable(e.id, true), cx);
+                self.exec(source.enable(e.id, true), cx);
             }
         } else {
             let effect = def.create();
             self.props.open_effect = Some(effect.id);
-            self.exec(input.add(effect, None), cx);
+            self.exec(source.add(effect, None), cx);
         }
         self.close_effect_catalog(window, cx);
     }

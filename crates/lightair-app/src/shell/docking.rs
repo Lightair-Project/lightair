@@ -289,9 +289,9 @@ impl StudioWindow {
             Ok("screen-layouts") => {
                 // the layout scenes, the display blank (an app that isn't there), Screen on air
                 let p = self.studio.read(cx).workspace().clone();
-                if let Some(display) = p.inputs.values().find(|i| i.kind == lightair_core::kinds::SCREEN) {
+                if let Some(display) = p.sources.values().find(|i| i.kind == lightair_core::kinds::SCREEN) {
                     let s = serde_json::json!({"mode": lightair_core::kinds::APP, "app": "app.lightair.nothing"});
-                    self.exec(lightair_core::Command::SetInputSettings { input: display.id, settings: s }, cx);
+                    self.exec(lightair_core::Command::SetSourceSettings { source: display.id, settings: s }, cx);
                 }
                 self.add_screen_layouts(cx);
                 let p = self.studio.read(cx).workspace().clone();
@@ -309,9 +309,9 @@ impl StudioWindow {
                     settings.folder = Some(dir);
                 }
                 self.exec(lightair_core::Command::SetRecordingSettings { settings }, cx);
-                if let Some(display) = p.inputs.values().find(|i| i.kind == lightair_core::kinds::SCREEN) {
+                if let Some(display) = p.sources.values().find(|i| i.kind == lightair_core::kinds::SCREEN) {
                     let s = serde_json::json!({"mode": lightair_core::kinds::APP, "app": "app.lightair.nothing", "cursor": false});
-                    self.exec(lightair_core::Command::SetInputSettings { input: display.id, settings: s }, cx);
+                    self.exec(lightair_core::Command::SetSourceSettings { source: display.id, settings: s }, cx);
                 }
                 if let Some(main) = p.scenes.iter().find(|s| s.name == "Main") {
                     self.exec(lightair_core::Command::SetProgram { scene: Some(main.id) }, cx);
@@ -327,11 +327,11 @@ impl StudioWindow {
                 // the drawn pointer, big, on the background colour (not on a screen capture: no
                 // one's screen in the picture)
                 let p = self.studio.read(cx).workspace().clone();
-                if let Some(bg) = p.inputs.values().find(|i| i.name == "Background") {
+                if let Some(bg) = p.sources.values().find(|i| i.name == "Background") {
                     let mut e = lightair_core::catalog::def(lightair_core::catalog::CURSOR_KIND).unwrap().create();
                     e.settings["size"] = serde_json::json!(4.0);
                     e.settings["idle_s"] = serde_json::json!(0.0);
-                    self.exec(lightair_core::Command::AddInputEffect { input: bg.id, effect: e, index: None }, cx);
+                    self.exec(lightair_core::Command::AddSourceEffect { source: bg.id, effect: e, index: None }, cx);
                 }
                 // the logo sits where the pointer usually is
                 if let Some(scene) = p.program.and_then(|s| p.scene(s)) {
@@ -499,11 +499,11 @@ impl StudioWindow {
                 .detach();
             }
             Ok("source") => {
-                let input = {
+                let source = {
                     let s = self.studio.read(cx);
-                    s.workspace().inputs.values().find(|i| i.kind == lightair_core::kinds::SCREEN).map(|i| i.id)
+                    s.workspace().sources.values().find(|i| i.kind == lightair_core::kinds::SCREEN).map(|i| i.id)
                 };
-                if let Some(id) = input {
+                if let Some(id) = source {
                     self.open_source_picker(id, window, cx);
                 }
             }
@@ -573,15 +573,15 @@ impl StudioWindow {
             Ok(hook @ ("fx-stack" | "fx-sheet" | "fx-shape" | "fx-none" | "fx-bg" | "fx-system" | "fx-key" | "fx-key-open")) => {
                 // A picture with a few effects, its stack open (or the catalog over it).
                 let board = concat!(env!("CARGO_MANIFEST_DIR"), "/../../branding/final/board.png");
-                self.add_input_layer("Board", "image_source", serde_json::json!({"file": board}), (1920.0, 1080.0), cx);
-                let (input, layer) = {
+                self.add_source_layer("Board", "image_source", serde_json::json!({"file": board}), (1920.0, 1080.0), cx);
+                let (source, layer) = {
                     let s = self.studio.read(cx);
                     let layer = s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().cloned());
-                    (layer.as_ref().and_then(|l| l.input), layer.map(|l| l.id))
+                    (layer.as_ref().and_then(|l| l.source), layer.map(|l| l.id))
                 };
                 self.select_layer(layer, cx);
                 self.collapsed.borrow_mut().extend(["Source", "Transform"]);
-                if let Some(iid) = input {
+                if let Some(iid) = source {
                     let kinds: &[&str] = if hook.starts_with("fx-key") {
                         &["chroma_key_filter_v2"]
                     } else if hook == "fx-system" {
@@ -606,12 +606,12 @@ impl StudioWindow {
                                 effect.settings["bg_model"] = serde_json::json!(lightair_core::catalog::BG_MODEL_SYSTEM);
                             }
                             first.get_or_insert(effect.id);
-                            self.exec(lightair_core::Command::AddInputEffect { input: iid, effect, index: None }, cx);
+                            self.exec(lightair_core::Command::AddSourceEffect { source: iid, effect, index: None }, cx);
                         }
                     }
                     self.props.open_effect = first;
                     if hook == "fx-sheet" {
-                        self.open_effect_catalog(super::effects::Owner::Input(iid), super::effects::Page::All, window, cx);
+                        self.open_effect_catalog(super::effects::Owner::Source(iid), super::effects::Page::All, window, cx);
                     }
                 }
             }

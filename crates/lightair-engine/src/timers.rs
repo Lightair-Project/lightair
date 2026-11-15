@@ -1,5 +1,5 @@
 //! Countdown, stopwatch and clock layers (docs/07-scenes-layers-canvas.md, "Timer"). The
-//! document holds a `lightair_timer` input whose settings are text style plus timer settings;
+//! document holds a `lightair_timer` source whose settings are text style plus timer settings;
 //! libobs shows it with a text source whose text a tick callback rewrites once a second. Where
 //! a timer is (running, paused, ended) is runtime state, never in the document or undo history.
 

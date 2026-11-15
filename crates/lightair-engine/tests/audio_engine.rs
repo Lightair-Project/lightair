@@ -5,7 +5,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use lightair_core::{AudioMix, Bus, Command, Document, Effect, Input, Workspace, Route, Send, Track, diff};
+use lightair_core::{AudioMix, Bus, Command, Document, Effect, Source, Workspace, Route, Send, Track, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -52,12 +52,12 @@ fn the_engine_mixes_tracks_into_libobs() {
         let workspace = change.after.clone();
         engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     };
-    let tone = Input::new("Tone", "lightair_test_tone", json!({"freq": 440.0, "amplitude": 0.5}));
+    let tone = Source::new("Tone", "lightair_test_tone", json!({"freq": 440.0, "amplitude": 0.5}));
     let mut track = Track::new("Tone", tone.id);
     // −6 dB in the engine's own Gain effect
     track.effects = vec![Effect::new("Gain", "audio.gain", json!({"db": -6.0206}))];
     let tid = track.id;
-    apply(&mut doc, Command::AddInput { input: tone });
+    apply(&mut doc, Command::AddSource { source: tone });
     apply(&mut doc, Command::AddTrack { track, index: None });
 
     let p = peaks_after(1500);

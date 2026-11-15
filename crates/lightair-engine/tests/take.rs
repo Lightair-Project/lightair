@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -32,16 +32,16 @@ fn each_source_records_at_its_own_size() {
     let engine = Engine::start(EngineConfig { canvas: (1280, 720), output: (1280, 720), ..Default::default() }).unwrap();
     let mut doc = Document::new(Workspace::new("Take"));
     let f = doc.workspace().primary_canvas().id;
-    let wide = Input::new("Wide", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 1600, "height": 900}));
-    let tall = Input::new("Tall", "color_source_v3", json!({"color": 0xFF22AA44u32, "width": 480, "height": 640}));
+    let wide = Source::new("Wide", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 1600, "height": 900}));
+    let tall = Source::new("Tall", "color_source_v3", json!({"color": 0xFF22AA44u32, "width": 480, "height": 640}));
     let (wid, tid) = (wide.id, tall.id);
     let mut scene = Scene::new("Main");
     scene.layers.push(Layer::new("Wide", wid, [(f, Layout::boxed(0.0, 0.0, 1280.0, 720.0))]));
     scene.layers.push(Layer::new("Tall", tid, [(f, Layout::boxed(900.0, 100.0, 240.0, 320.0))]));
     let sid = scene.id;
     for cmd in [
-        Command::AddInput { input: wide },
-        Command::AddInput { input: tall },
+        Command::AddSource { source: wide },
+        Command::AddSource { source: tall },
         Command::AddScene { scene, index: None },
         Command::SetProgram { scene: Some(sid) },
     ] {
@@ -57,14 +57,14 @@ fn each_source_records_at_its_own_size() {
     let tracks = engine
         .call(move |s| {
             let sources: Vec<_> = workspace
-                .inputs
+                .sources
                 .values()
-                .filter_map(|i| s.reconciler.input_type(i.id).map(|_| ((**i).clone(), i.id)))
+                .filter_map(|i| s.reconciler.source_type(i.id).map(|_| ((**i).clone(), i.id)))
                 .collect();
-            // the live sources, as take_sources gives them (colour inputs aren't screens or cameras)
+            // the live sources, as take_sources gives them (colour sources aren't screens or cameras)
             let sources = sources
                 .into_iter()
-                .filter_map(|(i, id)| s.reconciler.input_source(id).map(|p| (i, p)))
+                .filter_map(|(i, id)| s.reconciler.source_source(id).map(|p| (i, p)))
                 .collect();
             let take = lightair_engine::take::Take::start(sources, &folder, (30, 1), &mut s.outputs, &caps)?;
             let tracks = take.tracks.clone();

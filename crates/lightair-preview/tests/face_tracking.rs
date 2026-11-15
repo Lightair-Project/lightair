@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Fit, Id, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Effect, Fit, Id, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -49,23 +49,23 @@ fn the_tracker_finds_the_face() {
     .unwrap();
     let mut doc = Document::new(Workspace::new("Face"));
     let f = doc.workspace().primary_canvas().id;
-    let mut input = Input::new("Face", "image_source", json!({"file": image.to_string_lossy()}));
+    let mut source = Source::new("Face", "image_source", json!({"file": image.to_string_lossy()}));
     let mut studio = Effect::new("Camera Studio", "lightair_camera_studio", json!({"debug_view": 2}));
     studio.enabled = false;
     let eid = studio.id;
-    input.effects.push(studio);
-    let iid = input.id;
+    source.effects.push(studio);
+    let iid = source.id;
     let mut scene = Scene::new("Main");
     scene.id = Id::new();
     let sid = scene.id;
     scene.layers =
         vec![Layer::new("Face", iid, [(f, Layout { fit: Fit::Fit, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
-    apply(&engine, &mut doc, Command::AddInput { input });
+    apply(&engine, &mut doc, Command::AddSource { source });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
     std::thread::sleep(Duration::from_millis(800));
     let plain = grid(&preview);
-    apply(&engine, &mut doc, Command::SetInputEffectEnabled { input: iid, effect: eid, enabled: true });
+    apply(&engine, &mut doc, Command::SetSourceEffectEnabled { source: iid, effect: eid, enabled: true });
     // Models load on the tracker's threads (the first load also compiles them for this Mac).
     let mut present = false;
     for _ in 0..60 {
@@ -120,16 +120,16 @@ fn the_background_is_replaced_around_the_person() {
     .unwrap();
     let mut doc = Document::new(Workspace::new("Background"));
     let f = doc.workspace().primary_canvas().id;
-    let mut input = Input::new("Person", "image_source", json!({"file": image.to_string_lossy()}));
+    let mut source = Source::new("Person", "image_source", json!({"file": image.to_string_lossy()}));
     // Pure red behind the person (OBS colours are 0xAABBGGRR).
     let studio = Effect::new("Background", "studio.bg_replace", json!({"bg_mode": 3, "bg_color": 0xFF0000FFu32}));
     let eid = studio.id;
-    input.effects.push(studio);
-    let iid = input.id;
+    source.effects.push(studio);
+    let iid = source.id;
     let mut scene = Scene::new("Main");
     scene.layers =
         vec![Layer::new("Person", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
-    apply(&engine, &mut doc, Command::AddInput { input });
+    apply(&engine, &mut doc, Command::AddSource { source });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
     let mut person = false;
@@ -157,7 +157,7 @@ fn the_background_is_replaced_around_the_person() {
     if expect {
         for (model, quality, name) in [(0, 0, "Vision fast"), (0, 2, "Vision accurate"), (1, 1, "MediaPipe")] {
             let settings = json!({"bg_mode": 3, "bg_color": 0xFF0000FFu32, "bg_model": model, "bg_quality": quality});
-            apply(&engine, &mut doc, Command::SetInputEffectSettings { input: iid, effect: eid, settings });
+            apply(&engine, &mut doc, Command::SetSourceEffectSettings { source: iid, effect: eid, settings });
             std::thread::sleep(Duration::from_millis(1500));
             let n = red(&chroma(&preview));
             eprintln!("{name}: {n} of 576 grid points red");
@@ -168,8 +168,8 @@ fn the_background_is_replaced_around_the_person() {
     // Blur keeps the background's own colours: nothing red.
     // (one face effect for another: the same Camera Studio filter, updated in place)
     let blur = Effect::new("Blur", "studio.bg_blur", json!({"bg_blur": 80}));
-    apply(&engine, &mut doc, Command::AddInputEffect { input: iid, effect: blur, index: None });
-    apply(&engine, &mut doc, Command::RemoveInputEffect { input: iid, effect: eid });
+    apply(&engine, &mut doc, Command::AddSourceEffect { source: iid, effect: blur, index: None });
+    apply(&engine, &mut doc, Command::RemoveSourceEffect { source: iid, effect: eid });
     std::thread::sleep(Duration::from_millis(400));
     assert!(red(&chroma(&preview)) < 5, "blur shows the real background");
     drop(preview);
@@ -204,22 +204,22 @@ fn background_edges_hold_still() {
     .unwrap();
     let mut doc = Document::new(Workspace::new("Flicker"));
     let f = doc.workspace().primary_canvas().id;
-    let mut input = Input::new("Person", "image_source", json!({"file": image.to_string_lossy()}));
+    let mut source = Source::new("Person", "image_source", json!({"file": image.to_string_lossy()}));
     // Moving grain first, so the segmenter sees a new, noisy frame every time (like a camera).
-    input.effects.push(Effect::new("Grain", "fx.grain", json!({"amount": std::env::var("LIGHTAIR_GRAIN").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.35), "grain_size": 1.0, "colored": true})));
+    source.effects.push(Effect::new("Grain", "fx.grain", json!({"amount": std::env::var("LIGHTAIR_GRAIN").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.35), "grain_size": 1.0, "colored": true})));
     // A mirror, off for now: switching it on moves the person at once (the motion test).
     let mut mirror = Effect::new("Mirror", "fx.mirror", json!({"axis": 1}));
     mirror.enabled = false;
     let mid = mirror.id;
-    input.effects.push(mirror);
+    source.effects.push(mirror);
     let studio = Effect::new("Background", "studio.bg_replace", json!({"bg_mode": 3, "bg_color": 0xFF0000FFu32}));
     let eid = studio.id;
-    input.effects.push(studio);
-    let iid = input.id;
+    source.effects.push(studio);
+    let iid = source.id;
     let mut scene = Scene::new("Main");
     scene.layers =
         vec![Layer::new("Person", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
-    apply(&engine, &mut doc, Command::AddInput { input });
+    apply(&engine, &mut doc, Command::AddSource { source });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
     let max: f64 = std::env::var("LIGHTAIR_FLICKER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1);
@@ -238,7 +238,7 @@ fn background_edges_hold_still() {
     };
     for (model, quality, name) in [(0, 1, "Vision balanced"), (0, 2, "Vision accurate"), (1, 1, "MediaPipe")] {
         let settings = json!({"bg_mode": 3, "bg_model": model, "bg_quality": quality, "bg_show_mask": true});
-        apply(&engine, &mut doc, Command::SetInputEffectSettings { input: iid, effect: eid, settings });
+        apply(&engine, &mut doc, Command::SetSourceEffectSettings { source: iid, effect: eid, settings });
         std::thread::sleep(Duration::from_millis(3000));
         let frames: Vec<Vec<i32>> = (0..60).map(|_| mask_at(&preview)).collect();
         let pairs = frames.windows(2);
@@ -260,10 +260,10 @@ fn background_edges_hold_still() {
     // (Accurate is Vision's slow, large model: it lags by itself, as its hint says.)
     for (model, quality, name, bound) in [(0, 1, "Vision balanced", 6), (0, 2, "Vision accurate", 16)] {
         let settings = json!({"bg_mode": 3, "bg_model": model, "bg_quality": quality, "bg_show_mask": true});
-        apply(&engine, &mut doc, Command::SetInputEffectSettings { input: iid, effect: eid, settings });
-        apply(&engine, &mut doc, Command::SetInputEffectEnabled { input: iid, effect: mid, enabled: false });
+        apply(&engine, &mut doc, Command::SetSourceEffectSettings { source: iid, effect: eid, settings });
+        apply(&engine, &mut doc, Command::SetSourceEffectEnabled { source: iid, effect: mid, enabled: false });
         std::thread::sleep(Duration::from_millis(2500));
-        apply(&engine, &mut doc, Command::SetInputEffectEnabled { input: iid, effect: mid, enabled: true });
+        apply(&engine, &mut doc, Command::SetSourceEffectEnabled { source: iid, effect: mid, enabled: true });
         let frames: Vec<Vec<i32>> = (0..40).map(|_| mask_at(&preview)).collect();
         let settled = frames.last().unwrap();
         let off = |f: &Vec<i32>| f.iter().zip(settled).filter(|(a, b)| (**a - **b).abs() > 64).count();
@@ -302,17 +302,17 @@ fn background_edges_steady_in_motion() {
     .unwrap();
     let mut doc = Document::new(Workspace::new("Sway"));
     let f = doc.workspace().primary_canvas().id;
-    let mut input = Input::new("Person", "image_source", json!({"file": image.to_string_lossy()}));
-    input.effects.push(Effect::new("Sway", "fx.wave", json!({"amount": 0.35, "frequency": 0.1, "speed": 0.15})));
-    input.effects.push(Effect::new("Grain", "fx.grain", json!({"amount": std::env::var("LIGHTAIR_GRAIN").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.2), "grain_size": 1.0, "colored": true})));
+    let mut source = Source::new("Person", "image_source", json!({"file": image.to_string_lossy()}));
+    source.effects.push(Effect::new("Sway", "fx.wave", json!({"amount": 0.35, "frequency": 0.1, "speed": 0.15})));
+    source.effects.push(Effect::new("Grain", "fx.grain", json!({"amount": std::env::var("LIGHTAIR_GRAIN").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.2), "grain_size": 1.0, "colored": true})));
     let studio = Effect::new("Background", "studio.bg_replace", json!({"bg_mode": 3}));
     let eid = studio.id;
-    input.effects.push(studio);
-    let iid = input.id;
+    source.effects.push(studio);
+    let iid = source.id;
     let mut scene = Scene::new("Main");
     scene.layers =
         vec![Layer::new("Person", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
-    apply(&engine, &mut doc, Command::AddInput { input });
+    apply(&engine, &mut doc, Command::AddSource { source });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
     let max: f64 = std::env::var("LIGHTAIR_JITTER_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(0.7);
@@ -333,7 +333,7 @@ fn background_edges_steady_in_motion() {
     std::thread::sleep(Duration::from_millis(8000));
     for (model, quality, name) in [(0, 1, "Vision balanced"), (0, 2, "Vision accurate"), (1, 1, "MediaPipe")] {
         let settings = json!({"bg_mode": 3, "bg_model": model, "bg_quality": quality, "bg_show_mask": true});
-        apply(&engine, &mut doc, Command::SetInputEffectSettings { input: iid, effect: eid, settings });
+        apply(&engine, &mut doc, Command::SetSourceEffectSettings { source: iid, effect: eid, settings });
         std::thread::sleep(Duration::from_millis(3000));
         let frames: Vec<Vec<i32>> = (0..90).map(|_| mask_at(&preview)).collect();
         let (mut reversals, mut edge) = (0usize, 0usize);

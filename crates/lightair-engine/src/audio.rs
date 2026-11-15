@@ -199,7 +199,7 @@ pub fn spec(workspace: &Workspace) -> la::GraphSpec {
                     }
                     s
                 },
-                ..la::Strip::track(node(t.id), node(t.input), channels)
+                ..la::Strip::track(node(t.id), node(t.source), channels)
             }
         })
         .collect();
@@ -262,13 +262,13 @@ pub fn spec(workspace: &Workspace) -> la::GraphSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lightair_core::{AudioMix, Bus, Input, Send, Track};
+    use lightair_core::{AudioMix, Bus, Source, Send, Track};
     use serde_json::json;
 
     #[test]
     fn a_workspace_mixer_becomes_the_engine_graph() {
         let mut p = Workspace::new("Show");
-        let mic = Input::new("Mic", lightair_core::kinds::MIC, json!({}));
+        let mic = Source::new("Mic", lightair_core::kinds::MIC, json!({}));
         let bus = Bus::new("Guests");
         let phones = AudioMix::new("Headphones");
         let mut t = Track::new("Host", mic.id);
@@ -281,13 +281,13 @@ mod tests {
             Effect::new("Old", "noise_suppress_filter_v2", json!({})),
         ];
         let tid = t.id;
-        p.inputs.insert(mic.id, mic.into());
+        p.sources.insert(mic.id, mic.into());
         p.tracks.push(t.into());
         p.audio.buses.push(bus.clone());
         p.audio.mixes.push(phones.clone());
         let g = spec(&p);
         let host = g.strips.iter().find(|s| s.id == node(tid)).unwrap();
-        assert_eq!(host.role, la::Role::Track { input: node(p.tracks[0].input), channels: la::Channels::Mono(2) });
+        assert_eq!(host.role, la::Role::Track { input: node(p.tracks[0].source), channels: la::Channels::Mono(2) });
         assert_eq!(host.dest, la::Dest::Bus(node(bus.id)));
         assert_eq!(host.sends, vec![la::Send { mix: node(phones.id), level_db: -6.0, pre_fader: true }]);
         assert!(host.gain_db < -144.0, "−∞ fader: silence");
@@ -319,12 +319,12 @@ mod tests {
     fn the_engine_chain_follows_the_workspace_order() {
         use lightair_core::{Command, Document, MixerStrip};
         let mut doc = Document::new(Workspace::new("Order"));
-        let mic = Input::new("Mic", "lightair_audio_device", json!({}));
+        let mic = Source::new("Mic", "lightair_audio_device", json!({}));
         let mut t = Track::new("Host", mic.id);
         let names = ["audio.gate", "audio.eq", "audio.compressor", "audio.limiter"];
         t.effects = names.iter().map(|k| Effect::new(*k, *k, json!({}))).collect();
         let (tid, ids): (Id, Vec<Id>) = (t.id, t.effects.iter().map(|e| e.id).collect());
-        doc.apply(&Command::AddInput { input: mic }).unwrap();
+        doc.apply(&Command::AddSource { source: mic }).unwrap();
         doc.apply(&Command::AddTrack { track: t, index: None }).unwrap();
         let order = |doc: &Document| -> Vec<&'static str> {
             let g = spec(doc.workspace());

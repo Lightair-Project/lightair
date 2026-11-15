@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Crop, Document, Fit, Id, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Crop, Document, Fit, Id, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -50,9 +50,9 @@ fn the_cut_away_part_fades_in_and_out() {
     .unwrap();
     let mut doc = Document::new(Workspace::new("Crop view"));
     let f = doc.workspace().primary_canvas().id;
-    // A 640×360 red input cropped to its left half, filling the canvas's left half: uncropped,
+    // A 640×360 red source cropped to its left half, filling the canvas's left half: uncropped,
     // it would reach across the whole canvas.
-    let r = Input::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 640, "height": 360}));
+    let r = Source::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 640, "height": 360}));
     let rid = r.id;
     let layout = Layout {
         fit: Fit::Stretch,
@@ -64,7 +64,7 @@ fn the_cut_away_part_fades_in_and_out() {
     let mut scene = Scene::new("Main");
     scene.id = sid;
     scene.layers = vec![a];
-    apply(&engine, &mut doc, Command::AddInput { input: r });
+    apply(&engine, &mut doc, Command::AddSource { source: r });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
     assert!(red(at(&preview, 80.0, 90.0)) && black(at(&preview, 240.0, 90.0)), "cropped to the left half");

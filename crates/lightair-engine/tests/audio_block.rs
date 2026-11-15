@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Input, Workspace, Track, diff};
+use lightair_core::{Command, Document, Source, Workspace, Track, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -21,10 +21,10 @@ fn a_smaller_buffer_restarts_the_engine_and_keeps_playing() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
     let mut doc = Document::new(Workspace::new("Block"));
-    let tone = Input::new("Tone", "lightair_test_tone", json!({"freq": 400.0, "amplitude": 0.3}));
+    let tone = Source::new("Tone", "lightair_test_tone", json!({"freq": 400.0, "amplitude": 0.3}));
     let mut t = Track::new("Tone", tone.id);
     t.cue = true;
-    for cmd in [Command::AddInput { input: tone }, Command::AddTrack { track: t, index: None }] {
+    for cmd in [Command::AddSource { source: tone }, Command::AddTrack { track: t, index: None }] {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
         let workspace = change.after.clone();

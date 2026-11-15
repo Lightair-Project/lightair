@@ -1,4 +1,4 @@
-//! Media playback control for media inputs (video files): runtime state, not document state
+//! Media playback control for media sources (video files): runtime state, not document state
 //! (docs/07-scenes-layers-canvas.md, "Media layer"). Looping and the file live in settings.
 
 use libobs_sys as sys;
@@ -49,9 +49,9 @@ pub(crate) fn state(s: sys::obs_media_state) -> MediaState {
 }
 
 impl Reconciler {
-    /// Playback status of a media input, or `None` if the input isn't a media source.
-    pub fn media_status(&self, input: Id) -> Option<MediaStatus> {
-        let src = self.input_ptr(input)?;
+    /// Playback status of a media source, or `None` if the source isn't a media source.
+    pub fn media_status(&self, source: Id) -> Option<MediaStatus> {
+        let src = self.source_ptr(source)?;
         let flags = unsafe { sys::obs_source_get_output_flags(src) };
         if flags & sys::OBS_SOURCE_CONTROLLABLE_MEDIA == 0 {
             return None;
@@ -65,8 +65,8 @@ impl Reconciler {
         }
     }
 
-    pub fn media_action(&self, input: Id, action: MediaAction) {
-        let Some(src) = self.input_ptr(input) else { return };
+    pub fn media_action(&self, source: Id, action: MediaAction) {
+        let Some(src) = self.source_ptr(source) else { return };
         unsafe {
             match action {
                 MediaAction::Play => sys::obs_source_media_play_pause(src, false),

@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Fit, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Effect, Fit, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::{Value, json};
@@ -49,12 +49,12 @@ fn every_shader_effect_renders() {
     .unwrap();
     let mut doc = Document::new(Workspace::new("FX"));
     let f = doc.workspace().primary_canvas().id;
-    let input = Input::new("Picture", "image_source", json!({"file": picture.to_string_lossy()}));
-    let iid = input.id;
+    let source = Source::new("Picture", "image_source", json!({"file": picture.to_string_lossy()}));
+    let iid = source.id;
     let mut scene = Scene::new("Main");
     scene.layers =
         vec![Layer::new("Picture", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 640.0, 360.0) })])];
-    apply(&engine, &mut doc, Command::AddInput { input });
+    apply(&engine, &mut doc, Command::AddSource { source });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
     std::thread::sleep(Duration::from_millis(300));
@@ -88,13 +88,13 @@ fn every_shader_effect_renders() {
     for (name, settings) in cases {
         let effect = Effect::new(*name, format!("fx.{name}"), settings.clone());
         let eid = effect.id;
-        apply(&engine, &mut doc, Command::AddInputEffect { input: iid, effect, index: None });
+        apply(&engine, &mut doc, Command::AddSourceEffect { source: iid, effect, index: None });
         let n = changed(&plain, &grid(&preview));
         eprintln!("{name:>10}: {n:>3} of 256 grid points changed");
         if n < 6 {
             failed.push(*name);
         }
-        apply(&engine, &mut doc, Command::RemoveInputEffect { input: iid, effect: eid });
+        apply(&engine, &mut doc, Command::RemoveSourceEffect { source: iid, effect: eid });
     }
     assert!(failed.is_empty(), "no visible change from: {failed:?}");
     assert!(changed(&plain, &grid(&preview)) < 3, "removing the effects restores the picture");

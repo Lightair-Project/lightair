@@ -1,8 +1,8 @@
 //! The drawn pointer (docs/plans/screen-studio.md, "Cursor"): a filter on a screen capture that
 //! draws the pointer itself, so it can be bigger, smoother and styled. The capture's own cursor
-//! is turned off while it's on (`reconcile::input_settings`).
+//! is turned off while it's on (`reconcile::source_settings`).
 //!
-//! - The pointer comes from `lightair_platform::input` each frame and is followed by a critically
+//! - The pointer comes from `lightair_platform::source` each frame and is followed by a critically
 //!   damped spring (smoothing), tilted by its speed, and faded out when it rests.
 //! - Shapes are Lightair's own, drawn here at a high resolution (an arrow, an I-beam, a
 //!   crosshair; a dot and a ring as styles), so they stay sharp at any size.

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Effect, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -32,13 +32,13 @@ fn custom_key_colour_and_live_bypass() {
     let mut doc = Document::new(Workspace::new("Key"));
     let f = doc.workspace().primary_canvas().id;
     // An orange screen: none of the presets.
-    let screen = Input::new("Screen", "color_source_v3", json!({"color": 0xFF1E78FFu32, "width": 320, "height": 180}));
+    let screen = Source::new("Screen", "color_source_v3", json!({"color": 0xFF1E78FFu32, "width": 320, "height": 180}));
     let sid = screen.id;
     let mut scene = Scene::new("Main");
     scene.layers.push(Layer::new("Screen", sid, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let scene_id = scene.id;
     for cmd in [
-        Command::AddInput { input: screen },
+        Command::AddSource { source: screen },
         Command::AddScene { scene, index: None },
         Command::SetProgram { scene: Some(scene_id) },
     ] {
@@ -53,7 +53,7 @@ fn custom_key_colour_and_live_bypass() {
         json!({"key_color_type": "custom", "key_color": 0xFF1E78FFu32, "similarity": 400, "smoothness": 80, "spill": 100}),
     );
     let kid = key.id;
-    apply(&engine, &mut doc, Command::AddInputEffect { input: sid, effect: key, index: None });
+    apply(&engine, &mut doc, Command::AddSourceEffect { source: sid, effect: key, index: None });
     let keyed = centre(&preview);
     eprintln!("orange {before:?}, keyed {keyed:?}");
     assert!(keyed.0 < 40, "the custom colour is keyed out: {keyed:?}");

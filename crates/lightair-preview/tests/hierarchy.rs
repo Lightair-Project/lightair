@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Fit, Id, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Fit, Id, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -33,7 +33,7 @@ fn pictures_follow_their_empty() {
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
     let mut doc = Document::new(Workspace::new("Hierarchy"));
     let f = doc.workspace().primary_canvas().id;
-    let r = Input::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 40, "height": 40}));
+    let r = Source::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 40, "height": 40}));
     let rid = r.id;
     // An empty at (60, 60) holding a 40×40 red square centred on it.
     let group = Layer::empty("Group", [(f, (60.0, 60.0))]);
@@ -45,7 +45,7 @@ fn pictures_follow_their_empty() {
     let mut scene = Scene::new("Main");
     scene.id = sid;
     scene.layers = vec![group, square];
-    apply(&engine, &mut doc, Command::AddInput { input: r });
+    apply(&engine, &mut doc, Command::AddSource { source: r });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
     assert!(red(at(&preview, 60.0, 60.0)), "the square sits on the empty's pivot");

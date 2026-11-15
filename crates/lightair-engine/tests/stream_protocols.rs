@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Id, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Id, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::outputs::{OutputKey, OutputState, StreamConfig, StreamProtocol, default_encoders, runtime};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -54,10 +54,10 @@ fn srt_udp_and_whip() {
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
     let mut doc = Document::new(Workspace::new("Protocols"));
     let f = doc.workspace().primary_canvas().id;
-    let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
+    let colour = Source::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
     let mut scene = Scene::new("Main");
     scene.layers.push(Layer::new("Colour", colour.id, [(f, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));
-    apply(&engine, &mut doc, Command::AddInput { input: colour });
+    apply(&engine, &mut doc, Command::AddSource { source: colour });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let caps = engine.capabilities.encoders.clone();
     let cfg = |server: String, key: &str| StreamConfig {
@@ -69,15 +69,15 @@ fn srt_udp_and_whip() {
     };
 
     // ---- SRT: a media source in the same engine is the SRT listener; the output calls it.
-    let receiver = Input::new(
+    let receiver = Source::new(
         "SRT in",
         "ffmpeg_source",
         json!({"is_local_file": false, "input": "srt://127.0.0.1:19381?mode=listener", "input_format": "mpegts"}),
     );
     let rx = receiver.id;
-    apply(&engine, &mut doc, Command::AddInput { input: receiver });
-    // Media sources open their input while shown.
-    engine.call(move |s| s.reconciler.hold_inputs(&[rx]));
+    apply(&engine, &mut doc, Command::AddSource { source: receiver });
+    // Media sources open their source while shown.
+    engine.call(move |s| s.reconciler.hold_sources(&[rx]));
     std::thread::sleep(Duration::from_millis(1000));
     let srt = cfg("srt://127.0.0.1:19381".into(), "");
     let srt_id = srt.id;
@@ -93,7 +93,7 @@ fn srt_udp_and_whip() {
     eprintln!("SRT sent {bytes} bytes");
     assert!(bytes > 100_000, "the stream flows over SRT: {bytes} bytes");
     engine.call(move |s| s.outputs.stop_stream(srt_id));
-    engine.call(|s| s.reconciler.release_inputs());
+    engine.call(|s| s.reconciler.release_sources());
 
     // ---- MPEG-TS over UDP to ffmpeg (same output as SRT, another transport).
     let have_ffmpeg = Proc::new("ffmpeg").arg("-version").stdout(Stdio::null()).status().is_ok_and(|s| s.success());

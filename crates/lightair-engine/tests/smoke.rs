@@ -19,11 +19,11 @@ fn engine_starts_renders_and_stops() {
     })
     .expect("engine starts");
     assert!(engine.version.starts_with("33."), "libobs version {}", engine.version);
-    // the screen and camera inputs each platform's modules give
+    // the screen and camera sources each platform's modules give
     let capture: [&str; 2] =
         if cfg!(windows) { ["monitor_capture", "dshow_input"] } else { ["display_capture", "av_capture_input_v2"] };
     for id in ["color_source_v3", "image_source"].into_iter().chain(capture) {
-        assert!(engine.capabilities.inputs.iter().any(|i| i == id), "missing input type {id}");
+        assert!(engine.capabilities.sources.iter().any(|i| i == id), "missing input type {id}");
     }
     assert!(engine.capabilities.encoders.iter().any(|e| e.contains("x264")), "x264 encoder missing");
     assert!(!engine.capabilities.modules.iter().any(|m| m.contains("frontend-tools")), "UI module loaded");
