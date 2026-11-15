@@ -17,6 +17,7 @@ lightair-engine = { path = "crates/lightair-engine" }
 lightair-platform = { path = "crates/lightair-platform" }
 lightair-preview = { path = "crates/lightair-preview" }
 lightair-render = { path = "crates/lightair-render" }
+lightair-remote = { path = "crates/lightair-remote" }
 lightair-store = { path = "crates/lightair-store" }
 lightair-ui = { path = "crates/lightair-ui" }
 lightair-web = { path = "crates/lightair-web" }

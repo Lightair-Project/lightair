@@ -40,6 +40,26 @@ pub struct Preferences {
     /// macOS's Backgrounds picture for Lightair before Background removal set it to green (put
     /// back when nothing keys the green any more; `system_effects`).
     pub macos_background_before: Option<String>,
+    /// The remote API: obs-websocket, JSON-RPC and MCP (Settings › Remote API).
+    pub remote: RemoteApi,
+}
+
+/// The remote API's server (its password is in the Keychain: `secrets`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteApi {
+    pub enabled: bool,
+    pub port: u16,
+    /// Other devices on the network may connect (otherwise this Mac only).
+    pub lan: bool,
+    /// Clients must send the password (always, with LAN access on).
+    pub require_password: bool,
+}
+
+impl Default for RemoteApi {
+    fn default() -> Self {
+        Self { enabled: true, port: lightair_remote::DEFAULT_PORT, lan: false, require_password: true }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +123,7 @@ impl Default for Preferences {
             last_workspace: None,
             record_mode: RecordMode::Program,
             macos_background_before: None,
+            remote: RemoteApi::default(),
         }
     }
 }
