@@ -40,7 +40,8 @@ struct TakeRun {
     recorder: Option<lightair_platform::input::Recorder>,
     log: Option<lightair_store::input_log::Writer>,
     tracks: Vec<lightair_engine::take::Track>,
-    audio: Vec<PathBuf>,
+    /// Its stems, and whose sound each is (the mixer track's name).
+    audio: Vec<(PathBuf, String)>,
     stopping: bool,
     thumbnail_due: Option<std::time::Instant>,
 }
@@ -113,7 +114,8 @@ pub struct Studio {
     /// Bumped when a project's recordings index changes (the Library reloads).
     pub library_version: u64,
     /// Multitrack audio files being recorded: their base name and paths.
-    stems: Option<(String, Vec<std::path::PathBuf>)>,
+    /// Multitrack audio being recorded: its files' base name, and each file with whose sound it is.
+    stems: Option<(String, Vec<(std::path::PathBuf, String)>)>,
     /// What a new project starts as.
     starter: fn() -> Project,
 }
@@ -560,7 +562,7 @@ impl Studio {
                 let seconds = self.project().outputs.clips.seconds as u64;
                 let started = chrono::Utc::now().timestamp_millis() - seconds as i64 * 1000;
                 let title = format!("Clip · {}", chrono::Local::now().format("%-d %b, %H:%M:%S"));
-                let mut item = Item::new(Kind::Clip, title, vec![ItemFile { path, format: None }], started);
+                let mut item = Item::new(Kind::Clip, title, vec![ItemFile::new(path)], started);
                 item.duration_ms = Some(seconds * 1000);
                 let thumb = recordings::thumbnails_dir(&dir).join(format!("{}.png", item.id));
                 item.thumbnail = Some(thumb.clone());
@@ -646,13 +648,13 @@ impl Studio {
         for canvas in targets {
             let label = several.then(|| project.format(canvas).map(|f| f.name.clone()).unwrap_or_default());
             let name = match &label {
-                Some(l) => format!("Lightair {stamp} {l}.{}", container.extension()),
+                Some(l) => format!("Lightair {stamp} {}.{}", lightair_core::file_safe(l), container.extension()),
                 None => format!("Lightair {stamp}.{}", container.extension()),
             };
             let Some(format) = project.format(canvas) else { continue };
             let path = self.recording_folder().join(&name);
             if let Some(p) = &mut self.pending {
-                p.item.files.push(ItemFile { path, format: label.clone() });
+                p.item.files.push(ItemFile { format: label.clone(), ..ItemFile::new(path) });
             }
             let cfg = RecordingConfig {
                 canvas,
@@ -752,7 +754,7 @@ impl Studio {
         });
         let title = format!("Take · {}", chrono::Local::now().format("%-d %b, %H:%M"));
         let mut item = Item::new(Kind::Take, title, Vec::new(), chrono::Utc::now().timestamp_millis());
-        item.files = tracks.iter().map(|t| ItemFile { path: t.file.clone(), format: Some(t.name.clone()) }).collect();
+        item.files = tracks.iter().map(|t| ItemFile { track: Some(t.name.clone()), ..ItemFile::new(t.file.clone()) }).collect();
         let project_dir = self.project_dir();
         if let Some(dir) = &project_dir {
             item.thumbnail = Some(recordings::thumbnails_dir(dir).join(format!("{}.png", item.id)));
@@ -795,20 +797,28 @@ impl Studio {
                 let _ = w.flush();
             }
         }
+        // the files written (each with its track's name, from when they started)
         if let Some(r) = &report {
-            t.audio = r.files.clone();
+            let named = std::mem::take(&mut t.audio);
+            t.audio = r.files.iter().map(|f| (f.clone(), named.iter().find(|(p, _)| p == f).map_or_else(String::new, |(_, n)| n.clone()))).collect();
         }
         let sidecar = serde_json::json!({
             "started_ms": t.item.started_ms,
             "duration_ms": t.item.duration_ms,
             "video": t.tracks.iter().map(|k| serde_json::json!({
                 "name": k.name,
+                "kind": if k.screen { "screen" } else { "camera" },
                 "file": k.file.file_name().map(|n| n.to_string_lossy().into_owned()),
                 "input": k.input,
                 "width": k.width,
                 "height": k.height,
             })).collect::<Vec<_>>(),
-            "audio": t.audio.iter().filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>(),
+            "audio": t.audio.iter().filter_map(|(f, _)| f.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>(),
+            // whose sound each stem is
+            "audio_tracks": t.audio.iter().map(|(f, name)| serde_json::json!({
+                "file": f.file_name().map(|n| n.to_string_lossy().into_owned()),
+                "name": name,
+            })).collect::<Vec<_>>(),
             "audio_start_ns": report.as_ref().map(|r| r.start_ns),
             "sample_rate": report.as_ref().map(|r| r.sample_rate),
             "input": "input.bin",
@@ -818,9 +828,9 @@ impl Studio {
         if let Ok(text) = serde_json::to_string_pretty(&sidecar) {
             let _ = std::fs::write(&take_json, text);
         }
-        t.item.files.extend(t.audio.iter().map(|f| ItemFile { path: f.clone(), format: None }));
-        t.item.files.push(ItemFile { path: t.folder.join("input.bin"), format: None });
-        t.item.files.push(ItemFile { path: take_json, format: None });
+        t.item.files.extend(t.audio.iter().map(|(f, _)| ItemFile::new(f.clone())));
+        t.item.files.push(ItemFile::new(t.folder.join("input.bin")));
+        t.item.files.push(ItemFile::new(take_json));
         cx.notify();
     }
 
@@ -875,7 +885,7 @@ impl Studio {
             if let Some(path) = runtime().get(OutputKey::Recording(*canvas)).path
                 && !p.item.files.iter().any(|f| f.path == path)
             {
-                p.item.files.push(ItemFile { path, format: label.clone() });
+                p.item.files.push(ItemFile { format: label.clone(), ..ItemFile::new(path) });
             }
         }
         if p.thumbnail_due.is_some_and(|t| t <= std::time::Instant::now()) {
@@ -922,7 +932,7 @@ impl Studio {
     /// Stops the multitrack audio files and writes what they hold beside them
     /// ("<name>.multitrack.json": the files, their rate and length, and when they started).
     fn finish_stems(&mut self, cx: &mut Context<Self>) {
-        let Some((base, _)) = self.stems.take() else { return };
+        let Some((base, named)) = self.stems.take() else { return };
         let Some(report) = self.engine.call(|s| s.reconciler.stop_stems()) else {
             self.issue = Some("Multitrack audio couldn't be finished.".into());
             cx.notify();
@@ -930,8 +940,18 @@ impl Studio {
         };
         let names: Vec<String> =
             report.files.iter().filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
+        let tracks: Vec<serde_json::Value> = report
+            .files
+            .iter()
+            .map(|f| serde_json::json!({
+                "file": f.file_name().map(|n| n.to_string_lossy().into_owned()),
+                "name": named.iter().find(|(p, _)| p == f).map(|(_, n)| n.clone()),
+            }))
+            .collect();
         let sidecar = serde_json::json!({
             "files": names,
+            // whose sound each file is
+            "tracks": tracks,
             "sample_rate": report.sample_rate,
             "frames": report.frames,
             "seconds": report.frames as f64 / report.sample_rate as f64,
@@ -942,8 +962,8 @@ impl Studio {
             let _ = std::fs::write(&path, text);
         }
         if let Some(p) = &mut self.pending {
-            p.item.files.extend(report.files.iter().map(|f| ItemFile { path: f.clone(), format: None }));
-            p.item.files.push(ItemFile { path, format: None });
+            p.item.files.extend(report.files.iter().map(|f| ItemFile::new(f.clone())));
+            p.item.files.push(ItemFile::new(path));
             if p.item.kind == Kind::Multitrack {
                 p.item.duration_ms = Some(report.frames * 1000 / report.sample_rate.max(1) as u64);
             }
@@ -1074,7 +1094,7 @@ impl Studio {
         let p = self.project();
         p.tracks
             .iter()
-            .filter(|t| p.inputs.get(&t.input).is_some_and(|i| i.kind == lightair_core::kinds::MIC))
+            .filter(|t| p.inputs.get(&t.input).is_some_and(|i| lightair_core::kinds::is_mic(&i.kind)))
             .map(|t| (t.id, t.name.clone()))
             .collect()
     }

@@ -1325,8 +1325,8 @@ impl StudioWindow {
             let mut grid = div().grid().grid_cols(3).gap_2();
             for d in in_cat {
                 let badge = match d.needs {
-                    Needs::Face => Some("Needs a face"),
-                    Needs::Person => Some("Needs a person"),
+                    Needs::Face => Some(("scan-face", "Face")),
+                    Needs::Person => Some(("user-round", "Person")),
                     Needs::Nothing => None,
                 };
                 let added = in_stack.contains_key(d.kind);
@@ -1607,7 +1607,8 @@ fn tile(
     icon: &str,
     name: &str,
     description: &str,
-    badge: Option<&'static str>,
+    // what it needs in the picture: an icon and a word
+    badge: Option<(&'static str, &'static str)>,
     selected: bool,
 ) -> Stateful<Div> {
     div()
@@ -1640,7 +1641,7 @@ fn tile(
                         .child(ui::icon(icon).size(px(15.)).text_color(tok::accent_primary())),
                 )
                 .child(div().flex_1())
-                .when_some(badge, |d, b| {
+                .when_some(badge, |d, (badge_icon, badge_word)| {
                     d.child(
                         div()
                             .flex()
@@ -1652,8 +1653,8 @@ fn tile(
                             .bg(tok::bg_app())
                             .text_size(px(10.))
                             .text_color(tok::text_tertiary())
-                            .child(ui::icon(if b.contains("face") { "scan-face" } else { "user-round" }).size(px(11.)))
-                            .child(if b.contains("face") { "Face" } else { "Person" }),
+                            .child(ui::icon(badge_icon).size(px(11.)))
+                            .child(badge_word),
                     )
                 })
                 .when(selected, |d| d.child(ui::icon("check").size(px(14.)).text_color(tok::accent_primary()))),

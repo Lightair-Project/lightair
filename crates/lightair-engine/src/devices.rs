@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 /// The input kind of a device input (its settings: `{"device": "<name>"}`, "" for the default).
-pub const DEVICE_KIND: &str = "lightair_audio_device";
+pub const DEVICE_KIND: &str = lightair_core::kinds::AUDIO_DEVICE;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceInfo {

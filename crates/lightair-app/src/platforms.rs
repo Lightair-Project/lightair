@@ -204,32 +204,53 @@ pub fn by_id(id: &str) -> Option<&'static Platform> {
     PLATFORMS.iter().find(|p| p.id == id)
 }
 
-/// The platform a server address belongs to (for destinations added before platforms were kept).
+/// The server address's host ("a.rtmps.youtube.com" in "rtmps://a.rtmps.youtube.com:443/live2").
+fn host(server: &str) -> String {
+    let rest = server.split_once("://").map_or(server, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    host.split(':').next().unwrap_or("").to_lowercase()
+}
+
+/// The platform a server address belongs to (for destinations added before platforms were
+/// kept): by its host, one of the platform's listed servers or a domain the platform owns.
 pub fn guess(server: &str) -> Option<&'static Platform> {
-    let s = server.to_lowercase();
+    let host = host(server);
+    if host.is_empty() {
+        return None;
+    }
+    if let Some(p) = PLATFORMS.iter().find(|p| p.servers.iter().any(|(_, s)| self::host(s) == host)) {
+        return Some(p);
+    }
+    let under = |domain: &str| host == domain || host.ends_with(&format!(".{domain}"));
     // Kick's ingest is on the same network as Twitch's, under global-contribute.
-    let id = if s.contains("kick") || s.contains("global-contribute.live-video.net") {
+    let id = if under("global-contribute.live-video.net") || under("kick.com") {
         "kick"
-    } else if s.contains("youtube.com") {
+    } else if under("youtube.com") {
         "youtube"
-    } else if s.contains("live-video.net") || s.contains("twitch.tv") {
+    } else if under("live-video.net") || under("twitch.tv") {
         "twitch"
-    } else if s.contains("facebook.com") {
+    } else if under("facebook.com") {
         "facebook"
-    } else if s.contains("pscp.tv") {
+    } else if under("pscp.tv") {
         "x"
-    } else if s.contains("restream.io") {
+    } else if under("restream.io") {
         "restream"
-    } else if s.contains("tiktok") {
+    } else if under("tiktok.com") || under("tiktokcdn.com") {
         "tiktok"
-    } else if s.contains("instagram") {
+    } else if under("instagram.com") {
         "instagram"
-    } else if s.contains("linkedin") {
+    } else if under("linkedin.com") {
         "linkedin"
     } else {
         return None;
     };
     by_id(id)
+}
+
+/// A destination that's no listed platform's: any address.
+pub fn custom() -> &'static Platform {
+    by_id("custom").expect("the custom platform")
 }
 
 /// Which of a platform's servers to start with: for regional lists, the one nearest this
@@ -283,5 +304,8 @@ mod tests {
         assert_eq!(guess("rtmps://a.rtmps.youtube.com:443/live2").map(|p| p.id), Some("youtube"));
         assert_eq!(guess("rtmp://euc10.contribute.live-video.net/app/").map(|p| p.id), Some("twitch"));
         assert!(guess("rtmp://example.com/live").is_none());
+        // a word in an address isn't a platform
+        assert!(guess("rtmp://kickstart-media.example/live").is_none());
+        assert_eq!(guess("rtmp://user@ingest.restream.io:1935/live").map(|p| p.id), Some("restream"));
     }
 }

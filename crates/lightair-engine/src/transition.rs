@@ -45,9 +45,13 @@ pub(crate) struct MoveAnim {
 
 unsafe impl Send for MoveAnim {}
 
-/// Which layer in `from` a layer of `to` continues: same input, else same name.
+/// Which layer in `from` a layer of `to` continues: the one showing the same input, else the
+/// one with the same link (`Layer::link`). Never by name: two layers called "Logo" needn't be
+/// the same thing.
 pub(crate) fn match_layer<'a>(from: &'a DocScene, layer: &lightair_core::Layer) -> Option<&'a lightair_core::Layer> {
-    from.layers.iter().find(|l| l.input == layer.input).or_else(|| from.layers.iter().find(|l| l.name == layer.name))
+    let same_input = |l: &&lightair_core::Layer| layer.input.is_some() && l.input == layer.input;
+    let same_link = |l: &&lightair_core::Layer| layer.link.is_some() && l.link == layer.link;
+    from.layers.iter().find(same_input).or_else(|| from.layers.iter().find(same_link))
 }
 
 fn ease_in_out(t: f32) -> f32 {

@@ -1447,18 +1447,23 @@ impl StudioWindow {
     }
 
     // ------------------------------------------------------------ adding things
-    fn add_input_layer(
+    fn add_input_layer(&mut self, name: &str, kind: &str, settings: serde_json::Value, size: (f32, f32), cx: &mut Context<Self>) {
+        self.add_input_layer_id(name, kind, settings, size, cx);
+    }
+
+    /// Adds an input and a layer showing it to the selected scene: the input's id.
+    fn add_input_layer_id(
         &mut self,
         name: &str,
         kind: &str,
         settings: serde_json::Value,
         size: (f32, f32),
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<Id> {
         self.add_menu = false;
         let studio = self.studio.read(cx);
         let project = studio.project().clone();
-        let Some(scene) = studio.selected_scene else { return };
+        let scene = studio.selected_scene?;
         let (w, h) = size;
         let layouts: Vec<(Id, Layout)> = project
             .formats
@@ -1470,6 +1475,7 @@ impl StudioWindow {
             })
             .collect();
         let input = Input::new(name, kind, settings);
+        let input_id = input.id;
         let layer = Layer::new(name, input.id, layouts);
         let layer_id = layer.id;
         let cmd = Command::Batch {
@@ -1478,19 +1484,19 @@ impl StudioWindow {
         };
         self.exec(cmd, cx);
         self.select_layer(Some(layer_id), cx);
+        Some(input_id)
     }
 
     /// A camera layer, set up with the camera defaults (Settings › Camera): with Beauty on by
     /// default, the input starts with the Beauty effect.
     fn add_camera(&mut self, label: &str, uid: &str, cx: &mut Context<Self>) {
         let defaults = self.prefs.camera;
-        self.add_input_layer(label, lightair_core::kinds::CAMERA, defaults.settings(uid), (1280.0, 720.0), cx);
-        let project = self.studio.read(cx).project().clone();
+        let input = self.add_input_layer_id(label, lightair_core::kinds::CAMERA, defaults.settings(uid), (1280.0, 720.0), cx);
         if defaults.studio_on
-            && let Some(input) = project.inputs.values().find(|i| i.settings["device"] == uid && i.effects.is_empty())
+            && let Some(input) = input
             && let Some(beauty) = lightair_core::catalog::def("studio.beauty")
         {
-            let cmd = Command::AddInputEffect { input: input.id, effect: beauty.create(), index: None };
+            let cmd = Command::AddInputEffect { input, effect: beauty.create(), index: None };
             self.exec(cmd, cx);
         }
     }

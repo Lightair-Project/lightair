@@ -92,7 +92,7 @@ impl Editor {
             let (a, b) = (w.start_ms, w.end_ms);
             let cut = marked.contains(&(a, b));
             let here = now.is_some_and(|s| s >= a && s < b);
-            let filler = speech::filler(&w.text);
+            let filler = speech::filler(t, &w.text);
             words = words.child(
                 div()
                     .id(("ed-w", n))

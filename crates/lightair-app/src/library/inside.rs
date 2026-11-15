@@ -12,14 +12,15 @@ pub(super) fn take_folder(item: &Item) -> Option<PathBuf> {
 
 /// A part's icon.
 pub(crate) fn part_icon(p: &TakePart) -> &'static str {
-    match p.what() {
-        "Screen" => "monitor",
-        "Video" => "video",
-        "Sound" => "audio-lines",
-        "Picture" => "image",
-        "Text" => "type",
-        "Colour" => "square",
-        _ => "file",
+    use lightair_render::sequence::PartKind as K;
+    match p.kind() {
+        Some(K::Screen) => "monitor",
+        Some(K::Video) => "video",
+        Some(K::Sound) => "audio-lines",
+        Some(K::Picture) => "image",
+        Some(K::Text) => "type",
+        Some(K::Shape) => "square",
+        None => "file",
     }
 }
 

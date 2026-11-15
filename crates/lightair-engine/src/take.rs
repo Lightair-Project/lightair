@@ -23,6 +23,8 @@ use crate::sys;
 pub struct Track {
     /// "Screen", "Camera", "Camera 2"…
     pub name: String,
+    /// A screen (else a camera): what it is, apart from its name.
+    pub screen: bool,
     pub input: Id,
     pub file: PathBuf,
     pub width: u32,
@@ -109,7 +111,7 @@ impl Take {
             };
             let video = crate::outputs::VideoOutput(unsafe { sys::obs_canvas_get_video(canvas.as_ptr()) });
             outputs.start_recording(&cfg, Some(video))?;
-            tracks.push(Track { name, input: input.id, file, width: w, height: h });
+            tracks.push(Track { name, screen, input: input.id, file, width: w, height: h });
             parts.push(Part { key, _own: own, _scene: scene, _canvas: canvas });
         }
         if parts.is_empty() {

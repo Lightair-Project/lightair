@@ -628,7 +628,8 @@ impl Library {
         let missing = !item.missing().is_empty();
         let thumbnail = item.thumbnail.clone().filter(|t| t.exists());
         let when = Local.timestamp_millis_opt(item.started_ms).single().map(|t| t.format("%H:%M").to_string()).unwrap_or_default();
-        let formats: Vec<String> = item.files.iter().filter_map(|f| f.format.clone()).collect();
+        // its canvases (a recording of several), or what a take recorded (screen, camera)
+        let formats: Vec<String> = item.files.iter().filter_map(|f| f.format.clone().or_else(|| f.track.clone())).collect();
         let mut detail = vec![when, item.kind.label().to_string()];
         if !formats.is_empty() {
             detail.push(formats.join(" + "));

@@ -1947,7 +1947,7 @@ fn source_cmd(p: &Project, track: Id, to: &Source, app_name: &str) -> Option<Com
         return None;
     }
     // (a name the user gave it stays)
-    let renamed = |t: &Track| if t.name == old.name { name.clone() } else { t.name.clone() };
+    let renamed = |t: &Track| if t.named { t.name.clone() } else { name.clone() };
     let mut commands = Vec::new();
     let mut new_track = Track { channels: lightair_core::TrackChannels::All, ..(**t).clone() };
     new_track.name = renamed(t);
