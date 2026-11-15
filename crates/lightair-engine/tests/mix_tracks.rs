@@ -3,7 +3,7 @@
 use std::process::Command as Proc;
 use std::time::{Duration, Instant};
 
-use lightair_core::{AudioMix, Command, Document, Input, Layer, Layout, Workspace, Scene, Send, Track, diff};
+use lightair_core::{AudioMix, Command, Document, Source, Layer, Layout, Workspace, Scene, Send, Track, diff};
 use lightair_engine::outputs::{Container, OutputKey, OutputState, RecordingConfig, default_encoders, runtime};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -20,16 +20,16 @@ fn a_recording_carries_the_program_and_a_mix() {
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
     let mut doc = Document::new(Workspace::new("Tracks"));
     let canvas = doc.workspace().primary_canvas().id;
-    let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 320, "height": 180}));
-    let tone = Input::new("Tone", "lightair_test_tone", json!({"freq": 440.0, "amplitude": 0.3}));
+    let colour = Source::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 320, "height": 180}));
+    let tone = Source::new("Tone", "lightair_test_tone", json!({"freq": 440.0, "amplitude": 0.3}));
     let mut scene = Scene::new("Main");
     scene.layers.push(Layer::new("Colour", colour.id, [(canvas, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let vod = AudioMix::new("VOD");
     let mut track = Track::new("Tone", tone.id);
     track.sends = vec![Send { mix: vod.id, level_db: 0.0, pre_fader: false }];
     for cmd in [
-        Command::AddInput { input: colour },
-        Command::AddInput { input: tone },
+        Command::AddSource { source: colour },
+        Command::AddSource { source: tone },
         Command::AddScene { scene, index: None },
         Command::AddMix { mix: vod },
         Command::AddTrack { track, index: None },

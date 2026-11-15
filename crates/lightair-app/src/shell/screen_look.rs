@@ -50,7 +50,7 @@ impl StudioWindow {
         let screens = scene
             .layers
             .iter()
-            .filter_map(|l| l.input.and_then(|i| workspace.inputs.get(&i)))
+            .filter_map(|l| l.source.and_then(|i| workspace.sources.get(&i)))
             .filter(|i| i.kind == lightair_core::kinds::SCREEN)
             .count();
         if !on {

@@ -11,7 +11,7 @@ use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{AudioMix, Bus, Command, Effect, Id, Input, Master, MixerStrip, Workspace, Route, Send, Track, kinds};
+use lightair_core::{AudioMix, Bus, Command, Effect, Id, Source, Master, MixerStrip, Workspace, Route, Send, Track, kinds};
 use lightair_engine::meters::meters;
 use serde_json::json;
 
@@ -52,7 +52,7 @@ fn meter_frac(db: f32) -> f32 {
 /// one-knob chain (noise, expander, de-esser, EQ, compressor, limiter).
 /// The commands that set the mixer up as a template. Podcasts take an interface's channels as
 /// mics when there's one with more than two (a stereo USB mic isn't two people); music takes a
-/// two-channel one too (vocal and instrument). Otherwise the default input.
+/// two-channel one too (vocal and instrument). Otherwise the default source.
 pub fn template_command(workspace: &lightair_core::Workspace, t: lightair_core::templates::Template) -> Command {
     use lightair_core::templates::{Mics, Template};
     let least = match t {
@@ -152,12 +152,12 @@ impl MixerPanel {
         cx: &mut Context<Self>,
     ) {
         self.add_track_menu = false;
-        let input = Input::new(name, kind, settings);
-        let mut track = Track::new(name, input.id);
+        let source = Source::new(name, kind, settings);
+        let mut track = Track::new(name, source.id);
         track.effects = effects;
         let cmd = Command::Batch {
             label: format!("Add {name} track"),
-            commands: vec![Command::AddInput { input }, Command::AddTrack { track, index: None }],
+            commands: vec![Command::AddSource { source }, Command::AddTrack { track, index: None }],
         };
         self.exec(cmd, cx);
     }
@@ -1407,7 +1407,7 @@ impl MixerPanel {
                     .dropdown_caret(true)
                     .dropdown_menu(move |menu, window, cx| {
                         use gpui_kit::component::menu::PopupMenuItem;
-                        let pick = move |to: Source, app: String, label: String, me: WeakEntity<MixerPanel>, on: bool| {
+                        let pick = move |to: TrackSource, app: String, label: String, me: WeakEntity<MixerPanel>, on: bool| {
                             source_item(track, to, app, label, me, on)
                         };
                         let mut menu = menu.item(PopupMenuItem::label("Microphones and interfaces"));
@@ -1417,16 +1417,16 @@ impl MixerPanel {
                             (d.name.clone(), format!("{} · {n}", d.name))
                         }));
                         for (value, label) in devices {
-                            let to = Source::Device(value);
+                            let to = TrackSource::Device(value);
                             let on = to == current;
                             menu = menu.item(pick(to, String::new(), label, me.clone(), on));
                         }
                         menu = menu.separator().item(pick(
-                            Source::Desktop,
+                            TrackSource::Desktop,
                             String::new(),
                             "Desktop audio".into(),
                             me.clone(),
-                            current == Source::Desktop,
+                            current == TrackSource::Desktop,
                         ));
                         let (me2, current2) = (me.clone(), current.clone());
                         menu.submenu("App", window, cx, move |mut sub, _, _| {
@@ -1435,7 +1435,7 @@ impl MixerPanel {
                                 sub = sub.item(PopupMenuItem::new("No apps open").disabled(true));
                             }
                             for (name, bundle) in apps {
-                                let to = Source::App(bundle);
+                                let to = TrackSource::App(bundle);
                                 let on = to == current2;
                                 sub = sub.item(source_item(track, to, name.clone(), name, me2.clone(), on));
                             }
@@ -1697,7 +1697,7 @@ struct StripView {
     /// Its effects: id, name, on.
     effects: Vec<(Id, String, bool)>,
     badge: Option<&'static str>,
-    /// A track's input (buses, mixes and the master have none).
+    /// A track's source (buses, mixes and the master have none).
     source: Option<StripSource>,
     /// Where a track or bus goes and what it sends (mixes and the master have none).
     channel: Option<Channel>,
@@ -1865,12 +1865,12 @@ fn strip_update(p: &Workspace, id: Id, f: impl FnOnce(StripFields)) -> Option<Co
 struct StripSource {
     icon: &'static str,
     label: String,
-    current: Source,
+    current: TrackSource,
 }
 
 /// A track's source, as the strip's source menu offers them.
 #[derive(Clone, PartialEq)]
-enum Source {
+enum TrackSource {
     /// An audio interface the engine opens ("" for the system default).
     Device(String),
     /// Everything the computer plays.
@@ -1881,27 +1881,27 @@ enum Source {
     Other,
 }
 
-impl Source {
-    fn of(i: &Input) -> Self {
+impl TrackSource {
+    fn of(i: &Source) -> Self {
         match i.kind.as_str() {
-            lightair_engine::devices::DEVICE_KIND => Source::Device(i.settings["device"].as_str().unwrap_or("").into()),
-            kinds::APP_AUDIO => Source::App(i.settings["app"].as_str().unwrap_or("").into()),
-            kinds::DESKTOP_AUDIO => Source::Desktop,
-            _ => Source::Other,
+            lightair_engine::devices::DEVICE_KIND => TrackSource::Device(i.settings["device"].as_str().unwrap_or("").into()),
+            kinds::APP_AUDIO => TrackSource::App(i.settings["app"].as_str().unwrap_or("").into()),
+            kinds::DESKTOP_AUDIO => TrackSource::Desktop,
+            _ => TrackSource::Other,
         }
     }
 
-    /// The input it needs: name, kind, settings.
-    fn input(&self, app_name: &str) -> (String, &'static str, serde_json::Value) {
+    /// The source it needs: name, kind, settings.
+    fn source(&self, app_name: &str) -> (String, &'static str, serde_json::Value) {
         match self {
-            Source::Device(d) => (
+            TrackSource::Device(d) => (
                 if d.is_empty() { SYSTEM_DEFAULT.into() } else { d.clone() },
                 lightair_engine::devices::DEVICE_KIND,
                 json!({ "device": d }),
             ),
-            Source::Desktop => ("Desktop audio".into(), kinds::DESKTOP_AUDIO, json!({})),
-            Source::App(b) => (app_name.to_string(), kinds::APP_AUDIO, json!({ "app": b })),
-            Source::Other => (String::new(), "", json!({})),
+            TrackSource::Desktop => ("Desktop audio".into(), kinds::DESKTOP_AUDIO, json!({})),
+            TrackSource::App(b) => (app_name.to_string(), kinds::APP_AUDIO, json!({ "app": b })),
+            TrackSource::Other => (String::new(), "", json!({})),
         }
     }
 }
@@ -1909,7 +1909,7 @@ impl Source {
 /// A source menu entry: picking it points `track` at `to`.
 fn source_item(
     track: Id,
-    to: Source,
+    to: TrackSource,
     app: String,
     label: String,
     me: WeakEntity<MixerPanel>,
@@ -1927,7 +1927,7 @@ fn source_item(
     })
 }
 
-/// The microphone the OS is set to use (macOS's or Windows' default input).
+/// The microphone the OS is set to use (macOS's or Windows' default source).
 pub(crate) const SYSTEM_DEFAULT: &str = "System Default";
 
 /// The apps that are open (the Dock's or taskbar's), name and capture id, by name; not
@@ -1936,13 +1936,13 @@ fn running_apps() -> Vec<(String, String)> {
     lightair_platform::apps::running().into_iter().map(|a| (a.name, a.id)).collect()
 }
 
-/// The commands that make `track` listen to `to`: the same kind of input changes its settings;
-/// another kind replaces the input (the old one goes if nothing else uses it). A track still
+/// The commands that make `track` listen to `to`: the same kind of source changes its settings;
+/// another kind replaces the source (the old one goes if nothing else uses it). A track still
 /// named after its old source takes the new one's name.
-fn source_cmd(p: &Workspace, track: Id, to: &Source, app_name: &str) -> Option<Command> {
+fn source_cmd(p: &Workspace, track: Id, to: &TrackSource, app_name: &str) -> Option<Command> {
     let t = p.track(track)?;
-    let old = p.inputs.get(&t.input)?;
-    let (name, kind, settings) = to.input(app_name);
+    let old = p.sources.get(&t.source)?;
+    let (name, kind, settings) = to.source(app_name);
     if kind.is_empty() {
         return None;
     }
@@ -1958,21 +1958,21 @@ fn source_cmd(p: &Workspace, track: Id, to: &Source, app_name: &str) -> Option<C
                 s.insert(k.clone(), v.clone());
             }
         }
-        commands.push(Command::SetInputSettings { input: old.id, settings: s });
+        commands.push(Command::SetSourceSettings { source: old.id, settings: s });
         if old.name != name {
-            commands.push(Command::RenameInput { input: old.id, name: name.clone() });
+            commands.push(Command::RenameSource { source: old.id, name: name.clone() });
         }
     } else {
-        let input = Input::new(name.clone(), kind, settings);
-        new_track.input = input.id;
-        commands.push(Command::AddInput { input });
+        let source = Source::new(name.clone(), kind, settings);
+        new_track.source = source.id;
+        commands.push(Command::AddSource { source });
     }
-    let switched = new_track.input != t.input;
+    let switched = new_track.source != t.source;
     commands.push(Command::UpdateTrack { track: new_track });
-    let shown = p.scenes.iter().any(|s| s.layers.iter().any(|l| l.input == Some(old.id)));
-    let shared = p.tracks.iter().any(|o| o.id != track && o.input == old.id);
+    let shown = p.scenes.iter().any(|s| s.layers.iter().any(|l| l.source == Some(old.id)));
+    let shared = p.tracks.iter().any(|o| o.id != track && o.source == old.id);
     if switched && !shown && !shared {
-        commands.push(Command::RemoveInput { input: old.id });
+        commands.push(Command::RemoveSource { source: old.id });
     }
     Some(Command::Batch { label: "Change audio source".into(), commands })
 }
@@ -1992,14 +1992,14 @@ impl StripView {
 fn strip_views(p: &Workspace) -> Vec<StripView> {
     let on = |e: &[Effect]| e.iter().map(|e| (e.id, e.name.clone(), e.enabled)).collect::<Vec<_>>();
     let source = |t: &Track| {
-        let i = p.inputs.get(&t.input)?;
-        let current = Source::of(i);
+        let i = p.sources.get(&t.source)?;
+        let current = TrackSource::of(i);
         let (icon, label) = match &current {
-            Source::Device(d) => ("mic", if d.is_empty() { SYSTEM_DEFAULT.into() } else { d.clone() }),
-            Source::Desktop => ("volume-2", "Desktop audio".into()),
-            Source::App(b) if b.is_empty() => ("app-window", "Pick an app".into()),
-            Source::App(_) => ("app-window", i.name.clone()),
-            Source::Other => (ui::input_icon(&i.kind), i.name.clone()),
+            TrackSource::Device(d) => ("mic", if d.is_empty() { SYSTEM_DEFAULT.into() } else { d.clone() }),
+            TrackSource::Desktop => ("volume-2", "Desktop audio".into()),
+            TrackSource::App(b) if b.is_empty() => ("app-window", "Pick an app".into()),
+            TrackSource::App(_) => ("app-window", i.name.clone()),
+            TrackSource::Other => (ui::source_icon(&i.kind), i.name.clone()),
         };
         Some(StripSource { icon, label, current })
     };

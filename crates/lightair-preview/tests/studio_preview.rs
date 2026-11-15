@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Frame, Preview, sample_ycbcr};
 use serde_json::json;
@@ -34,16 +34,16 @@ fn preview_shows_an_off_air_scene() {
     let mut doc = Document::new(Workspace::new("Studio mode"));
     let f = doc.workspace().primary_canvas().id;
     // libobs colours are ABGR.
-    let red = Input::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 320, "height": 180}));
-    let blue = Input::new("Blue", "color_source_v3", json!({"color": 0xFFFF0000u32, "width": 320, "height": 180}));
+    let red = Source::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 320, "height": 180}));
+    let blue = Source::new("Blue", "color_source_v3", json!({"color": 0xFFFF0000u32, "width": 320, "height": 180}));
     let mut live = Scene::new("Live");
     live.layers.push(Layer::new("Red", red.id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let mut next = Scene::new("Next");
     next.layers.push(Layer::new("Blue", blue.id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let (live_id, next_id) = (live.id, next.id);
     for cmd in [
-        Command::AddInput { input: red },
-        Command::AddInput { input: blue },
+        Command::AddSource { source: red },
+        Command::AddSource { source: blue },
         Command::AddScene { scene: live, index: None },
         Command::AddScene { scene: next, index: None },
         Command::SetProgram { scene: Some(live_id) },

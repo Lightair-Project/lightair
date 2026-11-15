@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Fit, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Effect, Fit, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -69,11 +69,11 @@ fn the_follow_zoom_magnifies_and_lets_go() {
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
     let mut doc = Document::new(Workspace::new("Zoom"));
     let f = doc.workspace().primary_canvas().id;
-    let input = Input::new("Picture", "image_source", json!({"file": picture.to_string_lossy()}));
-    let iid = input.id;
+    let source = Source::new("Picture", "image_source", json!({"file": picture.to_string_lossy()}));
+    let iid = source.id;
     let mut scene = Scene::new("Main");
     scene.layers = vec![Layer::new("Picture", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 640.0, 360.0) })])];
-    apply(&engine, &mut doc, Command::AddInput { input });
+    apply(&engine, &mut doc, Command::AddSource { source });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
     let plain = grid(&preview, Duration::from_millis(300));
@@ -82,14 +82,14 @@ fn the_follow_zoom_magnifies_and_lets_go() {
     let look = |zoom: i64| json!({"draw": false, "clicks": 0, "zoom": zoom, "zoom_scale": 3.0, "zoom_motion": 0.0});
     let fx = Effect::new("Screen look", lightair_engine::cursor::KIND, look(2));
     let fid = fx.id;
-    apply(&engine, &mut doc, Command::AddInputEffect { input: iid, effect: fx, index: None });
+    apply(&engine, &mut doc, Command::AddSourceEffect { source: iid, effect: fx, index: None });
     let zoomed = grid(&preview, Duration::from_millis(900));
     let n = changed(&plain, &zoomed);
     eprintln!("zoomed: {n} of 256 changed");
     assert!(n > 180, "magnified: {n} of 256 changed");
 
     // off: it eases back out to the picture as it was
-    apply(&engine, &mut doc, Command::SetInputEffectSettings { input: iid, effect: fid, settings: look(0) });
+    apply(&engine, &mut doc, Command::SetSourceEffectSettings { source: iid, effect: fid, settings: look(0) });
     let out = grid(&preview, Duration::from_millis(1500));
     let n = changed(&plain, &out);
     assert!(n < 10, "as it was: {n} of 256 changed");

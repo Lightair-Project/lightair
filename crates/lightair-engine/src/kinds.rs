@@ -1,4 +1,4 @@
-//! Lightair's portable input kinds (`lightair_core::kinds`) as this platform's libobs sources:
+//! Lightair's portable source kinds (`lightair_core::kinds`) as this platform's libobs sources:
 //! which source type plays each, and its settings under libobs's names.
 //!
 //! | Kind | macOS | Windows |
@@ -7,8 +7,8 @@
 //! | screen: window | `screen_capture` (type 1) | `window_capture` |
 //! | screen: app | `screen_capture` (type 2) | `window_capture` (by executable) |
 //! | screen: game | `screen_capture` (type 1) | `game_capture` (a window, or any full-screen game) |
-//! | camera | `macos-avcapture` | `dshow_input` |
-//! | mic | `coreaudio_input_capture` | `wasapi_input_capture` |
+//! | camera | `macos-avcapture` | `dshow_source` |
+//! | mic | `coreaudio_source_capture` | `wasapi_source_capture` |
 //! | desktop audio | `sck_audio_capture` (type 0); a loopback device: `coreaudio_output_capture` | `wasapi_output_capture` |
 //! | app audio | `sck_audio_capture` (type 1) | `wasapi_process_output_capture` |
 //!
@@ -17,7 +17,7 @@
 use lightair_core::kinds::{APP, APP_AUDIO, CAMERA, DESKTOP_AUDIO, DISPLAY, GAME, MIC, SCREEN, WINDOW};
 use serde_json::{Value, json};
 
-/// The libobs source type and settings for an input, or `None` when its kind is libobs's own.
+/// The libobs source type and settings for a source, or `None` when its kind is libobs's own.
 pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
     let mut out = settings.as_object().cloned().unwrap_or_default();
     let mut take = |from: &str| out.remove(from);
@@ -152,7 +152,7 @@ pub fn cameras() -> Vec<(String, String)> {
     }
 }
 
-/// The libobs source type an input plays as (its own kind when that's libobs's).
+/// The libobs source type a source plays as (its own kind when that's libobs's).
 pub fn libobs_kind<'a>(kind: &'a str, settings: &Value) -> &'a str {
     resolve(kind, settings).map_or(kind, |(id, _)| id)
 }

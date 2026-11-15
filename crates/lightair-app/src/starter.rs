@@ -1,7 +1,7 @@
 //! The workspace a first launch starts with (until onboarding generates one from the user's
 //! devices; docs/05-interface-shell.md, "Onboarding").
 
-use lightair_core::{Command, Input, Layer, Layout, Workspace, Scene, Track};
+use lightair_core::{Command, Source, Layer, Layout, Workspace, Scene, Track};
 use serde_json::json;
 
 pub fn starter_workspace() -> Workspace {
@@ -9,14 +9,14 @@ pub fn starter_workspace() -> Workspace {
     let canvas = p.primary_canvas().clone();
     let (w, h) = (canvas.width as f32, canvas.height as f32);
 
-    let background = Input::new(
+    let background = Source::new(
         "Background",
         "color_source_v3",
         json!({"color": 0xFF1B1B1Cu32, "width": canvas.width, "height": canvas.height}),
     );
-    let display = Input::new("Main display", lightair_core::kinds::SCREEN, crate::shell::display_settings());
+    let display = Source::new("Main display", lightair_core::kinds::SCREEN, crate::shell::display_settings());
     let icon_path = brand_icon();
-    let logo = Input::new("Lightair logo", "image_source", json!({"file": icon_path.to_string_lossy()}));
+    let logo = Source::new("Lightair logo", "image_source", json!({"file": icon_path.to_string_lossy()}));
 
     let mut main = Scene::new("Main");
     main.layers = vec![
@@ -35,21 +35,21 @@ pub fn starter_workspace() -> Workspace {
         Layer::new("Logo", logo.id, [(canvas.id, Layout::boxed(80.0, h - 240.0, 160.0, 160.0))]),
     ];
 
-    let mic = Input::new(crate::mixer::SYSTEM_DEFAULT, lightair_core::kinds::MIC, json!({"device": "default"}));
-    let desktop = Input::new("Desktop audio", lightair_core::kinds::DESKTOP_AUDIO, json!({}));
+    let mic = Source::new(crate::mixer::SYSTEM_DEFAULT, lightair_core::kinds::MIC, json!({"device": "default"}));
+    let desktop = Source::new("Desktop audio", lightair_core::kinds::DESKTOP_AUDIO, json!({}));
     let mut mic_track = Track::new(crate::mixer::SYSTEM_DEFAULT, mic.id);
     mic_track.effects = crate::mixer::voice_clarity();
     let desktop_track = Track::new("Desktop audio", desktop.id);
 
     for cmd in [
-        Command::AddInput { input: background },
-        Command::AddInput { input: display },
-        Command::AddInput { input: logo },
+        Command::AddSource { source: background },
+        Command::AddSource { source: display },
+        Command::AddSource { source: logo },
         Command::AddScene { scene: soon, index: None },
         Command::AddScene { scene: main, index: None },
         Command::AddScene { scene: brb, index: None },
-        Command::AddInput { input: mic },
-        Command::AddInput { input: desktop },
+        Command::AddSource { source: mic },
+        Command::AddSource { source: desktop },
         Command::AddTrack { track: mic_track, index: None },
         Command::AddTrack { track: desktop_track, index: None },
     ] {
@@ -65,20 +65,20 @@ pub fn plain_workspace() -> Workspace {
     let mut p = Workspace::new("Demo");
     let canvas = p.primary_canvas().clone();
     let (w, h) = (canvas.width as f32, canvas.height as f32);
-    let bg = Input::new("Background", "color_source_v3", json!({"color": 0xFF2A1A12u32, "width": w, "height": h}));
-    let card = Input::new("Card", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 960, "height": 540}));
-    let title = Input::new(
+    let bg = Source::new("Background", "color_source_v3", json!({"color": 0xFF2A1A12u32, "width": w, "height": h}));
+    let card = Source::new("Card", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 960, "height": 540}));
+    let title = Source::new(
         "Title",
         "text_ft2_source_v2",
         json!({"text": "Lightair", "font": {"face": "Helvetica Neue", "size": 144, "flags": 1}, "color1": 0xFFFFFFFFu32, "color2": 0xFFFFFFFFu32}),
     );
-    let timer = Input::new(
+    let timer = Source::new(
         "Countdown",
         lightair_engine::timers::TIMER_KIND,
         json!({"mode": "countdown", "seconds": 300, "font": {"face": "Helvetica Neue", "size": 96, "flags": 0}, "color1": 0xFFFFFFFFu32, "color2": 0xFFFFFFFFu32}),
     );
     let icon = brand_icon();
-    let logo = Input::new("Logo", "image_source", json!({"file": icon.to_string_lossy()}));
+    let logo = Source::new("Logo", "image_source", json!({"file": icon.to_string_lossy()}));
     let f = canvas.id;
     let mut main = Scene::new("Main");
     main.layers.push(Layer::new("Background", bg.id, [(f, Layout::boxed(0.0, 0.0, w, h))]));
@@ -94,17 +94,17 @@ pub fn plain_workspace() -> Workspace {
         ..Layout::boxed(1500.0, 640.0, 360.0, 360.0)
     };
     soon.layers.push(Layer::new("Logo", logo.id, [(f, logo_box)]));
-    let tone = |name: &str| Input::new(name, "color_source_v3", json!({}));
+    let tone = |name: &str| Source::new(name, "color_source_v3", json!({}));
     let (a, b) = (tone("Mic (demo)"), tone("Music (demo)"));
     let tracks = [Track::new("Mic", a.id), Track::new("Music", b.id)];
     let mut commands = vec![
-        Command::AddInput { input: bg },
-        Command::AddInput { input: card },
-        Command::AddInput { input: title },
-        Command::AddInput { input: timer },
-        Command::AddInput { input: logo },
-        Command::AddInput { input: a },
-        Command::AddInput { input: b },
+        Command::AddSource { source: bg },
+        Command::AddSource { source: card },
+        Command::AddSource { source: title },
+        Command::AddSource { source: timer },
+        Command::AddSource { source: logo },
+        Command::AddSource { source: a },
+        Command::AddSource { source: b },
         Command::AddScene { scene: soon, index: None },
         Command::AddScene { scene: main, index: None },
     ];

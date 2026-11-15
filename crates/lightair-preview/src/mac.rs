@@ -271,7 +271,7 @@ struct Shared {
     /// own one strong reference.
     canvas: Option<CanvasRef>,
     /// When set, renders this source (a scene that isn't on air: Studio mode's preview)
-    /// instead of the canvas's program. Held "showing" so its inputs run.
+    /// instead of the canvas's program. Held "showing" so its sources run.
     source: Mutex<Option<SourceRef>>,
     /// Draw the source at its own size (a player), not in the canvas's coordinates.
     own_size: AtomicBool,

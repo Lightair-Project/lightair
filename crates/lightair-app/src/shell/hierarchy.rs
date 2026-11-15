@@ -104,14 +104,14 @@ impl StudioWindow {
         let mut items = Vec::new();
         for (i, (layer, depth, holds)) in list.into_iter().enumerate() {
             let id = layer.id;
-            let kind = layer.input.and_then(|i| workspace.inputs.get(&i)).map(|i| i.kind.clone()).unwrap_or_default();
+            let kind = layer.source.and_then(|i| workspace.sources.get(&i)).map(|i| i.kind.clone()).unwrap_or_default();
             let prefab = layer.prefab.is_some();
             let icon = if prefab {
                 "package"
             } else if layer.is_empty() {
                 "box"
             } else {
-                ui::input_icon(&kind)
+                ui::source_icon(&kind)
             };
             let own_visible = layer.layouts.get(&canvas).is_some_and(|l| l.visible);
             let shown = scene.shown(id, canvas);
@@ -630,15 +630,15 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{TreeDrop, drop_command, rows};
-    use lightair_core::{Command, Document, Id, Input, Layer, Layout, Workspace, Scene};
+    use lightair_core::{Command, Document, Id, Source, Layer, Layout, Workspace, Scene};
 
     /// Back, Group{A, B}, Front — built through commands like the app does.
     fn scene() -> (Document, Id, [Id; 5]) {
         let mut doc = Document::new(Workspace::new("T"));
         let f = doc.workspace().primary_canvas().id;
-        let input = Input::new("I", "color_source_v3", serde_json::json!({}));
-        let iid = input.id;
-        doc.apply(&Command::AddInput { input }).unwrap();
+        let source = Source::new("I", "color_source_v3", serde_json::json!({}));
+        let iid = source.id;
+        doc.apply(&Command::AddSource { source }).unwrap();
         let sc = Scene::new("S");
         let sid = sc.id;
         doc.apply(&Command::AddScene { scene: sc, index: None }).unwrap();

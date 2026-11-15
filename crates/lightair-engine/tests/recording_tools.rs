@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::outputs::{Container, OutputState, RecordingConfig, default_encoders, runtime};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -46,12 +46,12 @@ fn pause_marker_split() {
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
     let mut doc = Document::new(Workspace::new("Rec"));
     let f = doc.workspace().primary_canvas().id;
-    let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
+    let colour = Source::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
     let mut scene = Scene::new("Main");
     scene.layers.push(Layer::new("Colour", colour.id, [(f, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));
     let scene_id = scene.id;
     for cmd in [
-        Command::AddInput { input: colour },
+        Command::AddSource { source: colour },
         Command::AddScene { scene, index: None },
         Command::SetProgram { scene: Some(scene_id) },
     ] {

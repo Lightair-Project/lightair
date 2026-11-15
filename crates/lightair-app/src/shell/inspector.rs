@@ -203,8 +203,8 @@ impl StudioWindow {
     ) -> AnyElement {
         let lo = layer.layouts.get(&canvas.id).copied().unwrap_or(Layout::boxed(0., 0., 100., 100.));
         let (sid, lid, fid) = (scene.id, layer.id, canvas.id);
-        let input = layer.input.and_then(|i| workspace.inputs.get(&i)).cloned();
-        let kind = input.as_ref().map(|i| i.kind.clone()).unwrap_or_default();
+        let source = layer.source.and_then(|i| workspace.sources.get(&i)).cloned();
+        let kind = source.as_ref().map(|i| i.kind.clone()).unwrap_or_default();
         let set = move |f: &dyn Fn(&mut Layout)| {
             let mut l = lo;
             f(&mut l);
@@ -221,7 +221,7 @@ impl StudioWindow {
             .items_center()
             .gap_2()
             .py_2()
-            .child(ui::icon(ui::input_icon(&kind)).size(px(16.)).text_color(tok::text_secondary()))
+            .child(ui::icon(ui::source_icon(&kind)).size(px(16.)).text_color(tok::text_secondary()))
             .child(
                 div()
                     .flex_1()
@@ -480,15 +480,15 @@ impl StudioWindow {
         }
 
         let mut col = body.gap_0().child(header);
-        if let Some(source) = input.as_ref().and_then(|i| self.source_section(i, cx)) {
+        if let Some(source) = source.as_ref().and_then(|i| self.source_section(i, cx)) {
             col = col.child(source);
         }
         col = col.child(transform);
-        if let Some(input) = &input {
-            if let Some(content) = self.content_section(input, cx) {
+        if let Some(source) = &source {
+            if let Some(content) = self.content_section(source, cx) {
                 col = col.child(content);
             }
-            col = col.child(self.effects_section(input, cx));
+            col = col.child(self.effects_section(source, cx));
         }
         if workspace.canvases.len() > 1 {
             col = col.child(self.canvases_section(workspace, layer, sid, cx));

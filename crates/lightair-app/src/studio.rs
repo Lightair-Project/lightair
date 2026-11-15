@@ -31,7 +31,7 @@ struct Pending {
 }
 
 /// A Studio take in progress (docs/plans/screen-studio.md, 4.2): its folder, Library entry,
-/// and the input it logs.
+/// and the source it logs.
 struct TakeRun {
     workspace: Option<PathBuf>,
     folder: PathBuf,
@@ -96,7 +96,7 @@ pub struct Studio {
     clips_seen: u32,
     /// Frames libobs lagged since the previous stats sample (health is about now, not startup).
     pub recent_lagged: u32,
-    /// The newest saved clip, and replays playing on the canvas (scene, layer, input).
+    /// The newest saved clip, and replays playing on the canvas (scene, layer, source).
     pub last_clip: Option<PathBuf>,
     replays: Vec<(Id, Id, Id)>,
     /// Microphone tracks' loudest peak (dBFS) for each of the last ten seconds.
@@ -256,9 +256,9 @@ impl Studio {
                 if self.execute(command, cx).is_ok() {
                     self.issue = Some(format!("Imported OBS scenes: {}", report.summary()).into());
                     if !report.estimated.is_empty() {
-                        let mut inputs: Vec<Id> = report.estimated.iter().map(|e| e.input).collect();
-                        inputs.dedup();
-                        self.engine.post(move |s| s.reconciler.hold_inputs(&inputs));
+                        let mut sources: Vec<Id> = report.estimated.iter().map(|e| e.source).collect();
+                        sources.dedup();
+                        self.engine.post(move |s| s.reconciler.hold_sources(&sources));
                         self.refit = Some((report.estimated, std::time::Instant::now()));
                     }
                 }
@@ -276,7 +276,7 @@ impl Studio {
             return;
         };
         let p = self.workspace().clone();
-        let input = lightair_core::Input::new(
+        let source = lightair_core::Source::new(
             "Replay",
             "ffmpeg_source",
             serde_json::json!({
@@ -292,28 +292,28 @@ impl Studio {
             .iter()
             .map(|f| (f.id, lightair_core::Layout::boxed(0.0, 0.0, f.width as f32, f.height as f32)))
             .collect();
-        let layer = lightair_core::Layer::new("Replay", input.id, layouts);
-        let (layer_id, input_id) = (layer.id, input.id);
+        let layer = lightair_core::Layer::new("Replay", source.id, layouts);
+        let (layer_id, source_id) = (layer.id, source.id);
         let command = Command::Batch {
             label: "Replay clip".into(),
-            commands: vec![Command::AddInput { input }, Command::AddLayer { scene, layer, index: None }],
+            commands: vec![Command::AddSource { source }, Command::AddLayer { scene, layer, index: None }],
         };
         if self.execute(command, cx).is_ok() {
-            self.replays.push((scene, layer_id, input_id));
+            self.replays.push((scene, layer_id, source_id));
         }
     }
 
     /// Removes replays whose clip has finished (called on the stats tick).
     pub fn end_replays(&mut self, cx: &mut Context<Self>) {
         let mut finished = Vec::new();
-        for (scene, layer, input) in &self.replays {
-            let id = *input;
+        for (scene, layer, source) in &self.replays {
+            let id = *source;
             let state = self.engine.call(move |s| s.reconciler.media_status(id)).map(|s| s.state);
             if matches!(
                 state,
                 None | Some(lightair_engine::media::MediaState::Ended | lightair_engine::media::MediaState::Error)
             ) {
-                finished.push((*scene, *layer, *input));
+                finished.push((*scene, *layer, *source));
             }
         }
         if finished.is_empty() {
@@ -324,7 +324,7 @@ impl Studio {
         let commands: Vec<Command> = finished
             .into_iter()
             .filter(|(scene, layer, _)| p.scene(*scene).is_some_and(|s| s.layer(*layer).is_some()))
-            .flat_map(|(scene, layer, input)| [Command::RemoveLayer { scene, layer }, Command::RemoveInput { input }])
+            .flat_map(|(scene, layer, source)| [Command::RemoveLayer { scene, layer }, Command::RemoveSource { source }])
             .collect();
         if !commands.is_empty() {
             let _ = self.execute(Command::Batch { label: "End replay".into(), commands }, cx);
@@ -345,7 +345,7 @@ impl Studio {
         for id in ended {
             let target = self
                 .workspace()
-                .inputs
+                .sources
                 .get(&id)
                 .and_then(|i| i.settings["end_scene"].as_str().map(str::to_string))
                 .and_then(|s| self.workspace().scenes.iter().find(|sc| sc.id.to_string() == s).map(|sc| sc.id));
@@ -362,13 +362,13 @@ impl Studio {
     /// import are left alone. One undo step.
     pub fn refit_imported(&mut self, cx: &mut Context<Self>) {
         let Some((pending, started)) = &self.refit else { return };
-        let inputs: Vec<Id> = pending.iter().map(|e| e.input).collect();
-        let sizes = self.engine.call(move |s| inputs.iter().map(|id| s.reconciler.input_size(*id)).collect::<Vec<_>>());
+        let sources: Vec<Id> = pending.iter().map(|e| e.source).collect();
+        let sizes = self.engine.call(move |s| sources.iter().map(|id| s.reconciler.source_size(*id)).collect::<Vec<_>>());
         if sizes.iter().any(Option::is_none) && started.elapsed() < std::time::Duration::from_secs(8) {
             return;
         }
         let (pending, _) = self.refit.take().unwrap();
-        self.engine.post(|s| s.reconciler.release_inputs());
+        self.engine.post(|s| s.reconciler.release_sources());
         let workspace = self.workspace().clone();
         let commands: Vec<Command> = pending
             .iter()
@@ -809,7 +809,7 @@ impl Studio {
                 "name": k.name,
                 "kind": if k.screen { "screen" } else { "camera" },
                 "file": k.file.file_name().map(|n| n.to_string_lossy().into_owned()),
-                "input": k.input,
+                "input": k.source,
                 "width": k.width,
                 "height": k.height,
             })).collect::<Vec<_>>(),
@@ -834,7 +834,7 @@ impl Studio {
         cx.notify();
     }
 
-    /// Follows the take: its input log to disk every second, the still, and its Library entry
+    /// Follows the take: its source log to disk every second, the still, and its Library entry
     /// once its files have stopped.
     fn track_take(&mut self) {
         let Some(t) = &mut self.take else { return };
@@ -1094,7 +1094,7 @@ impl Studio {
         let p = self.workspace();
         p.tracks
             .iter()
-            .filter(|t| p.inputs.get(&t.input).is_some_and(|i| lightair_core::kinds::is_mic(&i.kind)))
+            .filter(|t| p.sources.get(&t.source).is_some_and(|i| lightair_core::kinds::is_mic(&i.kind)))
             .map(|t| (t.id, t.name.clone()))
             .collect()
     }

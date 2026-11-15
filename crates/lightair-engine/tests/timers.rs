@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::timers::{TIMER_KIND, TimerAction};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -31,8 +31,8 @@ fn countdown_and_stopwatch() {
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
     let mut doc = Document::new(Workspace::new("Timers"));
     let f = doc.workspace().primary_canvas().id;
-    let countdown = Input::new("Countdown", TIMER_KIND, json!({"mode": "countdown", "seconds": 2, "end_text": "Go!"}));
-    let watch = Input::new("Stopwatch", TIMER_KIND, json!({"mode": "stopwatch", "autostart": false}));
+    let countdown = Source::new("Countdown", TIMER_KIND, json!({"mode": "countdown", "seconds": 2, "end_text": "Go!"}));
+    let watch = Source::new("Stopwatch", TIMER_KIND, json!({"mode": "stopwatch", "autostart": false}));
     let (cd, sw) = (countdown.id, watch.id);
     let mut on_air = Scene::new("Soon");
     on_air.layers.push(Layer::new("Countdown", cd, [(f, Layout::boxed(0.0, 0.0, 320.0, 90.0))]));
@@ -40,8 +40,8 @@ fn countdown_and_stopwatch() {
     let scene = on_air.id;
     // The first scene goes on air by itself; the timers' scene comes second.
     apply(&engine, &mut doc, Command::AddScene { scene: Scene::new("Live"), index: None });
-    apply(&engine, &mut doc, Command::AddInput { input: countdown });
-    apply(&engine, &mut doc, Command::AddInput { input: watch });
+    apply(&engine, &mut doc, Command::AddSource { source: countdown });
+    apply(&engine, &mut doc, Command::AddSource { source: watch });
     apply(&engine, &mut doc, Command::AddScene { scene: on_air, index: None });
 
     // Not on air yet: the countdown waits at its full length.

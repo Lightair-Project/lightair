@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use lightair_core::{
-    Command, Direction, Document, Id, Input, Layer, Layout, Workspace, Scene, TransitionKind, TransitionSettings, diff,
+    Command, Direction, Document, Id, Source, Layer, Layout, Workspace, Scene, TransitionKind, TransitionSettings, diff,
 };
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
@@ -60,16 +60,16 @@ fn directional_and_dip_transitions() {
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
     let mut doc = Document::new(Workspace::new("Transitions"));
     let f = doc.workspace().primary_canvas().id;
-    let r = Input::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 320, "height": 180}));
-    let b = Input::new("Blue", "color_source_v3", json!({"color": 0xFFFF0000u32, "width": 320, "height": 180}));
+    let r = Source::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 320, "height": 180}));
+    let b = Source::new("Blue", "color_source_v3", json!({"color": 0xFFFF0000u32, "width": 320, "height": 180}));
     let mut a_scene = Scene::new("A");
     a_scene.layers.push(Layer::new("Red", r.id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let mut b_scene = Scene::new("B");
     b_scene.layers.push(Layer::new("Blue", b.id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let (a, bb) = (a_scene.id, b_scene.id);
     for cmd in [
-        Command::AddInput { input: r },
-        Command::AddInput { input: b },
+        Command::AddSource { source: r },
+        Command::AddSource { source: b },
         Command::AddScene { scene: a_scene, index: None },
         Command::AddScene { scene: b_scene, index: None },
         Command::SetProgram { scene: Some(a) },

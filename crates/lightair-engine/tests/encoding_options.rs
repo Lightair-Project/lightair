@@ -4,7 +4,7 @@
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::outputs::{Container, OutputState, RecordingConfig, default_encoders, runtime};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -38,12 +38,12 @@ fn hevc_scaled_with_keyframes() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut doc = Document::new(Workspace::new("Enc"));
     let f = doc.workspace().primary_canvas().id;
-    let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
+    let colour = Source::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
     let mut scene = Scene::new("Main");
     scene.layers.push(Layer::new("Colour", colour.id, [(f, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));
     let sid = scene.id;
     for cmd in [
-        Command::AddInput { input: colour },
+        Command::AddSource { source: colour },
         Command::AddScene { scene, index: None },
         Command::SetProgram { scene: Some(sid) },
     ] {

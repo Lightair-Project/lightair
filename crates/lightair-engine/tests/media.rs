@@ -1,10 +1,10 @@
-//! Media transport on a media input: plays, pauses, seeks and restarts.
+//! Media transport on a media source: plays, pauses, seeks and restarts.
 
 use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::media::{MediaAction, MediaState, MediaStatus};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -55,15 +55,15 @@ fn media_transport() {
     let mut doc = Document::new(Workspace::new("Media"));
     let f = doc.workspace().primary_canvas().id;
     let media =
-        Input::new("Clip", "ffmpeg_source", json!({"local_file": wav.to_string_lossy(), "is_local_file": true}));
-    let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF000000u32}));
+        Source::new("Clip", "ffmpeg_source", json!({"local_file": wav.to_string_lossy(), "is_local_file": true}));
+    let colour = Source::new("Colour", "color_source_v3", json!({"color": 0xFF000000u32}));
     let (media_id, colour_id) = (media.id, colour.id);
     let mut scene = Scene::new("Main");
     scene.layers.push(Layer::new("Clip", media_id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let scene_id = scene.id;
     for cmd in [
-        Command::AddInput { input: media },
-        Command::AddInput { input: colour },
+        Command::AddSource { source: media },
+        Command::AddSource { source: colour },
         Command::AddScene { scene, index: None },
         Command::SetProgram { scene: Some(scene_id) },
     ] {

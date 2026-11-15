@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Id, Input, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Id, Source, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::outputs::{OutputKey, OutputState, StreamConfig, default_encoders, runtime};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -66,10 +66,10 @@ fn identical_destinations_share_an_encoder() {
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
     let mut doc = Document::new(Workspace::new("Share"));
     let f = doc.workspace().primary_canvas().id;
-    let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
+    let colour = Source::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
     let mut scene = Scene::new("Main");
     scene.layers.push(Layer::new("Colour", colour.id, [(f, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));
-    for cmd in [Command::AddInput { input: colour }, Command::AddScene { scene, index: None }] {
+    for cmd in [Command::AddSource { source: colour }, Command::AddScene { scene, index: None }] {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
         let workspace = change.after.clone();

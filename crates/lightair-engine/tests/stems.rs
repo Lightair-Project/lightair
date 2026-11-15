@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Input, Workspace, Track, TrackChannels, diff};
+use lightair_core::{Command, Document, Effect, Source, Workspace, Track, TrackChannels, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -19,13 +19,13 @@ fn tracks_record_to_aligned_files() {
         let workspace = change.after.clone();
         engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     };
-    let tone = Input::new("Tone", "lightair_test_tone", json!({"freq": 440.0, "amplitude": 0.5}));
+    let tone = Source::new("Tone", "lightair_test_tone", json!({"freq": 440.0, "amplitude": 0.5}));
     let mut host = Track::new("Host", tone.id);
     host.channels = TrackChannels::Mono(0);
     host.effects = vec![Effect::new("Gain", "audio.gain", json!({"db": -6.0206}))];
     host.volume_db = -20.0; // the fader doesn't touch a pre-fader file
     let guest = Track::new("Guest", tone.id);
-    apply(&mut doc, Command::AddInput { input: tone });
+    apply(&mut doc, Command::AddSource { source: tone });
     apply(&mut doc, Command::AddTrack { track: host, index: None });
     apply(&mut doc, Command::AddTrack { track: guest, index: None });
     std::thread::sleep(Duration::from_millis(500));

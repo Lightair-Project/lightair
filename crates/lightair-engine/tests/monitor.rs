@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Input, Workspace, Track, diff};
+use lightair_core::{Command, Document, Source, Workspace, Track, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -26,13 +26,13 @@ fn the_monitor_hears_the_cued_tracks() {
         let workspace = change.after.clone();
         engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     };
-    let a = Input::new("A", "lightair_test_tone", json!({"freq": 300.0, "amplitude": 0.4}));
-    let b = Input::new("B", "lightair_test_tone", json!({"freq": 500.0, "amplitude": 0.2}));
+    let a = Source::new("A", "lightair_test_tone", json!({"freq": 300.0, "amplitude": 0.4}));
+    let b = Source::new("B", "lightair_test_tone", json!({"freq": 500.0, "amplitude": 0.2}));
     let mut cued = Track::new("Cued", a.id);
     cued.cue = true;
     let other = Track::new("Other", b.id);
-    apply(&mut doc, Command::AddInput { input: a });
-    apply(&mut doc, Command::AddInput { input: b });
+    apply(&mut doc, Command::AddSource { source: a });
+    apply(&mut doc, Command::AddSource { source: b });
     apply(&mut doc, Command::AddTrack { track: cued, index: None });
     apply(&mut doc, Command::AddTrack { track: other, index: None });
     std::thread::sleep(Duration::from_millis(400));

@@ -1,11 +1,11 @@
-//! Shapes belong to layers: one layer of an input can be a circle while another isn't, and the
+//! Shapes belong to layers: one layer of a source can be a circle while another isn't, and the
 //! circle is cut from the cropped picture. Skipped when Lightair's module isn't built
 //! (`cargo xtask modules`).
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Crop, Document, Fit, Id, Input, Layer, Layout, Workspace, Scene, Shape, ShapeKind, diff};
+use lightair_core::{Command, Crop, Document, Fit, Id, Source, Layer, Layout, Workspace, Scene, Shape, ShapeKind, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -53,8 +53,8 @@ fn shapes_are_per_layer_and_follow_the_crop() {
     .unwrap();
     let mut doc = Document::new(Workspace::new("Shapes"));
     let f = doc.workspace().primary_canvas().id;
-    // One 640×360 red input in two layers: left half and right half of the canvas.
-    let r = Input::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 640, "height": 360}));
+    // One 640×360 red source in two layers: left half and right half of the canvas.
+    let r = Source::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 640, "height": 360}));
     let rid = r.id;
     let left_box = Layout { fit: Fit::Stretch, ..Layout::boxed(0.0, 0.0, 160.0, 180.0) };
     let right_box = Layout { fit: Fit::Stretch, ..Layout::boxed(160.0, 0.0, 160.0, 180.0) };
@@ -64,12 +64,12 @@ fn shapes_are_per_layer_and_follow_the_crop() {
     let mut scene = Scene::new("Main");
     scene.id = sid;
     scene.layers = vec![a, b];
-    apply(&engine, &mut doc, Command::AddInput { input: r });
+    apply(&engine, &mut doc, Command::AddSource { source: r });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
     assert!(red(at(&preview, 4.0, 4.0)) && red(at(&preview, 164.0, 4.0)), "both start plain");
 
-    // A becomes a circle: its corner goes, B's stays (same input).
+    // A becomes a circle: its corner goes, B's stays (same source).
     let circle = Layout { shape: Some(Shape::new(ShapeKind::Circle)), ..left_box };
     apply(&engine, &mut doc, Command::SetLayout { scene: sid, layer: aid, canvas: f, layout: circle });
     let (a_corner, a_mid, b_corner) = (at(&preview, 4.0, 4.0), at(&preview, 80.0, 90.0), at(&preview, 164.0, 4.0));

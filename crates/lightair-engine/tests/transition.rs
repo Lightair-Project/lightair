@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use lightair_core::{
-    Command, Document, Input, Layer, Layout, Workspace, Scene, TransitionKind, TransitionSettings, diff,
+    Command, Document, Source, Layer, Layout, Workspace, Scene, TransitionKind, TransitionSettings, diff,
 };
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -16,7 +16,7 @@ fn move_glides_matching_layers_then_lands() {
         Engine::start(EngineConfig { canvas: (1280, 720), output: (1280, 720), ..Default::default() }).unwrap();
     let mut doc = Document::new(Workspace::new("Move"));
     let canvas = doc.workspace().primary_canvas().id;
-    let cam = Input::new("Cam", "color_source_v3", json!({"color": 0xFFFFFFFFu32, "width": 400, "height": 400}));
+    let cam = Source::new("Cam", "color_source_v3", json!({"color": 0xFFFFFFFFu32, "width": 400, "height": 400}));
     let cam_id = cam.id;
     let mut a = Scene::new("A");
     a.layers.push(Layer::new("Cam", cam_id, [(canvas, Layout::boxed(0.0, 0.0, 200.0, 200.0))]));
@@ -29,7 +29,7 @@ fn move_glides_matching_layers_then_lands() {
         let workspace = change.after.clone();
         engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     };
-    apply(&mut doc, Command::AddInput { input: cam });
+    apply(&mut doc, Command::AddSource { source: cam });
     apply(&mut doc, Command::AddScene { scene: a, index: None });
     apply(&mut doc, Command::AddScene { scene: b, index: None });
     apply(
