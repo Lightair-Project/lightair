@@ -79,7 +79,7 @@ fn identical_destinations_share_an_encoder() {
         engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     }
 
-    let ports = [19361u16, 19362, 19363];
+    let ports = [19361u16, 19362, 19363, 19364];
     let files: Vec<PathBuf> = ports.iter().map(|p| dir.join(format!("{p}.flv"))).collect();
     let servers: Vec<Child> = ports.iter().zip(&files).map(|(p, f)| server(*p, f)).collect();
     std::thread::sleep(Duration::from_millis(800));
@@ -91,6 +91,7 @@ fn identical_destinations_share_an_encoder() {
         key: "test".into(),
         encoders: default_encoders(&caps, kbps, true),
         reconnect: None,
+        vod_mix: None,
     };
     let (a, b, c) = (config(ports[0], 2500), config(ports[1], 2500), config(ports[2], 1200));
     let ids = [a.id, b.id, c.id];
@@ -104,6 +105,17 @@ fn identical_destinations_share_an_encoder() {
     assert_eq!(enc(ids[0]), enc(ids[1]), "same settings share an encoder");
     assert_ne!(enc(ids[0]), enc(ids[2]), "a different bitrate gets its own");
     assert_eq!(engine.call(|s| s.outputs.stream_encoder_count()), 2);
+
+    // A destination on a mix with a VOD track (Twitch's): its sound from libobs mix 2, and a
+    // second audio track from mix 1; not sharing the others' audio.
+    let mut vod = config(ports[3], 2500);
+    vod.encoders.audio_mix = 2;
+    vod.vod_mix = Some(1);
+    let vod_id = vod.id;
+    engine.call(move |s| s.outputs.start_stream(&vod, None)).expect("stream with a VOD track starts");
+    assert!(wait_active(vod_id), "stream with a VOD track active");
+    assert_eq!(engine.call(move |s| s.outputs.stream_audio_tracks(vod_id)), vec![2, 1], "its mix, then the VOD track");
+    assert_eq!(engine.call(move |s| s.outputs.stream_audio_tracks(ids[0])), vec![0], "the others: the master alone");
 
     // Stopping the first leaves the shared encoder running for the second.
     std::thread::sleep(Duration::from_millis(1200));

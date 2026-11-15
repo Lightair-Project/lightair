@@ -206,6 +206,8 @@ pub struct EncoderConfig {
     pub keyint_sec: u32,
     /// Encode at this size instead of the canvas's (scaled on the GPU).
     pub scaled: Option<(u32, u32)>,
+    /// The libobs mix its audio is (0: Program, the master; 1–5: the audio engine's mixes).
+    pub audio_mix: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -279,6 +281,8 @@ pub struct StreamConfig {
     pub encoders: EncoderConfig,
     /// (retries, seconds apart) when the connection drops; `None`: libobs's defaults.
     pub reconnect: Option<(u32, u32)>,
+    /// A second audio track (Twitch's VOD track): the libobs mix it carries (RTMP only).
+    pub vod_mix: Option<usize>,
 }
 
 // ---------------------------------------------------------------- libobs objects
@@ -533,7 +537,7 @@ unsafe fn create_encoders(
             c(&cfg.audio_encoder).as_ptr(),
             c(&format!("{name} audio")).as_ptr(),
             a.as_ptr(),
-            0,
+            cfg.audio_mix,
             std::ptr::null_mut(),
         );
         if audio.is_null() {
@@ -812,7 +816,9 @@ impl Outputs {
             .find(|r| r.share == share_key)
             .map(|r| unsafe { (sys::obs_encoder_get_ref(r.video), sys::obs_encoder_get_ref(r.audio)) });
         let shared = shared.filter(|(v, a)| !v.is_null() && !a.is_null());
-        let running = unsafe { start(key, output_type, &output_settings, &encoders, service, video_output, shared, &[])? };
+        // Twitch's VOD track: a second audio track, as OBS sends it (RTMP's multitrack audio)
+        let vod: Vec<usize> = cfg.vod_mix.filter(|_| protocol == StreamProtocol::Rtmp).into_iter().collect();
+        let running = unsafe { start(key, output_type, &output_settings, &encoders, service, video_output, shared, &vod)? };
         if let Some((retries, delay)) = cfg.reconnect {
             unsafe { sys::obs_output_set_reconnect_settings(running.output, retries as i32, delay as i32) };
         }
@@ -829,6 +835,17 @@ impl Outputs {
     }
 
     /// The video encoder a stream uses (diagnostics and tests).
+    /// A stream's audio tracks, in order: the libobs mix each encodes (diagnostics, tests).
+    pub fn stream_audio_tracks(&self, id: Id) -> Vec<usize> {
+        let Some(r) = self.streams.get(&id) else { return Vec::new() };
+        (0..6)
+            .map_while(|k| {
+                let enc = unsafe { sys::obs_output_get_audio_encoder(r.output, k) };
+                (!enc.is_null()).then(|| unsafe { sys::obs_encoder_get_mixer_index(enc) })
+            })
+            .collect()
+    }
+
     pub fn stream_video_encoder(&self, id: Id) -> Option<usize> {
         self.streams.get(&id).map(|r| r.video as usize)
     }
@@ -904,6 +921,7 @@ impl Outputs {
                         bframes: false,
                         keyint_sec: 0,
                         scaled: None,
+                        audio_mix: 0,
                     },
                 ),
                 extra: Vec::new(),
@@ -1117,6 +1135,7 @@ pub fn default_encoders(available: &[String], video_bitrate_kbps: u32, constant_
         bframes: true,
         keyint_sec: 2,
         scaled: None,
+        audio_mix: 0,
     }
 }
 

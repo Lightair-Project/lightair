@@ -65,7 +65,15 @@ pub fn for_stream(caps: &[String], workspace: &Workspace, d: &Destination) -> En
         bframes: true,
         keyint_sec: e.keyframe_s.max(1),
         scaled: scaled(canvas, e.height),
+        // its sound: a mix, or the master
+        audio_mix: d.audio_mix.and_then(|m| libobs_mix(workspace, m)).unwrap_or(0),
     }
+}
+
+/// The libobs mix a mixer mix plays into: the audio engine plays the first five mixes, in mixer
+/// order, into libobs mixes 1–5 (0 is Program, the master); `None` past those or when gone.
+pub fn libobs_mix(workspace: &Workspace, mix: lightair_core::Id) -> Option<usize> {
+    workspace.audio.mixes.iter().position(|m| m.id == mix).filter(|&k| k < 5).map(|k| k + 1)
 }
 
 /// A recording's encoders for one canvas.
@@ -79,6 +87,7 @@ pub fn for_recording(caps: &[String], settings: &RecordingSettings, canvas: &Can
         bframes: true,
         keyint_sec: 2,
         scaled: scaled(canvas, settings.height),
+        audio_mix: 0,
     }
 }
 
@@ -152,6 +161,8 @@ mod tests {
             canvas: None,
             platform: Some(platform.into()),
             encoding: None,
+            audio_mix: None,
+            vod_mix: None,
         };
         assert_eq!(automatic(&workspace, &d("twitch")).bitrate_kbps, 6000, "Twitch takes 6 Mbps");
         assert_eq!(automatic(&workspace, &d("youtube")).bitrate_kbps, 9000);
