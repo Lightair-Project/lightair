@@ -318,6 +318,7 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
     crate::audio_host::register_types();
     crate::pointer::register();
     crate::backdrop::register();
+    crate::web::register();
 }
 
 /// Loads every module in `dir` (subject to the safe-module allowlist): `<module>.plugin` bundles

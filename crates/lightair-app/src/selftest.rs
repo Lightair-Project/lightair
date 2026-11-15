@@ -15,6 +15,7 @@ pub fn run(engine: &Engine, what: &str) {
         "camera" => camera(engine),
         "green-key" => green_key(engine),
         "virtual-camera" => virtual_camera(engine),
+        "web" => web(engine),
         // puts Lightair's Backgrounds back: LIGHTAIR_BG_PICTURE and LIGHTAIR_BG_ON (0/1)
         "restore-backgrounds" => {
             use crate::system_effects as sys;
@@ -287,4 +288,40 @@ fn virtual_camera(engine: &Engine) {
     });
     std::thread::sleep(Duration::from_millis(500));
     println!("SELFTEST stopped: {:?}", lightair_engine::outputs::runtime().get(lightair_engine::outputs::OutputKey::VirtualCamera).state);
+}
+
+/// `LIGHTAIR_SELFTEST=web`: a web page (magenta) on air, Chromium driven from this thread; the
+/// program's colour.
+fn web(engine: &Engine) {
+    // the application object Chromium works with on macOS (the window loop makes it otherwise)
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject};
+        let _app: *mut AnyObject = unsafe { msg_send![AnyClass::get(c"NSApplication").unwrap(), sharedApplication] };
+    }
+    println!("SELFTEST Chromium bundled: {}", lightair_web::available());
+    engine.call(|s| {
+        let url = "data:text/html,<html><body style='margin:0;background:%23ff00ff'></body></html>";
+        let settings = Data::from_json(&serde_json::json!({"url": url, "width": 1920, "height": 1080, "fps": 30}));
+        let src = ObsSource::create(lightair_engine::web::KIND, "Self-test page", Some(&settings)).unwrap();
+        let scene = ObsScene::create("Self-test").unwrap();
+        scene.add(&src);
+        s.sources.insert("page".into(), src);
+        s.scenes.insert("selftest".into(), scene);
+        s.set_program("selftest");
+    });
+    let preview = engine.call(|_| lightair_preview::Preview::attach());
+    let start = std::time::Instant::now();
+    let mut next = 1;
+    while start.elapsed() < Duration::from_secs(8) {
+        lightair_web::pump();
+        std::thread::sleep(Duration::from_millis(8));
+        if start.elapsed() >= Duration::from_secs(next) {
+            next += 1;
+            let (w, h) = engine.call(|s| s.sources.get("page").map_or((0, 0), |c| (c.width(), c.height())));
+            let colour = preview.latest_frame().and_then(|f| lightair_preview::sample_ycbcr(&f, 0.3, 0.3));
+            println!("SELFTEST {} s: page {w}x{h}, program YCbCr {colour:?} (magenta is about 73/227/244)", next - 1);
+        }
+    }
 }

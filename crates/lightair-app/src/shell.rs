@@ -449,6 +449,19 @@ impl StudioWindow {
             }
         })
         .detach();
+        // Chromium for web page sources: driven from this (the main) thread, often while pages
+        // are open, and now and then to pick up the first one asked for.
+        cx.spawn(async move |this, cx| {
+            loop {
+                lightair_web::pump();
+                let wait = if lightair_web::busy() { 8 } else { 120 };
+                cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
+                if this.upgrade().is_none() {
+                    break;
+                }
+            }
+        })
+        .detach();
         // The badge by the real pointer while viewers see the screen zoomed in (on the user's
         // screen only): following the pointer every frame while shown.
         cx.spawn(async move |this, cx| {
