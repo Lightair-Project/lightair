@@ -1082,18 +1082,14 @@ impl Render for OutputsPanel {
                     }),
             );
         }
-        // The recording drive: free space (moving live while recording) and, once it can tell,
-        // how long it lasts at the rate it's going down.
+        // The recording drive: free space, moving live while recording.
         let recording = workspace.canvases.iter().any(|f| runtime().get(OutputKey::Recording(f.id)).state.is_running());
         self.disk.poll(&folder, recording, Instant::now(), lightair_platform::files::space);
         let storage = self.disk.space.map(|(free, total)| {
-            let left = self.disk.time_left().filter(|_| recording);
-            let low = |warn_secs: u64, warn_bytes: u64| {
-                left.is_some_and(|d| d.as_secs() < warn_secs) || (recording && free < warn_bytes)
-            };
-            let colour = if low(5 * 60, 2_000_000_000) {
+            let low = |bytes: u64| recording && free < bytes;
+            let colour = if low(2_000_000_000) {
                 tok::error()
-            } else if low(30 * 60, 10_000_000_000) {
+            } else if low(10_000_000_000) {
                 tok::warn()
             } else if recording {
                 tok::accent_primary()
@@ -1101,10 +1097,7 @@ impl Render for OutputsPanel {
                 tok::text_tertiary()
             };
             let used = if total > 0 { 1.0 - free as f32 / total as f32 } else { 0.0 };
-            let detail = match left {
-                Some(d) => crate::storage::left(d),
-                None => format!("of {}", crate::storage::bytes(total, false)),
-            };
+            let detail = format!("of {}", crate::storage::bytes(total, false));
             let tip = format!("Recordings are saved to {}", folder.display());
             div()
                 .id("recording-storage")
@@ -1128,7 +1121,7 @@ impl Render for OutputsPanel {
                                 .child(format!("{} free", crate::storage::bytes(free, recording))),
                         )
                         .child(div().flex_1())
-                        .child(div().text_color(if left.is_some() { colour } else { tok::text_tertiary() }).child(detail)),
+                        .child(div().text_color(tok::text_tertiary()).child(detail)),
                 )
                 .child(
                     div()
