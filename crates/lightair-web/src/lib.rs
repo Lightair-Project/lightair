@@ -18,6 +18,11 @@ use std::sync::Arc;
 /// Where a page's frames go: premultiplied BGRA rows, `width × 4` bytes each, and the size.
 pub type FrameSink = Arc<dyn Fn(&[u8], u32, u32) + Send + Sync>;
 
+/// Where a page's frames go when Chromium shares them as textures (macOS: an `IOSurfaceRef`,
+/// premultiplied BGRA, valid during the call: retain it to keep it), and its size. No pixel
+/// crosses to the CPU (`Page::open_shared`).
+pub type TextureSink = Arc<dyn Fn(*mut std::ffi::c_void, u32, u32) + Send + Sync>;
+
 /// Where a page's sound goes: one plane of 32-bit float samples per channel (all the same
 /// length), and the sample rate. Chromium sends sound here instead of playing it.
 pub type AudioSink = Arc<dyn Fn(&[&[f32]], u32) + Send + Sync>;
@@ -55,7 +60,16 @@ impl Page {
     /// to `audio`.
     pub fn open(options: PageOptions, sink: FrameSink, audio: AudioSink) -> Page {
         let id = imp::next_id();
-        imp::request(imp::Request::Open { id, options, sink, audio });
+        imp::request(imp::Request::Open { id, options, sink, texture: None, audio });
+        Page { id }
+    }
+
+    /// Like [`Page::open`], but where Chromium can share its frames as GPU textures (macOS),
+    /// they go to `texture` instead of being read back into memory for `sink`.
+    pub fn open_shared(options: PageOptions, texture: TextureSink, sink: FrameSink, audio: AudioSink) -> Page {
+        let id = imp::next_id();
+        let texture = cfg!(target_os = "macos").then_some(texture);
+        imp::request(imp::Request::Open { id, options, sink, texture, audio });
         Page { id }
     }
 
@@ -105,7 +119,7 @@ pub fn busy() -> bool {
 
 #[cfg(any(target_os = "macos", all(windows, not(lightair_cross_check))))]
 mod imp {
-    use super::{AudioSink, FrameSink, PageOptions};
+    use super::{AudioSink, FrameSink, PageOptions, TextureSink};
     use cef::*;
     use parking_lot::Mutex;
     use std::cell::RefCell;
@@ -114,7 +128,7 @@ mod imp {
     use std::sync::Arc;
 
     pub enum Request {
-        Open { id: u64, options: PageOptions, sink: FrameSink, audio: AudioSink },
+        Open { id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink },
         Update { id: u64, options: PageOptions },
         Reload { id: u64 },
         Style { id: u64, css: String },
@@ -369,6 +383,7 @@ mod imp {
         struct PageRender {
             view: Arc<Mutex<((u32, u32), f32)>>,
             sink: FrameSink,
+            texture: Option<TextureSink>,
         }
         impl RenderHandler {
             fn view_rect(&self, _browser: Option<&mut Browser>, rect: Option<&mut Rect>) {
@@ -391,6 +406,15 @@ mod imp {
                 }
                 let bytes = unsafe { std::slice::from_raw_parts(buffer, width as usize * height as usize * 4) };
                 (self.sink)(bytes, width as u32, height as u32);
+            }
+            fn on_accelerated_paint(&self, _browser: Option<&mut Browser>, type_: PaintElementType, _dirty: Option<&[Rect]>, info: Option<&AcceleratedPaintInfo>) {
+                let (Some(texture), Some(info)) = (&self.texture, info) else { return };
+                let surface = shared_surface(info);
+                if type_ != PaintElementType::VIEW || surface.is_null() {
+                    return;
+                }
+                let size = &info.extra.coded_size;
+                texture(surface, size.width.max(0) as u32, size.height.max(0) as u32);
             }
         }
     }
@@ -495,17 +519,29 @@ mod imp {
         }
     }
 
-    fn open(id: u64, options: PageOptions, sink: FrameSink, audio: AudioSink) {
+    /// The IOSurface a shared-texture paint is in (macOS only).
+    #[cfg(target_os = "macos")]
+    fn shared_surface(info: &AcceleratedPaintInfo) -> *mut std::ffi::c_void {
+        info.shared_texture_io_surface
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn shared_surface(_: &AcceleratedPaintInfo) -> *mut std::ffi::c_void {
+        std::ptr::null_mut()
+    }
+
+    fn open(id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink) {
         let view = Arc::new(Mutex::new(view_of(&options)));
         let format = Arc::new(Mutex::new((48_000, 2)));
         let css = Arc::new(Mutex::new(options.css.clone()));
         let mut client = PageClient::new(
-            PageRender::new(view.clone(), sink),
+            PageRender::new(view.clone(), sink, texture.clone()),
             PageLife::new(id),
             PageAudio::new(format, audio),
             PageLoad::new(css.clone()),
         );
-        let window = WindowInfo { windowless_rendering_enabled: 1, ..Default::default() };
+        // shared textures: Chromium's GPU frames go to the scene as they are (no readback)
+        let window = WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: texture.is_some() as i32, ..Default::default() };
         let browser_settings = BrowserSettings {
             windowless_frame_rate: options.fps.clamp(1, 60) as i32,
             background_color: 0x0000_0000,
@@ -594,7 +630,7 @@ mod imp {
         let requests = std::mem::take(&mut *REQUESTS.lock());
         for r in requests {
             match r {
-                Request::Open { id, options, sink, audio } => open(id, options, sink, audio),
+                Request::Open { id, options, sink, texture, audio } => open(id, options, sink, texture, audio),
                 Request::Update { id, options } => update(id, options),
                 Request::Reload { id } => reload(id),
                 Request::Style { id, css } => style(id, css),
@@ -652,11 +688,11 @@ mod imp {
 /// No Chromium here (the Windows check made from a Mac): pages never paint.
 #[cfg(not(any(target_os = "macos", all(windows, not(lightair_cross_check)))))]
 mod imp {
-    use super::{AudioSink, FrameSink, PageOptions};
+    use super::{AudioSink, FrameSink, PageOptions, TextureSink};
 
     #[allow(dead_code)] // (asked for, never made here)
     pub enum Request {
-        Open { id: u64, options: PageOptions, sink: FrameSink, audio: AudioSink },
+        Open { id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink },
         Update { id: u64, options: PageOptions },
         Reload { id: u64 },
         Style { id: u64, css: String },

@@ -91,6 +91,8 @@ pub struct MixerPanel {
     /// Displayed (decaying) peak per track and channel, plus the time of the last frame.
     display: HashMap<Id, [f32; 2]>,
     last_frame: Instant,
+    /// When the meters last moved.
+    meters_at: Instant,
     add_track_menu: bool,
     /// When a click outside last closed the add menu (that click on + mustn't reopen it).
     menu_closed: Option<Instant>,
@@ -100,12 +102,19 @@ pub struct MixerPanel {
 impl MixerPanel {
     pub fn new(studio: Entity<Studio>, cx: &mut Context<Self>) -> Self {
         cx.observe(&studio, |_, _, cx| cx.notify()).detach();
-        // meters move at 30 frames a second: smooth to the eye, a quarter of a 120 Hz display's
-        // redraws (docs/16, "Performance budgets")
+        // Meters move at about 30 frames a second, in step with the canvas's frames when it shows
+        // a live picture (`tick_meters`: one window redraw for both, not two); on their own
+        // when it doesn't (docs/16, "Performance budgets").
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(33)).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                let alive = this.update(cx, |m, cx| {
+                    if m.meters_at.elapsed() >= std::time::Duration::from_millis(50) {
+                        m.meters_at = Instant::now();
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
                     break;
                 }
             }
@@ -122,6 +131,7 @@ impl MixerPanel {
             renaming: None,
             display: HashMap::new(),
             last_frame: Instant::now(),
+            meters_at: Instant::now(),
             add_track_menu: false,
             menu_closed: None,
             focus: cx.focus_handle(),
@@ -171,6 +181,16 @@ impl MixerPanel {
             commands: vec![Command::AddSource { source }, Command::AddTrack { track, index: None }],
         };
         self.exec(cmd, cx);
+    }
+}
+
+impl MixerPanel {
+    /// The canvas drew a frame: the meters move with it if they're due (same redraw).
+    pub fn tick_meters(&mut self, cx: &mut Context<Self>) {
+        if self.meters_at.elapsed() >= std::time::Duration::from_millis(30) {
+            self.meters_at = Instant::now();
+            cx.notify();
+        }
     }
 }
 

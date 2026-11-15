@@ -39,7 +39,16 @@ impl ShellPanel {
                     match frames {
                         Ok(Some(n)) if n != seen => {
                             seen = n;
-                            let _ = this.update(cx, |_, cx| cx.notify());
+                            let _ = this.update(cx, |p, cx| {
+                                cx.notify();
+                                // the meters move in the same redraw
+                                if p.region == Region::Canvas
+                                    && let Some(shell) = p.shell.upgrade()
+                                {
+                                    let mixer = shell.read(cx).mixer.clone();
+                                    mixer.update(cx, |m, cx| m.tick_meters(cx));
+                                }
+                            });
                         }
                         Ok(Some(_)) => {}
                         _ => break,

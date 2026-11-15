@@ -5,6 +5,10 @@
 //!
 //! Settings: `url`; `width`, `height` (the frame's size: the page's in CSS pixels at 100%);
 //! `fps`; `zoom` (percent, as a browser's); `css` (added to the page each time it loads).
+//!
+//! On macOS Chromium shares its frames as IOSurfaces, which libobs draws as they are (as OBS's
+//! browser source does): no frame is read back to memory, copied or uploaded again. Elsewhere
+//! frames arrive as pixels, given to libobs like a camera's.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::Arc;
@@ -23,6 +27,8 @@ struct Web {
     page: Option<lightair_web::Page>,
     target: Target,
     options: lightair_web::PageOptions,
+    #[cfg(target_os = "macos")]
+    shared: Arc<shared::Frames>,
 }
 
 fn string(settings: *mut sys::obs_data_t, key: &CStr) -> String {
@@ -43,7 +49,11 @@ fn options(settings: *mut sys::obs_data_t) -> lightair_web::PageOptions {
     }
 }
 
-fn open(o: &lightair_web::PageOptions, target: &Target) -> Option<lightair_web::Page> {
+fn open(
+    o: &lightair_web::PageOptions,
+    target: &Target,
+    #[cfg(target_os = "macos")] shared: Option<Arc<shared::Frames>>,
+) -> Option<lightair_web::Page> {
     if o.url.trim().is_empty() {
         return None;
     }
@@ -92,6 +102,11 @@ fn open(o: &lightair_web::PageOptions, target: &Target) -> Option<lightair_web::
             sys::obs_source_output_audio(source as *mut sys::obs_source_t, &audio);
         }
     });
+    #[cfg(target_os = "macos")]
+    if let Some(frames) = shared {
+        let texture: lightair_web::TextureSink = Arc::new(move |surface, _w, _h| frames.put(surface));
+        return Some(lightair_web::Page::open_shared(o.clone(), texture, sink, audio));
+    }
     Some(lightair_web::Page::open(o.clone(), sink, audio))
 }
 
@@ -131,8 +146,17 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
     unsafe { sys::obs_source_set_async_unbuffered(source, true) };
     let target = Target(Arc::new(Mutex::new(Some(source as usize))));
     let o = options(settings);
-    let page = open(&o, &target);
-    Box::into_raw(Box::new(Web { page, target, options: o })) as *mut c_void
+    #[cfg(target_os = "macos")]
+    {
+        let frames = Arc::new(shared::Frames::default());
+        let page = open(&o, &target, Some(frames.clone()));
+        Box::into_raw(Box::new(Web { page, target, options: o, shared: frames })) as *mut c_void
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let page = open(&o, &target);
+        Box::into_raw(Box::new(Web { page, target, options: o })) as *mut c_void
+    }
 }
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
@@ -150,6 +174,9 @@ unsafe extern "C" fn update(data: *mut c_void, settings: *mut sys::obs_data_t) {
     }
     match &web.page {
         Some(page) if !o.url.trim().is_empty() => page.update(o.clone()),
+        #[cfg(target_os = "macos")]
+        _ => web.page = open(&o, &web.target, Some(web.shared.clone())),
+        #[cfg(not(target_os = "macos"))]
         _ => web.page = open(&o, &web.target),
     }
     web.options = o;
@@ -173,6 +200,14 @@ pub fn register() {
         info.type_ = sys::OBS_SOURCE_TYPE_INPUT;
         // frames as they're painted, kept until the next (a still page paints once); its sound
         info.output_flags = sys::OBS_SOURCE_ASYNC_VIDEO | sys::OBS_SOURCE_AUDIO | sys::OBS_SOURCE_DO_NOT_DUPLICATE;
+        // macOS: Chromium's shared textures, drawn as they are
+        #[cfg(target_os = "macos")]
+        {
+            info.output_flags = sys::OBS_SOURCE_VIDEO | sys::OBS_SOURCE_AUDIO | sys::OBS_SOURCE_DO_NOT_DUPLICATE | sys::OBS_SOURCE_CUSTOM_DRAW;
+            info.video_render = Some(shared::video_render);
+            info.get_width = Some(shared::get_width);
+            info.get_height = Some(shared::get_height);
+        }
         info.get_name = Some(get_name);
         info.create = Some(create);
         info.destroy = Some(destroy);
@@ -180,4 +215,151 @@ pub fn register() {
         info.get_defaults = Some(get_defaults);
         sys::obs_register_source_s(&info, std::mem::size_of::<sys::obs_source_info>());
     });
+}
+
+/// Chromium's frames as shared IOSurfaces (macOS): the newest one is kept (retained, and marked
+/// in use so Chromium doesn't paint into it again meanwhile) until libobs draws the next.
+#[cfg(target_os = "macos")]
+mod shared {
+    use std::ffi::c_void;
+
+    use parking_lot::Mutex;
+
+    use super::Web;
+    use crate::sys;
+
+    #[link(name = "IOSurface", kind = "framework")]
+    unsafe extern "C" {
+        fn IOSurfaceIncrementUseCount(surface: *mut c_void);
+        fn IOSurfaceDecrementUseCount(surface: *mut c_void);
+        fn IOSurfaceGetWidth(surface: *mut c_void) -> usize;
+        fn IOSurfaceGetHeight(surface: *mut c_void) -> usize;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRetain(cf: *const c_void) -> *const c_void;
+        fn CFRelease(cf: *const c_void);
+    }
+
+    /// A retained IOSurface, in use until dropped.
+    struct Surface(*mut c_void);
+
+    impl Surface {
+        fn hold(surface: *mut c_void) -> Self {
+            unsafe {
+                CFRetain(surface);
+                IOSurfaceIncrementUseCount(surface);
+            }
+            Surface(surface)
+        }
+        fn size(&self) -> (u32, u32) {
+            unsafe { (IOSurfaceGetWidth(self.0) as u32, IOSurfaceGetHeight(self.0) as u32) }
+        }
+    }
+
+    impl Drop for Surface {
+        fn drop(&mut self) {
+            unsafe {
+                IOSurfaceDecrementUseCount(self.0);
+                CFRelease(self.0);
+            }
+        }
+    }
+
+    // SAFETY: IOSurfaces are reference-counted kernel objects usable from any thread.
+    unsafe impl Send for Surface {}
+
+    struct Texture(*mut sys::gs_texture_t);
+    // SAFETY: only touched on libobs's graphics thread (destroyed there too).
+    unsafe impl Send for Texture {}
+
+    /// The surface on screen, the texture over it, its size.
+    type Shown = (Option<Surface>, Option<Texture>, (u32, u32));
+
+    #[derive(Default)]
+    pub struct Frames {
+        /// Painted, not yet drawn.
+        next: Mutex<Option<Surface>>,
+        /// What the texture shows (kept in use while it does), the texture, its size.
+        shown: Mutex<Shown>,
+    }
+
+    impl Frames {
+        /// A new frame (main thread, during Chromium's paint).
+        pub fn put(&self, surface: *mut c_void) {
+            if surface.is_null() {
+                return;
+            }
+            let held = Surface::hold(surface);
+            // the one it replaces (never drawn) goes back to Chromium
+            *self.next.lock() = Some(held);
+        }
+    }
+
+    impl Drop for Frames {
+        fn drop(&mut self) {
+            if let Some(Texture(t)) = self.shown.get_mut().1.take() {
+                unsafe {
+                    sys::obs_enter_graphics();
+                    sys::gs_texture_destroy(t);
+                    sys::obs_leave_graphics();
+                }
+            }
+        }
+    }
+
+    fn frames<'a>(data: *mut c_void) -> &'a Frames {
+        unsafe { &(*(data as *const Web)).shared }
+    }
+
+    pub unsafe extern "C" fn video_render(data: *mut c_void, _effect: *mut sys::gs_effect_t) {
+        let f = frames(data);
+        let mut shown = f.shown.lock();
+        if let Some(next) = f.next.lock().take() {
+            let size = next.size();
+            let rebound = match &shown.1 {
+                Some(Texture(t)) if shown.2 == size => unsafe { sys::gs_texture_rebind_iosurface(*t, next.0) },
+                _ => false,
+            };
+            if !rebound {
+                if let Some(Texture(t)) = shown.1.take() {
+                    unsafe { sys::gs_texture_destroy(t) };
+                }
+                let t = unsafe { sys::gs_texture_create_from_iosurface(next.0) };
+                shown.1 = (!t.is_null()).then_some(Texture(t));
+            }
+            shown.2 = size;
+            // the previous surface goes back to Chromium now that the texture shows this one
+            shown.0 = Some(next);
+        }
+        let Some(Texture(tex)) = &shown.1 else { return };
+        let (w, h) = shown.2;
+        unsafe {
+            // an IOSurface is a rectangle texture; Chromium's pixels are premultiplied (the
+            // blend says so)
+            let effect = sys::obs_get_base_effect(sys::OBS_EFFECT_DEFAULT_RECT);
+            let image = sys::gs_effect_get_param_by_name(effect, c"image".as_ptr());
+            sys::gs_effect_set_texture(image, *tex);
+            sys::gs_blend_state_push();
+            sys::gs_blend_function(sys::GS_BLEND_ONE, sys::GS_BLEND_INVSRCALPHA);
+            while sys::gs_effect_loop(effect, c"Draw".as_ptr()) {
+                sys::gs_draw_sprite(*tex, 0, w, h);
+            }
+            sys::gs_blend_state_pop();
+        }
+    }
+
+    fn size(data: *mut c_void) -> (u32, u32) {
+        let web = unsafe { &*(data as *const Web) };
+        let shown = web.shared.shown.lock().2;
+        if shown.0 > 0 { shown } else { (web.options.width, web.options.height) }
+    }
+
+    pub unsafe extern "C" fn get_width(data: *mut c_void) -> u32 {
+        size(data).0
+    }
+
+    pub unsafe extern "C" fn get_height(data: *mut c_void) -> u32 {
+        size(data).1
+    }
 }
