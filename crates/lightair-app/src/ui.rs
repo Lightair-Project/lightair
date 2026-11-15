@@ -212,3 +212,18 @@ pub fn icon_button(id: impl Into<ElementId>, name: &str, color: Hsla) -> Statefu
         .hover(|s| s.bg(tok::bg_selected()))
         .child(icon(name).size(px(15.)).text_color(color))
 }
+
+/// A description as a tooltip, wrapped to a readable width: panels show the controls, and what
+/// a control does is on hover rather than written under it.
+pub fn tip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text: SharedString = text.into();
+    move |window, cx| {
+        let text = text.clone();
+        gpui_kit::component::tooltip::Tooltip::element(move |_, _| div().max_w(px(280.)).child(text.clone())).build(window, cx)
+    }
+}
+
+/// A small ⓘ beside a heading or label: its description on hover.
+pub fn info(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
+    div().id(id).flex_none().child(icon("info").size(px(12.)).text_color(tok::text_tertiary())).tooltip(tip(text))
+}

@@ -169,9 +169,14 @@ fn main() {
         // A copy started by a test or screenshot hook stays in the background: it must never take
         // the keyboard from the app someone is typing in.
         let background = std::env::var_os("LIGHTAIR_OPEN").is_some();
+        // its size; a screenshot hook can ask for another ("900x700")
+        let (w, h) = std::env::var("LIGHTAIR_WINDOW")
+            .ok()
+            .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
+            .unwrap_or((1440.0, 900.0));
         let options = WindowOptions {
             focus: !background,
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1440.), px(900.)), cx))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(w), px(h)), cx))),
             titlebar: Some(TitlebarOptions {
                 title: Some("Lightair".into()),
                 appears_transparent: true,

@@ -1889,7 +1889,7 @@ impl Render for StudioWindow {
             .bg(tok::bg_app())
             .text_color(tok::text())
             .text_size(px(13.))
-            .child(self.title_bar(&workspace, cx))
+            .child(self.title_bar(&workspace, f32::from(window.viewport_size().width), cx))
             .child(match self.place {
                 Place::Live => div().flex().flex_1().min_h_0().children(self.dock.clone()),
                 Place::Library => div().flex().flex_1().min_h_0().child(self.library.clone()),
@@ -2145,7 +2145,8 @@ impl StudioWindow {
     }
 
     /// [● Record | ⌄]: the record button, and the mode beside it.
-    fn record_control(&self, rec: &lightair_engine::outputs::OutputStatus, cx: &mut Context<Self>) -> AnyElement {
+    /// (`compact`: idle, just its symbol, the label in the tooltip.)
+    fn record_control(&self, rec: &lightair_engine::outputs::OutputStatus, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         use crate::prefs::RecordMode;
         use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
         let studio = self.studio.read(cx);
@@ -2191,7 +2192,7 @@ impl StudioWindow {
             .when(active, |d| d.bg(tok::live()).text_color(rgb(0xFFFFFF)))
             .when(!active, |d| d.hover(|d| d.bg(tok::bg_selected())))
             .child(symbol)
-            .child(div().text_size(px(13.)).when(active, |d| d.font_family("Menlo")).child(label))
+            .when(!(compact && !stop), |d| d.child(div().text_size(px(13.)).when(active, |d| d.font_family("Menlo")).child(label)))
             .when(!tip.is_empty(), |d| d.tooltip(move |w, cx| Tooltip::new(tip).build(w, cx)))
             .on_click(cx.listener(|this, _, _, cx| this.record_click(cx)));
         let chevron = Button::new("record-mode")
@@ -2307,7 +2308,10 @@ impl StudioWindow {
             .child(tab("place-editor", "Editor", Place::Editor, PLACE_KEYS[2]))
     }
 
-    fn title_bar(&self, workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The title bar, laid out for the window's `width`: full; compact (the performance readout
+    /// as its dot, Record as its symbol) when that doesn't fit beside the centred Library · Live
+    /// · Editor; and narrow (the switcher in the row, not centred) when even that doesn't.
+    fn title_bar(&self, workspace: &Workspace, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let editor = self.place == Place::Editor;
         let studio = self.studio.read(cx);
         let stats = studio.stats;
@@ -2320,7 +2324,24 @@ impl StudioWindow {
         let rec_status = runtime().recording();
         let rec = rec_status.state.clone();
         let recording = matches!(rec, OutputState::Active { .. }) || taking;
-        let record = self.record_control(&rec_status, cx);
+        // what fits: each side's width, roughly, against half of what the switcher leaves
+        let streaming_now = runtime().any_stream_running();
+        let half = (width - 210.0) / 2.0;
+        let left = 84.0 + 7.5 * workspace.name.chars().count() as f32 + 40.0 + if streaming_now { 52.0 } else { 0.0 } + if editor { 160.0 } else { 0.0 };
+        let right = |compact: bool| -> f32 {
+            if editor {
+                return 260.0;
+            }
+            let perf = if compact { 28.0 } else { 150.0 };
+            let live = if streaming_now { 130.0 } else { 76.0 };
+            let tools = if recording && !taking { 84.0 } else { 0.0 };
+            let record = if compact && !recording && !taking { 58.0 } else { 160.0 };
+            let clips = if self.studio.read(cx).last_clip.is_some() { 64.0 } else { 32.0 };
+            12.0 + perf + live + tools + record + clips + 28.0 + 12.0 * 6.0
+        };
+        let compact = left > half || right(false) > half;
+        let narrow = left > half || right(true) > half;
+        let record = self.record_control(&rec_status, compact, cx);
         let paused = if taking { take_paused } else { rec_status.paused };
         let recording_tools = recording.then(|| {
             div()
@@ -2388,9 +2409,11 @@ impl StudioWindow {
             .border_b_1()
             .border_color(tok::border())
             .bg(tok::bg_app())
-            // Library · Live · Editor, in the middle of the bar whatever is either side
-            .child(div().absolute().inset_0().flex().items_center().justify_center().child(self.place_switcher(cx)))
-            .child(self.workspace_picker(workspace, cx))
+            // Library · Live · Editor, in the middle of the bar whatever is either side (in the
+            // row when the window is too narrow for that)
+            .when(!narrow, |d| d.child(div().absolute().inset_0().flex().items_center().justify_center().child(self.place_switcher(cx))))
+            .child(div().min_w_0().flex_shrink_1().overflow_hidden().child(self.workspace_picker(workspace, cx)))
+            .when(narrow, |d| d.child(div().flex_none().child(self.place_switcher(cx))))
             // the Editor: its workspace beside the workspace
             .when(editor, |d| d.child(self.editor.update(cx, |e, cx| e.title_left(cx))))
             .when(streaming, |d| {
@@ -2409,24 +2432,24 @@ impl StudioWindow {
             .child(div().flex_1())
             // the Editor: undo, redo and export here; what records and streams only while it does
             .when(editor, |d| d.child(self.editor.update(cx, |e, cx| e.title_right(cx))))
-            .when(!editor, |d| d.child(self.performance(fps_color, cx)))
+            .when(!editor, |d| d.child(self.performance(fps_color, compact, cx)))
             .when(!editor || streaming, |d| d.child(go_live))
             .children(recording_tools.filter(|_| !taking))
             .when(!editor || recording || taking, |d| d.child(record))
             .when(!editor, |d| d.child({
                 let ready = self.studio.read(cx).clips_ready();
                 Button::new("clip")
-                    .label("Clip")
+                    .icon(ui::icon("clapperboard"))
                     .small()
-                    .outline()
+                    .ghost()
                     .disabled(!ready)
-                    .tooltip(if ready { "Save the last seconds as a clip" } else { "Turn on Clips in Outputs" })
+                    .tooltip(if ready { "Save the last seconds as a clip" } else { "Clip: turn on Clips in Outputs" })
                     .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.save_clip(cx))))
             }))
             .when(!editor && self.studio.read(cx).last_clip.is_some(), |d| {
                 d.child(
                     Button::new("replay")
-                        .label("Replay")
+                        .icon(ui::icon("rewind"))
                         .small()
                         .ghost()
                         .tooltip("Play the last clip on the live scene")
@@ -3787,13 +3810,7 @@ impl StudioWindow {
                 ));
                 // How scenes change on air (the same for every scene).
                 let transition = self
-                    .section("Transition", None, cx)
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(tok::text_tertiary())
-                            .child("How every scene change looks on air."),
-                    )
+                    .section("Transition", Some(ui::info("transition-info", "How every scene change looks on air.").into_any_element()), cx)
                     .child(self.transition_picker(workspace, cx));
                 let screen = self.screen_zoom_pointer_section(workspace, &scene, cx);
                 body.child(header).child(info).child(screen).child(transition).into_any_element()
@@ -3809,7 +3826,8 @@ impl StudioWindow {
     }
 
     /// The FPS readout in the top bar; a click shows the frame counts.
-    fn performance(&self, dot: Hsla, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The frame rate and frame time, or (`compact`) just their dot; either opens the details.
+    fn performance(&self, dot: Hsla, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let studio = self.studio.read(cx);
         let stats = studio.stats;
         let recent = studio.recent_lagged;
@@ -3831,8 +3849,8 @@ impl StudioWindow {
             .when(open, |d| d.bg(tok::bg_raised()))
             .hover(|d| d.bg(tok::bg_raised()))
             .child(div().size(px(8.)).rounded_full().bg(dot))
-            .child(format!("{:>4.1} FPS", stats.active_fps))
-            .child(format!("{:>4.1} ms", stats.average_frame_time_ms))
+            .when(!compact, |d| d.child(format!("{:>4.1} FPS", stats.active_fps)).child(format!("{:>4.1} ms", stats.average_frame_time_ms)))
+            .when(compact, |d| d.tooltip(ui::tip(format!("{:.1} FPS · {:.1} ms a frame", stats.active_fps, stats.average_frame_time_ms))))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.perf_open = !this.perf_open;
                 cx.notify();
