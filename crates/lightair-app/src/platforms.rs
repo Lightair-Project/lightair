@@ -204,6 +204,12 @@ pub fn by_id(id: &str) -> Option<&'static Platform> {
     PLATFORMS.iter().find(|p| p.id == id)
 }
 
+/// Whether a destination takes a second audio track for its VODs: Twitch's VOD track (OBS
+/// sends it to Twitch alone; other platforms ignore or reject a second track).
+pub fn takes_vod_track(d: &lightair_core::Destination) -> bool {
+    d.platform.as_deref().and_then(by_id).or_else(|| guess(&d.server)).is_some_and(|p| p.id == "twitch")
+}
+
 /// The server address's host ("a.rtmps.youtube.com" in "rtmps://a.rtmps.youtube.com:443/live2").
 fn host(server: &str) -> String {
     let rest = server.split_once("://").map_or(server, |(_, r)| r);

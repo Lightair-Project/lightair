@@ -769,13 +769,7 @@ impl Studio {
                 container,
                 encoders: crate::encoding::for_recording(&self.engine.capabilities.encoders, &settings, shape),
                 // the engine plays the first five mixes into libobs mixes 1-5, in mixer order
-                extra_mixes: settings
-                    .file_mixes
-                    .iter()
-                    .filter_map(|m| workspace.audio.mixes.iter().position(|x| x.id == *m))
-                    .filter(|&k| k < 5)
-                    .map(|k| k + 1)
-                    .collect(),
+                extra_mixes: settings.file_mixes.iter().filter_map(|m| crate::encoding::libobs_mix(&workspace, *m)).collect(),
             };
             self.engine.post(move |s| {
                 let video = s.reconciler.canvas_video(canvas);
@@ -1162,6 +1156,11 @@ impl Studio {
                 key,
                 encoders: crate::encoding::for_stream(&self.engine.capabilities.encoders, &workspace, &d),
                 reconnect: Some((reconnect.retries, reconnect.delay_s)),
+                // Twitch's VOD track
+                vod_mix: d
+                    .vod_mix
+                    .filter(|_| crate::platforms::takes_vod_track(&d))
+                    .and_then(|m| crate::encoding::libobs_mix(&workspace, m)),
             };
             let canvas = d.canvas;
             self.engine.post(move |s| {

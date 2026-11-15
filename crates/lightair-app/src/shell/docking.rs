@@ -453,6 +453,8 @@ impl StudioWindow {
                         canvas: None,
                         platform: Some(platform.into()),
                         encoding: None,
+                        audio_mix: None,
+                        vod_mix: None,
                     };
                     self.exec(lightair_core::Command::AddDestination { destination }, cx);
                 }
@@ -470,6 +472,8 @@ impl StudioWindow {
                         height: Some(720),
                         ..Default::default()
                     }),
+                    audio_mix: None,
+                    vod_mix: None,
                 };
                 let id = destination.id;
                 self.exec(lightair_core::Command::AddDestination { destination }, cx);

@@ -38,6 +38,9 @@ struct Edit {
     canvas: Option<Id>,
     /// `None`: Automatic.
     encoding: Option<Encoding>,
+    /// Its sound (`None`: the master), and Twitch's VOD track (`None`: none).
+    audio_mix: Option<Id>,
+    vod_mix: Option<Id>,
     error: Option<String>,
 }
 
@@ -259,6 +262,8 @@ impl OutputsPanel {
             canvas: c.canvas,
             platform: Some(c.platform.id.to_string()),
             encoding: None,
+            audio_mix: None,
+            vod_mix: None,
         };
         if let Err(e) = crate::secrets::set_stream_key(destination.id, &key) {
             c.error = Some(format!("Couldn't save the stream key: {e}"));
@@ -303,6 +308,8 @@ impl OutputsPanel {
             key,
             canvas: d.canvas,
             encoding: d.encoding,
+            audio_mix: d.audio_mix,
+            vod_mix: d.vod_mix,
             error: None,
         }));
         cx.notify();
@@ -335,6 +342,8 @@ impl OutputsPanel {
             server,
             canvas: e.canvas,
             encoding: e.encoding,
+            audio_mix: e.audio_mix,
+            vod_mix: e.vod_mix,
             ..old
         };
         self.studio.update(cx, |s, cx| {
@@ -360,6 +369,10 @@ impl OutputsPanel {
             div().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(tok::text_secondary()).child(text)
         };
         let field = |name: &'static str| div().flex().flex_col().gap_1().child(label(name));
+        // a field whose meaning is on hover (an ⓘ by its name)
+        let field_tip = |name: &'static str, tip: &'static str| {
+            div().flex().flex_col().gap_1().child(div().flex().items_center().gap_1().child(label(name)).child(ui::info(name, tip)))
+        };
         let me = cx.entity().downgrade();
         // Change the dialog's draft encoding.
         let set = move |f: Box<dyn Fn(&mut Encoding)>| {
@@ -442,6 +455,53 @@ impl OutputsPanel {
                 ),
             );
         }
+
+        // Sound: the master or a mix; Twitch also takes a VOD track (a second mix kept in VODs).
+        // (the audio engine plays the first five mixes out: the rest can't be picked)
+        let mixes: Vec<(Id, String, bool)> = workspace
+            .audio
+            .mixes
+            .iter()
+            .enumerate()
+            .map(|(k, m)| (m.id, m.name.clone(), k < 5))
+            .collect();
+        let mut audio_row = div().flex().flex_wrap().gap_1().child(
+            chip(("edit-audio-master", 0), "Master".to_string(), e.audio_mix.is_none(), true).on_click(cx.listener(|this, _, _, cx| {
+                if let Some(Setup::Edit(e)) = &mut this.setup {
+                    e.audio_mix = None;
+                }
+                cx.notify();
+            })),
+        );
+        for (i, (id, name, usable)) in mixes.iter().cloned().enumerate() {
+            audio_row = audio_row.child(chip(("edit-audio-mix", i), name, e.audio_mix == Some(id), usable).on_click(cx.listener(move |this, _, _, cx| {
+                if usable && let Some(Setup::Edit(e)) = &mut this.setup {
+                    e.audio_mix = Some(id);
+                }
+                cx.notify();
+            })));
+        }
+        // (the editor's platform: the saved one, or the one its server address belongs to)
+        let twitch = p.id == "twitch";
+        let vod_row = twitch.then(|| {
+            let mut row = div().flex().flex_wrap().gap_1().child(
+                chip(("edit-vod-off", 0), "Off".to_string(), e.vod_mix.is_none(), true).on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(Setup::Edit(e)) = &mut this.setup {
+                        e.vod_mix = None;
+                    }
+                    cx.notify();
+                })),
+            );
+            for (i, (id, name, usable)) in mixes.iter().cloned().enumerate() {
+                row = row.child(chip(("edit-vod-mix", i), name, e.vod_mix == Some(id), usable).on_click(cx.listener(move |this, _, _, cx| {
+                    if usable && let Some(Setup::Edit(e)) = &mut this.setup {
+                        e.vod_mix = Some(id);
+                    }
+                    cx.notify();
+                })));
+            }
+            row
+        });
 
         // Quality: Automatic, or its own.
         let destination = workspace.outputs.destinations.iter().find(|d| d.id == e.id).cloned();
@@ -585,6 +645,13 @@ impl OutputsPanel {
             .child(server)
             .child(field("Stream key").child(Input::new(&e.key).small().mask_toggle()))
             .child(field("Send").child(shapes))
+            .child(field_tip("Audio", "What it hears: the master (everything on air), or a mix built from sends, such as one without the music.").child(audio_row))
+            .when_some(vod_row, |d, row| {
+                d.child(field_tip(
+                    "VOD track",
+                    "Twitch keeps this mix in your VODs and clips instead of the stream's sound: viewers live hear the stream, the VOD has, say, no copyrighted music.",
+                ).child(row))
+            })
             .child(field("Quality").child(quality))
             .when_some(e.error.clone(), |d, err| d.child(div().text_size(px(11.)).text_color(tok::error()).child(err)))
             .child(

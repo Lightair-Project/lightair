@@ -223,6 +223,7 @@ fn record_and_stream() {
             key: "test".into(),
             encoders: default_encoders(&engine.capabilities.encoders, 2500, true),
             reconnect: None,
+            vod_mix: None,
         };
         engine.call(move |s| s.outputs.start_stream(&cfg, None)).expect("stream starts");
         let state =

@@ -69,6 +69,7 @@ fn srt_udp_and_whip() {
         key: key.into(),
         encoders: default_encoders(&caps, 2500, true),
         reconnect: None,
+        vod_mix: None,
     };
 
     // ---- SRT: a media source in the same engine is the SRT listener; the output calls it.
