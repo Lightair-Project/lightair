@@ -761,44 +761,7 @@ impl Reconciler {
     /// displays or windows, a microphone's devices): (label, value). Read from the source itself,
     /// with its current settings applied, since some sources fill their lists only then.
     pub fn source_options(&self, source: Id, property: &str) -> Vec<(String, serde_json::Value)> {
-        let mut out = Vec::new();
-        let Some(src) = self.sources.get(&source) else { return out };
-        let name = std::ffi::CString::new(property).unwrap_or_default();
-        unsafe {
-            let props = sys::obs_source_properties(src.as_ptr());
-            if props.is_null() {
-                return out;
-            }
-            let settings = sys::obs_source_get_settings(src.as_ptr());
-            sys::obs_properties_apply_settings(props, settings);
-            sys::obs_data_release(settings);
-            let p = sys::obs_properties_get(props, name.as_ptr());
-            if !p.is_null() {
-                let int = sys::obs_property_list_format(p) == sys::OBS_COMBO_FORMAT_INT;
-                for i in 0..sys::obs_property_list_item_count(p) {
-                    let label = sys::obs_property_list_item_name(p, i);
-                    let label = if label.is_null() {
-                        String::new()
-                    } else {
-                        std::ffi::CStr::from_ptr(label).to_string_lossy().into_owned()
-                    };
-                    let value = if int {
-                        serde_json::Value::from(sys::obs_property_list_item_int(p, i))
-                    } else {
-                        let v = sys::obs_property_list_item_string(p, i);
-                        if v.is_null() {
-                            continue;
-                        }
-                        serde_json::Value::from(std::ffi::CStr::from_ptr(v).to_string_lossy().into_owned())
-                    };
-                    if !label.is_empty() {
-                        out.push((label, value));
-                    }
-                }
-            }
-            sys::obs_properties_destroy(props);
-        }
-        out
+        self.sources.get(&source).map(|src| crate::obs::source_list_items(src.as_ptr(), property)).unwrap_or_default()
     }
 
     /// Every source's pixel size that's known (for the editor's frames and handles).
