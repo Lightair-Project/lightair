@@ -1,6 +1,7 @@
 //! The Add Object picker (docs/05-interface-shell.md, "Layers"): searchable object types as
 //! tiles in groups (what each is, on hover), with a second step where a type needs one: the
-//! camera, the display (each shown live), or a web page's address and size.
+//! camera, the display, window or app (each as a thumbnail: `screen_pick`), or a web page's
+//! address and size.
 
 use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -15,46 +16,9 @@ use crate::ui::{self, tok};
 pub(super) enum Step {
     Types,
     Cameras,
-    Displays,
+    /// A display, window or app (the picker's mode).
+    Screens,
     Web,
-}
-
-/// The displays to choose from, each captured live for its thumbnail while the step is open.
-pub(super) struct DisplayThumbs {
-    items: Vec<(lightair_engine::displays::Display, lightair_preview::Preview)>,
-    engine: std::sync::Arc<lightair_engine::Engine>,
-}
-
-impl DisplayThumbs {
-    fn open(engine: &std::sync::Arc<lightair_engine::Engine>) -> Self {
-        let found = engine.call(|_| lightair_engine::displays::list(true));
-        let items = found
-            .into_iter()
-            .map(|d| {
-                let preview = lightair_preview::Preview::attach();
-                preview.set_own_size(true);
-                let (w, h) = d.size.unwrap_or((16, 9));
-                preview.set_size(Some((480, (480 * h / w.max(1)).max(2))));
-                if let Some(c) = &d.capture {
-                    preview.set_source(Some(unsafe { lightair_engine::sys::obs_source_get_ref(c.as_ptr()) }));
-                }
-                (d, preview)
-            })
-            .collect();
-        Self { items, engine: engine.clone() }
-    }
-}
-
-impl Drop for DisplayThumbs {
-    fn drop(&mut self) {
-        let mut displays = Vec::new();
-        for (d, preview) in self.items.drain(..) {
-            preview.set_source(None);
-            displays.push(d);
-        }
-        // the captures go on the engine thread, with libobs's other work
-        self.engine.post(move |_| drop(displays));
-    }
 }
 
 pub(super) struct AddObject {
@@ -63,7 +27,7 @@ pub(super) struct AddObject {
     /// A web page's address, and its size (CSS pixels).
     web_url: Entity<InputState>,
     web_size: (u32, u32),
-    displays: Option<DisplayThumbs>,
+    screens: Option<super::screen_pick::ScreenPick>,
     _events: Subscription,
 }
 
@@ -71,6 +35,8 @@ pub(super) struct AddObject {
 enum Kind {
     Camera,
     Display,
+    Window,
+    App,
     Image,
     Video,
     Text,
@@ -83,6 +49,8 @@ enum Kind {
 const KINDS: &[(Kind, &str, &str, &str, &str)] = &[
     (Kind::Camera, "Capture", "camera", "Camera", "A webcam, capture card or phone"),
     (Kind::Display, "Capture", "monitor", "Display", "Everything on a screen"),
+    (Kind::Window, "Capture", "app-window", "Window", "One window, even when others cover it"),
+    (Kind::App, "Capture", "layout-grid", "App", "Every window of one app"),
     (Kind::Web, "Capture", "globe", "Browser", "A website, an overlay or an alert widget, live"),
     (Kind::Image, "Media", "image", "Image", "A picture or logo"),
     (Kind::Video, "Media", "clapperboard", "Video", "A video file, looped"),
@@ -110,7 +78,7 @@ impl StudioWindow {
                 cx.notify();
             }
         });
-        self.add_object = Some(AddObject { step: Step::Types, search, web_url, web_size: (1920, 1080), displays: None, _events: events });
+        self.add_object = Some(AddObject { step: Step::Types, search, web_url, web_size: (1920, 1080), screens: None, _events: events });
         cx.notify();
     }
 
@@ -120,9 +88,14 @@ impl StudioWindow {
         cx.notify();
     }
 
-    /// Opens the display step (for screenshots).
-    pub(super) fn pick_display(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.pick(Kind::Display, window, cx);
+    /// Opens the display, window or app step (for screenshots).
+    pub(super) fn pick_screen(&mut self, which: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let kind = match which {
+            "window" => Kind::Window,
+            "app" => Kind::App,
+            _ => Kind::Display,
+        };
+        self.pick(kind, window, cx);
     }
 
     fn pick(&mut self, kind: Kind, window: &mut Window, cx: &mut Context<Self>) {
@@ -135,11 +108,17 @@ impl StudioWindow {
                 cx.notify();
                 return;
             }
-            Kind::Display => {
-                let thumbs = DisplayThumbs::open(self.studio.read(cx).engine());
+            Kind::Display | Kind::Window | Kind::App => {
+                use lightair_core::kinds::{APP, DISPLAY, WINDOW};
+                let mode = match kind {
+                    Kind::Display => DISPLAY,
+                    Kind::Window => WINDOW,
+                    _ => APP,
+                };
+                let pick = super::screen_pick::ScreenPick::open(mode, self.studio.read(cx).engine());
                 if let Some(a) = &mut self.add_object {
-                    a.step = Step::Displays;
-                    a.displays = Some(thumbs);
+                    a.step = Step::Screens;
+                    a.screens = Some(pick);
                 }
                 cx.notify();
                 return;
@@ -161,13 +140,20 @@ impl StudioWindow {
         self.close_add_object(window, cx);
     }
 
-    /// Adds a capture of the display chosen (`value`: its `display` setting).
-    fn add_display(&mut self, name: &str, value: serde_json::Value, size: Option<(u32, u32)>, window: &mut Window, cx: &mut Context<Self>) {
-        let mut settings = super::display_settings();
-        settings["display"] = value;
+    /// Adds a capture of the display, window or app chosen (`size`: its picture's, if known).
+    fn add_screen(&mut self, mode: i64, name: &str, value: &serde_json::Value, size: Option<(u32, u32)>, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = super::screen_pick::settings(mode, value);
         let (w, h) = size.map_or((1920.0, 1080.0), |(w, h)| (w as f32, h as f32));
-        self.add_source_object(name, lightair_core::kinds::SCREEN, settings, (w, h), cx);
+        let name: String = name.chars().take(48).collect();
+        self.add_source_object(&name, lightair_core::kinds::SCREEN, settings, (w, h), cx);
         self.close_add_object(window, cx);
+    }
+
+    /// Moves the screen picker on (new captures, stills). Called each frame from render.
+    pub(super) fn tick_add_object(&mut self) {
+        if let Some(pick) = self.add_object.as_mut().and_then(|a| a.screens.as_mut()) {
+            pick.tick();
+        }
     }
 
     /// Adds the web page typed in (an address without a scheme gets https://).
@@ -272,7 +258,7 @@ impl StudioWindow {
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(a) = &mut this.add_object {
                         a.step = Step::Types;
-                        a.displays = None;
+                        a.screens = None;
                     }
                     cx.notify();
                 }))
@@ -370,75 +356,122 @@ impl StudioWindow {
                             ),
                     );
             }
-            Step::Displays => {
+            Step::Screens => {
+                use lightair_core::kinds::{APP, DISPLAY};
                 body = body.child(back(cx));
-                let items: Vec<_> = state
-                    .displays
-                    .as_ref()
-                    .map_or(&[][..], |t| &t.items[..])
+                let pick = state.screens.as_ref()?;
+                let mode = pick.mode;
+                let (icon, nothing, cols) = match mode {
+                    DISPLAY => ("monitor", "No displays found", 2),
+                    APP => ("layout-grid", "No apps with windows open", 3),
+                    _ => ("app-window", "No windows open", 3),
+                };
+                let shown: Vec<_> = pick
+                    .items
                     .iter()
-                    .filter(|(d, _)| matches(&query, &[&d.name]))
+                    .zip(&pick.thumbs)
+                    .enumerate()
+                    .filter(|(_, (item, _))| matches(&query, &[&item.title, &item.detail]))
                     .collect();
-                if items.is_empty() {
-                    body = body.child(div().p_3().text_color(tok::text_tertiary()).child("No displays found"));
+                if !pick.listed {
+                    body = body.child(div().p_3().text_color(tok::text_tertiary()).child("Looking…"));
+                } else if shown.is_empty() {
+                    body = body.child(div().p_3().text_color(tok::text_tertiary()).child(nothing));
                 }
-                let mut grid = div().grid().grid_cols(2).gap_2().pb_2();
-                for (i, (d, preview)) in items.into_iter().enumerate() {
-                    let (w, h) = d.size.unwrap_or((16, 9));
-                    let detail = match (d.size, d.main) {
-                        (Some((w, h)), true) => format!("{w} × {h} · Main"),
-                        (Some((w, h)), false) => format!("{w} × {h}"),
-                        (None, true) => "Main".into(),
-                        (None, false) => String::new(),
-                    };
-                    let (name, value, size) = (d.name.clone(), d.value.clone(), d.size);
-                    grid = grid.child(
-                        div()
-                            .id(("display", i))
-                            .flex()
-                            .flex_col()
-                            .gap_1p5()
-                            .p_1p5()
-                            .rounded(px(10.))
-                            .cursor_pointer()
-                            .hover(|d| d.bg(tok::bg_selected()))
-                            .child(
-                                div()
-                                    .relative()
-                                    .w_full()
-                                    // the display's own shape
-                                    .pb(relative(h as f32 / w.max(1) as f32))
-                                    .rounded(px(6.))
-                                    .overflow_hidden()
-                                    .bg(gpui_kit::black())
-                                    .border_1()
-                                    .border_color(tok::border())
-                                    .when_some(preview.latest_frame(), |c, f| {
-                                        c.child(crate::frame_view::frame(f).absolute().size_full().object_fit(ObjectFit::Contain))
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .px_0p5()
-                                    .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .whitespace_nowrap()
-                                            .child(d.name.clone()),
-                                    )
-                                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(detail)),
-                            )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.add_display(&name, value.clone(), size, window, cx)
-                            })),
-                    );
+                if mode != DISPLAY {
+                    // windows and apps: a plain list, by name
+                    let mut grid = div().grid().grid_cols(2).gap_1().pb_2();
+                    for (i, (item, _)) in shown {
+                        let (title, value) = (item.title.clone(), item.value.clone());
+                        grid = grid.child(card(("screen", i).into(), icon, item.title.clone(), item.detail.clone()).on_click(
+                            cx.listener(move |this, _, window, cx| this.add_screen(mode, &title, &value, None, window, cx)),
+                        ));
+                    }
+                    body = body.child(grid);
+                } else {
+                    let mut grid = div().grid().grid_cols(cols).gap_2().pb_2();
+                    for (i, (item, thumb)) in shown {
+                        let size = thumb.size;
+                        // a display in its own shape; windows and apps in one shape, so rows line up
+                        let ratio = match (mode, size) {
+                            (DISPLAY, Some((w, h))) => h as f32 / w.max(1) as f32,
+                            _ => 10.0 / 16.0,
+                        };
+                        let detail = match (mode, size, item.main) {
+                            (DISPLAY, Some((w, h)), main) => format!("{w} × {h}{}", if main { " · Main" } else { "" }),
+                            (DISPLAY, None, true) => "Main".into(),
+                            _ => item.detail.clone(),
+                        };
+                        let (title, value) = (item.title.clone(), item.value.clone());
+                        grid = grid.child(
+                            div()
+                                .id(("screen", i))
+                                .flex()
+                                .flex_col()
+                                .gap_1p5()
+                                .p_1p5()
+                                .min_w_0()
+                                .rounded(px(10.))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(tok::bg_selected()))
+                                .child(
+                                    div()
+                                        .relative()
+                                        .w_full()
+                                        .pb(relative(ratio))
+                                        .rounded(px(6.))
+                                        .overflow_hidden()
+                                        .bg(tok::bg_app())
+                                        .border_1()
+                                        .border_color(tok::border())
+                                        .child(match thumb.frame() {
+                                            Some(f) => crate::frame_view::frame(f)
+                                                .absolute()
+                                                .size_full()
+                                                .object_fit(ObjectFit::Contain)
+                                                .into_any_element(),
+                                            None => div()
+                                                .absolute()
+                                                .size_full()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(ui::icon(icon).size(px(20.)).text_color(tok::text_tertiary()))
+                                                .into_any_element(),
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .min_w_0()
+                                        .px_0p5()
+                                        .child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .whitespace_nowrap()
+                                                .child(item.title.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(tok::text_tertiary())
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .whitespace_nowrap()
+                                                .child(detail),
+                                        ),
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.add_screen(mode, &title, &value, size, window, cx)
+                                })),
+                        );
+                    }
+                    body = body.child(grid);
                 }
-                body = body.child(grid);
             }
             Step::Cameras => {
                 body = body.child(back(cx));
@@ -506,7 +539,11 @@ impl StudioWindow {
                                     match state.step {
                                         Step::Types => "Add object",
                                         Step::Cameras => "Choose a camera",
-                                        Step::Displays => "Choose a display",
+                                        Step::Screens => match state.screens.as_ref().map(|p| p.mode) {
+                                            Some(lightair_core::kinds::DISPLAY) => "Choose a display",
+                                            Some(lightair_core::kinds::APP) => "Choose an app",
+                                            _ => "Choose a window",
+                                        },
                                         Step::Web => "Browser",
                                     },
                                 ))
