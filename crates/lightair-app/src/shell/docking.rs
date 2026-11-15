@@ -33,12 +33,24 @@ impl ShellPanel {
         if matches!(region, Region::Canvas | Region::Inspector) {
             cx.spawn(async move |this, cx| {
                 let mut seen = 0;
+                let mut drawn = std::time::Instant::now();
                 loop {
                     cx.background_executor().timer(std::time::Duration::from_millis(8)).await;
-                    let frames = this.update(cx, |p, cx| p.shell.upgrade().map(|s| s.read(cx).live_frames(p.region)));
+                    let frames = this.update(cx, |p, cx| {
+                        p.shell.upgrade().map(|s| {
+                            let s = s.read(cx);
+                            // Settings › Canvases › Live preview: Light is 30 frames a second
+                            let gap = match s.prefs.preview_fps {
+                                0 => 0,
+                                fps => 1000 / fps.max(1) as u64 - 4,
+                            };
+                            (s.live_frames(p.region), gap)
+                        })
+                    });
                     match frames {
-                        Ok(Some(n)) if n != seen => {
+                        Ok(Some((n, gap))) if n != seen && drawn.elapsed().as_millis() as u64 >= gap => {
                             seen = n;
+                            drawn = std::time::Instant::now();
                             let _ = this.update(cx, |p, cx| {
                                 cx.notify();
                                 // the meters move in the same redraw

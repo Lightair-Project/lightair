@@ -1,5 +1,6 @@
-//! A mixer track keeps its source running (for its sound) without drawing it: a web page or any
-//! other source with a picture, on a track but in no object, doesn't show on the program.
+//! As in OBS, a source with a picture runs only while it's on air: on a mixer track but in no
+//! object on air, it's neither drawn nor running (no decoding, no painting, no sound); in the
+//! program scene it runs, and its sound reaches its track.
 
 use std::time::Duration;
 
@@ -24,7 +25,7 @@ fn centre(preview: &Preview) -> (u8, u8, u8) {
 }
 
 #[test]
-fn a_track_with_a_picture_stays_off_the_program() {
+fn a_track_with_a_picture_runs_only_on_air() {
     if lightair_engine::testing::ran_in_own_process() {
         return;
     }
@@ -47,7 +48,13 @@ fn a_track_with_a_picture_stays_off_the_program() {
     let shown = centre(&preview);
     eprintln!("empty scene with an orange track: {shown:?}");
     assert!(shown.0 < 40, "the track's picture isn't drawn: {shown:?}");
-    assert!(engine.call(move |s| s.reconciler.source_active(sid)), "still running, for its sound");
+    assert!(!engine.call(move |s| s.reconciler.source_active(sid)), "off air: not running");
+    // on air: running
+    let object = lightair_core::Object::new("Orange", sid, [(doc.workspace().primary_canvas().id, lightair_core::Layout::boxed(0.0, 0.0, 320.0, 180.0))]);
+    apply(&engine, &mut doc, Command::AddObject { scene: scene_id, object, index: None });
+    let shown = centre(&preview);
+    assert!(shown.0 > 40, "on air, it's drawn: {shown:?}");
+    assert!(engine.call(move |s| s.reconciler.source_active(sid)), "on air: running");
     drop(preview);
     drop(engine);
 }

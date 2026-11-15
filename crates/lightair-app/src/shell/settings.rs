@@ -1023,6 +1023,25 @@ impl StudioWindow {
                 "Each canvas is another shape of every scene (vertical for TikTok, say), recorded and streamed on its own.",
             )))
             .child(group("Add a canvas").child(div().px_3().py_2().child(add)))
+            .child(group("Preview").child(row(
+                "Live preview",
+                Some("Smooth draws every frame of the canvas; Light draws 30 a second, leaving more of the computer for the show. Recordings and streams are the same either way."),
+                {
+                    let light = self.prefs.preview_fps == 30;
+                    div()
+                        .flex()
+                        .gap_0p5()
+                        .p_0p5()
+                        .rounded(px(7.))
+                        .bg(tok::bg_panel())
+                        .child(pref_chip("preview-smooth", "Smooth".into(), !light).on_click(
+                            cx.listener(|this, _, _, cx| this.set_pref(|p| p.preview_fps = 0, cx)),
+                        ))
+                        .child(pref_chip("preview-light", "Light".into(), light).on_click(
+                            cx.listener(|this, _, _, cx| this.set_pref(|p| p.preview_fps = 30, cx)),
+                        ))
+                },
+            )))
     }
 
     /// Editing one canvas: name, size (presets for its shape, or typed), frame rate.

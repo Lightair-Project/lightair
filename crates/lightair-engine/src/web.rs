@@ -25,6 +25,8 @@ struct Target(Arc<Mutex<Option<usize>>>);
 
 struct Web {
     page: Option<lightair_web::Page>,
+    /// On screen somewhere (libobs's show/hide): a page off screen doesn't paint, as OBS's.
+    showing: std::sync::atomic::AtomicBool,
     target: Target,
     options: lightair_web::PageOptions,
     #[cfg(target_os = "macos")]
@@ -150,12 +152,12 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
     {
         let frames = Arc::new(shared::Frames::default());
         let page = open(&o, &target, Some(frames.clone()));
-        Box::into_raw(Box::new(Web { page, target, options: o, shared: frames })) as *mut c_void
+        Box::into_raw(Box::new(Web { page, target, options: o, shared: frames, showing: Default::default() })) as *mut c_void
     }
     #[cfg(not(target_os = "macos"))]
     {
         let page = open(&o, &target);
-        Box::into_raw(Box::new(Web { page, target, options: o })) as *mut c_void
+        Box::into_raw(Box::new(Web { page, target, options: o, showing: Default::default() })) as *mut c_void
     }
 }
 
@@ -172,6 +174,7 @@ unsafe extern "C" fn update(data: *mut c_void, settings: *mut sys::obs_data_t) {
     if o == web.options {
         return;
     }
+    let reopened = web.page.is_none() || o.url.trim().is_empty();
     match &web.page {
         Some(page) if !o.url.trim().is_empty() => page.update(o.clone()),
         #[cfg(target_os = "macos")]
@@ -180,6 +183,25 @@ unsafe extern "C" fn update(data: *mut c_void, settings: *mut sys::obs_data_t) {
         _ => web.page = open(&o, &web.target),
     }
     web.options = o;
+    if reopened && let Some(page) = &web.page {
+        page.set_visible(web.showing.load(std::sync::atomic::Ordering::Relaxed));
+    }
+}
+
+unsafe extern "C" fn show(data: *mut c_void) {
+    let web = unsafe { &*(data as *const Web) };
+    web.showing.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(page) = &web.page {
+        page.set_visible(true);
+    }
+}
+
+unsafe extern "C" fn hide(data: *mut c_void) {
+    let web = unsafe { &*(data as *const Web) };
+    web.showing.store(false, std::sync::atomic::Ordering::Relaxed);
+    if let Some(page) = &web.page {
+        page.set_visible(false);
+    }
 }
 
 unsafe extern "C" fn get_defaults(settings: *mut sys::obs_data_t) {
@@ -212,6 +234,8 @@ pub fn register() {
         info.create = Some(create);
         info.destroy = Some(destroy);
         info.update = Some(update);
+        info.show = Some(show);
+        info.hide = Some(hide);
         info.get_defaults = Some(get_defaults);
         sys::obs_register_source_s(&info, std::mem::size_of::<sys::obs_source_info>());
     });

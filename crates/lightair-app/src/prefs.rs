@@ -42,6 +42,8 @@ pub struct Preferences {
     pub macos_background_before: Option<String>,
     /// The remote API: obs-websocket, JSON-RPC and MCP (Settings › Remote API).
     pub remote: RemoteApi,
+    /// The canvas preview's frames a second at most (0: every frame of the canvas).
+    pub preview_fps: u32,
 }
 
 /// The remote API's server (its password is in the Keychain: `secrets`).
@@ -124,6 +126,7 @@ impl Default for Preferences {
             record_mode: RecordMode::Program,
             macos_background_before: None,
             remote: RemoteApi::default(),
+            preview_fps: 0,
         }
     }
 }

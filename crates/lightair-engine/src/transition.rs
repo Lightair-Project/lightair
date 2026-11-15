@@ -109,9 +109,24 @@ impl MoveAnim {
             return;
         }
         for f in &self.canvases {
-            unsafe { sys::obs_transition_set(f.transition, f.dest) };
+            unsafe { set_now(f.transition, f.dest) };
         }
         self.done = true;
+    }
+}
+
+/// Points a transition at `dest` straight away. libobs lets the old scene go before it takes the
+/// new one, so a source in both would stop for an instant and restart (a video caught between its
+/// stop and its restart stays stopped): `dest` is kept running across the swap.
+pub(crate) unsafe fn set_now(transition: *mut sys::obs_source_t, dest: *mut sys::obs_source_t) {
+    unsafe {
+        if !dest.is_null() {
+            sys::obs_source_inc_active(dest);
+        }
+        sys::obs_transition_set(transition, dest);
+        if !dest.is_null() {
+            sys::obs_source_dec_active(dest);
+        }
     }
 }
 
