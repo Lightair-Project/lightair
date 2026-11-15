@@ -134,10 +134,9 @@ pub struct Studio {
     pub recent_lagged: u32,
     /// The newest saved clip, and replays playing on the canvas (scene, object, source).
     pub last_clip: Option<PathBuf>,
-    /// The canvas the virtual camera shows (`None`: the primary one).
-    pub virtual_camera_canvas: Option<Id>,
-    /// The scene it shows (`None`: whatever is on air).
-    pub virtual_camera_scene: Option<Id>,
+    /// What the virtual camera was started on (the workspace's choice then): it restarts when
+    /// the choice changes (a click, undo, another workspace).
+    virtual_camera_started: Option<lightair_core::VirtualCameraSettings>,
     /// What other apps call the virtual camera (whose extension is installed), looked up when it
     /// starts.
     pub virtual_camera_name: &'static str,
@@ -199,8 +198,7 @@ impl Studio {
             multitrack_files: None,
             mic_history: Default::default(),
             last_clip: None,
-            virtual_camera_canvas: None,
-            virtual_camera_scene: None,
+            virtual_camera_started: None,
             virtual_camera_name: VIRTUAL_CAMERA_NAMES[0],
             replays: Vec::new(),
             starter,
@@ -270,6 +268,7 @@ impl Studio {
                 self.push(change.before, change.after);
                 self.fix_selection();
                 self.sync_clips();
+                self.sync_virtual_camera();
                 cx.notify();
                 Ok(())
             }
@@ -452,6 +451,7 @@ impl Studio {
         if let Some(change) = self.doc.undo() {
             self.issue = Some(format!("Undo: {}", change.label).into());
             self.push(change.before, change.after);
+            self.sync_virtual_camera();
             self.compact();
             self.fix_selection();
             cx.notify();
@@ -462,6 +462,7 @@ impl Studio {
         if let Some(change) = self.doc.redo() {
             self.issue = Some(format!("Redo: {}", change.label).into());
             self.push(change.before, change.after);
+            self.sync_virtual_camera();
             self.compact();
             self.fix_selection();
             cx.notify();
@@ -499,6 +500,7 @@ impl Studio {
             s.reconciler.rebuild(&workspace);
         });
         self.sync_clips();
+        self.sync_virtual_camera();
         self.library_version += 1;
         // opened next time too (not by a copy started on a given workspace: tests, screenshots)
         if std::env::var_os("LIGHTAIR_PROJECT").is_none() {
@@ -601,9 +603,11 @@ impl Studio {
 
     fn start_virtual_camera(&mut self) {
         self.virtual_camera_name = virtual_camera_name();
-        let canvas = self.virtual_camera_canvas.filter(|c| self.workspace().canvas(*c).is_some());
+        let choice = self.workspace().outputs.virtual_camera;
+        self.virtual_camera_started = Some(choice);
+        let canvas = choice.canvas.filter(|c| self.workspace().canvas(*c).is_some());
         // one scene: on the chosen canvas (its size), else the primary
-        let scene = self.virtual_camera_scene.filter(|id| self.workspace().scene(*id).is_some());
+        let scene = choice.scene.filter(|id| self.workspace().scene(*id).is_some());
         let shape = canvas.and_then(|c| self.workspace().canvas(c)).unwrap_or_else(|| self.workspace().primary_canvas());
         let (canvas_id, size) = (shape.id, (shape.width, shape.height, shape.fps_num, shape.fps_den));
         self.engine.post(move |s| {
@@ -617,24 +621,24 @@ impl Studio {
         });
     }
 
-    /// Which scene the virtual camera shows (`None`: the one on air); restarted on it if running.
+    /// Which scene the virtual camera shows (`None`: the one on air), kept in the workspace.
     pub fn set_virtual_camera_scene(&mut self, scene: Option<Id>, cx: &mut Context<Self>) {
-        self.virtual_camera_scene = scene;
-        if self.virtual_camera().is_running() {
-            self.engine.post(|s| s.outputs.stop_virtual_camera());
-            self.start_virtual_camera();
-        }
-        cx.notify();
+        let settings = lightair_core::VirtualCameraSettings { scene, ..self.workspace().outputs.virtual_camera };
+        let _ = self.execute(Command::SetVirtualCamera { settings }, cx);
     }
 
-    /// What the virtual camera shows: a canvas (`None`: the primary); restarted on it if running.
+    /// Which canvas the virtual camera shows (`None`: the primary), kept in the workspace.
     pub fn set_virtual_camera_canvas(&mut self, canvas: Option<Id>, cx: &mut Context<Self>) {
-        self.virtual_camera_canvas = canvas;
-        if self.virtual_camera().is_running() {
+        let settings = lightair_core::VirtualCameraSettings { canvas, ..self.workspace().outputs.virtual_camera };
+        let _ = self.execute(Command::SetVirtualCamera { settings }, cx);
+    }
+
+    /// A running virtual camera follows the workspace's choice (restarted when it changes).
+    fn sync_virtual_camera(&mut self) {
+        if self.virtual_camera().is_running() && self.virtual_camera_started != Some(self.workspace().outputs.virtual_camera) {
             self.engine.post(|s| s.outputs.stop_virtual_camera());
             self.start_virtual_camera();
         }
-        cx.notify();
     }
 
     pub fn clips_ready(&self) -> bool {
