@@ -133,6 +133,8 @@ impl StudioWindow {
                 .justify_center()
                 .items_center()
                 .bg(tok::scrim())
+                // a sheet: nothing behind it takes the mouse (scrolling here never pans the canvas)
+                .occlude()
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close_go_live(cx)))
                 .child(
                     div()

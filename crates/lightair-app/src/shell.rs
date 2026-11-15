@@ -833,6 +833,10 @@ impl StudioWindow {
     }
 
     fn canvas_scroll(&mut self, ev: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // a sheet over the window: its scrolling is its own (the sheets block the mouse too)
+        if self.sheet_open(cx) {
+            return;
+        }
         let delta = match ev.delta {
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
             ScrollDelta::Lines(p) => (p.x * 20.0, p.y * 20.0),
@@ -849,7 +853,21 @@ impl StudioWindow {
     }
 
     fn canvas_pinch(&mut self, ev: &PinchEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.sheet_open(cx) {
+            return;
+        }
         self.zoom_by(1.0 + ev.delta, Some(ev.position), cx);
+    }
+
+    /// Whether a sheet is over the window (settings, a dialog, a picker, the palette).
+    fn sheet_open(&self, cx: &App) -> bool {
+        self.settings_open
+            || self.palette.is_some()
+            || self.add_object.is_some()
+            || self.effect_sheet.is_some()
+            || self.go_live_sheet.is_some()
+            || self.source_picker.is_some()
+            || self.outputs.read(cx).dialog_open()
     }
 
     fn to_canvas(&self, workspace: &Workspace, canvas: Id, p: Point<Pixels>) -> Option<(f32, f32)> {

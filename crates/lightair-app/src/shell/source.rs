@@ -422,6 +422,8 @@ impl StudioWindow {
                 .items_start()
                 .pt(px(80.))
                 .bg(tok::scrim())
+                // a sheet: nothing behind it takes the mouse (scrolling here never pans the canvas)
+                .occlude()
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| this.close_source_picker(window, cx)),
