@@ -76,11 +76,9 @@ pub struct Reconciler {
 /// libobs state for one mixer track: its output channel, volume meter and effect filters.
 struct TrackState {
     source: Id,
-    /// Output channel (1..64) that keeps the track's source mixed when it isn't in a scene.
+    /// Output channel (1..64) that keeps a sound-only source running whatever is on air; 0 for
+    /// a source with a picture, which runs only while it's on air (as in OBS).
     channel: u32,
-    /// For a source with a picture (a web page): the scene on that channel instead, holding it
-    /// out of sight, since output channels draw over the program.
-    holder: Option<ObsScene>,
     volmeter: VolmeterPtr,
     meter: Arc<MeterCell>,
     filters: Vec<(Id, ObsSource)>,
@@ -655,7 +653,7 @@ impl Reconciler {
         self.sources.get(&source).map(|s| s.as_ptr())
     }
 
-    /// Whether libobs is running a source (on air, or kept going by a track for its sound).
+    /// Whether libobs is running a source (on air, or a sound-only source on a track).
     pub fn source_active(&self, source: Id) -> bool {
         self.source_ptr(source).is_some_and(|s| unsafe { sys::obs_source_active(s) })
     }
@@ -812,7 +810,7 @@ impl Reconciler {
     fn land(&mut self, program: Option<Id>) {
         for canvas in self.canvases.clone() {
             if let Some(tr) = self.transitions.get(&canvas) {
-                unsafe { sys::obs_transition_set(tr.as_ptr(), self.dest(program, canvas)) };
+                unsafe { crate::transition::set_now(tr.as_ptr(), self.dest(program, canvas)) };
             }
         }
     }
@@ -914,6 +912,10 @@ impl Reconciler {
                 None => ObsScene::create(&name),
             };
             let Some(temp) = temp else { continue };
+            // Active while it's built: libobs counts a source shown through an item's fade one way
+            // when the scene activates mid-fade and another when the fade ends, and a video caught
+            // by that stopped on landing. Built active, the counts match.
+            unsafe { sys::obs_source_inc_active(temp.source_ptr()) };
             let mut tweens = Vec::new();
             let mut fades = Vec::new();
             let mut masks = Vec::new();
@@ -982,7 +984,10 @@ impl Reconciler {
                     },
                 }
             }
-            unsafe { sys::obs_transition_set(tr.as_ptr(), temp.source_ptr()) };
+            unsafe {
+                crate::transition::set_now(tr.as_ptr(), temp.source_ptr());
+                sys::obs_source_dec_active(temp.source_ptr());
+            }
             canvases.push(CanvasMove { temp, tweens, transition: tr.as_ptr(), dest, fades, masks });
         }
         if canvases.is_empty() {
@@ -1197,7 +1202,7 @@ impl Reconciler {
             tracing::warn!(track = track.name, "track references a missing input");
             return;
         };
-        let used: std::collections::HashSet<u32> = self.tracks.values().map(|t| t.channel).collect();
+        let used: std::collections::HashSet<u32> = self.tracks.values().map(|t| t.channel).filter(|c| *c != 0).collect();
         let Some(channel) = (1..crate::audio_host::OUT_CHANNELS.start).find(|c| !used.contains(c)) else {
             tracing::error!("no free output channel for track");
             return;
@@ -1205,16 +1210,14 @@ impl Reconciler {
         let src = source.as_ptr();
         let meter = meters().insert(track.id);
         unsafe {
-            let holder = (sys::obs_source_get_output_flags(src) & sys::OBS_SOURCE_VIDEO != 0)
-                .then(|| ObsScene::create_private("Lightair track holder"))
-                .flatten();
-            match &holder {
-                Some(scene) => {
-                    // kept active (so its sound plays), drawn a pixel across far off the canvas
-                    scene.add_fitted(source, -100_000.0, -100_000.0, 1.0, 1.0);
-                    sys::obs_set_output_source(channel, scene.source_ptr());
-                }
-                None => sys::obs_set_output_source(channel, src),
+            // As in OBS: a source with a picture (a video, a web page, a capture) runs while a
+            // scene showing it is on air, and its sound with it; off air it stops (no decoding,
+            // no painting). Sound-only sources (microphones, desktop and app audio) always run,
+            // like OBS's global audio sources.
+            let pictured = sys::obs_source_get_output_flags(src) & sys::OBS_SOURCE_VIDEO != 0;
+            let channel = if pictured { 0 } else { channel };
+            if channel != 0 {
+                sys::obs_set_output_source(channel, src);
             }
             // with the engine, its post-fader meters fill the cell (sync_audio); otherwise libobs's
             let vm = if Self::engine_audio() {
@@ -1226,7 +1229,7 @@ impl Reconciler {
                 vm
             };
             let mut state =
-                TrackState { source: track.source, channel, holder, volmeter: VolmeterPtr(vm), meter, filters: vec![] };
+                TrackState { source: track.source, channel, volmeter: VolmeterPtr(vm), meter, filters: vec![] };
             if Self::engine_audio() {
                 // levels, mute and the engine's effects are the engine's; plugin filters stay
                 state.filters = chain_build(src, &libobs_effects(&track.effects));
@@ -1264,8 +1267,9 @@ impl Reconciler {
                 sys::obs_volmeter_remove_callback(state.volmeter.0, Some(on_levels), Arc::as_ptr(&state.meter) as *mut _);
                 sys::obs_volmeter_destroy(state.volmeter.0);
             }
-            sys::obs_set_output_source(state.channel, std::ptr::null_mut());
-            drop(state.holder.take());
+            if state.channel != 0 {
+                sys::obs_set_output_source(state.channel, std::ptr::null_mut());
+            }
             if let Some(source) = self.sources.get(&state.source) {
                 chain_remove(source.as_ptr(), &mut state.filters);
                 sys::obs_source_set_monitoring_enabled(source.as_ptr(), false);

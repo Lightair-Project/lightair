@@ -62,6 +62,8 @@ fn main() {
     if let Some(code) = mcp_bridge::main_if_asked() {
         std::process::exit(code);
     }
+    // Chromium's library before any other thread exists (lightair_web::preload)
+    lightair_web::preload();
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("LIGHTAIR_LOG").unwrap_or_else(|_| "info,libobs=warn".into()))
         .init();

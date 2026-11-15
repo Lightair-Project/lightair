@@ -83,6 +83,12 @@ impl Page {
         imp::request(imp::Request::Reload { id: self.id });
     }
 
+    /// Whether the page is on screen somewhere (on air, previewed). A hidden page doesn't paint
+    /// (its sound plays on), as OBS's browser source; pages start hidden.
+    pub fn set_visible(&self, visible: bool) {
+        imp::request(imp::Request::Visible { id: self.id, visible });
+    }
+
     /// Restyles the page now with `css` (while it's being typed; [`Page::update`] keeps it).
     pub fn restyle(&self, css: String) {
         imp::request(imp::Request::Style { id: self.id, css });
@@ -98,6 +104,14 @@ impl Drop for Page {
 /// Whether Chromium is bundled here (pages can paint).
 pub fn available() -> bool {
     imp::available()
+}
+
+/// Loads Chromium's library now, while this is the only thread. On macOS Chromium's allocator
+/// takes over the process's memory zone as its library loads; loaded later, with libobs's threads
+/// already allocating, a free racing the takeover crashed it now and then at startup. Call first
+/// thing in `main` (cheap: the library is mapped, nothing starts).
+pub fn preload() {
+    imp::preload()
 }
 
 /// Runs Chromium's helper process when this process is one (`--type=` on its command line):
@@ -132,6 +146,7 @@ mod imp {
         Update { id: u64, options: PageOptions },
         Reload { id: u64 },
         Style { id: u64, css: String },
+        Visible { id: u64, visible: bool },
         Close { id: u64 },
     }
 
@@ -178,7 +193,17 @@ mod imp {
 
     /// Loads Chromium's library (macOS loads it at run time, from the bundle), then declares the
     /// CEF API version this was built against, which CEF needs before anything else.
+    pub fn preload() {
+        if available() {
+            load(false);
+        }
+    }
+
     fn load(helper: bool) -> bool {
+        static LOADED: AtomicBool = AtomicBool::new(false);
+        if LOADED.load(Ordering::Relaxed) {
+            return true;
+        }
         #[cfg(target_os = "macos")]
         let loaded = {
             use std::os::unix::ffi::OsStrExt;
@@ -195,6 +220,7 @@ mod imp {
         };
         if loaded {
             let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
+            LOADED.store(true, Ordering::Relaxed);
         }
         loaded
     }
@@ -333,6 +359,8 @@ mod imp {
         /// The custom style sheet, read by the load handler.
         css: Arc<Mutex<String>>,
         options: PageOptions,
+        /// On screen somewhere (hidden pages don't paint).
+        visible: bool,
     }
 
     /// `s` as a JavaScript string literal.
@@ -430,7 +458,12 @@ mod imp {
                 tracing::debug!(id, "web page made");
                 let browser = browser.clone();
                 PAGES.with(|pages| match pages.borrow_mut().get_mut(&id) {
-                    Some(live) => live.browser = Some(browser),
+                    Some(live) => {
+                        if let Some(host) = browser.host() {
+                            host.was_hidden((!live.visible) as i32);
+                        }
+                        live.browser = Some(browser)
+                    }
                     // closed before it was made
                     None => {
                         if let Some(host) = browser.host() {
@@ -548,7 +581,7 @@ mod imp {
             ..Default::default()
         };
         let url = CefString::from(options.url.as_str());
-        PAGES.with(|pages| pages.borrow_mut().insert(id, Live { browser: None, view, css, options }));
+        PAGES.with(|pages| pages.borrow_mut().insert(id, Live { browser: None, view, css, options, visible: false }));
         if browser_host_create_browser(Some(&window), Some(&mut client), Some(&url), Some(&browser_settings), None, None) != 1 {
             tracing::warn!("Chromium didn't open a page");
         }
@@ -634,6 +667,14 @@ mod imp {
                 Request::Update { id, options } => update(id, options),
                 Request::Reload { id } => reload(id),
                 Request::Style { id, css } => style(id, css),
+                Request::Visible { id, visible } => PAGES.with(|pages| {
+                    let mut pages = pages.borrow_mut();
+                    let Some(live) = pages.get_mut(&id) else { return };
+                    live.visible = visible;
+                    if let Some(host) = live.browser.as_ref().and_then(|b| b.host()) {
+                        host.was_hidden((!visible) as i32);
+                    }
+                }),
                 Request::Close { id } => close(id),
             }
         }
@@ -696,6 +737,7 @@ mod imp {
         Update { id: u64, options: PageOptions },
         Reload { id: u64 },
         Style { id: u64, css: String },
+        Visible { id: u64, visible: bool },
         Close { id: u64 },
     }
 
@@ -708,6 +750,8 @@ mod imp {
     pub fn available() -> bool {
         false
     }
+
+    pub fn preload() {}
 
     pub fn helper_main() -> Option<i32> {
         None

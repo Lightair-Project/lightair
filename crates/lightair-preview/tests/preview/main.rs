@@ -9,6 +9,7 @@ mod fx;
 mod green_key;
 mod hierarchy;
 mod key_colour;
+mod media_on_air;
 mod resize_canvas;
 mod screen_zoom;
 mod shape_mask;
