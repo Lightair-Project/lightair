@@ -506,6 +506,37 @@ impl StudioWindow {
                 ok()
             }
 
+            "media.status" => {
+                let src = source_by(&w, need(p, "source")?)?.id;
+                let st = self.studio.read(cx).engine().call(move |e| e.reconciler.media_status(src));
+                let st = st.ok_or_else(|| ApiError::invalid("not a media source"))?;
+                use lightair_engine::media::MediaState as M;
+                let state = match st.state {
+                    M::None => "none",
+                    M::Playing => "playing",
+                    M::Opening => "opening",
+                    M::Buffering => "buffering",
+                    M::Paused => "paused",
+                    M::Stopped => "stopped",
+                    M::Ended => "ended",
+                    M::Error => "error",
+                };
+                Ok(json!({"state": state, "time_ms": st.time_ms, "duration_ms": st.duration_ms}))
+            }
+            "media.action" => {
+                use lightair_engine::media::MediaAction as A;
+                let src = source_by(&w, need(p, "source")?)?.id;
+                let action = match need(p, "action")? {
+                    "play" => A::Play,
+                    "pause" => A::Pause,
+                    "restart" => A::Restart,
+                    "stop" => A::Stop,
+                    "seek" => A::Seek(p.get("ms").and_then(Value::as_i64).ok_or_else(|| ApiError::invalid("`ms` is needed to seek"))?),
+                    a => return Err(ApiError::invalid(format!("no media action {a} (play, pause, restart, stop, seek)"))),
+                };
+                self.studio.read(cx).engine().call(move |e| e.reconciler.media_action(src, action));
+                ok()
+            }
             "audio.set" => {
                 let t = track_by(&w, need(p, "track")?)?;
                 let mut cmds = vec![];

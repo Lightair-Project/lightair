@@ -234,6 +234,18 @@ fn toggle(id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
 impl OutputsPanel {
     pub fn new(studio: Entity<Studio>, cx: &mut Context<Self>) -> Self {
         cx.observe(&studio, |_, _, cx| cx.notify()).detach();
+        // elapsed times and the recording drive, twice a second while an output runs
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                let busy = runtime().any_recording_running() || runtime().any_stream_running()
+                    || runtime().get(OutputKey::VirtualCamera).state.is_running();
+                if this.update(cx, |_, cx| if busy { cx.notify() }).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default() }
     }
 
@@ -979,8 +991,7 @@ impl OutputsPanel {
 }
 
 impl Render for OutputsPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        window.request_animation_frame();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
         let folder = studio.recording_folder();
