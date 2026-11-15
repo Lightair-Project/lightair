@@ -1631,16 +1631,22 @@ impl StudioWindow {
     }
 
     /// Picks the stinger video (cut point defaults to halfway through a typical 1 s stinger).
-    fn choose_stinger(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Picks a stinger video: the workspace's, or a scene's own (`scene`).
+    fn choose_stinger(&mut self, scene: Option<Id>, window: &mut Window, cx: &mut Context<Self>) {
         let paths =
             cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let Some(path): Option<PathBuf> = paths.into_iter().next() else { return };
             let _ = this.update(cx, |this, cx| {
-                let cut_ms = this.studio.read(cx).workspace().stinger.as_ref().map_or(500, |s| s.cut_ms);
-                let stinger = lightair_core::Stinger { path: path.to_string_lossy().into_owned(), cut_ms };
-                this.exec(Command::SetStinger { stinger: Some(stinger) }, cx)
+                let workspace = this.studio.read(cx).workspace().clone();
+                // the cut point it had (the scene's, else the show's)
+                let had = scene.and_then(|s| workspace.scene(s)).and_then(|s| s.stinger.clone()).or(workspace.stinger.clone());
+                let stinger = lightair_core::Stinger { path: path.to_string_lossy().into_owned(), cut_ms: had.map_or(500, |s| s.cut_ms) };
+                match scene {
+                    Some(scene) => this.exec(Command::SetSceneStinger { scene, stinger: Some(stinger) }, cx),
+                    None => this.exec(Command::SetStinger { stinger: Some(stinger) }, cx),
+                }
             });
         })
         .detach();
@@ -2812,11 +2818,15 @@ impl StudioWindow {
         }
         // Stinger: its video, and when the scene changes underneath it
         if current.kind == TransitionKind::Stinger {
-            let st = workspace.stinger.clone();
+            // this scene's own video when it has its own transition (the show's until it picks one)
+            let target = own.then_some(sid);
+            let st = if own { scene.stinger.clone().or(workspace.stinger.clone()) } else { workspace.stinger.clone() };
+            let shows_default = own && scene.stinger.is_none() && st.is_some();
             let name = st
                 .as_ref()
                 .and_then(|s| std::path::Path::new(&s.path).file_name().map(|n| n.to_string_lossy().into_owned()))
                 .unwrap_or_else(|| "Choose a video…".into());
+            let name = if shows_default { format!("{name} (the show's)") } else { name };
             body = body.child(row(
                 "Video",
                 Button::new("stinger-file")
@@ -2825,14 +2835,17 @@ impl StudioWindow {
                     .small()
                     .outline()
                     .w_full()
-                    .on_click(cx.listener(|this, _, window, cx| this.choose_stinger(window, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| this.choose_stinger(target, window, cx)))
                     .into_any_element(),
             ));
             if let Some(st) = st {
                 let step = |delta: i64| {
                     let mut s = st.clone();
                     s.cut_ms = (s.cut_ms as i64 + delta).clamp(0, 10_000) as u32;
-                    Command::SetStinger { stinger: Some(s) }
+                    match target {
+                        Some(scene) => Command::SetSceneStinger { scene, stinger: Some(s) },
+                        None => Command::SetStinger { stinger: Some(s) },
+                    }
                 };
                 let (earlier, later) = (step(-100), step(100));
                 let stepper = div()

@@ -849,8 +849,10 @@ impl Reconciler {
     fn set_program(&mut self, program: Option<Id>, workspace: &Workspace) {
         let previous = self.program;
         self.finish_move();
-        // the incoming scene's own transition, else the workspace's
-        let settings = program.and_then(|b| workspace.scene(b)).and_then(|s| s.transition).unwrap_or(self.transition_settings);
+        // the incoming scene's own transition (and stinger video), else the workspace's
+        let incoming = program.and_then(|b| workspace.scene(b));
+        let settings = incoming.and_then(|s| s.transition).unwrap_or(self.transition_settings);
+        let stinger = incoming.filter(|s| s.transition.is_some()).and_then(|s| s.stinger.clone()).or_else(|| self.stinger.clone());
         let kind = match (previous, program) {
             (Some(a), Some(b)) if a != b => settings.kind,
             _ => TransitionKind::Cut,
@@ -863,7 +865,7 @@ impl Reconciler {
             | TransitionKind::Wipe
             | TransitionKind::Dip
             | TransitionKind::Stinger => {
-                let (type_id, source_settings) = transition_source(&settings, self.stinger.as_ref());
+                let (type_id, source_settings) = transition_source(&settings, stinger.as_ref());
                 for canvas in self.canvases.clone() {
                     self.ensure_transition(canvas, type_id, &source_settings);
                     if let Some(tr) = self.transitions.get(&canvas) {
