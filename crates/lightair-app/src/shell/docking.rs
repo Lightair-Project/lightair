@@ -255,6 +255,7 @@ impl StudioWindow {
                     "clips" => Page::Clips,
                     "canvases" | "canvases-edit" => Page::Canvases,
                     "shortcuts" => Page::Shortcuts,
+                    "remote" => Page::Remote,
                     "about" => Page::About,
                     _ => Page::General,
                 };

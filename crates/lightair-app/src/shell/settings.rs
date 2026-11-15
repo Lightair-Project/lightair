@@ -34,6 +34,7 @@ pub(crate) enum Page {
     Clips,
     Canvases,
     Shortcuts,
+    Remote,
     About,
 }
 
@@ -46,6 +47,7 @@ const PAGES: &[(Page, &str, &str)] = &[
     (Page::Canvases, "Canvases", "proportions"),
     (Page::Camera, "Camera", "camera"),
     (Page::Shortcuts, "Shortcuts", "keyboard"),
+    (Page::Remote, "Remote API", "radio-tower"),
     (Page::About, "About", "info"),
 ];
 
@@ -322,6 +324,7 @@ impl StudioWindow {
             Page::Clips => self.clips_page(cx),
             Page::Canvases => self.canvases_page(cx),
             Page::Shortcuts => self.shortcuts_page(cx),
+            Page::Remote => self.remote_page(cx),
             Page::About => self.about_page(cx),
         };
         let title = PAGES.iter().find(|(p, ..)| *p == page).map_or("", |(_, l, _)| *l);
@@ -1129,6 +1132,114 @@ impl StudioWindow {
                         },
                     ))),
             )
+    }
+
+    fn set_remote(&mut self, f: impl FnOnce(&mut crate::prefs::RemoteApi), cx: &mut Context<Self>) {
+        self.set_pref(|p| f(&mut p.remote), cx);
+        self.sync_remote(cx);
+    }
+
+    fn remote_page(&self, cx: &mut Context<Self>) -> Div {
+        let r = self.prefs.remote;
+        let server = self.remote.running();
+        let port = server.map_or(r.port, |s| s.addr().port());
+        let host = if r.lan { lightair_platform::net::local_ip().unwrap_or_else(|| "this-mac".into()) } else { "127.0.0.1".into() };
+        let asks = r.require_password || r.lan;
+        let status = match (&self.remote.error, server) {
+            (Some(e), _) => e.clone(),
+            (None, Some(s)) => {
+                let n = s.clients().len();
+                let who = if r.lan { "this Mac and your network" } else { "this Mac only" };
+                format!("On, for {who} · {n} client{} connected", plural(n))
+            }
+            (None, None) => "Off".into(),
+        };
+        let copy = |id: &'static str, text: String| {
+            ui::icon_button(id, "copy", tok::text_secondary())
+                .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())))
+                .into_any_element()
+        };
+        let mut page = pages().child(
+            group("Remote API")
+                .child(row(
+                    "Let other apps control Lightair",
+                    Some(status.as_str()),
+                    switch("remote-on", r.enabled)
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_remote(|p| p.enabled = !r.enabled, cx))),
+                ))
+                .child(row(
+                    "Port",
+                    Some("4455 is where OBS tools look."),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(Button::new("remote-port-down").icon(ui::icon("minus")).xsmall().ghost().on_click(cx.listener(
+                            move |this, _, _, cx| this.set_remote(|p| p.port = p.port.saturating_sub(1).max(1024), cx),
+                        )))
+                        .child(div().w(px(56.)).text_center().text_size(px(12.)).font_family("Menlo").child(r.port.to_string()))
+                        .child(Button::new("remote-port-up").icon(ui::icon("plus")).xsmall().ghost().on_click(cx.listener(
+                            move |this, _, _, cx| this.set_remote(|p| p.port = p.port.saturating_add(1), cx),
+                        ))),
+                ))
+                .child(row(
+                    "Other devices on your network",
+                    Some("Phones, tablets, Stream Decks on other computers. Always asks for the password."),
+                    switch("remote-lan", r.lan)
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_remote(|p| p.lan = !r.lan, cx))),
+                ))
+                .child(row(
+                    "Ask for the password",
+                    Some(if r.lan { "Always, while other devices may connect." } else { "Apps on this Mac must send it too." }),
+                    switch("remote-password-on", asks).on_click(cx.listener(move |this, _, _, cx| {
+                        if !r.lan {
+                            this.set_remote(|p| p.require_password = !r.require_password, cx)
+                        }
+                    })),
+                )),
+        );
+        if asks {
+            let password = crate::secrets::remote_password().unwrap_or_default();
+            let shown = if self.remote.show_password { password.clone() } else { "•".repeat(12) };
+            let show = self.remote.show_password;
+            page = page.child(
+                group("Password").child(row(
+                    &shown,
+                    Some("Kept in the Keychain."),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(ui::icon_button("remote-show", if show { "eye-off" } else { "eye" }, tok::text_secondary()).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.remote.show_password = !show;
+                                cx.notify();
+                            }),
+                        ))
+                        .child(copy("remote-copy-password", password))
+                        .child(Button::new("remote-new-password").label("New").xsmall().ghost().on_click(cx.listener(
+                            |this, _, _, cx| {
+                                crate::secrets::new_remote_password();
+                                this.remote.restart(cx);
+                                this.sync_remote(cx);
+                            },
+                        ))),
+                )),
+            );
+        }
+        let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "lightair".into());
+        let agent = format!("claude mcp add lightair -- \"{exe}\" mcp");
+        let obs = format!("ws://{host}:{port}");
+        let mcp_url = format!("http://{host}:{port}/mcp");
+        let rpc = format!("ws://{host}:{port}/rpc");
+        page.child(
+            group("Connect")
+                .child(row("AI agents (MCP)", Some(&agent), copy("remote-copy-agent", agent.clone())))
+                .child(row("MCP over HTTP", Some(&format!("{mcp_url} · Authorization: Bearer <password>")), copy("remote-copy-mcp", mcp_url.clone())))
+                .child(row("OBS tools (obs-websocket 5)", Some(&format!("{obs} · connect as to OBS")), copy("remote-copy-obs", obs.clone())))
+                .child(row("Lightair JSON-RPC", Some(&rpc), copy("remote-copy-rpc", rpc.clone()))),
+        )
+        .child(note("Agents and tools change the workspace like you do: every change can be undone, named after who made it."))
     }
 
     fn about_page(&self, cx: &mut Context<Self>) -> Div {

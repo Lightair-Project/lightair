@@ -10,6 +10,7 @@ mod frame_view;
 mod geometry;
 mod shortcuts;
 mod library;
+mod mcp_bridge;
 mod mixer;
 #[cfg(target_os = "macos")]
 mod plugin_editor;
@@ -55,6 +56,10 @@ fn workspaces_dir() -> PathBuf {
 fn main() {
     // a helper process listing a VST3 bundle's effects (plugin_scan)
     if let Some(code) = plugin_scan::probe_main() {
+        std::process::exit(code);
+    }
+    // an agent's MCP connection (stdout is its, so before logging starts)
+    if let Some(code) = mcp_bridge::main_if_asked() {
         std::process::exit(code);
     }
     tracing_subscriber::fmt()

@@ -20,6 +20,7 @@ use serde_json::json;
 
 pub(crate) mod app_menu;
 mod add_object;
+mod remote;
 mod screen_pick;
 mod assets;
 mod docking;
@@ -396,6 +397,8 @@ pub struct StudioWindow {
     /// Monitoring devices, read when the Audio page opens.
     headphones_devices: Vec<(String, String)>,
     prefs: crate::prefs::Preferences,
+    /// The remote API (obs-websocket, JSON-RPC, MCP).
+    remote: remote::Remote,
     /// Resizable, collapsible, rearrangeable panels (built on first render).
     dock: Option<Entity<gpui_kit::component::dock::DockArea>>,
     canvas_menu:
@@ -428,6 +431,7 @@ impl StudioWindow {
         cx.observe_in(&studio, window, |this, studio, window, cx| {
             this.sync_studio_preview(cx);
             this.prune_plugin_editors(cx);
+            this.tell_remote(cx);
             if let Some(req) = studio.update(cx, |s, _| s.ui_request.take()) {
                 this.take_ui_request(req, window, cx);
             }
@@ -550,6 +554,8 @@ impl StudioWindow {
             cx.notify();
         })
         .detach();
+        let remote = Self::new_remote(window, cx);
+        cx.defer_in(window, |this, _, cx| this.sync_remote(cx));
         Self {
             previews: HashMap::from([(primary, preview)]),
             place: Place::Live,
@@ -642,6 +648,7 @@ impl StudioWindow {
             headphones_devices: Vec::new(),
             dock: None,
             prefs: crate::prefs::load_from(&crate::prefs::path()),
+            remote,
         }
     }
 

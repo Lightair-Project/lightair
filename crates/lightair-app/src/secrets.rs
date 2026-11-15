@@ -22,3 +22,27 @@ pub fn delete_stream_key(destination: Id) {
         let _ = e.delete_credential();
     }
 }
+
+const REMOTE: &str = "Lightair remote API";
+
+fn remote_entry() -> Option<keyring::Entry> {
+    keyring::Entry::new(REMOTE, "password").ok()
+}
+
+/// The remote API's password, made (and saved) the first time it's asked for.
+pub fn remote_password() -> Option<String> {
+    let entry = remote_entry()?;
+    if let Ok(p) = entry.get_password() {
+        return Some(p);
+    }
+    let p = lightair_remote::new_password();
+    entry.set_password(&p).ok()?;
+    Some(p)
+}
+
+/// A new remote API password (clients with the old one must reconnect with this).
+pub fn new_remote_password() -> Option<String> {
+    let p = lightair_remote::new_password();
+    remote_entry()?.set_password(&p).ok()?;
+    Some(p)
+}
