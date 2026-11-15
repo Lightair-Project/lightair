@@ -44,6 +44,42 @@ struct StudioTakeRun {
     audio: Vec<(PathBuf, String)>,
     stopping: bool,
     thumbnail_due: Option<std::time::Instant>,
+    /// Its pauses, from `started`: (from, to), `to` open while paused. The files leave them
+    /// out, so the input log does too.
+    pauses: Vec<(std::time::Duration, Option<std::time::Duration>)>,
+}
+
+impl StudioTakeRun {
+    fn paused(&self) -> bool {
+        self.pauses.last().is_some_and(|p| p.1.is_none())
+    }
+
+    /// Time paused before `at` (from `started`), the open pause counting up to `at`.
+    fn paused_before(&self, at: std::time::Duration) -> std::time::Duration {
+        self.pauses.iter().map(|&(a, b)| b.unwrap_or(at).min(at).saturating_sub(a)).sum()
+    }
+
+    /// How long it has recorded: the time since it started, less its pauses.
+    fn elapsed(&self) -> std::time::Duration {
+        let now = self.started.elapsed();
+        now - self.paused_before(now)
+    }
+
+    /// An input sample's time in the files, or `None` when it fell in a pause.
+    fn file_time(&self, at: std::time::Duration) -> Option<std::time::Duration> {
+        if self.pauses.iter().any(|&(a, b)| at >= a && b.is_none_or(|b| at < b)) {
+            return None;
+        }
+        Some(at - self.paused_before(at))
+    }
+
+    /// Input samples as log records, on the files' clock (paused ones dropped).
+    fn records(&self, samples: Vec<lightair_platform::input::Sample>) -> Vec<lightair_store::input_log::Record> {
+        samples
+            .into_iter()
+            .filter_map(|s| Some(lightair_store::input_log::Record { at: self.file_time(s.at)?, entry: log_entry(s.event) }))
+            .collect()
+    }
 }
 
 fn log_entry(e: lightair_platform::input::Event) -> lightair_store::input_log::Entry {
@@ -687,13 +723,18 @@ impl Studio {
     }
 
     /// A Studio studio_take is being recorded (and isn't stopping yet).
+    /// Whether the Studio take is paused.
+    pub fn studio_take_paused(&self) -> bool {
+        self.studio_take.as_ref().is_some_and(|t| !t.stopping && t.paused())
+    }
+
     pub fn is_taking(&self) -> bool {
         self.studio_take.as_ref().is_some_and(|t| !t.stopping)
     }
 
     /// How long the studio_take has run.
     pub fn studio_take_elapsed(&self) -> Option<std::time::Duration> {
-        self.studio_take.as_ref().filter(|t| !t.stopping).map(|t| t.started.elapsed())
+        self.studio_take.as_ref().filter(|t| !t.stopping).map(StudioTakeRun::elapsed)
     }
 
     /// Starts or stops a Studio take: each screen and camera in the program to its own file,
@@ -747,7 +788,13 @@ impl Studio {
         let recorder = lightair_platform::input::Recorder::start(120);
         let log = lightair_store::input_log::Writer::create(&folder.join("input.bin"), recorder.listening).ok().map(|mut w| {
             use lightair_store::input_log::{Entry, Record};
-            let (x, y, dw, dh) = lightair_platform::input::main_display();
+            // the screen recorded: its display, or its window where it is now (else the main display)
+            let screen = workspace.sources.values().find(|s| s.kind == lightair_core::kinds::SCREEN && tracks.iter().any(|t| t.screen && t.source == s.id));
+            let frame = screen.and_then(|s| match s.settings["mode"].as_i64().unwrap_or(lightair_core::kinds::DISPLAY) {
+                lightair_core::kinds::WINDOW => lightair_platform::input::window_frame(s.settings["window"].to_string().trim_matches('"')),
+                _ => s.settings["display"].as_str().and_then(lightair_platform::input::display_frame),
+            });
+            let (x, y, dw, dh) = frame.unwrap_or_else(lightair_platform::input::main_display);
             let at = std::time::Duration::ZERO;
             let _ = w.write(&[Record { at, entry: Entry::Display { x, y } }, Record { at, entry: Entry::DisplaySize { w: dw, h: dh } }]);
             w
@@ -772,6 +819,7 @@ impl Studio {
             audio,
             stopping: false,
             thumbnail_due: Some(std::time::Instant::now() + std::time::Duration::from_secs(3)),
+            pauses: Vec::new(),
         });
         cx.notify();
     }
@@ -782,16 +830,18 @@ impl Studio {
             return;
         }
         t.stopping = true;
-        t.item.duration_ms = Some(t.started.elapsed().as_millis() as u64);
+        if t.paused() {
+            let now = t.started.elapsed();
+            if let Some(p) = t.pauses.last_mut() {
+                p.1 = Some(now);
+            }
+        }
+        t.item.duration_ms = Some(t.elapsed().as_millis() as u64);
         self.engine.post(|s| s.outputs.stop_recording());
         let report = self.engine.call(|s| s.reconciler.stop_multitrack());
         let Some(t) = &mut self.studio_take else { return };
         if let Some(r) = t.recorder.take() {
-            let rest: Vec<_> = r
-                .stop()
-                .into_iter()
-                .map(|s| lightair_store::input_log::Record { at: s.at, entry: log_entry(s.event) })
-                .collect();
+            let rest = t.records(r.stop());
             if let Some(w) = &mut t.log {
                 let _ = w.write(&rest);
                 let _ = w.flush();
@@ -823,6 +873,8 @@ impl Studio {
             "sample_rate": report.as_ref().map(|r| r.sample_rate),
             "input": "input.bin",
             "markers": t.item.markers,
+            // where it was paused, on the files' clock (each a cut in the files)
+            "pauses_ms": t.pauses.iter().map(|&(a, _)| (a - t.paused_before(a)).as_millis() as u64).collect::<Vec<_>>(),
         });
         let studio_take_json = t.folder.join("take.json");
         if let Ok(text) = serde_json::to_string_pretty(&sidecar) {
@@ -838,11 +890,12 @@ impl Studio {
     /// once its files have stopped.
     fn track_studio_take(&mut self) {
         let Some(t) = &mut self.studio_take else { return };
-        if let (Some(r), Some(w)) = (&t.recorder, &mut t.log) {
-            let records: Vec<_> =
-                r.take().into_iter().map(|s| lightair_store::input_log::Record { at: s.at, entry: log_entry(s.event) }).collect();
-            let _ = w.write(&records);
-            let _ = w.flush();
+        if let Some(r) = &t.recorder {
+            let records = t.records(r.take());
+            if let Some(w) = &mut t.log {
+                let _ = w.write(&records);
+                let _ = w.flush();
+            }
         }
         if t.thumbnail_due.is_some_and(|d| d <= std::time::Instant::now()) {
             t.thumbnail_due = None;
@@ -921,7 +974,19 @@ impl Studio {
     }
 
     pub fn pause_recording(&mut self, cx: &mut Context<Self>) {
-        let pause = !runtime().recording().paused;
+        let mut pause = !runtime().recording().paused;
+        // a Studio take keeps its own pauses (its input log leaves them out)
+        if let Some(t) = &mut self.studio_take
+            && !t.stopping
+        {
+            pause = !t.paused();
+            let now = t.started.elapsed();
+            if pause {
+                t.pauses.push((now, None));
+            } else if let Some(p) = t.pauses.last_mut() {
+                p.1 = Some(now);
+            }
+        }
         self.engine.post(move |s| {
             s.outputs.pause_recording(pause);
             s.reconciler.pause_multitrack(pause);
@@ -986,7 +1051,7 @@ impl Studio {
             p.item.markers.push(Marker { at_ms, label: format!("Marker {n}") });
         }
         if ok && let Some(t) = &mut self.studio_take {
-            let at_ms = t.started.elapsed().as_millis() as u64;
+            let at_ms = t.elapsed().as_millis() as u64;
             t.item.markers.push(Marker { at_ms, label: format!("Marker {n}") });
         }
         self.issue = Some(if ok {

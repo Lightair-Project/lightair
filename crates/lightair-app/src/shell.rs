@@ -2134,7 +2134,8 @@ impl StudioWindow {
         let mode = self.prefs.record_mode;
         // (symbol, label, tooltip)
         let (stop, label, tip): (bool, String, &str) = if let Some(t) = studio.studio_take_elapsed() {
-            (true, clock(t.as_secs()), "Stop the Studio take")
+            let time = clock(t.as_secs());
+            (true, if studio.studio_take_paused() { format!("❚❚ {time}") } else { time }, "Stop the Studio take")
         } else if let Some(started) = self.studio_take_countdown {
             (true, format!("{}", 3u64.saturating_sub(started.elapsed().as_secs()).max(1)), "Cancel")
         } else {
@@ -2296,11 +2297,12 @@ impl StudioWindow {
         let has_destination = workspace.outputs.destinations.iter().any(|d| d.enabled);
 
         let taking = studio.is_taking();
+        let take_paused = studio.studio_take_paused();
         let rec_status = runtime().recording();
         let rec = rec_status.state.clone();
-        let recording = matches!(rec, OutputState::Active { .. });
+        let recording = matches!(rec, OutputState::Active { .. }) || taking;
         let record = self.record_control(&rec_status, cx);
-        let paused = rec_status.paused;
+        let paused = if taking { take_paused } else { rec_status.paused };
         let recording_tools = recording.then(|| {
             div()
                 .flex()
@@ -2317,11 +2319,11 @@ impl StudioWindow {
                         .tooltip(|w, cx| Tooltip::new("Add marker (⌘M)").build(w, cx))
                         .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.add_marker(cx)))),
                 )
-                .child(
+                .when(!taking, |d| d.child(
                     ui::icon_button("rec-split", "split", tok::text_secondary())
                         .tooltip(|w, cx| Tooltip::new("Continue in a new file").build(w, cx))
                         .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.split_recording(cx)))),
-                )
+                ))
         });
 
         let live_since = runtime().stream_since();

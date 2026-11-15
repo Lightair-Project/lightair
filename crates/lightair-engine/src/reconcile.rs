@@ -1713,6 +1713,7 @@ fn screen_zoom_pointer_settings(l: &lightair_core::ScreenZoomPointer) -> serde_j
         "zoom_scale": l.zoom_scale,
         "zoom_hold_s": l.zoom_hold_s,
         "zoom_motion": l.zoom_motion,
+        "zoom_typing": l.zoom_typing,
     })
 }
 
