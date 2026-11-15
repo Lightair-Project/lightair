@@ -258,6 +258,7 @@ impl Studio {
 
     /// Applies, journals and reconciles a command. Errors are shown in the status bar.
     pub fn execute(&mut self, command: Command, cx: &mut Context<Self>) -> Result<(), CommandError> {
+        let command = with_page_cleanup(self.workspace(), command);
         match self.doc.apply(&command) {
             Ok(change) => {
                 if let Some(pkg) = &mut self.package
@@ -1400,4 +1401,81 @@ pub const VIRTUAL_CAMERA_NAMES: [&str; 2] = ["Lightair Virtual Camera", "OBS Vir
 fn virtual_camera_name() -> &'static str {
     let ours = lightair_engine::kinds::cameras().iter().any(|(_, uid)| VIRTUAL_CAMERAS.iter().any(|v| uid.eq_ignore_ascii_case(v)));
     VIRTUAL_CAMERA_NAMES[usize::from(!ours)]
+}
+
+/// `command`, and when it removes the last object showing a web page, the page's mixer track
+/// and the page too (one undo step): a page nobody sees shouldn't keep playing on air.
+fn with_page_cleanup(before: &lightair_core::Workspace, command: Command) -> Command {
+    fn removes(c: &Command) -> bool {
+        match c {
+            Command::RemoveObject { .. } | Command::RemoveScene { .. } => true,
+            Command::Batch { commands, .. } => commands.iter().any(removes),
+            _ => false,
+        }
+    }
+    if !removes(&command) {
+        return command;
+    }
+    let mut after = before.clone();
+    if command.apply(&mut after).is_err() {
+        return command;
+    }
+    let mut extra = vec![];
+    for (id, source) in &before.sources {
+        let gone = before.objects_using(*id).next().is_some() && after.objects_using(*id).next().is_none();
+        if source.kind != lightair_engine::web::KIND || !gone || !after.sources.contains_key(id) {
+            continue;
+        }
+        extra.extend(after.tracks.iter().filter(|t| t.source == *id).map(|t| Command::RemoveTrack { track: t.id }));
+        extra.push(Command::RemoveSource { source: *id });
+    }
+    if extra.is_empty() {
+        return command;
+    }
+    let label = command.label();
+    let mut commands = vec![command];
+    commands.extend(extra);
+    Command::Batch { label, commands }
+}
+
+#[cfg(test)]
+mod page_cleanup {
+    use super::*;
+    use lightair_core::{Document, Layout, Object, Scene, Source, Track, Workspace};
+
+    /// Deleting the only object showing a web page takes its track and the page with it (one
+    /// undo step); a page still shown elsewhere, or a microphone's track, stays.
+    #[test]
+    fn deleting_a_pages_last_object_removes_its_track() {
+        let mut doc = Document::new(Workspace::new("Pages"));
+        let f = doc.workspace().primary_canvas().id;
+        let page = Source::new("Page", lightair_engine::web::KIND, serde_json::json!({"url": "https://example.com"}));
+        let (pid, track) = (page.id, Track::new("Page", page.id));
+        let mut a = Scene::new("A");
+        let mut b = Scene::new("B");
+        let (oa, ob) = (Object::new("Page", pid, [(f, Layout::boxed(0.0, 0.0, 10.0, 10.0))]), Object::new("Page", pid, [(f, Layout::boxed(0.0, 0.0, 10.0, 10.0))]));
+        let (oa_id, ob_id, a_id, b_id) = (oa.id, ob.id, a.id, b.id);
+        a.objects.push(oa);
+        b.objects.push(ob);
+        for cmd in [
+            Command::AddSource { source: page },
+            Command::AddScene { scene: a, index: None },
+            Command::AddScene { scene: b, index: None },
+            Command::AddTrack { track, index: None },
+        ] {
+            doc.apply(&cmd).unwrap();
+        }
+        // still shown in B: nothing more
+        let first = with_page_cleanup(doc.workspace(), Command::RemoveObject { scene: a_id, object: oa_id });
+        assert!(matches!(first, Command::RemoveObject { .. }));
+        doc.apply(&first).unwrap();
+        // the last one: the track and the page go too
+        let last = with_page_cleanup(doc.workspace(), Command::RemoveObject { scene: b_id, object: ob_id });
+        doc.apply(&last).unwrap();
+        assert!(doc.workspace().tracks.is_empty(), "its track is gone");
+        assert!(!doc.workspace().sources.contains_key(&pid), "the page is gone");
+        doc.undo().unwrap();
+        assert_eq!(doc.workspace().tracks.len(), 1, "one undo brings both back");
+        assert!(doc.workspace().sources.contains_key(&pid));
+    }
 }

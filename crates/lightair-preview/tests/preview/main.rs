@@ -14,5 +14,6 @@ mod screen_zoom;
 mod shape_mask;
 mod stinger;
 mod studio_preview;
+mod track_picture;
 mod transform3d;
 mod transitions;
