@@ -133,6 +133,10 @@ impl ObsScene {
     pub fn create(name: &str) -> Option<Self> {
         NonNull::new(unsafe { sys::obs_scene_create(cstr(name).as_ptr()) }).map(Self)
     }
+    /// A scene of Lightair's own, not listed with the show's.
+    pub fn create_private(name: &str) -> Option<Self> {
+        NonNull::new(unsafe { sys::obs_scene_create_private(cstr(name).as_ptr()) }).map(Self)
+    }
     pub fn as_ptr(&self) -> *mut sys::obs_scene_t {
         self.0.as_ptr()
     }

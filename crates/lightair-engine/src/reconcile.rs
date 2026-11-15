@@ -78,6 +78,9 @@ struct TrackState {
     source: Id,
     /// Output channel (1..64) that keeps the track's source mixed when it isn't in a scene.
     channel: u32,
+    /// For a source with a picture (a web page): the scene on that channel instead, holding it
+    /// out of sight, since output channels draw over the program.
+    holder: Option<ObsScene>,
     volmeter: VolmeterPtr,
     meter: Arc<MeterCell>,
     filters: Vec<(Id, ObsSource)>,
@@ -650,6 +653,11 @@ impl Reconciler {
     /// The libobs source of a source (borrowed; valid while the source exists).
     pub(crate) fn source_ptr(&self, source: Id) -> Option<*mut sys::obs_source_t> {
         self.sources.get(&source).map(|s| s.as_ptr())
+    }
+
+    /// Whether libobs is running a source (on air, or kept going by a track for its sound).
+    pub fn source_active(&self, source: Id) -> bool {
+        self.source_ptr(source).is_some_and(|s| unsafe { sys::obs_source_active(s) })
     }
 
     /// Shows a object whole while it's being cropped (crop mode), or `None` to end it. The
@@ -1234,7 +1242,17 @@ impl Reconciler {
         let src = source.as_ptr();
         let meter = meters().insert(track.id);
         unsafe {
-            sys::obs_set_output_source(channel, src);
+            let holder = (sys::obs_source_get_output_flags(src) & sys::OBS_SOURCE_VIDEO != 0)
+                .then(|| ObsScene::create_private("Lightair track holder"))
+                .flatten();
+            match &holder {
+                Some(scene) => {
+                    // kept active (so its sound plays), drawn a pixel across far off the canvas
+                    scene.add_fitted(source, -100_000.0, -100_000.0, 1.0, 1.0);
+                    sys::obs_set_output_source(channel, scene.source_ptr());
+                }
+                None => sys::obs_set_output_source(channel, src),
+            }
             // with the engine, its post-fader meters fill the cell (sync_audio); otherwise libobs's
             let vm = if Self::engine_audio() {
                 std::ptr::null_mut()
@@ -1245,7 +1263,7 @@ impl Reconciler {
                 vm
             };
             let mut state =
-                TrackState { source: track.source, channel, volmeter: VolmeterPtr(vm), meter, filters: vec![] };
+                TrackState { source: track.source, channel, holder, volmeter: VolmeterPtr(vm), meter, filters: vec![] };
             if Self::engine_audio() {
                 // levels, mute and the engine's effects are the engine's; plugin filters stay
                 state.filters = chain_build(src, &libobs_effects(&track.effects));
@@ -1284,6 +1302,7 @@ impl Reconciler {
                 sys::obs_volmeter_destroy(state.volmeter.0);
             }
             sys::obs_set_output_source(state.channel, std::ptr::null_mut());
+            drop(state.holder.take());
             if let Some(source) = self.sources.get(&state.source) {
                 chain_remove(source.as_ptr(), &mut state.filters);
                 sys::obs_source_set_monitoring_enabled(source.as_ptr(), false);
