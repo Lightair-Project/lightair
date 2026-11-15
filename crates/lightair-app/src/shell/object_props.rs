@@ -33,6 +33,8 @@ pub(super) struct ObjectProps {
     /// The effect whose controls are shown.
     pub(super) open_effect: Option<Id>,
     timer: Option<(Id, TimerStatus, Instant)>,
+    /// The address field for the selected web page.
+    web: Option<TextEdit>,
 }
 
 pub(super) fn is_text(kind: &str) -> bool {
@@ -40,6 +42,18 @@ pub(super) fn is_text(kind: &str) -> bool {
 }
 pub(super) fn is_colour(kind: &str) -> bool {
     kind.starts_with("color_source")
+}
+pub(super) fn is_web(kind: &str) -> bool {
+    kind == lightair_engine::web::KIND
+}
+/// An address as typed, made loadable: without a scheme it gets https://.
+pub(super) fn web_address(typed: &str) -> String {
+    let typed = typed.trim();
+    if typed.is_empty() || typed.contains("://") || typed.starts_with("data:") || typed.starts_with("about:") {
+        typed.to_string()
+    } else {
+        format!("https://{typed}")
+    }
 }
 pub(super) fn is_media(kind: &str) -> bool {
     kind == "ffmpeg_source" || kind == "vlc_source"
@@ -110,6 +124,30 @@ impl StudioWindow {
             None => self.props.text = None,
         }
 
+        // Web page address: the same, applied on Enter or when the field loses focus.
+        match source.as_ref().filter(|i| is_web(&i.kind)) {
+            Some(i) => {
+                let url = i.settings["url"].as_str().unwrap_or("").to_string();
+                if !self.props.web.as_ref().is_some_and(|t| t.source == i.id) {
+                    let state = cx.new(|cx| InputState::new(window, cx).placeholder("https://…"));
+                    let id = i.id;
+                    let events = cx.subscribe_in(&state, window, move |this, state, ev: &InputEvent, _, cx| {
+                        if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                            let value = state.read(cx).value().to_string();
+                            this.set_web_url(id, value, cx);
+                        }
+                    });
+                    self.props.web = Some(TextEdit { source: i.id, state, _events: events });
+                }
+                let t = self.props.web.as_ref().unwrap();
+                let focused = t.state.read(cx).focus_handle(cx).is_focused(window);
+                if !focused && t.state.read(cx).value() != url.as_str() {
+                    t.state.update(cx, |s, cx| s.set_value(url, window, cx));
+                }
+            }
+            None => self.props.web = None,
+        }
+
         // Timer status, polled the same way.
         match source.as_ref().filter(|i| i.kind == TIMER_KIND) {
             Some(i) => {
@@ -154,6 +192,16 @@ impl StudioWindow {
         self.exec(Command::SetSourceSettings { source, settings: with(&i.settings, "text", json!(text)) }, cx);
     }
 
+    fn set_web_url(&mut self, source: Id, typed: String, cx: &mut Context<Self>) {
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some(i) = workspace.sources.get(&source) else { return };
+        let url = web_address(&typed);
+        if url.is_empty() || i.settings["url"].as_str() == Some(url.as_str()) {
+            return;
+        }
+        self.exec(Command::SetSourceSettings { source, settings: with(&i.settings, "url", json!(url)) }, cx);
+    }
+
     fn media(&self, source: Id, action: MediaAction, cx: &mut Context<Self>) {
         self.studio.read(cx).engine().post(move |s| s.reconciler.media_action(source, action));
     }
@@ -168,6 +216,8 @@ impl StudioWindow {
             Some(self.colour_section(source, cx).into_any_element())
         } else if is_media(&source.kind) {
             Some(self.media_section(source, cx).into_any_element())
+        } else if is_web(&source.kind) {
+            Some(self.web_section(source, cx).into_any_element())
         } else {
             None
         }
@@ -576,6 +626,58 @@ impl StudioWindow {
             ),
         )
         .into_any_element()
+    }
+
+    /// A web page: its address, its size (the page's layout width, and the frame's), how often it
+    /// may repaint, and a reload.
+    fn web_section(&self, source: &Source, cx: &mut Context<Self>) -> impl IntoElement {
+        const SIZES: &[(&str, &str, (i64, i64))] = &[
+            ("1080p", "Landscape, 1920×1080", (1920, 1080)),
+            ("720p", "Landscape, 1280×720", (1280, 720)),
+            ("Vertical", "Portrait, 1080×1920", (1080, 1920)),
+            ("Square", "1080×1080", (1080, 1080)),
+        ];
+        let (id, settings) = (source.id, source.settings.clone());
+        let width = settings["width"].as_i64().unwrap_or(1920);
+        let height = settings["height"].as_i64().unwrap_or(1080);
+        let fps = settings["fps"].as_i64().unwrap_or(30);
+        let set = |pairs: &[(&str, Value)]| {
+            let mut s = settings.clone();
+            for (key, value) in pairs {
+                s = with(&s, key, value.clone());
+            }
+            Command::SetSourceSettings { source: id, settings: s }
+        };
+        let sizes = SIZES
+            .iter()
+            .map(|(label, _, (w, h))| (*label, set(&[("width", json!(w)), ("height", json!(h))]), (*w, *h) == (width, height)))
+            .collect();
+        let rates = [30i64, 60]
+            .into_iter()
+            .map(|r| (if r == 30 { "30 fps" } else { "60 fps" }, set(&[("fps", json!(r))]), fps == r))
+            .collect();
+        let custom = !SIZES.iter().any(|(_, _, wh)| *wh == (width, height));
+        let label = |text: &'static str| div().text_size(px(11.)).text_color(tok::text_tertiary()).child(text);
+        self.section(
+            "Web page",
+            Some(
+                crate::ui::icon_button("web-reload", "refresh-cw", tok::text_secondary())
+                    .tooltip(crate::ui::tip("Reload the page"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.studio.read(cx).engine().post(move |s| s.reconciler.web_reload(id));
+                    }))
+                    .into_any_element(),
+            ),
+            cx,
+        )
+        .when_some(self.props.web.as_ref().filter(|t| t.source == source.id), |d, t| d.child(TextInput::new(&t.state).small()))
+        .child(label("Size"))
+        .child(self.segmented("web-size", sizes, cx))
+        .when(custom, |d| {
+            d.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!("Custom, {width}×{height}")))
+        })
+        .child(label("Frame rate"))
+        .child(self.segmented("web-fps", rates, cx))
     }
 
     fn colour_section(&self, source: &Source, cx: &mut Context<Self>) -> impl IntoElement {
