@@ -106,6 +106,29 @@ fn directional_and_dip_transitions() {
     let fade = TransitionSettings { kind: TransitionKind::Fade, duration_ms: 300, ..Default::default() };
     transition(&engine, &mut doc, &preview, fade, a);
     assert!(red(sample(&preview)[2]), "fade lands on A");
+
+    // A scene's own transition: switching to B dips through black (B's own), switching back
+    // to A fades (the default), no black on the way.
+    apply(&engine, &mut doc, Command::SetSceneTransition { scene: bb, transition: Some(dip) });
+    let watch = |doc: &mut Document, to: Id, ms: u64| {
+        apply(&engine, doc, Command::SetProgram { scene: Some(to) });
+        let end = Instant::now() + Duration::from_millis(ms + 300);
+        let (mut seen, mut frames) = (Vec::new(), preview.frames());
+        while Instant::now() < end {
+            if preview.frames() != frames {
+                frames = preview.frames();
+                seen.push(sample(&preview));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        seen
+    };
+    let seen = watch(&mut doc, bb, 800);
+    assert!(seen.iter().any(|[_, _, c]| black(*c)), "to B: its own dip: {seen:?}");
+    assert!(blue(sample(&preview)[2]), "lands on B");
+    let seen = watch(&mut doc, a, 300);
+    assert!(!seen.iter().any(|[_, _, c]| black(*c)), "back to A: the default fade, no black: {seen:?}");
+    assert!(red(sample(&preview)[2]), "lands on A");
     drop(preview);
     drop(engine);
 }

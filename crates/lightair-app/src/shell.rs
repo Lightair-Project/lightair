@@ -2711,9 +2711,23 @@ impl StudioWindow {
 
     /// How scenes change on air: a tile per kind, then its settings as rows (duration;
     /// direction for Slide and Wipe; the video and its cut point for Stinger).
-    fn transition_picker(&self, workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = workspace.transition;
-        let set = move |settings: TransitionSettings| Command::SetTransition { settings };
+    fn transition_picker(&self, workspace: &Workspace, scene: &Scene, cx: &mut Context<Self>) -> impl IntoElement {
+        // this scene's own, or the default every switch uses (what the tiles below change)
+        let own = scene.transition.is_some();
+        let current = scene.transition.unwrap_or(workspace.transition);
+        let sid = scene.id;
+        let set = move |settings: TransitionSettings| {
+            if own { Command::SetSceneTransition { scene: sid, transition: Some(settings) } } else { Command::SetTransition { settings } }
+        };
+        let scope = self.segmented(
+            "tr-scope",
+            vec![
+                ("All scenes", Command::SetSceneTransition { scene: sid, transition: None }, !own),
+                // its own starts as a copy of the default
+                ("This scene", Command::SetSceneTransition { scene: sid, transition: Some(current) }, own),
+            ],
+            cx,
+        );
         // the kinds, as tiles
         let tile = |i: usize, kind: TransitionKind| {
             let on = current.kind == kind;
@@ -2769,7 +2783,18 @@ impl StudioWindow {
                 .child(div().w(px(72.)).flex_none().text_size(px(12.)).text_color(tok::text_secondary()).child(name))
                 .child(div().flex_1().min_w_0().flex().items_center().child(control))
         };
-        let mut body = div().flex().flex_col().gap_2().child(grid);
+        let others = workspace.scenes.iter().filter(|s| s.id != sid && s.transition.is_some()).count();
+        // (worth saying only when other scenes go their own way)
+        let hint = (!own && others > 0).then(|| {
+            format!("Except switching to the {others} scene{} with {} own", if others == 1 { "" } else { "s" }, if others == 1 { "its" } else { "their" })
+        });
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(scope)
+            .children(hint.map(|h| div().text_size(px(11.)).text_color(tok::text_tertiary()).child(h)))
+            .child(grid);
         // duration (a cut has none)
         if current.kind != TransitionKind::Cut {
             let durations: Vec<(&'static str, Command, bool)> = [(300u32, "0.3 s"), (500, "0.5 s"), (800, "0.8 s"), (1200, "1.2 s")]
@@ -3984,10 +4009,20 @@ impl StudioWindow {
                     canvas.height,
                     canvas.fps_num / canvas.fps_den.max(1)
                 ));
-                // How scenes change on air (the same for every scene).
+                // How switching to this scene looks on air: the show's default, or its own.
                 let transition = self
-                    .section("Transition", Some(ui::info("transition-info", "How every scene change looks on air.").into_any_element()), cx)
-                    .child(self.transition_picker(workspace, cx));
+                    .section(
+                        "Transition",
+                        Some(
+                            ui::info(
+                                "transition-info",
+                                "How switching to this scene looks on air. All scenes: the default every switch uses. This scene: its own, used whenever you switch to it.",
+                            )
+                            .into_any_element(),
+                        ),
+                        cx,
+                    )
+                    .child(self.transition_picker(workspace, &scene, cx));
                 let screen = self.screen_zoom_pointer_section(workspace, &scene, cx);
                 body.child(header).child(info).child(screen).child(transition).into_any_element()
             }
