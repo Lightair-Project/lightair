@@ -365,14 +365,48 @@ impl OutputsPanel {
     fn edit_view(&self, e: &Edit, workspace: &Workspace, cx: &mut Context<Self>) -> Div {
         let p = e.platform;
         let caps = self.studio.read(cx).engine().capabilities.encoders.clone();
-        let label = |text: &'static str| {
-            div().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(tok::text_secondary()).child(text)
+        // A row: its name on the left (an ⓘ with its meaning, when it has one), the control right.
+        let row = |name: &'static str, tip: Option<&'static str>, control: AnyElement| {
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .min_h(px(28.))
+                .child(
+                    div()
+                        .w(px(108.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(name))
+                        .children(tip.map(|t| ui::info(name, t))),
+                )
+                // (a row of its own: segmented controls hug their choices; inputs and dropdowns
+                // fill it themselves)
+                .child(div().flex_1().min_w_0().flex().items_center().child(control))
         };
-        let field = |name: &'static str| div().flex().flex_col().gap_1().child(label(name));
-        // a field whose meaning is on hover (an ⓘ by its name)
-        let field_tip = |name: &'static str, tip: &'static str| {
-            div().flex().flex_col().gap_1().child(div().flex().items_center().gap_1().child(label(name)).child(ui::info(name, tip)))
+        // A card of rows under a small title.
+        let card = |title: &'static str| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2p5()
+                .p_3p5()
+                .rounded(px(10.))
+                .bg(tok::bg_raised())
+                .border_1()
+                .border_color(tok::border())
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(tok::text_tertiary())
+                        .child(title.to_uppercase()),
+                )
         };
+        // Choices side by side, in one well (a segmented control).
+        let seg = || div().flex().flex_wrap().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(tok::bg_app());
         let me = cx.entity().downgrade();
         // Change the dialog's draft encoding.
         let set = move |f: Box<dyn Fn(&mut Encoding)>| {
@@ -393,18 +427,14 @@ impl OutputsPanel {
         let chip = |id: (&'static str, usize), text: String, on: bool, enabled: bool| {
             div()
                 .id(id)
-                .px_2()
+                .px_2p5()
                 .h(px(24.))
                 .flex()
                 .items_center()
                 .rounded(px(5.))
-                .text_size(px(11.))
-                .border_1()
-                .border_color(if on { tok::text_secondary() } else { tok::border() })
-                .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
-                .when(!on && enabled, |d| {
-                    d.cursor_pointer().text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised()))
-                })
+                .text_size(px(12.))
+                .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()).font_weight(FontWeight::MEDIUM))
+                .when(!on && enabled, |d| d.cursor_pointer().text_color(tok::text_secondary()).hover(|d| d.text_color(tok::text())))
                 .when(!enabled, |d| d.opacity(0.4).text_color(tok::text_tertiary()))
                 .child(text)
         };
@@ -414,7 +444,7 @@ impl OutputsPanel {
             let current = e.server.and_then(|i| p.servers.get(i)).map_or("Custom address", |(l, _)| *l);
             let selected = e.server;
             let me = cx.entity().downgrade();
-            field("Server").child(Button::new("edit-server").label(current).small().outline().w_full().dropdown_menu(
+            row("Server", None, div().flex_1().child(Button::new("edit-server").label(current).small().outline().w_full().dropdown_caret(true).dropdown_menu(
                 move |mut menu, _, _| {
                     for (i, (l, _)) in p.servers.iter().enumerate() {
                         let me = me.clone();
@@ -432,16 +462,15 @@ impl OutputsPanel {
                     }
                     menu.max_h(px(320.)).scrollable(true)
                 },
-            ))
+            )).into_any_element())
         } else if p.servers.len() == 1 && e.server.is_some() {
-            field("Server")
-                .child(div().text_size(px(12.)).text_color(tok::text_tertiary()).child(host_of(p.servers[0].1)))
+            row("Server", None, div().text_size(px(12.)).text_color(tok::text_tertiary()).child(host_of(p.servers[0].1)).into_any_element())
         } else {
-            field("Server URL").child(Input::new(&e.server_input).small())
+            row("Server URL", None, div().flex_1().child(Input::new(&e.server_input).small()).into_any_element())
         };
 
         // Shape.
-        let mut shapes = div().flex().flex_wrap().gap_1();
+        let mut shapes = seg();
         for (i, f) in workspace.canvases.iter().enumerate() {
             let id = (f.id != workspace.primary_canvas().id).then_some(f.id);
             shapes = shapes.child(
@@ -465,43 +494,46 @@ impl OutputsPanel {
             .enumerate()
             .map(|(k, m)| (m.id, m.name.clone(), k < 5))
             .collect();
-        let mut audio_row = div().flex().flex_wrap().gap_1().child(
-            chip(("edit-audio-master", 0), "Master".to_string(), e.audio_mix.is_none(), true).on_click(cx.listener(|this, _, _, cx| {
-                if let Some(Setup::Edit(e)) = &mut this.setup {
-                    e.audio_mix = None;
+        // a mix by id: its name (the master / off when none)
+        let mix_name = |id: Option<Id>, none: &str| {
+            id.and_then(|id| mixes.iter().find(|m| m.0 == id)).map_or(none.to_string(), |m| m.1.clone())
+        };
+        let me = cx.entity().downgrade();
+        // a dropdown that sets e.audio_mix or e.vod_mix (`vod`)
+        let mix_menu = |id: &'static str, current: String, none: &'static str, vod: bool| {
+            let (me, mixes) = (me.clone(), mixes.clone());
+            Button::new(id).label(current).small().outline().w_full().dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+                let pick = |mix: Option<Id>| {
+                    let me = me.clone();
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        if let Some(me) = me.upgrade() {
+                            me.update(cx, |this, cx| {
+                                if let Some(Setup::Edit(e)) = &mut this.setup {
+                                    if vod {
+                                        e.vod_mix = mix;
+                                    } else {
+                                        e.audio_mix = mix;
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                    }
+                };
+                menu = menu.item(PopupMenuItem::new(none).on_click(pick(None)));
+                if !mixes.is_empty() {
+                    menu = menu.separator().item(PopupMenuItem::label("Mixes"));
                 }
-                cx.notify();
-            })),
-        );
-        for (i, (id, name, usable)) in mixes.iter().cloned().enumerate() {
-            audio_row = audio_row.child(chip(("edit-audio-mix", i), name, e.audio_mix == Some(id), usable).on_click(cx.listener(move |this, _, _, cx| {
-                if usable && let Some(Setup::Edit(e)) = &mut this.setup {
-                    e.audio_mix = Some(id);
+                for (mid, name, usable) in mixes.iter().cloned() {
+                    menu = menu.item(PopupMenuItem::new(name).disabled(!usable).on_click(pick(Some(mid))));
                 }
-                cx.notify();
-            })));
-        }
+                menu
+            })
+        };
+        let audio_row = mix_menu("edit-audio-mix", mix_name(e.audio_mix, "Master"), "Master", false);
         // (the editor's platform: the saved one, or the one its server address belongs to)
         let twitch = p.id == "twitch";
-        let vod_row = twitch.then(|| {
-            let mut row = div().flex().flex_wrap().gap_1().child(
-                chip(("edit-vod-off", 0), "Off".to_string(), e.vod_mix.is_none(), true).on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(Setup::Edit(e)) = &mut this.setup {
-                        e.vod_mix = None;
-                    }
-                    cx.notify();
-                })),
-            );
-            for (i, (id, name, usable)) in mixes.iter().cloned().enumerate() {
-                row = row.child(chip(("edit-vod-mix", i), name, e.vod_mix == Some(id), usable).on_click(cx.listener(move |this, _, _, cx| {
-                    if usable && let Some(Setup::Edit(e)) = &mut this.setup {
-                        e.vod_mix = Some(id);
-                    }
-                    cx.notify();
-                })));
-            }
-            row
-        });
+        let vod_row = twitch.then(|| mix_menu("edit-vod-mix", mix_name(e.vod_mix, "Off"), "Off", true));
 
         // Quality: Automatic, or its own.
         let destination = workspace.outputs.destinations.iter().find(|d| d.id == e.id).cloned();
@@ -517,7 +549,7 @@ impl OutputsPanel {
                 enc.audio_kbps
             )
         };
-        let mut quality = div().flex().flex_col().gap_2().p_3().rounded(px(8.)).bg(tok::bg_raised()).child(
+        let mut quality = card("Quality").child(
             div()
                 .flex()
                 .items_center()
@@ -538,7 +570,7 @@ impl OutputsPanel {
                 }))),
         );
         if let Some(enc) = e.encoding {
-            let mut encoders = div().flex().flex_wrap().gap_1();
+            let mut encoders = seg();
             for (i, choice) in [VideoEncoder::H264, VideoEncoder::Hevc, VideoEncoder::X264].into_iter().enumerate() {
                 let ok = crate::encoding::available(&caps, choice);
                 let mut c = chip(("edit-encoder", i), choice.label().to_string(), enc.encoder == choice, ok);
@@ -581,7 +613,7 @@ impl OutputsPanel {
                         m / 1000
                     )))
                 });
-            let mut heights = div().flex().flex_wrap().gap_1();
+            let mut heights = seg();
             for (i, h) in [None, Some(1080), Some(720), Some(480), Some(360)].into_iter().enumerate() {
                 heights = heights.child(
                     chip(
@@ -593,84 +625,94 @@ impl OutputsPanel {
                     .on_click(set(Box::new(move |e| e.height = h))),
                 );
             }
-            let mut keys = div().flex().flex_wrap().gap_1();
+            let mut keys = seg();
             for (i, k) in [1, 2, 4].into_iter().enumerate() {
                 keys = keys.child(
                     chip(("edit-keyframe", i), format!("{k} s"), enc.keyframe_s == k, true)
                         .on_click(set(Box::new(move |e| e.keyframe_s = k))),
                 );
             }
-            let mut audio = div().flex().flex_wrap().gap_1();
+            let mut audio = seg();
             for (i, k) in [96, 128, 160, 320].into_iter().enumerate() {
                 audio = audio.child(
                     chip(("edit-audio", i), format!("{k} kbps"), enc.audio_kbps == k, true)
                         .on_click(set(Box::new(move |e| e.audio_kbps = k))),
                 );
             }
+            let hevc = enc.encoder == VideoEncoder::Hevc;
             quality = quality
-                .child(field("Encoder").child(encoders).when(enc.encoder == VideoEncoder::Hevc, |d| {
-                    d.child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(tok::text_tertiary())
-                            .child("HEVC streams to YouTube; most other platforms need H.264."),
-                    )
-                }))
-                .child(field("Bitrate").child(bitrate))
-                .child(field("Resolution").child(heights))
-                .child(field("Keyframes every").child(keys))
-                .child(field("Audio").child(audio));
+                .child(div().h(px(1.)).bg(tok::border()))
+                .child(row(
+                    "Encoder",
+                    Some("H.264 plays everywhere; HEVC streams to YouTube (most other platforms need H.264); x264 encodes on the CPU."),
+                    div().flex().items_center().gap_2().child(encoders).when(hevc, |d| {
+                        d.child(div().text_size(px(11.)).text_color(tok::warn()).child("YouTube only"))
+                    }).into_any_element(),
+                ))
+                .child(row("Bitrate", None, bitrate.into_any_element()))
+                .child(row("Resolution", None, heights.into_any_element()))
+                .child(row("Keyframes", Some("How often a full picture is sent: 2 s is what most platforms ask for."), keys.into_any_element()))
+                .child(row("Audio bitrate", None, audio.into_any_element()));
         }
         let id = e.id;
+        let connection = card("Connection")
+            .child(server)
+            .child(row("Stream key", None, div().flex_1().child(Input::new(&e.key).small().mask_toggle()).into_any_element()));
+        let picture_sound = card("Picture & sound")
+            .child(row("Canvas", None, shapes.into_any_element()))
+            .child(row(
+                "Audio",
+                Some("What it hears: the master (everything on air), or a mix built from sends, such as one without the music."),
+                div().flex_1().child(audio_row).into_any_element(),
+            ))
+            .when_some(vod_row, |d, vod| {
+                d.child(row(
+                    "VOD track",
+                    Some("A second track Twitch keeps in your VODs and clips instead of the stream's sound: live viewers hear the stream, the VOD gets, say, a mix without copyrighted music."),
+                    div().flex_1().child(vod).into_any_element(),
+                ))
+            });
         div()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
+                    .pb_1()
                     .child(badge(p, 36.))
                     .child(div().flex_1().child(Input::new(&e.name).small()))
                     .child(
-                        Button::new("edit-remove")
-                            .label("Remove")
-                            .icon(ui::icon("trash"))
-                            .xsmall()
-                            .ghost()
+                        ui::icon_button("edit-remove", "trash", tok::text_secondary())
+                            .tooltip(ui::tip("Remove this destination"))
                             .on_click(cx.listener(move |this, _, _, cx| this.remove_destination(id, cx))),
                     ),
             )
-            .child(server)
-            .child(field("Stream key").child(Input::new(&e.key).small().mask_toggle()))
-            .child(field("Send").child(shapes))
-            .child(field_tip("Audio", "What it hears: the master (everything on air), or a mix built from sends, such as one without the music.").child(audio_row))
-            .when_some(vod_row, |d, row| {
-                d.child(field_tip(
-                    "VOD track",
-                    "Twitch keeps this mix in your VODs and clips instead of the stream's sound: viewers live hear the stream, the VOD has, say, no copyrighted music.",
-                ).child(row))
-            })
-            .child(field("Quality").child(quality))
-            .when_some(e.error.clone(), |d, err| d.child(div().text_size(px(11.)).text_color(tok::error()).child(err)))
+            .child(connection)
+            .child(picture_sound)
+            .child(quality)
+            .when_some(e.error.clone(), |d, err| d.child(div().text_size(px(12.)).text_color(tok::error()).child(err)))
             .child(
                 div()
                     .flex()
+                    .justify_end()
                     .gap_2()
+                    .pt_1()
+                    .child(Button::new("edit-cancel").label("Cancel").small().ghost().on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.setup = None;
+                            cx.notify();
+                        },
+                    )))
                     .child(
                         Button::new("edit-save")
                             .label("Save")
                             .small()
                             .primary()
                             .on_click(cx.listener(|this, _, _, cx| this.save_edit(cx))),
-                    )
-                    .child(Button::new("edit-cancel").label("Cancel").small().ghost().on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.setup = None;
-                            cx.notify();
-                        },
-                    ))),
+                    ),
             )
     }
 
