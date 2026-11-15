@@ -6,7 +6,14 @@
 //!
 //! On Windows, OBS_DIR names the OBS build or install whose libobs Lightair links and runs
 //! (docs/plans/windows.md); the tests run with its `bin/64bit` on PATH.
-//!   cargo xtask test [filter]  build every test program, then run them all at once
+//!   cargo xtask test [--machine] [filter]  build every test program, then run them all at once
+//!
+//! The edit loop (docs/build-speed.md):
+//!   cargo xtask check [--changed]  `cargo check` every target for this Mac (`--changed`: only
+//!                              the crates changed since the last commit and those that use them)
+//!   cargo xtask precommit      clippy for macOS and for Windows, then `cargo xtask test`: what a
+//!                              commit needs (0 warnings, 0 failures)
+//!   cargo xtask prune          delete object files no program in target/debug/deps uses
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -176,11 +183,250 @@ fn main() -> anyhow::Result<()> {
         Some("bundle") => bundle(),
         Some("dev") => dev(),
         Some("test") => test(std::env::args().skip(2).collect()),
+        Some("check") => check(std::env::args().any(|a| a == "--changed")),
+        Some("precommit") => precommit(),
+        Some("prune") => {
+            be_polite();
+            let (files, bytes) = prune(None)?;
+            eprintln!("deleted {files} unused object files ({:.0} MB)", bytes as f64 / 1e6);
+            Ok(())
+        }
         _ => {
-            eprintln!("usage: cargo xtask (modules | bundle | dev | test [filter])");
+            eprintln!(
+                "usage: cargo xtask (modules | bundle | dev | test [--machine] [filter] | check [--changed] | precommit | prune)"
+            );
             Ok(())
         }
     }
+}
+
+fn cargo() -> Command {
+    let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    cmd.current_dir(root());
+    cmd
+}
+
+/// Workspace packages: name, folder (relative to the root), and the workspace packages each one
+/// uses (dev-dependencies too: `--all-targets` builds the tests).
+fn packages() -> anyhow::Result<Vec<(String, PathBuf, Vec<String>)>> {
+    let out = cargo().args(["metadata", "--format-version", "1", "--no-deps", "--offline"]).output()?;
+    anyhow::ensure!(out.status.success(), "cargo metadata failed");
+    let meta: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    let root = root();
+    Ok(meta["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| {
+            let manifest = PathBuf::from(p["manifest_path"].as_str().unwrap_or_default());
+            let dir = manifest.parent().unwrap_or(&root).strip_prefix(&root).unwrap_or(Path::new("")).to_path_buf();
+            let uses = p["dependencies"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|d| d["path"].is_string())
+                .filter_map(|d| d["name"].as_str().map(str::to_string))
+                .collect();
+            (p["name"].as_str().unwrap_or_default().to_string(), dir, uses)
+        })
+        .collect())
+}
+
+/// The packages changed since the last commit (staged, unstaged or new files), and every package
+/// that uses one of them; `None` when a change touches the whole workspace (Cargo.toml at the
+/// root, Cargo.lock, .cargo, the toolchain).
+fn changed_packages() -> anyhow::Result<Option<Vec<String>>> {
+    let out = Command::new("git").current_dir(root()).args(["status", "--porcelain", "-uall"]).output()?;
+    anyhow::ensure!(out.status.success(), "git status failed");
+    let paths: Vec<PathBuf> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.get(3..))
+        // a rename: "old -> new"; both changed
+        .flat_map(|p| p.split(" -> ").map(|p| PathBuf::from(p.trim_matches('"'))).collect::<Vec<_>>())
+        .collect();
+    let packages = packages()?;
+    let mut changed: Vec<String> = Vec::new();
+    for path in &paths {
+        // the deepest package folder holding it (the workspace root is "")
+        let owner = packages
+            .iter()
+            .filter(|(_, dir, _)| !dir.as_os_str().is_empty() && path.starts_with(dir))
+            .max_by_key(|(_, dir, _)| dir.components().count());
+        match owner {
+            Some((name, ..)) => changed.push(name.clone()),
+            None if path.starts_with("docs") || path.extension().is_some_and(|e| e == "md") => {}
+            None if path.starts_with("modules") || path.starts_with("branding") || path.starts_with("screenshots") => {}
+            None => return Ok(None),
+        }
+    }
+    // and whatever uses them, until nothing new is added
+    loop {
+        let more: Vec<String> = packages
+            .iter()
+            .filter(|(name, _, uses)| !changed.contains(name) && uses.iter().any(|u| changed.contains(u)))
+            .map(|(name, ..)| name.clone())
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        changed.extend(more);
+    }
+    changed.sort();
+    changed.dedup();
+    Ok(Some(changed))
+}
+
+/// The inner loop: `cargo check` (all targets, so tests too) for this Mac; clippy and Windows
+/// are for `precommit`. The whole workspace by default: crates that didn't change cost almost
+/// nothing to check, while checking a subset (`--changed`) unifies dependencies' features over
+/// that subset only, so each new subset first rebuilds some dependencies (docs/build-speed.md).
+fn check(changed: bool) -> anyhow::Result<()> {
+    be_polite();
+    // Plain `cargo build` and `cargo test` leave object files behind too: past 50,000 files in
+    // the folder (a few seconds per crate again), clear them first.
+    let crowded = std::fs::read_dir(root().join("target/debug/deps")).map_or(0, |d| d.count()) > 50_000;
+    if crowded {
+        let (files, bytes) = prune(None)?;
+        eprintln!("deleted {files} unused object files ({:.0} MB)", bytes as f64 / 1e6);
+    }
+    let mut cmd = cargo();
+    cmd.args(["check", "--all-targets"]);
+    match if changed { changed_packages()? } else { None } {
+        None => {
+            cmd.arg("--workspace");
+        }
+        Some(packages) if packages.is_empty() => {
+            eprintln!("nothing changed since the last commit (`cargo xtask check` checks everything)");
+            return Ok(());
+        }
+        Some(packages) => {
+            for p in packages {
+                cmd.args(["-p", &p]);
+            }
+        }
+    }
+    run(&mut cmd)
+}
+
+/// Runs clippy for the workspace and all targets, counting warnings (cached results are
+/// replayed, so a clean build with nothing to redo still reports them).
+fn clippy(target: Option<&str>) -> anyhow::Result<usize> {
+    use std::io::BufRead;
+    let mut cmd = cargo();
+    cmd.args(["clippy", "--workspace", "--all-targets", "--message-format=json-render-diagnostics"]);
+    if let Some(t) = target {
+        cmd.args(["--target", t]);
+        // gpui's build script compiles a Windows resource file with llvm-rc; Homebrew's LLVM
+        // keeps it off PATH.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        if !dirs.iter().any(|d| d.join("llvm-rc").exists())
+            && let Some(llvm) = ["/opt/homebrew/opt/llvm/bin", "/usr/local/opt/llvm/bin"]
+                .map(PathBuf::from)
+                .into_iter()
+                .find(|d| d.join("llvm-rc").exists())
+        {
+            dirs.push(llvm);
+            cmd.env("PATH", std::env::join_paths(dirs)?);
+        }
+    }
+    eprintln!(
+        "$ cargo clippy --workspace --all-targets{}",
+        target.map(|t| format!(" --target {t}")).unwrap_or_default()
+    );
+    let mut child = cmd.stdout(std::process::Stdio::piped()).spawn()?;
+    let mut warnings = 0;
+    for line in std::io::BufReader::new(child.stdout.take().unwrap()).lines() {
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line?) else { continue };
+        if msg["reason"] == "compiler-message" && msg["message"]["level"] == "warning" {
+            // rustc's own "N warnings emitted" summary has no code and no spans
+            if msg["message"]["spans"].as_array().is_some_and(|s| !s.is_empty()) {
+                warnings += 1;
+            }
+        }
+    }
+    anyhow::ensure!(child.wait()?.success(), "clippy failed");
+    Ok(warnings)
+}
+
+/// What a commit needs: clippy clean for macOS and for Windows, and every test passing.
+fn precommit() -> anyhow::Result<()> {
+    be_polite();
+    let started = std::time::Instant::now();
+    let mac = clippy(None)?;
+    let mac_took = started.elapsed();
+    let windows = clippy(Some("x86_64-pc-windows-msvc"))?;
+    let windows_took = started.elapsed() - mac_took;
+    eprintln!(
+        "clippy: {mac} warning(s) for macOS ({:.1}s), {windows} for Windows ({:.1}s)",
+        mac_took.as_secs_f64(),
+        windows_took.as_secs_f64()
+    );
+    anyhow::ensure!(mac + windows == 0, "clippy warnings");
+    test(Vec::new())
+}
+
+/// Object files are left in target/debug/deps by every incremental build of a test program or
+/// binary (macOS keeps them for their debug info, under new names each build), and nothing
+/// deletes the old ones. rustc lists that folder each time it starts, so a few hundred thousand
+/// of them cost seconds per crate. This deletes those no program there refers to; with
+/// `programs`, only the leftovers of those programs (just built). Returns (files, bytes).
+fn prune(programs: Option<&[PathBuf]>) -> anyhow::Result<(usize, u64)> {
+    if !cfg!(target_os = "macos") {
+        return Ok((0, 0));
+    }
+    let deps = root().join("target/debug/deps");
+    let mut objects: Vec<String> = Vec::new();
+    let mut found: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(&deps)? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".rcgu.o") {
+            objects.push(name);
+        } else if !name.contains('.') && name.rsplit_once('-').is_some_and(|(_, h)| h.len() == 16) {
+            found.push(deps.join(&name));
+        }
+    }
+    // a program's own objects are named after it: `name-hash.<unit>.<build>.rcgu.o`
+    let only: Option<Vec<String>> = programs.map(|programs| {
+        programs.iter().filter_map(|p| Some(format!("{}.", p.file_name()?.to_string_lossy()))).collect()
+    });
+    let programs = programs.map(<[PathBuf]>::to_vec).unwrap_or(found);
+    let mut used = std::collections::HashSet::new();
+    let lists = std::thread::scope(|s| {
+        let jobs: Vec<_> = programs
+            .chunks(programs.len().div_ceil(8).max(1))
+            .map(|chunk| {
+                s.spawn(move || {
+                    let mut names = Vec::new();
+                    for p in chunk {
+                        let Ok(out) = Command::new("nm").arg("-ap").arg(p).output() else { continue };
+                        for line in String::from_utf8_lossy(&out.stdout).lines() {
+                            if let Some((_, path)) = line.split_once(" OSO ") {
+                                names.push(path.rsplit('/').next().unwrap_or(path).to_string());
+                            }
+                        }
+                    }
+                    names
+                })
+            })
+            .collect();
+        jobs.into_iter().flat_map(|j| j.join().unwrap_or_default()).collect::<Vec<_>>()
+    });
+    used.extend(lists);
+    let (mut files, mut bytes) = (0, 0);
+    for name in objects {
+        let theirs = only.as_ref().is_none_or(|only| only.iter().any(|p| name.starts_with(p.as_str())));
+        if used.contains(&name) || !theirs {
+            continue;
+        }
+        let path = deps.join(&name);
+        let size = std::fs::metadata(&path).map_or(0, |m| m.len());
+        if std::fs::remove_file(&path).is_ok() {
+            files += 1;
+            bytes += size;
+        }
+    }
+    Ok((files, bytes))
 }
 
 /// The SHA-1 of the first valid "Apple Development" code signing identity, if any.
@@ -194,30 +440,53 @@ fn apple_development_identity() -> Option<String> {
         .map(str::to_string)
 }
 
-/// A test program to run: its name, path, and package directory (cargo runs tests from there).
+/// A test program to run: its name, path, package directory (cargo runs tests from there), and
+/// arguments of its own (one test of a program whose tests each run in a process of their own).
 struct TestBin {
     name: String,
     exe: PathBuf,
     dir: PathBuf,
+    args: Vec<String>,
 }
+
+/// Ignored tests that measure rather than test (run by hand, optimised): `--machine` leaves
+/// them out.
+const MEASUREMENTS: &[&str] = &["podcast_graph_cost", "frames_per_second", "swizzle_cost"];
+
+/// Test programs whose tests start libobs (process-global): each test runs as a process of its
+/// own (lightair_engine::testing).
+const OWN_PROCESS: &[&str] = &["lightair-engine/engine", "lightair-preview/preview"];
 
 /// `cargo test` runs test programs one after another, and most of ours start libobs and record
 /// real seconds of video, so they spend their time waiting. This builds them all, then runs them
 /// side by side, slowest first (timings from the last run), so the whole suite takes about as
 /// long as its slowest program. Arguments after `test` are passed to every program (a filter,
-/// `--nocapture`, ...). Doc tests aren't run; `cargo test --doc` does those.
+/// `--nocapture`, ...). `--machine` also runs the tests that depend on this Mac (its audio
+/// devices, its settings), which are ignored otherwise. Doc tests aren't run; `cargo test --doc`
+/// does those.
 fn test(args: Vec<String>) -> anyhow::Result<()> {
     use std::io::BufRead;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     let started = Instant::now();
+    let machine = args.iter().any(|a| a == "--machine");
+    let mut args: Vec<String> = args.into_iter().filter(|a| a != "--machine").collect();
+    // the filter (the first argument that isn't a flag)
+    let filter = args.iter().position(|a| !a.starts_with('-')).map(|i| args.remove(i));
+    if machine {
+        args.push("--include-ignored".into());
+        for m in MEASUREMENTS {
+            args.extend(["--skip".into(), m.to_string()]);
+        }
+    }
+    let flags = args.clone();
+    args.extend(filter.clone());
     // Polite: the build and the tests run at a lower priority, so the Mac stays responsive
     // (typing elsewhere keeps up) while they run.
     be_polite();
-    let mut build = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+    let mut build = cargo()
         .args(["test", "--workspace", "--no-run", "--message-format=json-render-diagnostics"])
-        .current_dir(root())
         .stdout(std::process::Stdio::piped())
         .spawn()?;
     let mut bins = Vec::new();
@@ -235,10 +504,38 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
             "test" => format!("{}/{target}", package.unwrap_or_default()),
             _ => format!("{} ({kind})", package.unwrap_or_default()),
         };
-        bins.push(TestBin { name, exe: exe.into(), dir: manifest.parent().unwrap().to_path_buf() });
+        bins.push(TestBin { name, exe: exe.into(), dir: manifest.parent().unwrap().to_path_buf(), args: Vec::new() });
     }
     anyhow::ensure!(build.wait()?.success(), "build failed");
     let built = started.elapsed();
+    let built_programs: Vec<PathBuf> = bins.iter().map(|b| b.exe.clone()).collect();
+    let pruning = std::thread::spawn(move || prune(Some(&built_programs)));
+
+    // One test per process where libobs starts: the filter picks tests here, as the program
+    // would.
+    let mut expanded = Vec::new();
+    for bin in bins {
+        if !OWN_PROCESS.contains(&bin.name.as_str()) {
+            expanded.push(bin);
+            continue;
+        }
+        let out = Command::new(&bin.exe).args(["--list", "--format", "terse"]).current_dir(&bin.dir).output()?;
+        anyhow::ensure!(out.status.success(), "{} --list failed", bin.name);
+        for test in String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.strip_suffix(": test")) {
+            if filter.as_deref().is_some_and(|f| !test.contains(f)) {
+                continue;
+            }
+            let mut args = vec![test.to_string(), "--exact".into()];
+            args.extend(flags.iter().cloned());
+            expanded.push(TestBin {
+                name: format!("{}/{test}", bin.name.split('/').next().unwrap_or_default()),
+                exe: bin.exe.clone(),
+                dir: bin.dir.clone(),
+                args,
+            });
+        }
+    }
+    let mut bins = expanded;
 
     // Slowest first, so the long ones aren't left starting last.
     let times_path = root().join("target/test-times.json");
@@ -250,12 +547,17 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
     });
 
     // Each program runs from a folder of its own (a hard link, no copy). macOS treats a bare
-    // program's folder as its bundle and lists it while libobs starts; target/debug/deps holds
-    // every build's leftovers (hundreds of thousands of files), which costs seconds per program.
-    // The recording tests need OBS's mux helper next to the program.
+    // program's folder as its bundle and lists it while libobs starts, and target/debug/deps
+    // holds thousands of files (more when builds' leftovers pile up), which costs seconds per
+    // program. The recording tests need OBS's mux helper next to the program.
     let run_dir = root().join("target/test-run");
     let mux = obs_mux();
+    let mut linked_to = std::collections::HashMap::new();
     for bin in &mut bins {
+        if let Some(linked) = linked_to.get(&bin.exe) {
+            bin.exe = PathBuf::clone(linked);
+            continue;
+        }
         let file = bin.exe.file_name().unwrap().to_owned();
         let dir = run_dir.join(&file);
         std::fs::create_dir_all(&dir)?;
@@ -268,20 +570,18 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
         if !helper.exists() && mux.exists() {
             let _ = link_file(&mux, &helper);
         }
-        bin.exe = linked;
+        linked_to.insert(std::mem::replace(&mut bin.exe, linked.clone()), linked);
     }
-
-    // Tests that sample frames mid-animation need the machine to themselves: they run after
-    // the rest, one at a time. (Tests that count dropped frames skip that check while sharing.)
-    const ALONE: &[&str] = &["lightair-preview/transitions"];
-    let (alone, together): (Vec<TestBin>, Vec<TestBin>) =
-        bins.into_iter().partition(|b| ALONE.contains(&b.name.as_str()));
 
     // half the cores: each program runs libobs and real-time audio threads of its own
     let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8).div_ceil(2).max(2);
     let results = Arc::new(Mutex::new(Vec::new()));
-    run_tests(together, jobs, &args, &results);
-    run_tests(alone, 1, &args, &results);
+    run_tests(bins, jobs, &args, &results);
+    if let Ok(Ok((files, bytes))) = pruning.join()
+        && files > 0
+    {
+        eprintln!("deleted {files} object files earlier builds left ({:.0} MB)", bytes as f64 / 1e6);
+    }
 
     let results = std::mem::take(&mut *results.lock().unwrap());
     for (name, _, took, _, _) in &results {
@@ -295,7 +595,7 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
     let passed: usize = results.iter().map(|r| r.3).sum();
     let serial: Duration = results.iter().map(|r| r.2).sum();
     eprintln!(
-        "\n{} programs, {passed} tests, {} failed · build {:.1}s, run {:.1}s (one after another: {:.1}s)",
+        "\n{} processes, {passed} tests, {} failed · build {:.1}s, run {:.1}s (one after another: {:.1}s)",
         results.len(),
         failed.len(),
         built.as_secs_f64(),
@@ -338,8 +638,10 @@ fn run_tests(
                             cmd.env("PATH", joined);
                         }
                     }
+                    let own_process = !bin.args.is_empty();
                     let out = cmd
-                        .args(&args)
+                        .args(if own_process { &bin.args } else { &args })
+                        .envs(own_process.then_some(("LIGHTAIR_TEST_OWN_PROCESS", "1")))
                         .current_dir(&bin.dir)
                         .env("CARGO_MANIFEST_DIR", &bin.dir)
                         // Tests that measure frame timing skip that when sharing the GPU.
@@ -366,6 +668,8 @@ fn run_tests(
                         .filter_map(|l| l.strip_prefix("test result: "))
                         .filter_map(|l| l.split("; ").next()?.split_whitespace().nth(1)?.parse::<usize>().ok())
                         .sum();
+                    // a test of its own that didn't run (a name that no longer matches) isn't a pass
+                    let ok = ok && (!own_process || passed == 1 || log.contains(" 1 ignored"));
                     eprintln!(
                         "{} {:>6.1}s  {} ({passed})",
                         if ok { "ok  " } else { "FAIL" },

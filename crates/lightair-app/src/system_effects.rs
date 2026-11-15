@@ -54,6 +54,7 @@ pub fn backgrounds_on() -> Option<bool> {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[ignore = "depends on this Mac: needs macOS 15 (Backgrounds); cargo xtask test --machine"]
     fn this_macos_reports_its_effects() {
         // Present since macOS 12 / 15; the values are the user's.
         assert!(super::portrait_on().is_some());
