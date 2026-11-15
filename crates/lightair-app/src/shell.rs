@@ -2287,10 +2287,19 @@ impl StudioWindow {
         let state = studio.virtual_camera();
         let workspace = studio.workspace();
         let shown = studio.virtual_camera_canvas.and_then(|c| workspace.canvas(c)).unwrap_or_else(|| workspace.primary_canvas());
-        let shown_name = shown.name.clone();
+        let canvas_name = shown.name.clone();
         let listed = studio.virtual_camera_name;
+        let chosen_scene = studio.virtual_camera_scene.and_then(|id| workspace.scene(id));
+        // what it shows, said plainly: a scene, or the one on air (and on which canvas, if several)
+        let mut shown_name = chosen_scene.map_or_else(|| "the scene on air".to_string(), |s| format!("“{}”", s.name));
+        let scenes: Vec<(Id, String, bool)> =
+            workspace.scenes.iter().map(|s| (s.id, s.name.clone(), chosen_scene.is_some_and(|c| c.id == s.id))).collect();
+        let on_air = chosen_scene.is_none();
         let canvases: Vec<(Id, String, bool)> = workspace.canvases.iter().map(|c| (c.id, c.name.clone(), c.id == shown.id)).collect();
         let several = canvases.len() > 1;
+        if several {
+            shown_name = format!("{shown_name} ({canvas_name})");
+        }
         let on = matches!(state, OutputState::Active { .. });
         let busy = matches!(state, OutputState::Starting | OutputState::Stopping);
         let failed = match &state {
@@ -2347,8 +2356,27 @@ impl StudioWindow {
                     .icon(ui::icon(if on || busy { "square" } else { "play" }))
                     .on_click(act(|s, cx| s.toggle_virtual_camera(cx))),
             );
+            // which scene: the one on air, or a scene of its own
+            menu = menu.separator().item(PopupMenuItem::label("Shows")).item(
+                PopupMenuItem::new("Scene on air").icon(ui::icon("radio")).checked(on_air).on_click({
+                    let me = me.clone();
+                    move |_, _, cx| {
+                        if let Some(me) = me.upgrade() {
+                            me.update(cx, |this, cx| this.studio.update(cx, |s, cx| s.set_virtual_camera_scene(None, cx)));
+                        }
+                    }
+                }),
+            );
+            for (id, name, chosen) in scenes.clone() {
+                let me = me.clone();
+                menu = menu.item(PopupMenuItem::new(name).checked(chosen).on_click(move |_, _, cx| {
+                    if let Some(me) = me.upgrade() {
+                        me.update(cx, |this, cx| this.studio.update(cx, |s, cx| s.set_virtual_camera_scene(Some(id), cx)));
+                    }
+                }));
+            }
             if several {
-                menu = menu.separator().item(PopupMenuItem::label("Shows"));
+                menu = menu.separator().item(PopupMenuItem::label("Canvas"));
                 for (id, name, chosen) in canvases.clone() {
                     let me = me.clone();
                     menu = menu.item(PopupMenuItem::new(name).checked(chosen).on_click(move |_, _, cx| {

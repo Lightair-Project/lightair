@@ -466,7 +466,22 @@ pub struct Outputs {
     streams: HashMap<Id, Running>,
     clips: Option<Running>,
     virtual_camera: Option<Running>,
+    /// The virtual camera's own canvas, while it shows one scene rather than what's on air.
+    virtual_camera_canvas: Option<crate::obs::ObsCanvas>,
 }
+
+/// One scene for the virtual camera (instead of a canvas's program): its scene source and the
+/// size and rate of the canvas it belongs to.
+#[derive(Debug, Clone, Copy)]
+pub struct VirtualCameraScene {
+    pub source: *mut sys::obs_source_t,
+    pub width: u32,
+    pub height: u32,
+    pub fps_num: u32,
+    pub fps_den: u32,
+}
+
+unsafe impl Send for VirtualCameraScene {}
 
 fn c(s: &str) -> CString {
     CString::new(s).unwrap_or_default()
@@ -836,13 +851,25 @@ impl Outputs {
         }
     }
 
-    /// Starts the virtual camera on a canvas (`video`: its canvas video; `None` the primary).
-    /// Raw frames, no encoders. Its status is `OutputKey::VirtualCamera`'s.
-    pub fn start_virtual_camera(&mut self, video: Option<VideoOutput>) -> Result<(), String> {
+    /// Starts the virtual camera: what a canvas has on air (`video`: its canvas video; `None` the
+    /// primary), or one scene (`scene`: on a canvas of the camera's own). Raw frames, no
+    /// encoders. Its status is `OutputKey::VirtualCamera`'s.
+    pub fn start_virtual_camera(&mut self, video: Option<VideoOutput>, scene: Option<VirtualCameraScene>) -> Result<(), String> {
         if self.virtual_camera.as_ref().is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
             return Ok(());
         }
         self.drop_virtual_camera();
+        let video = match scene {
+            Some(sc) => {
+                let canvas = crate::obs::ObsCanvas::create("Virtual camera", sc.width, sc.height, sc.fps_num, sc.fps_den)
+                    .ok_or_else(|| "Couldn't make the virtual camera's canvas.".to_string())?;
+                unsafe { sys::obs_canvas_set_channel(canvas.as_ptr(), 0, sc.source) };
+                let v = VideoOutput(unsafe { sys::obs_canvas_get_video(canvas.as_ptr()) });
+                self.virtual_camera_canvas = Some(canvas);
+                Some(v)
+            }
+            None => video,
+        };
         let key = OutputKey::VirtualCamera;
         unsafe {
             let output = sys::obs_output_create(c"lightair_virtualcam".as_ptr(), c"Virtual camera".as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
@@ -885,6 +912,7 @@ impl Outputs {
             if !sys::obs_output_start(output) {
                 let err = last_error(output).unwrap_or_else(|| "The virtual camera didn't start.".into());
                 running.release();
+                self.virtual_camera_canvas = None;
                 runtime().update(key, |s| s.state = OutputState::Failed(err.clone()));
                 return Err(err);
             }
@@ -902,12 +930,15 @@ impl Outputs {
             });
             unsafe { sys::obs_output_stop(r.output) };
         }
+        // (a raw output stops at once: its canvas can go)
+        self.virtual_camera_canvas = None;
     }
 
     fn drop_virtual_camera(&mut self) {
         if let Some(old) = self.virtual_camera.take() {
             unsafe { old.release() };
         }
+        self.virtual_camera_canvas = None;
     }
 
     /// Starts the replay buffer (docs/11-outputs-streaming-recording.md, "Clips").
