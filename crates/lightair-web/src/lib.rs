@@ -18,6 +18,10 @@ use std::sync::Arc;
 /// Where a page's frames go: premultiplied BGRA rows, `width × 4` bytes each, and the size.
 pub type FrameSink = Arc<dyn Fn(&[u8], u32, u32) + Send + Sync>;
 
+/// Where a page's sound goes: one plane of 32-bit float samples per channel (all the same
+/// length), and the sample rate. Chromium sends sound here instead of playing it.
+pub type AudioSink = Arc<dyn Fn(&[&[f32]], u32) + Send + Sync>;
+
 /// A page's settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageOptions {
@@ -34,16 +38,22 @@ pub struct Page {
 }
 
 impl Page {
-    /// Opens `options` (made on the main thread soon after); its frames go to `sink`.
-    pub fn open(options: PageOptions, sink: FrameSink) -> Page {
+    /// Opens `options` (made on the main thread soon after); its frames go to `sink`, its sound
+    /// to `audio`.
+    pub fn open(options: PageOptions, sink: FrameSink, audio: AudioSink) -> Page {
         let id = imp::next_id();
-        imp::request(imp::Request::Open { id, options, sink });
+        imp::request(imp::Request::Open { id, options, sink, audio });
         Page { id }
     }
 
     /// New settings: another address, size or rate.
     pub fn update(&self, options: PageOptions) {
         imp::request(imp::Request::Update { id: self.id, options });
+    }
+
+    /// Loads the page again, skipping the cache.
+    pub fn reload(&self) {
+        imp::request(imp::Request::Reload { id: self.id });
     }
 }
 
@@ -77,7 +87,7 @@ pub fn busy() -> bool {
 
 #[cfg(any(target_os = "macos", all(windows, not(lightair_cross_check))))]
 mod imp {
-    use super::{FrameSink, PageOptions};
+    use super::{AudioSink, FrameSink, PageOptions};
     use cef::*;
     use parking_lot::Mutex;
     use std::cell::RefCell;
@@ -86,8 +96,9 @@ mod imp {
     use std::sync::Arc;
 
     pub enum Request {
-        Open { id: u64, options: PageOptions, sink: FrameSink },
+        Open { id: u64, options: PageOptions, sink: FrameSink, audio: AudioSink },
         Update { id: u64, options: PageOptions },
+        Reload { id: u64 },
         Close { id: u64 },
     }
 
@@ -187,8 +198,15 @@ mod imp {
             }
             fn on_before_command_line_processing(&self, _process_type: Option<&CefString>, command_line: Option<&mut CommandLine>) {
                 let Some(line) = command_line else { return };
-                // no window of its own, no keychain prompts, no first-run UI
-                for switch in ["use-mock-keychain", "disable-features=MacAppCodeSignClone", "no-first-run", "no-default-browser-check"] {
+                // no window of its own, no keychain prompts, no first-run UI; sound plays without
+                // a click (nobody clicks a page in a show)
+                for switch in [
+                    "use-mock-keychain",
+                    "disable-features=MacAppCodeSignClone",
+                    "no-first-run",
+                    "no-default-browser-check",
+                    "autoplay-policy=no-user-gesture-required",
+                ] {
                     match switch.split_once('=') {
                         Some((name, value)) => line.append_switch_with_value(Some(&CefString::from(name)), Some(&CefString::from(value))),
                         None => line.append_switch(Some(&CefString::from(switch))),
@@ -308,12 +326,55 @@ mod imp {
         }
     }
 
+    // A page's sound: asked for as 48 kHz stereo; Chromium says what it sends when a stream
+    // starts (rate, channels), then sends planar float packets.
+    wrap_audio_handler! {
+        struct PageAudio {
+            format: Arc<Mutex<(u32, usize)>>,
+            sink: AudioSink,
+        }
+        impl AudioHandler {
+            fn audio_parameters(&self, _browser: Option<&mut Browser>, params: Option<&mut AudioParameters>) -> ::std::os::raw::c_int {
+                let Some(params) = params else { return 0 };
+                params.channel_layout = ChannelLayout::LAYOUT_STEREO;
+                params.sample_rate = 48_000;
+                if params.frames_per_buffer <= 0 {
+                    params.frames_per_buffer = 1024;
+                }
+                1
+            }
+            fn on_audio_stream_started(&self, _browser: Option<&mut Browser>, params: Option<&AudioParameters>, channels: ::std::os::raw::c_int) {
+                let rate = params.map_or(48_000, |p| p.sample_rate.max(1) as u32);
+                *self.format.lock() = (rate, channels.clamp(1, 8) as usize);
+            }
+            fn on_audio_stream_packet(&self, _browser: Option<&mut Browser>, data: *mut *const f32, frames: ::std::os::raw::c_int, _pts: i64) {
+                let (rate, channels) = *self.format.lock();
+                if data.is_null() || frames <= 0 {
+                    return;
+                }
+                let mut planes: [&[f32]; 8] = [&[]; 8];
+                for (c, plane) in planes.iter_mut().enumerate().take(channels) {
+                    let ptr = unsafe { *data.add(c) };
+                    if ptr.is_null() {
+                        return;
+                    }
+                    *plane = unsafe { std::slice::from_raw_parts(ptr, frames as usize) };
+                }
+                (self.sink)(&planes[..channels], rate);
+            }
+        }
+    }
+
     wrap_client! {
         struct PageClient {
             render: RenderHandler,
             life: LifeSpanHandler,
+            audio: AudioHandler,
         }
         impl Client {
+            fn audio_handler(&self) -> Option<AudioHandler> {
+                Some(self.audio.clone())
+            }
             fn render_handler(&self) -> Option<RenderHandler> {
                 Some(self.render.clone())
             }
@@ -323,9 +384,10 @@ mod imp {
         }
     }
 
-    fn open(id: u64, options: PageOptions, sink: FrameSink) {
+    fn open(id: u64, options: PageOptions, sink: FrameSink, audio: AudioSink) {
         let size = Arc::new(Mutex::new((options.width, options.height)));
-        let mut client = PageClient::new(PageRender::new(size.clone(), sink), PageLife::new(id));
+        let format = Arc::new(Mutex::new((48_000, 2)));
+        let mut client = PageClient::new(PageRender::new(size.clone(), sink), PageLife::new(id), PageAudio::new(format, audio));
         let window = WindowInfo { windowless_rendering_enabled: 1, ..Default::default() };
         let browser_settings = BrowserSettings {
             windowless_frame_rate: options.fps.clamp(1, 60) as i32,
@@ -362,6 +424,14 @@ mod imp {
         });
     }
 
+    fn reload(id: u64) {
+        PAGES.with(|pages| {
+            if let Some(browser) = pages.borrow().get(&id).and_then(|live| live.browser.clone()) {
+                browser.reload_ignore_cache();
+            }
+        });
+    }
+
     fn close(id: u64) {
         OPEN_PAGES.fetch_sub(1, Ordering::Relaxed);
         PAGES.with(|pages| {
@@ -389,8 +459,9 @@ mod imp {
         let requests = std::mem::take(&mut *REQUESTS.lock());
         for r in requests {
             match r {
-                Request::Open { id, options, sink } => open(id, options, sink),
+                Request::Open { id, options, sink, audio } => open(id, options, sink, audio),
                 Request::Update { id, options } => update(id, options),
+                Request::Reload { id } => reload(id),
                 Request::Close { id } => close(id),
             }
         }
@@ -445,12 +516,13 @@ mod imp {
 /// No Chromium here (the Windows check made from a Mac): pages never paint.
 #[cfg(not(any(target_os = "macos", all(windows, not(lightair_cross_check)))))]
 mod imp {
-    use super::{FrameSink, PageOptions};
+    use super::{AudioSink, FrameSink, PageOptions};
 
     #[allow(dead_code)] // (asked for, never made here)
     pub enum Request {
-        Open { id: u64, options: PageOptions, sink: FrameSink },
+        Open { id: u64, options: PageOptions, sink: FrameSink, audio: AudioSink },
         Update { id: u64, options: PageOptions },
+        Reload { id: u64 },
         Close { id: u64 },
     }
 

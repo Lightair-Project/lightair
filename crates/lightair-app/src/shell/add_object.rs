@@ -117,7 +117,7 @@ impl StudioWindow {
         if typed.is_empty() {
             return;
         }
-        let url = if typed.contains("://") || typed.starts_with("data:") { typed } else { format!("https://{typed}") };
+        let url = super::object_props::web_address(&typed);
         let (w, h) = a.web_size;
         let name = url.split("://").nth(1).and_then(|r| r.split('/').next()).filter(|h| !h.is_empty()).unwrap_or("Web page").to_string();
         let settings = serde_json::json!({"url": url, "width": w, "height": h, "fps": 30});

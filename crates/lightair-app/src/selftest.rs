@@ -290,8 +290,22 @@ fn virtual_camera(engine: &Engine) {
     println!("SELFTEST stopped: {:?}", lightair_engine::outputs::runtime().get(lightair_engine::outputs::OutputKey::VirtualCamera).state);
 }
 
-/// `LIGHTAIR_SELFTEST=web`: a web page (magenta) on air, Chromium driven from this thread; the
-/// program's colour.
+/// The loudest sample the self-test page has sent libobs (linear amplitude bits).
+static WEB_PEAK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+unsafe extern "C" fn web_audio(_: *mut std::ffi::c_void, _: *mut lightair_engine::sys::obs_source_t, audio: *const lightair_engine::sys::audio_data, _: bool) {
+    let Some(audio) = (unsafe { audio.as_ref() }) else { return };
+    let plane = audio.data[0] as *const f32;
+    if plane.is_null() {
+        return;
+    }
+    let samples = unsafe { std::slice::from_raw_parts(plane, audio.frames as usize) };
+    let loudest = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    WEB_PEAK.fetch_max(loudest.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `LIGHTAIR_SELFTEST=web`: a web page (magenta, playing a tone) on air, Chromium driven from
+/// this thread; the program's colour and the page's sound.
 fn web(engine: &Engine) {
     // the application object Chromium works with on macOS (the window loop makes it otherwise)
     #[cfg(target_os = "macos")]
@@ -302,9 +316,10 @@ fn web(engine: &Engine) {
     }
     println!("SELFTEST Chromium bundled: {}", lightair_web::available());
     engine.call(|s| {
-        let url = "data:text/html,<html><body style='margin:0;background:%23ff00ff'></body></html>";
+        let url = "data:text/html,<html><body style='margin:0;background:%23ff00ff'><script>const c=new AudioContext();const o=c.createOscillator();o.connect(c.destination);o.start();</script></body></html>";
         let settings = Data::from_json(&serde_json::json!({"url": url, "width": 1920, "height": 1080, "fps": 30}));
         let src = ObsSource::create(lightair_engine::web::KIND, "Self-test page", Some(&settings)).unwrap();
+        unsafe { lightair_engine::sys::obs_source_add_audio_capture_callback(src.as_ptr(), Some(web_audio), std::ptr::null_mut()) };
         let scene = ObsScene::create("Self-test").unwrap();
         scene.add(&src);
         s.sources.insert("page".into(), src);
@@ -321,7 +336,8 @@ fn web(engine: &Engine) {
             next += 1;
             let (w, h) = engine.call(|s| s.sources.get("page").map_or((0, 0), |c| (c.width(), c.height())));
             let colour = preview.latest_frame().and_then(|f| lightair_preview::sample_ycbcr(&f, 0.3, 0.3));
-            println!("SELFTEST {} s: page {w}x{h}, program YCbCr {colour:?} (magenta is about 73/227/244)", next - 1);
+            let peak = f32::from_bits(WEB_PEAK.swap(0, std::sync::atomic::Ordering::Relaxed));
+            println!("SELFTEST {} s: page {w}x{h}, program YCbCr {colour:?} (magenta is about 73/227/244), sound peak {peak:.3}", next - 1);
         }
     }
 }

@@ -65,6 +65,13 @@ impl Reconciler {
         }
     }
 
+    /// Loads a web page source's page again.
+    pub fn web_reload(&self, source: Id) {
+        if let Some(src) = self.source_ptr(source) {
+            crate::web::reload(src);
+        }
+    }
+
     pub fn media_action(&self, source: Id, action: MediaAction) {
         let Some(src) = self.source_ptr(source) else { return };
         unsafe {

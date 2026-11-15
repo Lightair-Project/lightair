@@ -1537,10 +1537,11 @@ impl StudioWindow {
         let source_id = source.id;
         let object = Object::new(name, source.id, layouts);
         let object_id = object.id;
-        let cmd = Command::Batch {
-            label: format!("Add {name}"),
-            commands: vec![Command::AddSource { source }, Command::AddObject { scene, object, index: None }],
-        };
+        // a source with sound of its own (a web page) also gets a mixer track
+        let track = (kind == lightair_engine::web::KIND).then(|| lightair_core::Track::new(name, source_id));
+        let mut commands = vec![Command::AddSource { source }, Command::AddObject { scene, object, index: None }];
+        commands.extend(track.map(|track| Command::AddTrack { track, index: None }));
+        let cmd = Command::Batch { label: format!("Add {name}"), commands };
         self.exec(cmd, cx);
         self.select_object(Some(object_id), cx);
         Some(source_id)
