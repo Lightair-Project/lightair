@@ -160,6 +160,63 @@ fn section_label(text: &'static str) -> Div {
         .child(text)
 }
 
+/// A form row: its name on the left (an ⓘ with its meaning, when it has one), the control on
+/// the right (segmented controls hug their choices; inputs and dropdowns fill the row).
+fn form_row(name: &'static str, tip: Option<SharedString>, control: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .min_h(px(28.))
+        .child(
+            div()
+                .w(px(108.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(name))
+                .children(tip.map(|t| ui::info(name, t))),
+        )
+        .child(div().flex_1().min_w_0().flex().items_center().child(control))
+}
+
+/// A card of form rows under a small title.
+fn form_card(title: &'static str) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2p5()
+        .p_3p5()
+        .rounded(px(10.))
+        .bg(tok::bg_raised())
+        .border_1()
+        .border_color(tok::border())
+        .child(div().text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child(title.to_uppercase()))
+}
+
+/// Choices side by side in one well (a segmented control)...
+fn segments() -> Div {
+    div().flex().flex_wrap().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(tok::bg_app())
+}
+
+/// ...and one of them.
+fn segment(id: impl Into<ElementId>, text: impl Into<SharedString>, on: bool, enabled: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px_2p5()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .rounded(px(5.))
+        .text_size(px(12.))
+        .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()).font_weight(FontWeight::MEDIUM))
+        .when(!on && enabled, |d| d.cursor_pointer().text_color(tok::text_secondary()).hover(|d| d.text_color(tok::text())))
+        .when(!enabled, |d| d.opacity(0.4).text_color(tok::text_tertiary()))
+        .child(text.into())
+}
+
 fn toggle(id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
     div()
         .id(id)
@@ -365,48 +422,9 @@ impl OutputsPanel {
     fn edit_view(&self, e: &Edit, workspace: &Workspace, cx: &mut Context<Self>) -> Div {
         let p = e.platform;
         let caps = self.studio.read(cx).engine().capabilities.encoders.clone();
-        // A row: its name on the left (an ⓘ with its meaning, when it has one), the control right.
-        let row = |name: &'static str, tip: Option<&'static str>, control: AnyElement| {
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .min_h(px(28.))
-                .child(
-                    div()
-                        .w(px(108.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(name))
-                        .children(tip.map(|t| ui::info(name, t))),
-                )
-                // (a row of its own: segmented controls hug their choices; inputs and dropdowns
-                // fill it themselves)
-                .child(div().flex_1().min_w_0().flex().items_center().child(control))
-        };
-        // A card of rows under a small title.
-        let card = |title: &'static str| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_2p5()
-                .p_3p5()
-                .rounded(px(10.))
-                .bg(tok::bg_raised())
-                .border_1()
-                .border_color(tok::border())
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(tok::text_tertiary())
-                        .child(title.to_uppercase()),
-                )
-        };
-        // Choices side by side, in one well (a segmented control).
-        let seg = || div().flex().flex_wrap().gap(px(2.)).p(px(2.)).rounded(px(7.)).bg(tok::bg_app());
+        let row = |name: &'static str, tip: Option<&'static str>, control: AnyElement| form_row(name, tip.map(SharedString::from), control);
+        let card = form_card;
+        let seg = segments;
         let me = cx.entity().downgrade();
         // Change the dialog's draft encoding.
         let set = move |f: Box<dyn Fn(&mut Encoding)>| {
@@ -424,20 +442,7 @@ impl OutputsPanel {
                 }
             }
         };
-        let chip = |id: (&'static str, usize), text: String, on: bool, enabled: bool| {
-            div()
-                .id(id)
-                .px_2p5()
-                .h(px(24.))
-                .flex()
-                .items_center()
-                .rounded(px(5.))
-                .text_size(px(12.))
-                .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()).font_weight(FontWeight::MEDIUM))
-                .when(!on && enabled, |d| d.cursor_pointer().text_color(tok::text_secondary()).hover(|d| d.text_color(tok::text())))
-                .when(!enabled, |d| d.opacity(0.4).text_color(tok::text_tertiary()))
-                .child(text)
-        };
+        let chip = |id: (&'static str, usize), text: String, on: bool, enabled: bool| segment(id, text, on, enabled);
 
         // Server: the platform's list, or the typed address.
         let server = if p.servers.len() > 1 {
@@ -748,6 +753,11 @@ impl OutputsPanel {
             .child(grid)
     }
 
+    /// Whether the destination dialog (adding or editing) is open.
+    pub fn dialog_open(&self) -> bool {
+        self.setup.is_some()
+    }
+
     /// The Add destination dialog, drawn over the window while open.
     pub fn dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let workspace = self.studio.read(cx).workspace().clone();
@@ -777,6 +787,8 @@ impl OutputsPanel {
                 .items_start()
                 .pt(px(48.))
                 .bg(tok::scrim())
+                // a sheet: nothing behind it takes the mouse (scrolling here never pans the canvas)
+                .occlude()
                 .on_mouse_down(MouseButton::Left, close)
                 .child(
                     div()
@@ -803,51 +815,38 @@ impl OutputsPanel {
         )
     }
 
-    /// A platform's details: server, key, shape.
+    /// A platform's details: server, key, the canvas it's sent.
     fn configure(&self, c: &Configure, workspace: &Workspace, cx: &mut Context<Self>) -> Div {
         let p = c.platform;
-        let field_label = |text: &'static str| {
-            div().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(tok::text_secondary()).child(text)
-        };
         let me = cx.entity().downgrade();
         // Server: a choice where the platform has a list, otherwise pasted.
         let server = match p.servers.len() {
-            0 => div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(field_label("Server URL"))
-                .child(Input::new(&c.server_input).small()),
-            1 => div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(field_label("Server"))
-                .child(div().text_size(px(12.)).text_color(tok::text_tertiary()).child(host_of(p.servers[0].1))),
+            0 => form_row("Server URL", None, div().flex_1().child(Input::new(&c.server_input).small())),
+            1 => form_row("Server", None, div().text_size(px(12.)).text_color(tok::text_tertiary()).child(host_of(p.servers[0].1))),
             _ => {
                 let current = p.servers[c.server.min(p.servers.len() - 1)].0;
                 let selected = c.server;
-                div().flex().flex_col().gap_1().child(field_label("Server")).child(
-                    Button::new("server-choice").label(current).small().outline().w_full().dropdown_menu(
+                form_row(
+                    "Server",
+                    None,
+                    div().flex_1().child(Button::new("server-choice").label(current).small().outline().w_full().dropdown_caret(true).dropdown_menu(
                         move |mut menu, _, _| {
                             for (i, (label, _)) in p.servers.iter().enumerate() {
                                 let me = me.clone();
-                                menu = menu.item(PopupMenuItem::new(*label).checked(i == selected).on_click(
-                                    move |_, _, cx| {
-                                        if let Some(me) = me.upgrade() {
-                                            me.update(cx, |this, cx| {
-                                                if let Some(Setup::Configure(c)) = &mut this.setup {
-                                                    c.server = i;
-                                                }
-                                                cx.notify();
-                                            });
-                                        }
-                                    },
-                                ));
+                                menu = menu.item(PopupMenuItem::new(*label).checked(i == selected).on_click(move |_, _, cx| {
+                                    if let Some(me) = me.upgrade() {
+                                        me.update(cx, |this, cx| {
+                                            if let Some(Setup::Configure(c)) = &mut this.setup {
+                                                c.server = i;
+                                            }
+                                            cx.notify();
+                                        });
+                                    }
+                                }));
                             }
                             menu.max_h(px(320.)).scrollable(true)
                         },
-                    ),
+                    )),
                 )
             }
         };
@@ -859,31 +858,21 @@ impl OutputsPanel {
                 .ghost()
                 .on_click(move |_, _, cx| cx.open_url(url))
         });
-        // Shape: the workspace's canvases, the platform's preferred one marked.
-        let mut shapes = div().flex().flex_wrap().gap_1();
+        let key = form_row(
+            if p.id == "custom" { "Key or token" } else { "Stream key" },
+            Some("Kept in your Keychain, never in the workspace's files.".into()),
+            div().flex_1().child(Input::new(&c.key).small().mask_toggle()),
+        );
+        // Canvas: the workspace's canvases, the ones the platform takes marked with a dot.
+        let mut shapes = segments();
         for (i, f) in workspace.canvases.iter().enumerate() {
             let id = (f.id != workspace.primary_canvas().id).then_some(f.id);
-            let on = c.canvas == id;
             let fits = match p.shape {
                 Shape::Vertical => f.height > f.width,
                 Shape::Landscape => f.width >= f.height,
             };
             shapes = shapes.child(
-                div()
-                    .id(("dest-shape", i))
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .h(px(24.))
-                    .px_2()
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .text_size(px(11.))
-                    .border_1()
-                    .border_color(if on { tok::text_secondary() } else { tok::border() })
-                    .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
-                    .when(!on, |d| d.text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
-                    .child(format!("{} {}", f.name, aspect_label(f)))
+                segment(("dest-shape", i), format!("{} {}", f.name, aspect_label(f)), c.canvas == id, true)
                     .when(fits && p.id != "custom", |d| d.child(div().size(px(5.)).rounded_full().bg(tok::ok())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Setup::Configure(c)) = &mut this.setup {
@@ -893,18 +882,57 @@ impl OutputsPanel {
                     })),
             );
         }
+        let shape_tip: Option<SharedString> = (p.id != "custom").then(|| {
+            let shape = if p.shape == Shape::Vertical { "vertical" } else { "landscape" };
+            let rate = p.max_kbps.map_or(String::new(), |k| format!(" It takes up to {} Mbps.", k / 1000));
+            format!("{} wants {shape} video: the canvases that fit have a green dot.{rate}", p.name).into()
+        });
         let no_vertical = p.shape == Shape::Vertical && !workspace.canvases.iter().any(|f| f.height > f.width);
+        let picture = form_card("Picture").child(form_row("Canvas", shape_tip, shapes)).when(no_vertical, |d| {
+            d.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .p_2p5()
+                    .rounded(px(8.))
+                    .bg(tok::bg_app())
+                    .child(ui::icon("smartphone").size(px(14.)).text_color(tok::warn()))
+                    .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(tok::text_secondary()).child(format!(
+                        "{} wants vertical video, and this workspace has no vertical canvas yet.",
+                        p.name
+                    )))
+                    .child(
+                        Button::new("add-vertical")
+                            .flex_none()
+                            .label("Add vertical canvas")
+                            .xsmall()
+                            .outline()
+                            .on_click(cx.listener(|this, _, _, cx| this.request_vertical(cx))),
+                    ),
+            )
+        });
         div()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(badge(p, 36.))
-                    .child(div().flex_1().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(p.name))
+                    .pb_1()
+                    .child(badge(p, 40.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(p.name))
+                            .child(div().text_size(px(12.)).text_color(tok::text_tertiary()).child(p.help)),
+                    )
                     .child(
                         Button::new("change-platform")
                             .label("All platforms")
@@ -917,85 +945,33 @@ impl OutputsPanel {
                             })),
                     ),
             )
-            .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(p.help))
-            .child(server)
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(field_label(if p.id == "custom" { "Key or token" } else { "Stream key" }))
-                    .child(Input::new(&c.key).small().mask_toggle())
-                    .child(
-                        div().flex().items_center().justify_between().children(key_link).child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .text_size(px(10.))
-                                .text_color(tok::text_tertiary())
-                                .child(ui::icon("key-round").size(px(11.)))
-                                .child("Kept in your Keychain"),
-                        ),
-                    ),
+                form_card("Connection")
+                    .child(server)
+                    .child(key)
+                    .children(key_link.map(|l| div().flex().pl(px(120.)).child(l))),
             )
+            .child(picture)
+            .when_some(c.error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(tok::error()).child(e)))
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(field_label("Send"))
-                    .child(shapes)
-                    .when(no_vertical, |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(tok::warn()).child(
-                                    format!(
-                                        "{} wants vertical video, and this workspace has no vertical canvas yet.",
-                                        p.name
-                                    ),
-                                ))
-                                .child(
-                                    Button::new("add-vertical")
-                                        .flex_none()
-                                        .label("Add vertical canvas")
-                                        .xsmall()
-                                        .outline()
-                                        .on_click(cx.listener(|this, _, _, cx| this.request_vertical(cx))),
-                                ),
-                        )
-                    })
-                    .when_some(p.max_kbps, |d, kbps| {
-                        d.child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(tok::text_tertiary())
-                                .child(format!("Takes up to {} Mbps", kbps / 1000)),
-                        )
-                    }),
-            )
-            .when_some(c.error.clone(), |d, e| d.child(div().text_size(px(11.)).text_color(tok::error()).child(e)))
-            .child(
-                div()
-                    .flex()
+                    .justify_end()
                     .gap_2()
+                    .pt_1()
+                    .child(Button::new("dest-cancel").label("Cancel").small().ghost().on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.setup = None;
+                            cx.notify();
+                        },
+                    )))
                     .child(
                         Button::new("dest-save")
                             .label(format!("Add {}", p.name))
                             .small()
                             .primary()
                             .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                    )
-                    .child(Button::new("dest-cancel").label("Cancel").small().ghost().on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.setup = None;
-                            cx.notify();
-                        },
-                    ))),
+                    ),
             )
     }
 }

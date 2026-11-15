@@ -892,6 +892,8 @@ impl Library {
                 .items_center()
                 .justify_center()
                 .bg(tok::scrim())
+                // a sheet: nothing behind it takes the mouse (scrolling here never pans the canvas)
+                .occlude()
                 .child(
                     div()
                         .flex()
@@ -963,6 +965,8 @@ impl Library {
                 .items_center()
                 .justify_center()
                 .bg(tok::scrim())
+                // a sheet: nothing behind it takes the mouse (scrolling here never pans the canvas)
+                .occlude()
                 .child(
                     div()
                         .id("lib-player")
