@@ -215,9 +215,10 @@ impl StudioWindow {
                         .flex_1()
                         .min_w_0()
                         .flex()
-                        .flex_col()
+                        .items_center()
+                        .gap_1()
                         .child(div().text_size(px(12.)).child("Show Lightair's windows"))
-                        .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("On to show Lightair itself (a tutorial on Lightair). Off keeps its windows out of the picture.")),
+                        .child(crate::ui::info("source-show-lightair-info", "On to show Lightair itself (a tutorial on Lightair). Off keeps its windows out of the picture.")),
                 )
                 .child(super::settings::switch("source-show-lightair", shows_lightair).on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))))
         });

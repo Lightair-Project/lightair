@@ -31,6 +31,23 @@ fn slider_row(name: &'static str, slider: Slider, value: String) -> Div {
         .child(div().w(px(40.)).text_right().text_size(px(11.)).font_family("Menlo").text_color(tok::text_tertiary()).child(value))
 }
 
+/// A label with its description on hover (an ⓘ beside it).
+fn tip_row(name: &'static str, tip: &'static str, control: impl IntoElement) -> Div {
+    let name_tip = div().w(px(76.)).flex_none().flex().items_center().gap_1().child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(name)).child(ui::info(name, tip));
+    div().flex().items_center().gap_2().child(name_tip).child(div().flex_1().min_w_0().child(control))
+}
+
+/// A part's heading ("ZOOM"), with what its choice does on hover.
+fn heading(text: &'static str, tip: &'static str) -> Div {
+    div()
+        .pt_2()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child(text))
+        .child(ui::info(text, tip))
+}
+
 fn note(text: &'static str) -> Div {
     // (min_w_0: in a row, it wraps instead of running past the edge)
     div().min_w_0().text_size(px(11.)).text_color(tok::text_tertiary()).child(text)
@@ -43,9 +60,11 @@ impl StudioWindow {
         let on = scene.screen.is_some();
         let look = scene.screen.unwrap_or_default();
         let set = move |l: ScreenZoomPointer| Command::SetScreenZoomPointer { scene: sid, screen: Some(l) };
-        let toggle = super::settings::switch("screen-look-on", on).on_click(cx.listener(move |this, _, _, cx| {
-            this.exec(Command::SetScreenZoomPointer { scene: sid, screen: if on { None } else { Some(ScreenZoomPointer::default()) } }, cx)
-        }));
+        let toggle = super::settings::switch("screen-look-on", on)
+            .tooltip(ui::tip("Zoom in where you click and draw a bigger, smoother pointer with click effects on this scene's screen, live, as Screen Studio does."))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.exec(Command::SetScreenZoomPointer { scene: sid, screen: if on { None } else { Some(ScreenZoomPointer::default()) } }, cx)
+            }));
         let mut body = self.section("Screen zoom & pointer", Some(toggle.into_any_element()), cx);
         let screens = scene
             .objects
@@ -54,7 +73,7 @@ impl StudioWindow {
             .filter(|i| i.kind == lightair_core::kinds::SCREEN)
             .count();
         if !on {
-            return body.child(note("Zoom in where you click and draw a bigger, smoother pointer with click effects on this scene's screen, live, as Screen Studio does."));
+            return body;
         }
         if screens == 0 {
             body = body.child(note("Add a screen to this scene: it zooms and draws the pointer there."));
@@ -100,7 +119,15 @@ impl StudioWindow {
         }
         // ---- zoom
         body = body
-            .child(div().pt_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child("ZOOM"))
+            .child(heading(
+                "ZOOM",
+                match look.zoom {
+                    ScreenZoomPointer::ZOOM_CLICKS => "On clicks: zooms in where you click (and, when typing, where you clicked last) and follows the pointer, then back out once you stop.",
+                    ScreenZoomPointer::ZOOM_TOGGLE => "Toggle: press the key to zoom in and follow the pointer; press it again to go back to zooming on clicks.",
+                    ScreenZoomPointer::ZOOM_ALWAYS => "Always: zoomed in, the view following the pointer.",
+                    _ => "Off: the screen as it is. On clicks zooms in where you click; Always stays in, following the pointer; Toggle follows while a key has it on.",
+                },
+            ))
             .child(self.segmented(
                 "screen-zoom",
                 vec![
@@ -117,12 +144,13 @@ impl StudioWindow {
                 .map(|(n, v)| (n, set(ScreenZoomPointer { zoom_scale: v, ..look }), (look.zoom_scale - v).abs() < 0.01))
                 .collect();
             body = body.child(row("How far", self.segmented("screen-zoom-scale", scales, cx)));
-            if look.zoom == ScreenZoomPointer::ZOOM_CLICKS {
+            // toggle: on clicks while the key hasn't turned following on
+            if look.zoom == ScreenZoomPointer::ZOOM_CLICKS || look.zoom == ScreenZoomPointer::ZOOM_TOGGLE {
                 let s = self.slider(format!("screen-hold:{sid}"), (0.5, 8.0, 0.25), look.zoom_hold_s, move |v| set(ScreenZoomPointer { zoom_hold_s: v, ..look }), cx);
                 body = body.child(slider_row("Stays in", s, format!("{:.1} s", look.zoom_hold_s)));
                 let typing = super::settings::switch("screen-zoom-typing", look.zoom_typing)
                     .on_click(cx.listener(move |this, _, _, cx| this.exec(set(ScreenZoomPointer { zoom_typing: !look.zoom_typing, ..look }), cx)));
-                body = body.child(row("When typing", div().flex().child(typing)));
+                body = body.child(tip_row("Typing", "Typing zooms in too, at the text field (where you clicked last), and stays in while the keys keep coming.", div().flex().child(typing)));
             }
             body = body.child(row(
                 "Motion",
@@ -138,17 +166,8 @@ impl StudioWindow {
             ));
             let badge = super::settings::switch("screen-zoom-badge", look.zoom_badge)
                 .on_click(cx.listener(move |this, _, _, cx| this.exec(set(ScreenZoomPointer { zoom_badge: !look.zoom_badge, ..look }), cx)));
-            body = body.child(row("Pointer badge", div().flex().child(badge)));
-            if look.zoom_badge {
-                body = body.child(note(
-                    "While viewers see the zoom, a badge by your pointer says so. Only you see it: it's never in the picture.",
-                ));
-            }
-            body = body.child(note(match look.zoom {
-                ScreenZoomPointer::ZOOM_CLICKS => "Zooms in where you click (and, when typing, where you clicked last) and follows the pointer, then back out once you stop.",
-                ScreenZoomPointer::ZOOM_TOGGLE => "Press the key to zoom in and follow the pointer; press it again to zoom back out.",
-                _ => "Always zoomed in, the view following the pointer.",
-            }));
+            body = body.child(tip_row("Badge", "While viewers see the zoom, a badge by your pointer says so. Only you see it: it's never in the picture.", div().flex().child(badge)));
+
         }
         // ---- toggle: its key, and whether it's in now
         if look.zoom == ScreenZoomPointer::ZOOM_TOGGLE {
@@ -194,7 +213,7 @@ impl StudioWindow {
         }
         // ---- pointer
         body = body
-            .child(div().pt_2().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child("POINTER"))
+            .child(heading("POINTER", "As captured: the capture's own pointer. Drawn: Lightair draws it, bigger, smoother and styled. Hidden: no pointer on the screen, and no clicks drawn."))
             .child(self.segmented(
                 "screen-cursor",
                 vec![
@@ -204,9 +223,6 @@ impl StudioWindow {
                 ],
                 cx,
             ));
-        if look.pointer_hidden {
-            body = body.child(note("No pointer on the screen (and no clicks drawn)."));
-        }
         if look.pointer_drawn && !look.pointer_hidden {
             let style = self.segmented(
                 "screen-cursor-style",
@@ -245,7 +261,7 @@ impl StudioWindow {
                 .child(row("Tilt moving", div().flex().child(tilt)))
                 .child(row("Colour", swatches))
                 // ---- clicks
-                .child(div().pt_2().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child("CLICKS"))
+                .child(heading("CLICKS", "How a click shows: a circle under the pointer, or a ripple."))
                 .child(self.segmented(
                     "screen-clicks",
                     vec![

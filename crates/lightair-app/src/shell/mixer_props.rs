@@ -276,12 +276,16 @@ impl StudioWindow {
                 let Some(m) = workspace.audio.mix(id).cloned() else { return body.into_any_element() };
                 let fed = workspace.tracks.iter().filter(|t| t.sends.iter().any(|s| s.mix == id)).count()
                     + workspace.audio.buses.iter().filter(|b| b.sends.iter().any(|s| s.mix == id)).count();
-                body.child(header("split", m.name.clone(), "MIX"))
-                    .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(format!(
-                        "{fed} strip{} send{} to it. Use it for headphones, a Twitch VOD track, a guest's mix-minus or a music-free stream.",
-                        if fed == 1 { "" } else { "s" },
-                        if fed == 1 { "s" } else { "" }
-                    )))
+                body.child(
+                    header("split", m.name.clone(), "MIX").child(ui::info(
+                        "mix-info",
+                        format!(
+                            "{fed} strip{} send{} to it. Use it for headphones, a Twitch VOD track, a guest's mix-minus or a music-free stream.",
+                            if fed == 1 { "" } else { "s" },
+                            if fed == 1 { "s" } else { "" }
+                        ),
+                    )),
+                )
                     .child({
                         let mm = m.clone();
                         let pan = self.slider(format!("mixpan:{id}"), (-1.0, 1.0, 0.01), m.pan, move |v| {
@@ -303,14 +307,10 @@ impl StudioWindow {
                                     .flex_1()
                                     .min_w_0()
                                     .flex()
-                                    .flex_col()
+                                    .items_center()
+                                    .gap_1()
                                     .child(div().text_size(px(12.)).child("Into Program too"))
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(tok::text_tertiary())
-                                            .child("An effects return (a shared reverb), heard on the stream"),
-                                    ),
+                                    .child(ui::info("mix-to-program-info", "An effects return (a shared reverb), heard on the stream")),
                             )
                             .child(
                                 super::settings::switch("mix-to-program", on)
@@ -326,13 +326,10 @@ impl StudioWindow {
                     .into_any_element()
             }
             MixerStrip::Master => body
-                .child(header("radio", "Master".into(), "MASTER"))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(tok::text_secondary())
-                        .child("What the stream and the recording's main track carry. A limiter here keeps it from clipping."),
-                )
+                .child(header("radio", "Master".into(), "MASTER").child(ui::info(
+                    "master-info",
+                    "What the stream and the recording's main track carry. A limiter here keeps it from clipping.",
+                )))
                 .child(self.strip_effects_section(strip, &workspace.audio.master.effects, cx))
                 .into_any_element(),
             MixerStrip::Track(_) => body.into_any_element(),

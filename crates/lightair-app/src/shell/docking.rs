@@ -178,18 +178,20 @@ impl StudioWindow {
         // No "…" menu in panel headers: each panel's actions are its own buttons.
         skin.set_menu_button_visible(false, cx);
         dock.update(cx, |area, cx| {
-            area.set_center(
-                DockLayout::v_split().child(DockLayout::tabs().panel_view(panel_handle(canvas), cx), None).child(
-                    DockLayout::tabs()
-                        .panel_view(panel_handle(mixer), cx)
-                        .panel_view(panel_handle(assets), cx)
-                        .active_index(usize::from(std::env::var("LIGHTAIR_OPEN").is_ok_and(|h| h.starts_with("assets")))),
-                    // tall enough for a full channel strip (taller for the audio screenshot hooks)
-                    Some(px(if std::env::var("LIGHTAIR_OPEN").is_ok_and(|h| h.starts_with("audio")) { 600. } else { 420. })),
-                ),
+            area.set_center(DockLayout::tabs().panel_view(panel_handle(canvas), cx), window, cx);
+            // the mixer and assets: a dock of their own, so they hide like the side panels
+            area.set_dock(
+                DockPlacement::Bottom,
+                DockLayout::tabs()
+                    .panel_view(panel_handle(mixer), cx)
+                    .panel_view(panel_handle(assets), cx)
+                    .active_index(usize::from(std::env::var("LIGHTAIR_OPEN").is_ok_and(|h| h.starts_with("assets")))),
                 window,
                 cx,
             );
+            // tall enough for a full channel strip (taller for the audio screenshot hooks)
+            let bottom = if std::env::var("LIGHTAIR_OPEN").is_ok_and(|h| h.starts_with("audio")) { 600. } else { 420. };
+            area.set_dock_size(DockPlacement::Bottom, px(bottom), window, cx);
             area.set_dock(
                 DockPlacement::Left,
                 DockLayout::v_split()
@@ -214,6 +216,11 @@ impl StudioWindow {
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
             Ok("add-object") => self.open_add_object(window, cx),
             Ok("settings") => self.toggle_settings(cx),
+            Ok("bottom-closed") => {
+                if let Some(dock) = self.dock.clone() {
+                    dock.update(cx, |area, cx| area.toggle_dock(DockPlacement::Bottom, window, cx));
+                }
+            }
             Ok("shortcut-capture") => {
                 // Settings › Shortcuts listening for a key, then Esc sent through the window (no
                 // shortcut saved): whether it reached Settings, logged
