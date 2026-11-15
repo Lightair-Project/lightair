@@ -1,5 +1,5 @@
-//! Auto-reframe (docs/07-scenes-layers-canvas.md, "Formats"): a first layout for a layer in a
-//! newly added canvas. Full-canvas layers (backgrounds) fill the new canvas; everything else
+//! Auto-reframe (docs/07-scenes-objects-canvas.md, "Formats"): a first layout for a object in a
+//! newly added canvas. Full-canvas objects (backgrounds) fill the new canvas; everything else
 //! keeps its arrangement, scaled to the new width and centred vertically. The user refines it.
 
 use lightair_core::{Fit, Canvas, Layout};

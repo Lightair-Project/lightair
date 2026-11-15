@@ -69,7 +69,7 @@ impl Owner {
             Owner::Strip(lightair_core::MixerStrip::Mix(id)) => {
                 workspace.audio.mix(id).map(|m| (m.name.clone(), m.effects.clone()))
             }
-            Owner::Strip(lightair_core::MixerStrip::Master) => Some(("Program".into(), workspace.audio.master.effects.clone())),
+            Owner::Strip(lightair_core::MixerStrip::Master) => Some(("Master".into(), workspace.audio.master.effects.clone())),
             Owner::Strip(lightair_core::MixerStrip::Track(id)) => workspace.track(id).map(|t| (t.name.clone(), t.effects.clone())),
         }
     }
@@ -137,13 +137,13 @@ pub(super) struct ColourPicker {
 }
 
 fn hsla_of_abgr(abgr: u32) -> Hsla {
-    super::layer_props::rgb_to_hsla(super::layer_props::rgb_of(abgr))
+    super::object_props::rgb_to_hsla(super::object_props::rgb_of(abgr))
 }
 
 fn abgr_of_hsla(c: Hsla) -> u32 {
     let rgba = Rgba::from(c);
     let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
-    super::layer_props::abgr((ch(rgba.r) << 16) | (ch(rgba.g) << 8) | ch(rgba.b))
+    super::object_props::abgr((ch(rgba.r) << 16) | (ch(rgba.g) << 8) | ch(rgba.b))
 }
 
 /// Colours offered for effect colour controls: neutrals, then makeup-friendly and bright ones.
@@ -793,10 +793,10 @@ impl StudioWindow {
     /// A colour: the swatch opens the picker (palette, HSLA, hex); the dropper picks from the
     /// screen; the hex says what it is.
     fn colour_control(&self, iid: Owner, eid: Id, key: &'static str, current: u32, cx: &mut Context<Self>) -> Div {
-        let hex = format!("#{:06X}", super::layer_props::rgb_of(current));
+        let hex = format!("#{:06X}", super::object_props::rgb_of(current));
         let picker = match self.colour_pickers.get(&format!("{eid}:{key}")) {
             Some(p) => ColorPicker::new(&p.state)
-                .featured_colors(SWATCHES.iter().map(|rgb| super::layer_props::rgb_to_hsla(*rgb)).collect())
+                .featured_colors(SWATCHES.iter().map(|rgb| super::object_props::rgb_to_hsla(*rgb)).collect())
                 .anchor(Anchor::TopRight) // opens towards the canvas: the Inspector sits at the window's edge
                 .small()
                 .into_any_element(),
@@ -825,8 +825,8 @@ impl StudioWindow {
     pub(super) fn ensure_colour_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let source = studio
-            .selected_layer
-            .and_then(|l| studio.selected_scene.and_then(|s| studio.workspace().scene(s)).and_then(|s| s.layer(l)))
+            .selected_object
+            .and_then(|l| studio.selected_scene.and_then(|s| studio.workspace().scene(s)).and_then(|s| s.object(l)))
             .and_then(|l| l.source)
             .and_then(|i| studio.workspace().sources.get(&i).cloned());
         let Some(source) = source else {
@@ -915,7 +915,7 @@ impl StudioWindow {
             }
             if let Some(rgb) = result {
                 let _ = this.update(cx, |this, cx| {
-                    this.set_effect_colour(iid, eid, key, super::layer_props::abgr(rgb), cx)
+                    this.set_effect_colour(iid, eid, key, super::object_props::abgr(rgb), cx)
                 });
             }
         })
@@ -964,8 +964,8 @@ impl StudioWindow {
     pub(super) fn refresh_presence(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let Some(source) = studio
-            .selected_layer
-            .and_then(|l| studio.selected_scene.and_then(|s| studio.workspace().scene(s)).and_then(|s| s.layer(l)))
+            .selected_object
+            .and_then(|l| studio.selected_scene.and_then(|s| studio.workspace().scene(s)).and_then(|s| s.object(l)))
             .and_then(|l| l.source)
         else {
             return;
@@ -1104,7 +1104,7 @@ impl StudioWindow {
         };
         let id = strip.id();
         self.studio.update(cx, |s, _| {
-            s.selected_layer = None;
+            s.selected_object = None;
             s.select_track(Some(id));
         });
         let owner = match strip {

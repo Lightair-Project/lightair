@@ -12,7 +12,7 @@ use crate::ui;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Region {
-    Layers,
+    Hierarchy,
     Scenes,
     Canvas,
     Inspector,
@@ -35,7 +35,7 @@ impl ShellPanel {
 impl BasePanel for ShellPanel {
     fn panel_name(&self) -> &'static str {
         match self.region {
-            Region::Layers => "layers",
+            Region::Hierarchy => "layers",
             Region::Scenes => "scenes",
             Region::Canvas => "canvas",
             Region::Inspector => "inspector",
@@ -52,7 +52,7 @@ impl Panel for ShellPanel {
 
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         match self.region {
-            Region::Layers => ui::panel_title("list-tree", "Hierarchy"),
+            Region::Hierarchy => ui::panel_title("list-tree", "Hierarchy"),
             Region::Scenes => ui::panel_title("layout-dashboard", "Scenes"),
             Region::Canvas => ui::panel_title("monitor", "Canvas"),
             Region::Inspector => ui::panel_title("sliders-horizontal", "Inspector"),
@@ -70,7 +70,7 @@ impl Panel for ShellPanel {
             Button::new(id).icon(ui::icon(icon)).ghost().xsmall().tooltip(tip)
         };
         match self.region {
-            Region::Layers => {
+            Region::Hierarchy => {
                 let empty = shell.clone();
                 Some(vec![
                     button("create-empty", "box", "Create empty (⇧⌘N)").on_click(move |_, window, cx| {
@@ -78,7 +78,7 @@ impl Panel for ShellPanel {
                             s.update(cx, |w, cx| w.create_empty(None, window, cx));
                         }
                     }),
-                    button("add-layer", "plus", "Add object").on_click(move |_, window, cx| {
+                    button("add-object", "plus", "Add object").on_click(move |_, window, cx| {
                         if let Some(s) = shell.upgrade() {
                             s.update(cx, |w, cx| w.toggle_add_menu(window, cx));
                         }
@@ -146,7 +146,7 @@ impl Render for ShellPanel {
         shell.update(cx, |w, cx| {
             let workspace = w.studio.read(cx).workspace().clone();
             match region {
-                Region::Layers => w.hierarchy_panel(&workspace, cx).into_any_element(),
+                Region::Hierarchy => w.hierarchy_panel(&workspace, cx).into_any_element(),
                 Region::Scenes => w.scenes_panel(&workspace, cx).into_any_element(),
                 Region::Canvas => w.canvas_panel(&workspace, cx).into_any_element(),
                 Region::Inspector => {
@@ -167,7 +167,7 @@ impl StudioWindow {
         }
         let me = cx.entity();
         let panel = |region: Region, cx: &mut Context<Self>| cx.new(|cx| ShellPanel::new(me.clone(), region, cx));
-        let (layers, scenes) = (panel(Region::Layers, cx), panel(Region::Scenes, cx));
+        let (objects, scenes) = (panel(Region::Hierarchy, cx), panel(Region::Scenes, cx));
         let (canvas, inspector) = (panel(Region::Canvas, cx), panel(Region::Inspector, cx));
         let assets = panel(Region::Assets, cx);
         let (mixer, outputs) = (self.mixer.clone(), self.outputs.clone());
@@ -193,7 +193,7 @@ impl StudioWindow {
             area.set_dock(
                 DockPlacement::Left,
                 DockLayout::v_split()
-                    .child(DockLayout::tabs().panel_view(panel_handle(layers), cx), None)
+                    .child(DockLayout::tabs().panel_view(panel_handle(objects), cx), None)
                     .child(DockLayout::tabs().panel_view(panel_handle(scenes), cx), Some(px(300.))),
                 window,
                 cx,
@@ -212,7 +212,7 @@ impl StudioWindow {
         self.dock = Some(dock);
         // Development: open a dialog on launch for screenshots (no clicking needed).
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
-            Ok("add-layer") => self.open_add_layer(window, cx),
+            Ok("add-object") => self.open_add_object(window, cx),
             Ok("settings") => self.toggle_settings(cx),
             Ok("hotkey-capture") => {
                 // Settings › Shortcuts listening for a key, then Esc sent through the window (no
@@ -264,7 +264,7 @@ impl StudioWindow {
                 if let Some(scene) = scene {
                     let look = lightair_core::ScreenLook { zoom: lightair_core::ScreenLook::ZOOM_TOGGLE, ..Default::default() };
                     self.exec(lightair_core::Command::SetSceneScreen { scene, screen: Some(look) }, cx);
-                    self.select_layer(None, cx);
+                    self.select_object(None, cx);
                 }
             }
             Ok("library") => self.show_place(super::Place::Library, cx),
@@ -336,8 +336,8 @@ impl StudioWindow {
                 // the logo sits where the pointer usually is
                 if let Some(scene) = p.program.and_then(|s| p.scene(s)) {
                     let f = p.primary_canvas().id;
-                    for l in scene.layers.iter().filter(|l| l.name == "Logo") {
-                        self.exec(lightair_core::Command::SetLayerVisible { scene: scene.id, layer: l.id, canvas: f, visible: false }, cx);
+                    for l in scene.objects.iter().filter(|l| l.name == "Logo") {
+                        self.exec(lightair_core::Command::SetObjectVisible { scene: scene.id, object: l.id, canvas: f, visible: false }, cx);
                     }
                 }
             }
@@ -483,9 +483,9 @@ impl StudioWindow {
                 // Rename the top object to "Renamed" and press Enter, as a person would.
                 let top = {
                     let s = self.studio.read(cx);
-                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.objects.last().map(|l| l.id))
                 };
-                self.select_layer(top, cx);
+                self.select_object(top, cx);
                 self.rename_selection(window, cx);
                 if let Some(r) = &self.renaming {
                     r.input.update(cx, |i, cx| i.set_value("Renamed", window, cx));
@@ -510,19 +510,19 @@ impl StudioWindow {
             Ok("crop") => {
                 let top = {
                     let s = self.studio.read(cx);
-                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.objects.last().map(|l| l.id))
                 };
-                self.select_layer(top, cx);
+                self.select_object(top, cx);
                 self.crop_mode = top;
             }
             Ok("assets") => {
-                // A prefab from the top layer, and an instance of it.
+                // A prefab from the top object, and an instance of it.
                 let top = {
                     let s = self.studio.read(cx);
-                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.objects.last().map(|l| l.id))
                 };
                 if let Some(top) = top {
-                    self.select_layer(Some(top), cx);
+                    self.select_object(Some(top), cx);
                     self.save_prefab(top, cx);
                     let assets = self.assets(cx);
                     if let Some(a) = assets.iter().find(|a| a.kind == super::assets::AssetKind::Prefab) {
@@ -538,16 +538,16 @@ impl StudioWindow {
                 }
             }
             Ok("group") => {
-                // The top two layers into a group, then an empty inside it.
+                // The top two objects into a group, then an empty inside it.
                 let top: Vec<lightair_core::Id> = {
                     let s = self.studio.read(cx);
                     s.selected_scene
                         .and_then(|id| s.workspace().scene(id))
-                        .map(|sc| sc.layers.iter().rev().take(2).map(|l| l.id).collect())
+                        .map(|sc| sc.objects.iter().rev().take(2).map(|l| l.id).collect())
                         .unwrap_or_default()
                 };
                 self.studio.update(cx, |s, _| {
-                    s.selected_layer = top.first().copied();
+                    s.selected_object = top.first().copied();
                     s.also_selected = top.iter().skip(1).copied().collect();
                 });
                 self.group_selection(window, cx);
@@ -556,30 +556,30 @@ impl StudioWindow {
             Ok("zoom") => {
                 let top = {
                     let s = self.studio.read(cx);
-                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.objects.last().map(|l| l.id))
                 };
-                self.select_layer(top, cx);
+                self.select_object(top, cx);
                 self.zoom = 2.5;
                 self.pan = (-700.0, -350.0);
             }
             Ok("gizmo") => {
                 let top = {
                     let s = self.studio.read(cx);
-                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.objects.last().map(|l| l.id))
                 };
-                self.select_layer(top, cx);
+                self.select_object(top, cx);
                 self.rotate_tool = true;
             }
             Ok(hook @ ("fx-stack" | "fx-sheet" | "fx-shape" | "fx-none" | "fx-bg" | "fx-system" | "fx-key" | "fx-key-open")) => {
                 // A picture with a few effects, its stack open (or the catalog over it).
                 let board = concat!(env!("CARGO_MANIFEST_DIR"), "/../../branding/final/board.png");
-                self.add_source_layer("Board", "image_source", serde_json::json!({"file": board}), (1920.0, 1080.0), cx);
-                let (source, layer) = {
+                self.add_source_object("Board", "image_source", serde_json::json!({"file": board}), (1920.0, 1080.0), cx);
+                let (source, object) = {
                     let s = self.studio.read(cx);
-                    let layer = s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().cloned());
-                    (layer.as_ref().and_then(|l| l.source), layer.map(|l| l.id))
+                    let object = s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.objects.last().cloned());
+                    (object.as_ref().and_then(|l| l.source), object.map(|l| l.id))
                 };
-                self.select_layer(layer, cx);
+                self.select_object(object, cx);
                 self.collapsed.borrow_mut().extend(["Source", "Transform"]);
                 if let Some(iid) = source {
                     let kinds: &[&str] = if hook.starts_with("fx-key") {
@@ -620,7 +620,7 @@ impl StudioWindow {
                 let track = self.studio.read(cx).workspace().tracks.first().map(|t| t.id);
                 if let Some(t) = track {
                     self.studio.update(cx, |s, cx| {
-                        s.selected_layer = None;
+                        s.selected_object = None;
                         s.selected_track = Some(t);
                         cx.notify();
                     });
@@ -674,7 +674,7 @@ impl StudioWindow {
                 self.use_audio_template(lightair_core::templates::Template::Streaming, cx);
                 let first = self.studio.read(cx).workspace().tracks.first().map(|t| t.id);
                 self.studio.update(cx, |s, cx| {
-                    s.selected_layer = None;
+                    s.selected_object = None;
                     s.select_track(first);
                     cx.notify();
                 });
@@ -693,7 +693,7 @@ impl StudioWindow {
                         cx,
                     );
                     self.studio.update(cx, |s, cx| {
-                        s.selected_layer = None;
+                        s.selected_object = None;
                         s.select_track(Some(lightair_core::MASTER_ID));
                         cx.notify();
                     });
@@ -727,7 +727,7 @@ impl StudioWindow {
                     }
                     let sel = if hook == "audio-bus" { bid } else { t.id };
                     self.studio.update(cx, |s, cx| {
-                        s.selected_layer = None;
+                        s.selected_object = None;
                         s.select_track(Some(sel));
                         cx.notify();
                     });
@@ -752,7 +752,7 @@ impl StudioWindow {
                     }
                     self.props.open_effect = first;
                     self.studio.update(cx, |s, cx| {
-                        s.selected_layer = None;
+                        s.selected_object = None;
                         s.selected_track = Some(t.id);
                         cx.notify();
                     });
@@ -764,9 +764,9 @@ impl StudioWindow {
             Ok("select") => {
                 let top = {
                     let s = self.studio.read(cx);
-                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.objects.last().map(|l| l.id))
                 };
-                self.select_layer(top, cx);
+                self.select_object(top, cx);
             }
             _ => {}
         }

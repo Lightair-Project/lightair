@@ -1,16 +1,16 @@
-//! The Move transition: a matching layer glides from its layout in scene A to its layout in
+//! The Move transition: a matching object glides from its layout in scene A to its layout in
 //! scene B, then the canvas lands on B.
 
 use std::time::Duration;
 
 use lightair_core::{
-    Command, Document, Source, Layer, Layout, Workspace, Scene, TransitionKind, TransitionSettings, diff,
+    Command, Document, Source, Object, Layout, Workspace, Scene, TransitionKind, TransitionSettings, diff,
 };
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
 #[test]
-fn move_glides_matching_layers_then_lands() {
+fn move_glides_matching_objects_then_lands() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let engine =
         Engine::start(EngineConfig { canvas: (1280, 720), output: (1280, 720), ..Default::default() }).unwrap();
@@ -19,9 +19,9 @@ fn move_glides_matching_layers_then_lands() {
     let cam = Source::new("Cam", "color_source_v3", json!({"color": 0xFFFFFFFFu32, "width": 400, "height": 400}));
     let cam_id = cam.id;
     let mut a = Scene::new("A");
-    a.layers.push(Layer::new("Cam", cam_id, [(canvas, Layout::boxed(0.0, 0.0, 200.0, 200.0))]));
+    a.objects.push(Object::new("Cam", cam_id, [(canvas, Layout::boxed(0.0, 0.0, 200.0, 200.0))]));
     let mut b = Scene::new("B");
-    b.layers.push(Layer::new("Cam", cam_id, [(canvas, Layout::boxed(1000.0, 400.0, 200.0, 200.0))]));
+    b.objects.push(Object::new("Cam", cam_id, [(canvas, Layout::boxed(1000.0, 400.0, 200.0, 200.0))]));
     let (a_id, b_id) = (a.id, b.id);
     let apply = |doc: &mut Document, cmd: Command| {
         let change = doc.apply(&cmd).unwrap();

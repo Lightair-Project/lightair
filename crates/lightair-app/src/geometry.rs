@@ -1,5 +1,5 @@
-//! Canvas geometry for the editor (docs/07-scenes-layers-canvas.md, "Canvas"): rotated boxes,
-//! hit-testing, and resize/crop computed in the layer's own frame. libobs turns a layer around
+//! Canvas geometry for the editor (docs/07-scenes-objects-canvas.md, "Canvas"): rotated boxes,
+//! hit-testing, and resize/crop computed in the object's own frame. libobs turns a object around
 //! its box centre, clockwise for positive degrees (y points down).
 
 use lightair_core::{Crop, Layout, ShapeKind};
@@ -24,14 +24,14 @@ pub fn centre(l: &Layout) -> (f32, f32) {
     (l.x + l.width / 2.0, l.y + l.height / 2.0)
 }
 
-/// A point given relative to the box centre in the layer's frame, in canvas coordinates.
+/// A point given relative to the box centre in the object's frame, in canvas coordinates.
 fn to_canvas(l: &Layout, local: (f32, f32)) -> (f32, f32) {
     let (cx, cy) = centre(l);
     let (x, y) = rotate(local, l.rotation);
     (cx + x, cy + y)
 }
 
-/// A canvas point relative to the box centre in the layer's frame.
+/// A canvas point relative to the box centre in the object's frame.
 fn to_local(l: &Layout, (x, y): (f32, f32)) -> (f32, f32) {
     let (cx, cy) = centre(l);
     rotate((x - cx, y - cy), -l.rotation)
@@ -69,7 +69,7 @@ pub fn contains(l: &Layout, p: (f32, f32)) -> bool {
 }
 
 /// Places `edited` (a change to `orig` computed as if it weren't rotated) back under the
-/// rotation: its centre moves by the same offset, turned with the layer.
+/// rotation: its centre moves by the same offset, turned with the object.
 fn reanchor(orig: &Layout, edited: Layout) -> Layout {
     let (ox, oy) = centre(orig);
     let (nx, ny) = centre(&edited);
@@ -158,7 +158,7 @@ pub enum Align {
     Bottom,
 }
 
-/// Lines layers up by their visible bounds, against the bounds of them all.
+/// Lines objects up by their visible bounds, against the bounds of them all.
 pub fn align(layouts: &[Layout], how: Align) -> Vec<Layout> {
     let all: Vec<_> = layouts.iter().map(bounds).collect();
     let left = all.iter().map(|b| b.0).fold(f32::INFINITY, f32::min);
@@ -182,7 +182,7 @@ pub fn align(layouts: &[Layout], how: Align) -> Vec<Layout> {
         .collect()
 }
 
-/// Spaces layers evenly between the outermost two (by visible bounds): equal gaps, along x
+/// Spaces objects evenly between the outermost two (by visible bounds): equal gaps, along x
 /// when `horizontal`, else y. Needs three or more; fewer are returned unchanged.
 pub fn distribute(layouts: &[Layout], horizontal: bool) -> Vec<Layout> {
     if layouts.len() < 3 {
@@ -213,7 +213,7 @@ pub fn distribute(layouts: &[Layout], horizontal: bool) -> Vec<Layout> {
     out
 }
 
-/// Whether a layer's visible bounds overlap the rectangle between two points.
+/// Whether a object's visible bounds overlap the rectangle between two points.
 pub fn touches(l: &Layout, a: (f32, f32), b: (f32, f32)) -> bool {
     let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
     let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
@@ -254,7 +254,7 @@ pub fn crop_edge(l: &Layout, e: Edge, size: (f32, f32), delta: (f32, f32)) -> La
     crop(l, corner, size, rotate(local, l.rotation))
 }
 
-/// The rectangle the picture actually fills inside a layer's box: in Fit mode the (cropped)
+/// The rectangle the picture actually fills inside a object's box: in Fit mode the (cropped)
 /// source keeps its shape, so it's letterboxed; Original shows it at its own size. The frame and
 /// handles sit on this, so they always hug the picture. `source` is the source's pixel size.
 pub fn content_rect(l: &Layout, source: Option<(f32, f32)>) -> Layout {
@@ -291,7 +291,7 @@ pub fn crop_pan(l: &Layout, size: (f32, f32), delta: (f32, f32)) -> Layout {
     }
 }
 
-/// The corner radius and half extents of a layer's shape, in its own frame (canvas units).
+/// The corner radius and half extents of a object's shape, in its own frame (canvas units).
 fn shape_extent(l: &Layout) -> ((f32, f32), f32) {
     let (hw, hh) = (l.width / 2.0, l.height / 2.0);
     let short = hw.min(hh);
@@ -303,7 +303,7 @@ fn shape_extent(l: &Layout) -> ((f32, f32), f32) {
     }
 }
 
-/// The layer's shape as a closed polyline in canvas coordinates (its box when it has none).
+/// The object's shape as a closed polyline in canvas coordinates (its box when it has none).
 pub fn shape_outline(l: &Layout) -> Vec<(f32, f32)> {
     let ((bx, by), r) = shape_extent(l);
     if r <= 0.5 {
@@ -325,7 +325,7 @@ pub fn shape_outline(l: &Layout) -> Vec<(f32, f32)> {
 /// Crop handle positions: corners and edges, each with where it sits on the canvas.
 pub type CropHandles = (Vec<(Corner, (f32, f32))>, Vec<(Edge, (f32, f32))>);
 
-/// Where crop handles sit for a layer's shape: on the shape itself (a circle's handles are on
+/// Where crop handles sit for a object's shape: on the shape itself (a circle's handles are on
 /// the circle), corners at its 45° points, edges at its sides' middles.
 pub fn crop_handles(l: &Layout) -> CropHandles {
     let ((bx, by), r) = shape_extent(l);
@@ -345,7 +345,7 @@ pub fn crop_handles(l: &Layout) -> CropHandles {
     (corners, edges)
 }
 
-/// A point in the layer's own frame (from its centre), as the 3D tilt shows it: the same
+/// A point in the object's own frame (from its centre), as the 3D tilt shows it: the same
 /// rotation and perspective as Lightair's transform filter (positive X tilt: the bottom
 /// recedes; positive Y tilt: the left side recedes; the eye two box-sizes away).
 fn tilted(l: &Layout, (x, y): (f32, f32)) -> (f32, f32) {
@@ -359,7 +359,7 @@ fn tilted(l: &Layout, (x, y): (f32, f32)) -> (f32, f32) {
     (x2 / w, y1 / w)
 }
 
-/// The layer's outline as the viewer sees it, tilt included (clockwise from top-left).
+/// The object's outline as the viewer sees it, tilt included (clockwise from top-left).
 pub fn projected_outline(l: &Layout) -> [(f32, f32); 4] {
     let (hw, hh) = (l.width / 2.0, l.height / 2.0);
     [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)].map(|p| to_canvas(l, tilted(l, p)))
@@ -381,10 +381,10 @@ pub enum Axis {
     Z,
 }
 
-/// The rotate gizmo's rings, centred on the layer, radius `r` canvas units, as closed
+/// The rotate gizmo's rings, centred on the object, radius `r` canvas units, as closed
 /// polylines in canvas coordinates. X and Y are the 3D circles they turn around, seen from the
 /// front: edge-on rings would be lines, so each keeps at least 30 % of its width to stay
-/// grabbable, and widens as the layer tilts.
+/// grabbable, and widens as the object tilts.
 pub fn gizmo_rings(l: &Layout, r: f32) -> [(Axis, Vec<(f32, f32)>); 3] {
     let (cx, cy) = centre(l);
     let ring = |rx: f32, ry: f32| -> Vec<(f32, f32)> {
@@ -601,7 +601,7 @@ mod tests {
         assert_eq!((bottom[0].y, bottom[1].y), (100.0, 100.0));
         let centre = align(&[a, b], Align::Centre);
         assert_eq!((centre[0].x + 50.0, centre[1].x + 25.0), (130.0, 130.0));
-        // A layer turned a quarter shows 50 wide: it aligns by that.
+        // A object turned a quarter shows 50 wide: it aligns by that.
         let turned = Layout { rotation: 90.0, ..Layout::boxed(300.0, 0.0, 100.0, 50.0) };
         let r = align(&[a, turned], Align::Left);
         assert!((bounds(&r[1]).0 - 10.0).abs() < 0.01);
@@ -709,7 +709,7 @@ mod tests {
 
     #[test]
     fn gizmo_rings_and_hits() {
-        // A flat 400×400 layer centred at (200, 200), rings of radius 100.
+        // A flat 400×400 object centred at (200, 200), rings of radius 100.
         let l = Layout::boxed(0.0, 0.0, 400.0, 400.0);
         assert_eq!(gizmo_hit(&l, 100.0, (300.0, 200.0), 4.0), Some(Axis::Z), "the blue ring's right side");
         // Flat, the X ring is a tall narrow ellipse (30 % wide), the Y ring a wide flat one.

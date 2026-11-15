@@ -171,10 +171,10 @@ impl StudioWindow {
         let mut commands = vec![Command::UpdateCanvas { canvas: new.clone() }];
         if (new.width, new.height) != (old.width, old.height) {
             for scene in &workspace.scenes {
-                for layer in scene.layers.iter().filter(|l| l.parent.is_none()) {
-                    if let Some(l) = layer.layouts.get(&old.id) {
+                for object in scene.objects.iter().filter(|l| l.parent.is_none()) {
+                    if let Some(l) = object.layouts.get(&old.id) {
                         let layout = crate::reframe::reframe(l, &old, &new);
-                        commands.push(Command::SetLayout { scene: scene.id, layer: layer.id, canvas: old.id, layout });
+                        commands.push(Command::SetLayout { scene: scene.id, object: object.id, canvas: old.id, layout });
                     }
                 }
             }

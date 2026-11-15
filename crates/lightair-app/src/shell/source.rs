@@ -1,5 +1,5 @@
 //! The Inspector's Source section and its picker: which camera, display, window, app,
-//! microphone or file a layer shows. Changing it changes the source, so it changes in every scene
+//! microphone or file a object shows. Changing it changes the source, so it changes in every scene
 //! that uses it.
 
 use std::path::PathBuf;

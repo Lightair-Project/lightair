@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use lightair_core::{
-    Command, Document, Source, Layer, Layout, Workspace, Scene, TransitionKind, TransitionSettings, diff,
+    Command, Document, Source, Object, Layout, Workspace, Scene, TransitionKind, TransitionSettings, diff,
 };
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
@@ -51,9 +51,9 @@ fn stinger_plays_over_the_switch() {
     let r = Source::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 320, "height": 180}));
     let b = Source::new("Blue", "color_source_v3", json!({"color": 0xFFFF0000u32, "width": 320, "height": 180}));
     let mut a_scene = Scene::new("A");
-    a_scene.layers.push(Layer::new("Red", r.id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
+    a_scene.objects.push(Object::new("Red", r.id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let mut b_scene = Scene::new("B");
-    b_scene.layers.push(Layer::new("Blue", b.id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
+    b_scene.objects.push(Object::new("Blue", b.id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let bb = b_scene.id;
     for cmd in [
         Command::AddSource { source: r },

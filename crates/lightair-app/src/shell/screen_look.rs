@@ -48,7 +48,7 @@ impl StudioWindow {
         }));
         let mut body = self.section("Screen zoom & pointer", Some(toggle.into_any_element()), cx);
         let screens = scene
-            .layers
+            .objects
             .iter()
             .filter_map(|l| l.source.and_then(|i| workspace.sources.get(&i)))
             .filter(|i| i.kind == lightair_core::kinds::SCREEN)
@@ -210,10 +210,10 @@ impl StudioWindow {
             let smooth = self.slider(format!("screen-smooth:{sid}"), (0.0, 1.0, 0.05), look.cursor_smoothing, move |v| set(ScreenLook { cursor_smoothing: v, ..look }), cx);
             let idle = self.slider(format!("screen-idle:{sid}"), (0.0, 10.0, 0.5), look.cursor_idle_s, move |v| set(ScreenLook { cursor_idle_s: v, ..look }), cx);
             let tilt = super::settings::switch("screen-tilt", look.cursor_tilt).on_click(cx.listener(move |this, _, _, cx| this.exec(set(ScreenLook { cursor_tilt: !look.cursor_tilt, ..look }), cx)));
-            let current = super::layer_props::rgb_of(look.cursor_color);
+            let current = super::object_props::rgb_of(look.cursor_color);
             let mut swatches = div().flex().flex_wrap().gap_1p5();
-            for (i, &rgb) in super::layer_props::PALETTE.iter().enumerate() {
-                let cmd = set(ScreenLook { cursor_color: super::layer_props::abgr(rgb), ..look });
+            for (i, &rgb) in super::object_props::PALETTE.iter().enumerate() {
+                let cmd = set(ScreenLook { cursor_color: super::object_props::abgr(rgb), ..look });
                 swatches = swatches.child(
                     div()
                         .id(("screen-colour", i))

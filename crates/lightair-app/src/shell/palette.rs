@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(score("", "Anything"), Some(0));
         assert!(score("rec", "Start or stop recording").is_some());
         assert!(score("xyz", "Take").is_none());
-        assert!(score("ta", "Take").unwrap() < score("ta", "Add text layer").unwrap(), "prefix first");
+        assert!(score("ta", "Take").unwrap() < score("ta", "Rotate all").unwrap(), "prefix first");
     }
 
     #[test]

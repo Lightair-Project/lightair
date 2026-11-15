@@ -1,11 +1,11 @@
-//! The Add Layer picker (docs/05-interface-shell.md, "Layers"): searchable, grouped layer types
+//! The Add Object picker (docs/05-interface-shell.md, "Layers"): searchable, grouped object types
 //! with a line each, a second step for choosing a camera, and sources already in the show to
 //! reuse in this scene.
 
 use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Id, Layer, Layout};
+use lightair_core::{Command, Id, Object, Layout};
 
 use super::StudioWindow;
 use crate::ui::{self, tok};
@@ -16,7 +16,7 @@ pub(super) enum Step {
     Cameras,
 }
 
-pub(super) struct AddLayer {
+pub(super) struct AddObject {
     step: Step,
     search: Entity<InputState>,
     _events: Subscription,
@@ -50,8 +50,8 @@ fn matches(query: &str, words: &[&str]) -> bool {
 }
 
 impl StudioWindow {
-    pub(super) fn open_add_layer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.add_layer.take().is_some() {
+    pub(super) fn open_add_object(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.add_object.take().is_some() {
             cx.notify();
             return;
         }
@@ -62,12 +62,12 @@ impl StudioWindow {
                 cx.notify();
             }
         });
-        self.add_layer = Some(AddLayer { step: Step::Types, search, _events: events });
+        self.add_object = Some(AddObject { step: Step::Types, search, _events: events });
         cx.notify();
     }
 
-    pub(super) fn close_add_layer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_layer = None;
+    pub(super) fn close_add_object(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_object = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -76,14 +76,14 @@ impl StudioWindow {
         match kind {
             Kind::Camera => {
                 self.camera_devices = self.studio.read(cx).engine().call(|_| lightair_engine::kinds::cameras());
-                if let Some(a) = &mut self.add_layer {
+                if let Some(a) = &mut self.add_object {
                     a.step = Step::Cameras;
                 }
                 cx.notify();
                 return;
             }
             Kind::Display => {
-                self.add_source_layer("Display", lightair_core::kinds::SCREEN, super::display_settings(), (1920.0, 1080.0), cx)
+                self.add_source_object("Display", lightair_core::kinds::SCREEN, super::display_settings(), (1920.0, 1080.0), cx)
             }
             Kind::Image => self.add_image(window, cx),
             Kind::Video => self.add_video(window, cx),
@@ -91,10 +91,10 @@ impl StudioWindow {
             Kind::Colour => self.add_colour(cx),
             Kind::Timer => self.add_timer(cx),
         }
-        self.close_add_layer(window, cx);
+        self.close_add_object(window, cx);
     }
 
-    /// Reuses a source already in the show as a new layer in this scene.
+    /// Reuses a source already in the show as a new object in this scene.
     fn add_existing(&mut self, source: Id, window: &mut Window, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
@@ -111,15 +111,15 @@ impl StudioWindow {
                 (f.id, Layout::boxed((f.width as f32 - lw) / 2.0, (f.height as f32 - lh) / 2.0, lw, lh))
             })
             .collect();
-        let layer = Layer::new(i.name.clone(), source, layouts);
-        let id = layer.id;
-        self.exec(Command::AddLayer { scene, layer, index: None }, cx);
-        self.select_layer(Some(id), cx);
-        self.close_add_layer(window, cx);
+        let object = Object::new(i.name.clone(), source, layouts);
+        let id = object.id;
+        self.exec(Command::AddObject { scene, object, index: None }, cx);
+        self.select_object(Some(id), cx);
+        self.close_add_object(window, cx);
     }
 
-    pub(super) fn add_layer_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let state = self.add_layer.as_ref()?;
+    pub(super) fn add_object_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let state = self.add_object.as_ref()?;
         let query = state.search.read(cx).value().to_string();
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
@@ -169,7 +169,7 @@ impl StudioWindow {
         };
 
         let mut body =
-            div().id("add-layer-body").flex().flex_col().flex_shrink(1.).min_h_0().overflow_y_scroll().px_2();
+            div().id("add-object-body").flex().flex_col().flex_shrink(1.).min_h_0().overflow_y_scroll().px_2();
         match state.step {
             Step::Types => {
                 for group in ["Capture", "Media", "Graphics"] {
@@ -189,13 +189,13 @@ impl StudioWindow {
                     body = body.child(heading(group)).child(grid);
                 }
                 // Sources already in the show but not in this scene: reuse them.
-                let in_scene: Vec<Id> = scene.iter().flat_map(|s| s.layers.iter().filter_map(|l| l.source)).collect();
+                let in_scene: Vec<Id> = scene.iter().flat_map(|s| s.objects.iter().filter_map(|l| l.source)).collect();
                 let audio_only = lightair_core::kinds::is_audio;
                 let existing: Vec<_> = workspace
                     .sources
                     .values()
                     .filter(|i| !in_scene.contains(&i.id) && !audio_only(&i.kind))
-                    .filter(|i| workspace.scenes.iter().any(|s| s.layers.iter().any(|l| l.source == Some(i.id))))
+                    .filter(|i| workspace.scenes.iter().any(|s| s.objects.iter().any(|l| l.source == Some(i.id))))
                     .filter(|i| matches(&query, &[&i.name, &i.kind]))
                     .cloned()
                     .collect();
@@ -219,7 +219,7 @@ impl StudioWindow {
             Step::Cameras => {
                 body = body.child(
                     div()
-                        .id("add-layer-back")
+                        .id("add-object-back")
                         .flex()
                         .items_center()
                         .gap_1()
@@ -231,7 +231,7 @@ impl StudioWindow {
                         .child(ui::icon("chevron-left").size(px(14.)))
                         .child("Object types")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(a) = &mut this.add_layer {
+                            if let Some(a) = &mut this.add_object {
                                 a.step = Step::Types;
                             }
                             cx.notify();
@@ -250,7 +250,7 @@ impl StudioWindow {
                     grid = grid.child(card(("camera", i).into(), "camera", label.clone(), hint.into()).on_click(
                         cx.listener(move |this, _, window, cx| {
                             this.add_camera(&label, &uid, cx);
-                            this.close_add_layer(window, cx);
+                            this.close_add_object(window, cx);
                         }),
                     ));
                 }
@@ -267,10 +267,10 @@ impl StudioWindow {
                 .items_start()
                 .pt(px(80.))
                 .bg(tok::scrim())
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_add_layer(window, cx)))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_add_object(window, cx)))
                 .child(
                     div()
-                        .id("add-layer")
+                        .id("add-object")
                         .flex()
                         .flex_col()
                         .gap_2()
@@ -285,7 +285,7 @@ impl StudioWindow {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                             if ev.keystroke.key == "escape" {
-                                this.close_add_layer(window, cx);
+                                this.close_add_object(window, cx);
                                 cx.stop_propagation();
                             }
                         }))

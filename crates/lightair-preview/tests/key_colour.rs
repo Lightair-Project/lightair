@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Effect, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -35,7 +35,7 @@ fn custom_key_colour_and_live_bypass() {
     let screen = Source::new("Screen", "color_source_v3", json!({"color": 0xFF1E78FFu32, "width": 320, "height": 180}));
     let sid = screen.id;
     let mut scene = Scene::new("Main");
-    scene.layers.push(Layer::new("Screen", sid, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
+    scene.objects.push(Object::new("Screen", sid, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let scene_id = scene.id;
     for cmd in [
         Command::AddSource { source: screen },

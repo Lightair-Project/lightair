@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -36,8 +36,8 @@ fn each_source_records_at_its_own_size() {
     let tall = Source::new("Tall", "color_source_v3", json!({"color": 0xFF22AA44u32, "width": 480, "height": 640}));
     let (wid, tid) = (wide.id, tall.id);
     let mut scene = Scene::new("Main");
-    scene.layers.push(Layer::new("Wide", wid, [(f, Layout::boxed(0.0, 0.0, 1280.0, 720.0))]));
-    scene.layers.push(Layer::new("Tall", tid, [(f, Layout::boxed(900.0, 100.0, 240.0, 320.0))]));
+    scene.objects.push(Object::new("Wide", wid, [(f, Layout::boxed(0.0, 0.0, 1280.0, 720.0))]));
+    scene.objects.push(Object::new("Tall", tid, [(f, Layout::boxed(900.0, 100.0, 240.0, 320.0))]));
     let sid = scene.id;
     for cmd in [
         Command::AddSource { source: wide },

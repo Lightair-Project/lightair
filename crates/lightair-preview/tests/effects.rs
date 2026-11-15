@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Effect, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -32,7 +32,7 @@ fn colour_correction_and_green_screen() {
     let green = Source::new("Green", "color_source_v3", json!({"color": 0xFF00FF00u32, "width": 320, "height": 180}));
     let (red_id, green_id) = (red.id, green.id);
     let mut scene = Scene::new("Main");
-    scene.layers.push(Layer::new("Red", red_id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
+    scene.objects.push(Object::new("Red", red_id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let scene_id = scene.id;
     for cmd in [
         Command::AddSource { source: red },
@@ -56,9 +56,9 @@ fn colour_correction_and_green_screen() {
     apply(&engine, &mut doc, Command::RemoveSourceEffect { source: red_id, effect: cc_id });
     assert!(centre(&preview).2 > 200, "red again");
 
-    // Green layer on top hides red; Green screen removes it.
-    let layer = Layer::new("Green", green_id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]);
-    apply(&engine, &mut doc, Command::AddLayer { scene: scene_id, layer, index: None });
+    // Green object on top hides red; Green screen removes it.
+    let object = Object::new("Green", green_id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]);
+    apply(&engine, &mut doc, Command::AddObject { scene: scene_id, object, index: None });
     let p = centre(&preview);
     assert!(p.1 < 100 && p.2 < 100, "green on top: {p:?}");
     let key = Effect::new(

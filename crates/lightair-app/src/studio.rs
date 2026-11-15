@@ -82,10 +82,10 @@ pub struct Studio {
     engine: Arc<Engine>,
     /// The scene selected for editing (the program scene unless studio mode stages another).
     pub selected_scene: Option<Id>,
-    pub selected_layer: Option<Id>,
-    /// Further selected layers (⇧-click); `selected_layer` is the one the Inspector edits.
+    pub selected_object: Option<Id>,
+    /// Further selected objects (⇧-click); `selected_object` is the one the Inspector edits.
     pub also_selected: Vec<Id>,
-    /// The mixer track the Inspector shows (instead of a layer).
+    /// The mixer track the Inspector shows (instead of a object).
     pub selected_track: Option<Id>,
     /// Last user-visible problem, shown in the status bar.
     pub issue: Option<SharedString>,
@@ -96,13 +96,13 @@ pub struct Studio {
     clips_seen: u32,
     /// Frames libobs lagged since the previous stats sample (health is about now, not startup).
     pub recent_lagged: u32,
-    /// The newest saved clip, and replays playing on the canvas (scene, layer, source).
+    /// The newest saved clip, and replays playing on the canvas (scene, object, source).
     pub last_clip: Option<PathBuf>,
     replays: Vec<(Id, Id, Id)>,
     /// Microphone tracks' loudest peak (dBFS) for each of the last ten seconds.
     mic_history: std::collections::HashMap<Id, std::collections::VecDeque<f32>>,
-    /// Imported layers whose size was guessed, waiting for their sources to report a size.
-    refit: Option<(Vec<lightair_store::EstimatedLayer>, std::time::Instant)>,
+    /// Imported objects whose size was guessed, waiting for their sources to report a size.
+    refit: Option<(Vec<lightair_store::EstimatedObject>, std::time::Instant)>,
     /// The recording on its way into the Library.
     pending: Option<Pending>,
     /// The Studio take being recorded.
@@ -139,7 +139,7 @@ impl Studio {
             package,
             engine,
             selected_scene,
-            selected_layer: None,
+            selected_object: None,
             also_selected: Vec::new(),
             selected_track: None,
             ui_request: None,
@@ -292,28 +292,28 @@ impl Studio {
             .iter()
             .map(|f| (f.id, lightair_core::Layout::boxed(0.0, 0.0, f.width as f32, f.height as f32)))
             .collect();
-        let layer = lightair_core::Layer::new("Replay", source.id, layouts);
-        let (layer_id, source_id) = (layer.id, source.id);
+        let object = lightair_core::Object::new("Replay", source.id, layouts);
+        let (object_id, source_id) = (object.id, source.id);
         let command = Command::Batch {
             label: "Replay clip".into(),
-            commands: vec![Command::AddSource { source }, Command::AddLayer { scene, layer, index: None }],
+            commands: vec![Command::AddSource { source }, Command::AddObject { scene, object, index: None }],
         };
         if self.execute(command, cx).is_ok() {
-            self.replays.push((scene, layer_id, source_id));
+            self.replays.push((scene, object_id, source_id));
         }
     }
 
     /// Removes replays whose clip has finished (called on the stats tick).
     pub fn end_replays(&mut self, cx: &mut Context<Self>) {
         let mut finished = Vec::new();
-        for (scene, layer, source) in &self.replays {
+        for (scene, object, source) in &self.replays {
             let id = *source;
             let state = self.engine.call(move |s| s.reconciler.media_status(id)).map(|s| s.state);
             if matches!(
                 state,
                 None | Some(lightair_engine::media::MediaState::Ended | lightair_engine::media::MediaState::Error)
             ) {
-                finished.push((*scene, *layer, *source));
+                finished.push((*scene, *object, *source));
             }
         }
         if finished.is_empty() {
@@ -323,8 +323,8 @@ impl Studio {
         let p = self.workspace().clone();
         let commands: Vec<Command> = finished
             .into_iter()
-            .filter(|(scene, layer, _)| p.scene(*scene).is_some_and(|s| s.layer(*layer).is_some()))
-            .flat_map(|(scene, layer, source)| [Command::RemoveLayer { scene, layer }, Command::RemoveSource { source }])
+            .filter(|(scene, object, _)| p.scene(*scene).is_some_and(|s| s.object(*object).is_some()))
+            .flat_map(|(scene, object, source)| [Command::RemoveObject { scene, object }, Command::RemoveSource { source }])
             .collect();
         if !commands.is_empty() {
             let _ = self.execute(Command::Batch { label: "End replay".into(), commands }, cx);
@@ -357,8 +357,8 @@ impl Studio {
         }
     }
 
-    /// Corrects imported layers whose source size was guessed, once the sources report their
-    /// real size (or after a few seconds, with whatever is known). Layers changed since the
+    /// Corrects imported objects whose source size was guessed, once the sources report their
+    /// real size (or after a few seconds, with whatever is known). Objects changed since the
     /// import are left alone. One undo step.
     pub fn refit_imported(&mut self, cx: &mut Context<Self>) {
         let Some((pending, started)) = &self.refit else { return };
@@ -374,11 +374,11 @@ impl Studio {
             .iter()
             .zip(sizes)
             .filter_map(|(est, size)| {
-                let current = workspace.scene(est.scene)?.layer(est.layer)?.layouts.get(&est.canvas)?;
+                let current = workspace.scene(est.scene)?.object(est.object)?.layouts.get(&est.canvas)?;
                 let size = size.filter(|_| *current == est.layout)?;
                 Some(Command::SetLayout {
                     scene: est.scene,
-                    layer: est.layer,
+                    object: est.object,
                     canvas: est.canvas,
                     layout: est.refit(size),
                 })
@@ -439,7 +439,7 @@ impl Studio {
         self.migrate();
         let workspace = self.doc.workspace().clone();
         self.selected_scene = workspace.program.or(workspace.scenes.first().map(|s| s.id));
-        self.selected_layer = None;
+        self.selected_object = None;
         self.also_selected.clear();
         self.selected_track = None;
         self.replays.clear();
@@ -1183,50 +1183,50 @@ impl Studio {
         self.push(empty, workspace);
     }
 
-    /// Every selected layer, the Inspector's first.
+    /// Every selected object, the Inspector's first.
     pub fn selection(&self) -> Vec<Id> {
-        self.selected_layer.into_iter().chain(self.also_selected.iter().copied()).collect()
+        self.selected_object.into_iter().chain(self.also_selected.iter().copied()).collect()
     }
 
-    /// Selects a scene for editing: the Inspector shows the scene (no layer or mixer strip).
+    /// Selects a scene for editing: the Inspector shows the scene (no object or mixer strip).
     pub fn select_scene(&mut self, scene: Id) {
         self.selected_scene = Some(scene);
-        self.selected_layer = None;
+        self.selected_object = None;
         self.also_selected.clear();
         self.selected_track = None;
     }
 
-    /// Selects a mixer track for the Inspector (and clears the layer selection).
+    /// Selects a mixer track for the Inspector (and clears the object selection).
     pub fn select_track(&mut self, track: Option<Id>) {
         self.selected_track = track;
         if track.is_some() {
-            self.selected_layer = None;
+            self.selected_object = None;
             self.also_selected.clear();
         }
     }
 
-    /// ⇧-click: add a layer to the selection, or take it out.
-    /// Adds a layer to the selection (kept if it's there).
-    pub fn add_selected(&mut self, layer: Id) {
-        if self.selected_layer == Some(layer) || self.also_selected.contains(&layer) {
+    /// ⇧-click: add a object to the selection, or take it out.
+    /// Adds a object to the selection (kept if it's there).
+    pub fn add_selected(&mut self, object: Id) {
+        if self.selected_object == Some(object) || self.also_selected.contains(&object) {
             return;
         }
-        if self.selected_layer.is_none() {
-            self.selected_layer = Some(layer);
+        if self.selected_object.is_none() {
+            self.selected_object = Some(object);
         } else {
-            self.also_selected.push(layer);
+            self.also_selected.push(object);
         }
     }
 
-    pub fn toggle_selected(&mut self, layer: Id) {
-        if self.selected_layer == Some(layer) {
-            self.selected_layer = (!self.also_selected.is_empty()).then(|| self.also_selected.remove(0));
-        } else if let Some(i) = self.also_selected.iter().position(|l| *l == layer) {
+    pub fn toggle_selected(&mut self, object: Id) {
+        if self.selected_object == Some(object) {
+            self.selected_object = (!self.also_selected.is_empty()).then(|| self.also_selected.remove(0));
+        } else if let Some(i) = self.also_selected.iter().position(|l| *l == object) {
             self.also_selected.remove(i);
-        } else if self.selected_layer.is_none() {
-            self.selected_layer = Some(layer);
+        } else if self.selected_object.is_none() {
+            self.selected_object = Some(object);
         } else {
-            self.also_selected.push(layer);
+            self.also_selected.push(object);
         }
     }
 
@@ -1239,15 +1239,15 @@ impl Studio {
         if self.selected_scene.is_none_or(|s| p.scene(s).is_none()) {
             self.selected_scene = p.program.or(p.scenes.first().map(|s| s.id));
         }
-        if let (Some(scene), Some(layer)) = (self.selected_scene, self.selected_layer)
-            && p.scene(scene).is_none_or(|s| s.layer(layer).is_none())
+        if let (Some(scene), Some(object)) = (self.selected_scene, self.selected_object)
+            && p.scene(scene).is_none_or(|s| s.object(object).is_none())
         {
-            self.selected_layer = self.also_selected.first().copied();
+            self.selected_object = self.also_selected.first().copied();
         }
         let scene = self.selected_scene.and_then(|s| p.scene(s));
-        let primary = self.selected_layer;
-        self.also_selected.retain(|l| Some(*l) != primary && scene.is_some_and(|s| s.layer(*l).is_some()));
-        if self.selected_layer.is_none() {
+        let primary = self.selected_object;
+        self.also_selected.retain(|l| Some(*l) != primary && scene.is_some_and(|s| s.object(*l).is_some()));
+        if self.selected_object.is_none() {
             self.also_selected.clear();
         }
     }

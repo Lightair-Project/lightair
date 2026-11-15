@@ -1,5 +1,5 @@
 //! The Inspector's building blocks (docs/05-interface-shell.md, "Inspector"): collapsible
-//! sections, compact numeric fields, sliders, and the layer view (Transform, content, Effects,
+//! sections, compact numeric fields, sliders, and the object view (Transform, content, Effects,
 //! Camera Studio, Canvases).
 
 use std::rc::Rc;
@@ -10,7 +10,7 @@ use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Fit, Canvas, Layer, Layout, Workspace, Scene, Shape, ShapeKind};
+use lightair_core::{Command, Fit, Canvas, Object, Layout, Workspace, Scene, Shape, ShapeKind};
 
 use super::StudioWindow;
 use crate::ui::{self, tok};
@@ -191,24 +191,24 @@ impl StudioWindow {
         Slider::new(&sliders[&key].state)
     }
 
-    /// The Inspector for one layer.
-    pub(super) fn layer_inspector(
+    /// The Inspector for one object.
+    pub(super) fn object_inspector(
         &self,
         workspace: &Workspace,
         scene: &Scene,
-        layer: &Layer,
+        object: &Object,
         canvas: &Canvas,
         body: Div,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let lo = layer.layouts.get(&canvas.id).copied().unwrap_or(Layout::boxed(0., 0., 100., 100.));
-        let (sid, lid, fid) = (scene.id, layer.id, canvas.id);
-        let source = layer.source.and_then(|i| workspace.sources.get(&i)).cloned();
+        let lo = object.layouts.get(&canvas.id).copied().unwrap_or(Layout::boxed(0., 0., 100., 100.));
+        let (sid, lid, fid) = (scene.id, object.id, canvas.id);
+        let source = object.source.and_then(|i| workspace.sources.get(&i)).cloned();
         let kind = source.as_ref().map(|i| i.kind.clone()).unwrap_or_default();
         let set = move |f: &dyn Fn(&mut Layout)| {
             let mut l = lo;
             f(&mut l);
-            Command::SetLayout { scene: sid, layer: lid, canvas: fid, layout: l }
+            Command::SetLayout { scene: sid, object: lid, canvas: fid, layout: l }
         };
 
         // Header: what it is, and the two actions people reach for.
@@ -229,7 +229,7 @@ impl StudioWindow {
                     .overflow_hidden()
                     .text_ellipsis()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(layer.name.clone()),
+                    .child(object.name.clone()),
             )
             .child(
                 ui::icon_button("fill-canvas", "maximize", tok::text_secondary())
@@ -237,10 +237,10 @@ impl StudioWindow {
                     .on_click(cx.listener(move |this, _, _, cx| this.exec(full.clone(), cx))),
             )
             .child(
-                ui::icon_button("delete-layer", "trash", tok::text_secondary())
+                ui::icon_button("delete-object", "trash", tok::text_secondary())
                     .tooltip(|w, cx| Tooltip::new("Delete object").build(w, cx))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.exec(Command::RemoveLayer { scene: sid, layer: lid }, cx)
+                        this.exec(Command::RemoveObject { scene: sid, object: lid }, cx)
                     })),
             );
 
@@ -285,7 +285,7 @@ impl StudioWindow {
         .into_iter()
         .enumerate()
         {
-            let cmd = Command::SetLayout { scene: sid, layer: lid, canvas: fid, layout: Layout { fit, ..lo } };
+            let cmd = Command::SetLayout { scene: sid, object: lid, canvas: fid, layout: Layout { fit, ..lo } };
             let on = lo.fit == fit;
             fits = fits.child(
                 div()
@@ -388,14 +388,14 @@ impl StudioWindow {
                 key("x"),
                 (-75.0, 75.0, 1.0),
                 lo.tilt_x,
-                move |v| Command::SetLayout { scene: sid, layer: lid, canvas: fid, layout: Layout { tilt_x: v, ..lo } },
+                move |v| Command::SetLayout { scene: sid, object: lid, canvas: fid, layout: Layout { tilt_x: v, ..lo } },
                 cx,
             );
             let ty = self.slider(
                 key("y"),
                 (-75.0, 75.0, 1.0),
                 lo.tilt_y,
-                move |v| Command::SetLayout { scene: sid, layer: lid, canvas: fid, layout: Layout { tilt_y: v, ..lo } },
+                move |v| Command::SetLayout { scene: sid, object: lid, canvas: fid, layout: Layout { tilt_y: v, ..lo } },
                 cx,
             );
             transform = transform.child(row("Tilt ↕", tx, format!("{:.0}°", lo.tilt_x))).child(row(
@@ -404,11 +404,11 @@ impl StudioWindow {
                 format!("{:.0}°", lo.tilt_y),
             ));
         }
-        // Shape: part of the layer's frame, cut from the cropped picture.
+        // Shape: part of the object's frame, cut from the cropped picture.
         let shape = lo.shape;
         let with_shape = |sh: Option<Shape>| Command::SetLayout {
             scene: sid,
-            layer: lid,
+            object: lid,
             canvas: fid,
             layout: Layout { shape: sh, ..lo },
         };
@@ -445,7 +445,7 @@ impl StudioWindow {
                 move |v: f32| {
                     let mut s = sh;
                     f(&mut s, v);
-                    Command::SetLayout { scene: sid, layer: lid, canvas: fid, layout: Layout { shape: Some(s), ..lo } }
+                    Command::SetLayout { scene: sid, object: lid, canvas: fid, layout: Layout { shape: Some(s), ..lo } }
                 }
             };
             let key = |name: &str| format!("shape:{lid}:{fid}:{name}");
@@ -458,10 +458,10 @@ impl StudioWindow {
             let s = self.slider(key("border"), (0.0, 40.0, 1.0), sh.border, set_shape(|s, v| s.border = v), cx);
             transform = transform.child(row("Border", s, format!("{:.0} px", sh.border)));
             if sh.border > 0.0 {
-                let current = super::layer_props::rgb_of(sh.border_color);
+                let current = super::object_props::rgb_of(sh.border_color);
                 let mut swatches = div().flex().flex_wrap().gap_1p5();
-                for (i, &rgb) in super::layer_props::PALETTE.iter().enumerate() {
-                    let colour = Shape { border_color: super::layer_props::abgr(rgb), ..sh };
+                for (i, &rgb) in super::object_props::PALETTE.iter().enumerate() {
+                    let colour = Shape { border_color: super::object_props::abgr(rgb), ..sh };
                     let cmd = with_shape(Some(colour));
                     swatches = swatches.child(
                         div()
@@ -469,7 +469,7 @@ impl StudioWindow {
                             .size(px(20.))
                             .rounded_full()
                             .cursor_pointer()
-                            .bg(super::layer_props::rgb_to_hsla(rgb))
+                            .bg(super::object_props::rgb_to_hsla(rgb))
                             .border_2()
                             .border_color(if current == rgb { tok::text() } else { tok::border() })
                             .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
@@ -491,7 +491,7 @@ impl StudioWindow {
             col = col.child(self.effects_section(source, cx));
         }
         if workspace.canvases.len() > 1 {
-            col = col.child(self.canvases_section(workspace, layer, sid, cx));
+            col = col.child(self.canvases_section(workspace, object, sid, cx));
         }
         col.into_any_element()
     }

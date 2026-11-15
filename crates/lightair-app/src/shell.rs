@@ -1,4 +1,4 @@
-//! The studio window (docs/05-interface-shell.md): title bar, Layers + Scenes, Canvas, Mixer,
+//! The studio window (docs/05-interface-shell.md): title bar, Objects + Scenes, Canvas, Mixer,
 //! Outputs + Inspector, status bar. Every edit goes through `Studio::execute`.
 
 use std::cell::RefCell;
@@ -13,20 +13,20 @@ use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{
-    Command, Direction, Canvas, Id, Source, Layer, Layout, Workspace, Scene, TransitionKind, TransitionSettings,
+    Command, Direction, Canvas, Id, Source, Object, Layout, Workspace, Scene, TransitionKind, TransitionSettings,
 };
 use lightair_preview::Preview;
 use serde_json::json;
 
 pub(crate) mod app_menu;
-mod add_layer;
+mod add_object;
 mod assets;
 mod docking;
 mod effects;
 mod golive;
 mod hierarchy;
 mod inspector;
-mod layer_props;
+mod object_props;
 mod menus;
 pub(crate) mod mixer_props;
 mod palette;
@@ -70,14 +70,14 @@ actions!(
         CreateEmptyChild,
         CopySelection,
         CutSelection,
-        PasteLayers,
+        PasteObjects,
         DuplicateSelection,
         BringToFront,
         SendToBack,
         BringForward,
         SendBackward,
-        ToggleLayerVisible,
-        ToggleLayerLocked,
+        ToggleObjectVisible,
+        ToggleObjectLocked,
         MoveOutOfParent,
         FillCanvas,
         SaveAsPrefab,
@@ -144,14 +144,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(crate::ui::key("cmd-alt-0"), ZoomToActual, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-c"), CopySelection, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-x"), CutSelection, Some("Studio")),
-        KeyBinding::new(crate::ui::key("cmd-v"), PasteLayers, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-v"), PasteObjects, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-d"), DuplicateSelection, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-shift-]"), BringToFront, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-shift-["), SendToBack, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-]"), BringForward, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-["), SendBackward, Some("Studio")),
-        KeyBinding::new(crate::ui::key("cmd-shift-h"), ToggleLayerVisible, Some("Studio")),
-        KeyBinding::new(crate::ui::key("cmd-shift-l"), ToggleLayerLocked, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-shift-h"), ToggleObjectVisible, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-shift-l"), ToggleObjectLocked, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-shift-g"), UngroupSelection, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-shift-n"), CreateEmpty, Some("Studio")),
         KeyBinding::new("alt-shift-n", CreateEmptyChild, Some("Studio")),
@@ -185,7 +185,7 @@ enum DragMode {
     TiltAxis(geo::Axis),
 }
 
-/// A handle of the selected layer, for hover and drag feedback.
+/// A handle of the selected object, for hover and drag feedback.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Handle {
     Gizmo(geo::Axis),
@@ -237,12 +237,12 @@ const ROTATE_OFFSET: f32 = 22.0;
 
 struct Drag {
     scene: Id,
-    layer: Id,
+    object: Id,
     canvas: Id,
     mode: DragMode,
     start: (f32, f32),
     layout: Layout,
-    /// Other selected layers moving with it (Move only), with their starting layouts.
+    /// Other selected objects moving with it (Move only), with their starting layouts.
     others: Vec<(Id, Layout)>,
     /// Whether the pointer moved (a still click on the 3D knob toggles the rotate gizmo).
     moved: bool,
@@ -315,7 +315,7 @@ pub struct StudioWindow {
     /// Audio interfaces (for track channel pickers), and when they were read.
     interfaces: RefCell<(std::time::Instant, Vec<lightair_engine::devices::DeviceInfo>)>,
     transition_menu: bool,
-    /// The layer showing crop handles instead of resize handles.
+    /// The object showing crop handles instead of resize handles.
     crop_mode: Option<Id>,
     crop_preview_sent: Option<(Id, Id, Id)>,
     /// The rotate gizmo (Unity-style rings) is showing, and which ring is under the pointer.
@@ -332,7 +332,7 @@ pub struct StudioWindow {
     /// Bumped by every grab, restarting the grabbed handle's pop.
     grabs: usize,
     /// Hierarchy rows folded shut.
-    collapsed_layers: HashSet<Id>,
+    collapsed_objects: HashSet<Id>,
     /// Where a row being dragged in the Hierarchy would land.
     tree_drop: Option<(Id, hierarchy::TreeDrop)>,
     /// The assets folder's files, and when they were read.
@@ -352,18 +352,18 @@ pub struct StudioWindow {
     /// The source picker, and fetched source lists per (source, setting).
     source_picker: Option<source::SourcePicker>,
     source_cache: RefCell<HashMap<(Id, &'static str), SourceOptions>>,
-    /// The Add Layer picker, while open.
-    add_layer: Option<add_layer::AddLayer>,
-    /// Camera devices (label, id), refreshed when the Add Layer menu opens.
+    /// The Add Object picker, while open.
+    add_object: Option<add_object::AddObject>,
+    /// Camera devices (label, id), refreshed when the Add Object menu opens.
     camera_devices: Vec<(String, String)>,
-    /// The open inline rename field in the Layers or Scenes list.
+    /// The open inline rename field in the Objects or Scenes list.
     renaming: Option<Renaming>,
-    /// Studio mode (docs/07-scenes-layers-canvas.md): the stage shows the selected scene, a
+    /// Studio mode (docs/07-scenes-objects-canvas.md): the stage shows the selected scene, a
     /// monitor shows Program, and Take puts the selected scene on air.
     studio_mode: bool,
     program_monitor: Option<Preview>,
     /// Inspector content sections (text field, media status).
-    props: layer_props::LayerProps,
+    props: object_props::ObjectProps,
     /// Safe-area overlay shown on landscape and on vertical stages.
     safe_landscape: Option<Profile>,
     safe_vertical: Option<Profile>,
@@ -543,7 +543,7 @@ impl StudioWindow {
             drag: None,
             guides: vec![],
             add_menu: false,
-            add_layer: None,
+            add_object: None,
             collapsed: RefCell::new(["Canvases"].into_iter().collect()),
             sliders: RefCell::default(),
             effect_sheet: None,
@@ -563,7 +563,7 @@ impl StudioWindow {
             crop_epoch: 0,
             crop_leaving: false,
             grabs: 0,
-            collapsed_layers: HashSet::new(),
+            collapsed_objects: HashSet::new(),
             tree_drop: None,
             asset_cache: RefCell::new((None, Vec::new())),
             selected_asset: None,
@@ -619,15 +619,15 @@ impl StudioWindow {
         cx.notify();
     }
 
-    /// Enter renames the selected layer (or the selected scene when no layer is selected).
+    /// Enter renames the selected object (or the selected scene when no object is selected).
     fn rename_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
         let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
-        match studio.selected_layer.and_then(|id| scene.layer(id)) {
-            Some(layer) => {
-                let target = RowTarget::Layer { scene: scene.id, layer: layer.id };
-                let name = layer.name.clone();
+        match studio.selected_object.and_then(|id| scene.object(id)) {
+            Some(object) => {
+                let target = RowTarget::Object { scene: scene.id, object: object.id };
+                let name = object.name.clone();
                 self.start_rename(target, &name, window, cx)
             }
             None => {
@@ -641,10 +641,10 @@ impl StudioWindow {
     fn drop_row(&mut self, row: &DraggedRow, onto: RowTarget, to: usize, cx: &mut Context<Self>) {
         let cmd = match (row.target, onto) {
             (RowTarget::Scene(scene), RowTarget::Scene(other)) if scene != other => Command::MoveScene { scene, to },
-            (RowTarget::Layer { scene, layer }, RowTarget::Layer { scene: s2, layer: other })
-                if scene == s2 && layer != other =>
+            (RowTarget::Object { scene, object }, RowTarget::Object { scene: s2, object: other })
+                if scene == s2 && object != other =>
             {
-                Command::MoveLayer { scene, layer, to }
+                Command::MoveObject { scene, object, to }
             }
             _ => return,
         };
@@ -669,48 +669,48 @@ impl StudioWindow {
         }
     }
 
-    /// Selects just this layer (or nothing).
-    fn select_layer(&mut self, layer: Option<Id>, cx: &mut Context<Self>) {
-        if self.crop_mode.is_some() && self.crop_mode != layer {
+    /// Selects just this object (or nothing).
+    fn select_object(&mut self, object: Option<Id>, cx: &mut Context<Self>) {
+        if self.crop_mode.is_some() && self.crop_mode != object {
             self.leave_crop_view(std::time::Duration::ZERO, cx);
         }
         self.studio.update(cx, |s, cx| {
-            s.selected_layer = layer;
+            s.selected_object = object;
             s.also_selected.clear();
-            if layer.is_some() {
+            if object.is_some() {
                 s.selected_track = None;
             }
             cx.notify();
         });
     }
 
-    fn toggle_selected(&self, layer: Id, cx: &mut Context<Self>) {
+    fn toggle_selected(&self, object: Id, cx: &mut Context<Self>) {
         self.studio.update(cx, |s, cx| {
-            s.toggle_selected(layer);
+            s.toggle_selected(object);
             cx.notify();
         });
     }
 
-    /// One command for several layers' layouts (a plain SetLayout for one).
+    /// One command for several objects' layouts (a plain SetLayout for one).
     /// `layouts` are frames in canvas terms (as `frame_of` gives them); each is stored in its
-    /// layer's parent space. An empty moves its pivot by as much as its frame moved.
+    /// object's parent space. An empty moves its pivot by as much as its frame moved.
     fn set_layouts(&self, scene: Id, canvas: Id, layouts: Vec<(Id, Layout)>, label: &str, cx: &mut Context<Self>) {
         let workspace = self.studio.read(cx).workspace().clone();
         let Some(sc) = workspace.scene(scene) else { return };
         let mut commands: Vec<Command> = layouts
             .into_iter()
-            .filter_map(|(layer, frame)| {
-                let l = sc.layer(layer)?;
+            .filter_map(|(object, frame)| {
+                let l = sc.object(object)?;
                 let world = if l.is_empty() {
                     let now = self.frame_of(sc, l, canvas)?;
-                    let pivot = sc.world(layer, canvas)?;
+                    let pivot = sc.world(object, canvas)?;
                     let (dx, dy) = (frame.x - now.x, frame.y - now.y);
                     Layout { x: pivot.x + dx, y: pivot.y + dy, ..pivot }
                 } else {
                     frame
                 };
-                let layout = sc.local(layer, canvas, &world)?;
-                Some(Command::SetLayout { scene, layer, canvas, layout })
+                let layout = sc.local(object, canvas, &world)?;
+                Some(Command::SetLayout { scene, object, canvas, layout })
             })
             .collect();
         match commands.len() {
@@ -925,12 +925,12 @@ impl StudioWindow {
         }
     }
 
-    /// Adds a vertical canvas with every layer auto-reframed (one undo step).
+    /// Adds a vertical canvas with every object auto-reframed (one undo step).
     fn add_vertical(&mut self, cx: &mut Context<Self>) {
         self.add_canvas(Canvas::vertical(), cx)
     }
 
-    /// Adds a canvas with every layer reframed into it (one undo step), and shows both.
+    /// Adds a canvas with every object reframed into it (one undo step), and shows both.
     fn add_canvas(&mut self, to: Canvas, cx: &mut Context<Self>) {
         self.canvas_menu = None;
         let workspace = self.studio.read(cx).workspace().clone();
@@ -939,10 +939,10 @@ impl StudioWindow {
         let label = format!("Add {} format", to.name.to_lowercase());
         let mut commands = vec![Command::AddCanvas { canvas: to.clone() }];
         for scene in &workspace.scenes {
-            for layer in &scene.layers {
-                if let Some(l) = layer.layouts.get(&from.id) {
+            for object in &scene.objects {
+                if let Some(l) = object.layouts.get(&from.id) {
                     let layout = crate::reframe::reframe(l, &from, &to);
-                    commands.push(Command::SetLayout { scene: scene.id, layer: layer.id, canvas: to_id, layout });
+                    commands.push(Command::SetLayout { scene: scene.id, object: object.id, canvas: to_id, layout });
                 }
             }
         }
@@ -970,8 +970,8 @@ impl StudioWindow {
         };
         let Some(scene) = workspace.scene(scene_id) else { return };
 
-        // A handle of the selected layer? (See `handle_at`.)
-        if let Some(sel) = studio.selected_layer.and_then(|id| scene.layer(id))
+        // A handle of the selected object? (See `handle_at`.)
+        if let Some(sel) = studio.selected_object.and_then(|id| scene.object(id))
             && let Some(frame) = self.frame_of(scene, sel, canvas).filter(|_| !scene.locked(sel.id) && !sel.is_empty())
         {
             // The frame hugs the picture: handles sit on it, and a drag snaps the box to it.
@@ -983,7 +983,7 @@ impl StudioWindow {
                 // Double-click the 3D knob: flat again.
                 let stored = sel.layouts[&canvas];
                 let layout = Layout { tilt_x: 0.0, tilt_y: 0.0, ..stored };
-                self.exec(Command::SetLayout { scene: scene_id, layer: sel.id, canvas, layout }, cx);
+                self.exec(Command::SetLayout { scene: scene_id, object: sel.id, canvas, layout }, cx);
                 return;
             }
             let mode = handle.and_then(|h| {
@@ -1014,7 +1014,7 @@ impl StudioWindow {
                 self.hover_handle = None;
                 self.drag = Some(Drag {
                     scene: scene_id,
-                    layer: sel.id,
+                    object: sel.id,
                     canvas,
                     mode,
                     start: (x, y),
@@ -1026,35 +1026,35 @@ impl StudioWindow {
                 return;
             }
         }
-        // Topmost visible picture under the pointer (the deepest layer: a child, not the empty
-        // holding it). A selected empty is grabbed anywhere in the box round its layers.
+        // Topmost visible picture under the pointer (the deepest object: a child, not the empty
+        // holding it). A selected empty is grabbed anywhere in the box round its objects.
         let selected_empty = studio
-            .selected_layer
-            .and_then(|id| scene.layer(id))
+            .selected_object
+            .and_then(|id| scene.object(id))
             .filter(|l| l.is_empty() && !scene.locked(l.id))
             .filter(|l| self.frame_of(scene, l, canvas).is_some_and(|lo| geo::contains(&lo, (x, y))));
         let hit =
             selected_empty.or_else(|| {
-                scene.layers.iter().rev().filter(|l| !l.is_empty()).find(|l| {
+                scene.objects.iter().rev().filter(|l| !l.is_empty()).find(|l| {
                     self.frame_of(scene, l, canvas).is_some_and(|lo| lo.visible && geo::contains(&lo, (x, y)))
                 })
             });
         let selection = studio.selection();
         match hit {
             // ⇧ or ⌘: add or take away
-            Some(layer) if ev.modifiers.shift || ev.modifiers.platform => self.toggle_selected(layer.id, cx),
-            Some(layer) => {
-                let id = layer.id;
-                // Dragging one of several selected layers moves them all; otherwise select it.
+            Some(object) if ev.modifiers.shift || ev.modifiers.platform => self.toggle_selected(object.id, cx),
+            Some(object) => {
+                let id = object.id;
+                // Dragging one of several selected objects moves them all; otherwise select it.
                 let in_selection = selection.contains(&id);
-                if !scene.locked(layer.id) {
-                    let Some(layout) = self.frame_of(scene, layer, canvas) else { return };
+                if !scene.locked(object.id) {
+                    let Some(layout) = self.frame_of(scene, object, canvas) else { return };
                     let others: Vec<(Id, Layout)> = if in_selection {
                         selection
                             .iter()
                             .filter(|o| **o != id)
-                            .filter_map(|o| scene.layer(*o).filter(|l| !scene.locked(l.id)))
-                            // Not inside another moving layer: it moves with that one.
+                            .filter_map(|o| scene.object(*o).filter(|l| !scene.locked(l.id)))
+                            // Not inside another moving object: it moves with that one.
                             .filter(|l| !selection.iter().any(|a| scene.is_under(l.id, *a)))
                             .filter_map(|l| self.frame_of(scene, l, canvas).map(|lo| (l.id, lo)))
                             .collect()
@@ -1064,7 +1064,7 @@ impl StudioWindow {
                     let mode = DragMode::Move;
                     self.drag = Some(Drag {
                         scene: scene_id,
-                        layer: id,
+                        object: id,
                         canvas,
                         mode,
                         start: (x, y),
@@ -1075,25 +1075,25 @@ impl StudioWindow {
                     self.studio.update(cx, |s, _| s.begin_gesture());
                 }
                 if in_selection {
-                    // Keep the group; the grabbed layer becomes the Inspector's.
+                    // Keep the group; the grabbed object becomes the Inspector's.
                     self.studio.update(cx, |s, cx| {
-                        if s.selected_layer != Some(id) {
+                        if s.selected_object != Some(id) {
                             s.also_selected.retain(|l| *l != id);
-                            if let Some(prev) = s.selected_layer.replace(id) {
+                            if let Some(prev) = s.selected_object.replace(id) {
                                 s.also_selected.insert(0, prev);
                             }
                         }
                         cx.notify();
                     });
                 } else {
-                    self.select_layer(Some(id), cx);
+                    self.select_object(Some(id), cx);
                 }
             }
             // Empty space: start a selection box (⇧ adds to the selection).
             None => {
                 let adding = ev.modifiers.shift || ev.modifiers.platform;
                 if !adding {
-                    self.select_layer(None, cx);
+                    self.select_object(None, cx);
                 }
                 self.marquee = Some((canvas, (x, y), (x, y), adding));
             }
@@ -1130,14 +1130,14 @@ impl StudioWindow {
             let canvas = self.canvas_id(&workspace);
             let studio = self.studio.read(cx);
             let hover = studio.selected_scene.and_then(|sid| workspace.scene(sid)).and_then(|scene| {
-                let layer = studio.selected_layer.and_then(|id| scene.layer(id)).filter(|l| !scene.locked(l.id))?;
-                if layer.is_empty() {
+                let object = studio.selected_object.and_then(|id| scene.object(id)).filter(|l| !scene.locked(l.id))?;
+                if object.is_empty() {
                     return None;
                 }
-                let frame = self.frame_of(scene, layer, canvas)?;
+                let frame = self.frame_of(scene, object, canvas)?;
                 let (_, _, s) = self.mapping(&workspace, canvas)?;
                 let p = self.pointer.map(|(_, p)| p)?;
-                let has_size = layer.source.is_some_and(|i| self.sizes.borrow().1.contains_key(&i));
+                let has_size = object.source.is_some_and(|i| self.sizes.borrow().1.contains_key(&i));
                 self.handle_at(&frame, p, s, ev.modifiers.alt, has_size)
             });
             let gizmo = match hover {
@@ -1232,9 +1232,9 @@ impl StudioWindow {
             }
         }
         self.guides = guides;
-        // The group follows the grabbed layer (after snapping).
+        // The group follows the grabbed object (after snapping).
         let (mx, my) = (l.x - drag.layout.x, l.y - drag.layout.y);
-        let mut layouts = vec![(drag.layer, l)];
+        let mut layouts = vec![(drag.object, l)];
         layouts.extend(drag.others.iter().map(|(id, o)| (*id, Layout { x: o.x + mx, y: o.y + my, ..*o })));
         let (scene, canvas) = (drag.scene, drag.canvas);
         self.set_layouts(scene, canvas, layouts, "Move objects", cx);
@@ -1253,7 +1253,7 @@ impl StudioWindow {
                     && moved
                 {
                     let hit: Vec<Id> = scene
-                        .layers
+                        .objects
                         .iter()
                         .rev()
                         .filter(|l| !l.is_empty() && !scene.locked(l.id))
@@ -1270,7 +1270,7 @@ impl StudioWindow {
                             all.push(id);
                         }
                     }
-                    s.selected_layer = all.first().copied();
+                    s.selected_object = all.first().copied();
                     s.also_selected = all.into_iter().skip(1).collect();
                 }
                 cx.notify();
@@ -1295,7 +1295,7 @@ impl StudioWindow {
         }
     }
 
-    /// The handle of `l` (the selected layer's frame) at canvas point `p`. One set does
+    /// The handle of `l` (the selected object's frame) at canvas point `p`. One set does
     /// everything: corners resize (⌥ crops), edges crop, the top knob rotates, the bottom knob
     /// tilts in 3D (and opens the rotate gizmo), ⌥-drag inside pans a cropped picture.
     fn handle_at(&self, l: &Layout, (x, y): (f32, f32), s: f32, alt: bool, has_size: bool) -> Option<Handle> {
@@ -1387,7 +1387,7 @@ impl StudioWindow {
             studio
                 .selected_scene
                 .and_then(|id| workspace.scene(id))
-                .and_then(|sc| studio.selected_layer.and_then(|l| sc.world(l, canvas)))
+                .and_then(|sc| studio.selected_object.and_then(|l| sc.world(l, canvas)))
                 .map_or(0.0, |l| l.rotation)
         };
         let grabbing = self.drag.is_some();
@@ -1419,7 +1419,7 @@ impl StudioWindow {
         let selection = studio.selection();
         let moved: Vec<(Id, Layout)> = selection
             .iter()
-            .filter_map(|id| scene.layer(*id).filter(|l| !scene.locked(l.id)))
+            .filter_map(|id| scene.object(*id).filter(|l| !scene.locked(l.id)))
             .filter(|l| !selection.iter().any(|a| scene.is_under(l.id, *a)))
             .filter_map(|l| {
                 self.frame_of(scene, l, canvas).map(|lo| (l.id, Layout { x: lo.x + dx, y: lo.y + dy, ..lo }))
@@ -1432,12 +1432,12 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let Some(scene) = studio.selected_scene else { return };
         let Some(sc) = studio.workspace().scene(scene) else { return };
-        // A layer inside another selected one goes with it.
+        // A object inside another selected one goes with it.
         let selection = studio.selection();
         let mut commands: Vec<Command> = selection
             .iter()
             .filter(|l| !selection.iter().any(|a| sc.is_under(**l, *a)))
-            .map(|layer| Command::RemoveLayer { scene, layer: *layer })
+            .map(|object| Command::RemoveObject { scene, object: *object })
             .collect();
         match commands.len() {
             0 => {}
@@ -1447,12 +1447,12 @@ impl StudioWindow {
     }
 
     // ------------------------------------------------------------ adding things
-    fn add_source_layer(&mut self, name: &str, kind: &str, settings: serde_json::Value, size: (f32, f32), cx: &mut Context<Self>) {
-        self.add_source_layer_id(name, kind, settings, size, cx);
+    fn add_source_object(&mut self, name: &str, kind: &str, settings: serde_json::Value, size: (f32, f32), cx: &mut Context<Self>) {
+        self.add_source_object_id(name, kind, settings, size, cx);
     }
 
-    /// Adds a source and a layer showing it to the selected scene: the source's id.
-    fn add_source_layer_id(
+    /// Adds a source and a object showing it to the selected scene: the source's id.
+    fn add_source_object_id(
         &mut self,
         name: &str,
         kind: &str,
@@ -1476,22 +1476,22 @@ impl StudioWindow {
             .collect();
         let source = Source::new(name, kind, settings);
         let source_id = source.id;
-        let layer = Layer::new(name, source.id, layouts);
-        let layer_id = layer.id;
+        let object = Object::new(name, source.id, layouts);
+        let object_id = object.id;
         let cmd = Command::Batch {
             label: format!("Add {name}"),
-            commands: vec![Command::AddSource { source }, Command::AddLayer { scene, layer, index: None }],
+            commands: vec![Command::AddSource { source }, Command::AddObject { scene, object, index: None }],
         };
         self.exec(cmd, cx);
-        self.select_layer(Some(layer_id), cx);
+        self.select_object(Some(object_id), cx);
         Some(source_id)
     }
 
-    /// A camera layer, set up with the camera defaults (Settings › Camera): with Beauty on by
+    /// A camera object, set up with the camera defaults (Settings › Camera): with Beauty on by
     /// default, the source starts with the Beauty effect.
     fn add_camera(&mut self, label: &str, uid: &str, cx: &mut Context<Self>) {
         let defaults = self.prefs.camera;
-        let source = self.add_source_layer_id(label, lightair_core::kinds::CAMERA, defaults.settings(uid), (1280.0, 720.0), cx);
+        let source = self.add_source_object_id(label, lightair_core::kinds::CAMERA, defaults.settings(uid), (1280.0, 720.0), cx);
         if defaults.studio_on
             && let Some(source) = source
             && let Some(beauty) = lightair_core::catalog::def("studio.beauty")
@@ -1510,7 +1510,7 @@ impl StudioWindow {
             let Some(path): Option<PathBuf> = paths.into_iter().next() else { return };
             let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Image".into());
             let _ = this.update(cx, |this, cx| {
-                this.add_source_layer(&name, "image_source", json!({"file": path.to_string_lossy()}), (640.0, 360.0), cx)
+                this.add_source_object(&name, "image_source", json!({"file": path.to_string_lossy()}), (640.0, 360.0), cx)
             });
         })
         .detach();
@@ -1523,7 +1523,7 @@ impl StudioWindow {
             "color1": 0xFFFFFFFFu32,
             "color2": 0xFFFFFFFFu32,
         });
-        self.add_source_layer("Text", "text_ft2_source_v2", settings, (720.0, 180.0), cx)
+        self.add_source_object("Text", "text_ft2_source_v2", settings, (720.0, 180.0), cx)
     }
 
     /// A 5-minute countdown that starts when its scene goes on air.
@@ -1536,15 +1536,15 @@ impl StudioWindow {
             "color1": 0xFFFFFFFFu32,
             "color2": 0xFFFFFFFFu32,
         });
-        self.add_source_layer("Countdown", lightair_engine::timers::TIMER_KIND, settings, (560.0, 200.0), cx)
+        self.add_source_object("Countdown", lightair_engine::timers::TIMER_KIND, settings, (560.0, 200.0), cx)
     }
 
     fn add_colour(&mut self, cx: &mut Context<Self>) {
         let settings = json!({"color": 0xFF4A3BFFu32, "width": 400, "height": 400});
-        self.add_source_layer("Colour", "color_source_v3", settings, (400.0, 400.0), cx)
+        self.add_source_object("Colour", "color_source_v3", settings, (400.0, 400.0), cx)
     }
 
-    /// A video file layer: plays when its scene goes on air, loops by default.
+    /// A video file object: plays when its scene goes on air, loops by default.
     fn add_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.add_menu = false;
         let paths =
@@ -1560,7 +1560,7 @@ impl StudioWindow {
                 "restart_on_activate": true,
             });
             let _ = this
-                .update(cx, |this, cx| this.add_source_layer(&name, "ffmpeg_source", settings, (1920.0, 1080.0), cx));
+                .update(cx, |this, cx| this.add_source_object(&name, "ffmpeg_source", settings, (1920.0, 1080.0), cx));
         })
         .detach();
     }
@@ -1629,7 +1629,7 @@ impl Render for StudioWindow {
         self.refresh_sizes(cx);
         self.sync_previews(cx);
         self.take_thumbnails(cx);
-        self.sync_layer_props(window, cx);
+        self.sync_object_props(window, cx);
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
 
@@ -1707,7 +1707,7 @@ impl Render for StudioWindow {
                     this.rotate_tool = false;
                     cx.notify();
                 } else {
-                    this.select_layer(None, cx)
+                    this.select_object(None, cx)
                 }
             }))
             .on_action(cx.listener(|this, _: &RenameSelection, window, cx| {
@@ -1747,11 +1747,11 @@ impl Render for StudioWindow {
                     this.cut_selection(cx)
                 }
             }))
-            .on_action(cx.listener(|this, _: &PasteLayers, _, cx| {
+            .on_action(cx.listener(|this, _: &PasteObjects, _, cx| {
                 if this.place == Place::Editor {
                     this.editor.update(cx, |e, cx| e.paste_at(None, cx));
                 } else {
-                    this.paste_layers(cx)
+                    this.paste_objects(cx)
                 }
             }))
             .on_action(cx.listener(|this, _: &DuplicateSelection, _, cx| {
@@ -1767,8 +1767,8 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &SendBackward, _, cx| {
                 this.arrange("Send backward", |i, _| i.saturating_sub(1), cx)
             }))
-            .on_action(cx.listener(|this, _: &ToggleLayerVisible, _, cx| this.toggle_selection_visible(cx)))
-            .on_action(cx.listener(|this, _: &ToggleLayerLocked, _, cx| this.toggle_selection_locked(cx)))
+            .on_action(cx.listener(|this, _: &ToggleObjectVisible, _, cx| this.toggle_selection_visible(cx)))
+            .on_action(cx.listener(|this, _: &ToggleObjectLocked, _, cx| this.toggle_selection_locked(cx)))
             .on_action(cx.listener(|this, _: &MoveOutOfParent, _, cx| this.move_out_of_parent(cx)))
             .on_action(cx.listener(|this, _: &FillCanvas, _, cx| this.fill_canvas(cx)))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
@@ -1815,14 +1815,14 @@ impl Render for StudioWindow {
                 }
             }))
             .on_action(cx.listener(|this, _: &SaveAsPrefab, _, cx| {
-                if let Some(layer) = this.studio.read(cx).selected_layer {
-                    this.save_prefab(layer, cx);
+                if let Some(object) = this.studio.read(cx).selected_object {
+                    this.save_prefab(object, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &UngroupSelection, _, cx| this.ungroup_selection(cx)))
             .on_action(cx.listener(|this, _: &CreateEmpty, window, cx| this.create_empty(None, window, cx)))
             .on_action(cx.listener(|this, _: &CreateEmptyChild, window, cx| {
-                let parent = this.studio.read(cx).selected_layer;
+                let parent = this.studio.read(cx).selected_object;
                 this.create_empty(parent, window, cx)
             }))
             .on_action(cx.listener(|this, _: &Scene1, w, cx| this.scene_shortcut(0, w, cx)))
@@ -1841,13 +1841,13 @@ impl Render for StudioWindow {
                 }
                 this.studio.update(cx, |s, cx| {
                     let p = s.workspace().clone();
-                    let layers: Vec<Id> = s
+                    let objects: Vec<Id> = s
                         .selected_scene
                         .and_then(|id| p.scene(id))
-                        .map(|scene| scene.layers.iter().rev().map(|l| l.id).collect())
+                        .map(|scene| scene.objects.iter().rev().map(|l| l.id).collect())
                         .unwrap_or_default();
-                    s.selected_layer = layers.first().copied();
-                    s.also_selected = layers.into_iter().skip(1).collect();
+                    s.selected_object = objects.first().copied();
+                    s.also_selected = objects.into_iter().skip(1).collect();
                     cx.notify();
                 })
             }))
@@ -1877,7 +1877,7 @@ impl Render for StudioWindow {
                 Place::Editor => div().flex().flex_1().min_h_0().child(self.editor.clone()),
             })
             .child(self.status_bar(cx))
-            .children(self.add_layer_overlay(cx))
+            .children(self.add_object_overlay(cx))
             .children(self.effect_catalog_overlay(cx))
             .children(self.source_picker_overlay(cx))
             .children(self.outputs.update(cx, |o, cx| o.dialog(cx)))
@@ -1968,7 +1968,7 @@ impl StudioWindow {
         self.rotate_tool = false;
         self.renaming = None;
         self.source_picker = None;
-        self.add_layer = None;
+        self.add_object = None;
         self.marquee = None;
         self.zoom = 1.0;
         self.pan = (0.0, 0.0);
@@ -2427,17 +2427,17 @@ impl StudioWindow {
         }
     }
 
-    /// Where a layer's picture actually is in a canvas: its box, narrowed to the picture in Fit
+    /// Where a object's picture actually is in a canvas: its box, narrowed to the picture in Fit
     /// mode. The frame, handles and dragging use this, so they stick to the source.
     /// In canvas terms (a child's layout is in its parent's space). An empty's frame is the box
     /// round what it holds (a small square at its pivot when it holds nothing).
-    fn frame_of(&self, scene: &Scene, layer: &Layer, canvas: Id) -> Option<Layout> {
-        let world = scene.world(layer.id, canvas)?;
-        if layer.is_empty() {
+    fn frame_of(&self, scene: &Scene, object: &Object, canvas: Id) -> Option<Layout> {
+        let world = scene.world(object.id, canvas)?;
+        if object.is_empty() {
             let frames: Vec<Layout> = scene
-                .layers
+                .objects
                 .iter()
-                .filter(|l| !l.is_empty() && scene.is_under(l.id, layer.id))
+                .filter(|l| !l.is_empty() && scene.is_under(l.id, object.id))
                 .filter_map(|l| self.frame_of(scene, l, canvas))
                 .collect();
             let bounds =
@@ -2445,23 +2445,23 @@ impl StudioWindow {
             let bounds = bounds.map(|(x0, y0, x1, y1)| Layout::boxed(x0, y0, x1 - x0, y1 - y0));
             let (px_, py_) = (world.x, world.y);
             return Some(Layout {
-                visible: world.visible && scene.shown(layer.id, canvas),
+                visible: world.visible && scene.shown(object.id, canvas),
                 ..bounds.unwrap_or(Layout::boxed(px_ - 20.0, py_ - 20.0, 40.0, 40.0))
             });
         }
-        let size = layer.source.and_then(|i| self.sizes.borrow().1.get(&i).copied()).map(|(w, h)| (w as f32, h as f32));
+        let size = object.source.and_then(|i| self.sizes.borrow().1.get(&i).copied()).map(|(w, h)| (w as f32, h as f32));
         let mut frame = geo::content_rect(&world, size);
-        frame.visible = scene.shown(layer.id, canvas);
+        frame.visible = scene.shown(object.id, canvas);
         Some(frame)
     }
 
-    /// Keeps libobs showing the layer being cropped whole (crop mode), or not.
+    /// Keeps libobs showing the object being cropped whole (crop mode), or not.
     fn sync_crop_preview(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
         let want = self
             .crop_mode
-            .and_then(|layer| studio.selected_scene.map(|scene| (scene, self.canvas_id(&workspace), layer)));
+            .and_then(|object| studio.selected_scene.map(|scene| (scene, self.canvas_id(&workspace), object)));
         if want != self.crop_preview_sent {
             self.crop_preview_sent = want;
             studio.engine().post(move |s| s.reconciler.set_crop_preview(want, &workspace));
@@ -2469,7 +2469,7 @@ impl StudioWindow {
     }
 
     fn toggle_add_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_add_layer(window, cx);
+        self.open_add_object(window, cx);
     }
 
     fn transition_picker(&self, workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2731,7 +2731,7 @@ impl StudioWindow {
                         .id("scenes-end")
                         .flex_1()
                         .min_h(px(24.))
-                        .on_click(cx.listener(|this, _, _, cx| this.select_layer(None, cx)))
+                        .on_click(cx.listener(|this, _, _, cx| this.select_object(None, cx)))
                         .context_menu({
                             let shell = cx.entity().downgrade();
                             move |m, _, _| menus::scenes_blank_menu(m, &shell)
@@ -3061,7 +3061,7 @@ impl StudioWindow {
             let selected = studio
                 .selected_scene
                 .and_then(|id| workspace.scene(id))
-                .and_then(|scene| studio.selected_layer.and_then(|l| scene.layer(l)))
+                .and_then(|scene| studio.selected_object.and_then(|l| scene.object(l)))
                 .and_then(|l| {
                     let scene = studio.selected_scene.and_then(|id| workspace.scene(id))?;
                     self.frame_of(scene, l, fid).map(|lo| (lo, scene.locked(l.id) || l.is_empty(), l.id))
@@ -3083,7 +3083,7 @@ impl StudioWindow {
                         .bg(tok::canvas_safe_area_fill()),
                 );
             }
-            // Other selected layers: outlines only.
+            // Other selected objects: outlines only.
             let extras: Vec<[(f32, f32); 4]> = studio
                 .selected_scene
                 .and_then(|id| workspace.scene(id))
@@ -3091,7 +3091,7 @@ impl StudioWindow {
                     studio
                         .also_selected
                         .iter()
-                        .filter_map(|id| scene.layer(*id))
+                        .filter_map(|id| scene.object(*id))
                         .filter_map(|l| self.frame_of(scene, l, fid))
                         .map(|lo| geo::outline(&lo).map(|(px_, py_)| (lx + px_ * s, ly + py_ * s)))
                         .collect()
@@ -3127,11 +3127,11 @@ impl StudioWindow {
                 let outline = geo::outline(&l).map(to_stage);
                 let cropping = editing && !locked && self.crop_mode == Some(lid) && !self.crop_leaving;
                 // The handle being dragged, or else the one under the pointer: lit up.
-                let hot: Option<Handle> = match self.drag.as_ref().filter(|d| d.layer == lid) {
+                let hot: Option<Handle> = match self.drag.as_ref().filter(|d| d.object == lid) {
                     Some(d) => d.mode.handle(self.rotate_tool),
                     None => self.hover_handle,
                 };
-                let grabbed = self.drag.as_ref().is_some_and(|d| d.layer == lid);
+                let grabbed = self.drag.as_ref().is_some_and(|d| d.object == lid);
                 let grabs = self.grabs;
                 // A handle's dot: lit when hot, and a quick pop when grabbed.
                 let dot = move |(x, y): (f32, f32), base: f32, round: bool, this: Option<Handle>| -> AnyElement {
@@ -3167,8 +3167,8 @@ impl StudioWindow {
                     let source = studio
                         .selected_scene
                         .and_then(|id| workspace.scene(id))
-                        .and_then(|sc| sc.layer(lid))
-                        .and_then(|layer| layer.source);
+                        .and_then(|sc| sc.object(lid))
+                        .and_then(|object| object.source);
                     let size = source.and_then(|i| studio.engine().call(move |s| s.reconciler.source_size(i)));
                     let full = size.map(|(w, h)| geo::outline(&l.uncropped((w as f32, h as f32))).map(to_stage));
                     let shape: Vec<(f32, f32)> = geo::shape_outline(&l).into_iter().map(to_stage).collect();
@@ -3194,7 +3194,7 @@ impl StudioWindow {
                 let active_axis = self
                     .drag
                     .as_ref()
-                    .filter(|d| d.layer == lid)
+                    .filter(|d| d.object == lid)
                     .and_then(|d| match d.mode {
                         DragMode::TiltAxis(a) => Some(a),
                         DragMode::Rotate if gizmo_on => Some(geo::Axis::Z),
@@ -3246,7 +3246,7 @@ impl StudioWindow {
                 let tilted =
                     (l.tilt_x.abs() > 0.01 || l.tilt_y.abs() > 0.01).then(|| geo::projected_outline(&l).map(to_stage));
                 let edge = tok::canvas_selection_edge();
-                // The outline turns with the layer, so it's painted as a path.
+                // The outline turns with the object, so it's painted as a path.
                 stage = stage.child(
                     canvas(
                         |_, _, _| {},
@@ -3400,7 +3400,7 @@ impl StudioWindow {
                 }
                 // What the drag is doing, by the pointer.
                 if let (Some(d), Some((pf, p))) =
-                    (self.drag.as_ref().filter(|d| d.layer == lid && d.moved), self.pointer)
+                    (self.drag.as_ref().filter(|d| d.object == lid && d.moved), self.pointer)
                     && pf == fid
                 {
                     let text = match d.mode {
@@ -3439,7 +3439,7 @@ impl StudioWindow {
             }
             // A selected empty: its pivot, as a small crosshair.
             if let Some(pivot) = studio.selected_scene.and_then(|id| workspace.scene(id)).and_then(|scene| {
-                let l = studio.selected_layer.and_then(|id| scene.layer(id)).filter(|l| l.is_empty())?;
+                let l = studio.selected_object.and_then(|id| scene.object(id)).filter(|l| l.is_empty())?;
                 scene.world(l.id, fid)
             }) {
                 let (px_, py_) = (lx + pivot.x * s, ly + pivot.y * s);
@@ -3519,7 +3519,7 @@ impl StudioWindow {
                     }))
                     .context_menu({
                         let shell = cx.entity().downgrade();
-                        move |m, window, cx| menus::layer_menu(m, &shell, window, cx)
+                        move |m, window, cx| menus::object_menu(m, &shell, window, cx)
                     }),
             );
         let well = match self.studio_mode.then(|| self.program_column(workspace, cx)) {
@@ -3529,8 +3529,8 @@ impl StudioWindow {
         div().flex().flex_col().size_full().child(self.canvas_tabs(workspace, cx)).child(well)
     }
 
-    /// Per-canvas visibility, and copying this layer's layout from another canvas.
-    fn canvases_section(&self, workspace: &Workspace, layer: &Layer, scene: Id, cx: &mut Context<Self>) -> AnyElement {
+    /// Per-canvas visibility, and copying this object's layout from another canvas.
+    fn canvases_section(&self, workspace: &Workspace, object: &Object, scene: Id, cx: &mut Context<Self>) -> AnyElement {
         let active = self.canvas_id(workspace);
         let mut col = div().flex().flex_col().gap_1p5().pt_3().mt_1().border_t_1().border_color(tok::border()).child(
             div()
@@ -3541,8 +3541,8 @@ impl StudioWindow {
         );
         let Some(here) = workspace.canvas(active).cloned() else { return col.into_any_element() };
         for (i, f) in workspace.canvases.iter().enumerate() {
-            let (fid, lid) = (f.id, layer.id);
-            let visible = layer.layouts.get(&fid).is_some_and(|l| l.visible);
+            let (fid, lid) = (f.id, object.id);
+            let visible = object.layouts.get(&fid).is_some_and(|l| l.visible);
             let mut row = div()
                 .flex()
                 .items_center()
@@ -3554,7 +3554,7 @@ impl StudioWindow {
                         if visible { tok::text_secondary() } else { tok::text_tertiary() },
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.exec(Command::SetLayerVisible { scene, layer: lid, canvas: fid, visible: !visible }, cx)
+                        this.exec(Command::SetObjectVisible { scene, object: lid, canvas: fid, visible: !visible }, cx)
                     })),
                 )
                 .child(
@@ -3565,10 +3565,10 @@ impl StudioWindow {
                 );
             // Copy this canvas's layout into the canvas being edited (reframed to its shape).
             if fid != active
-                && let (Some(from), Some(current)) = (layer.layouts.get(&fid), layer.layouts.get(&active))
+                && let (Some(from), Some(current)) = (object.layouts.get(&fid), object.layouts.get(&active))
             {
                 let layout = Layout { visible: current.visible, ..crate::reframe::reframe(from, f, &here) };
-                let cmd = Command::SetLayout { scene, layer: lid, canvas: active, layout };
+                let cmd = Command::SetLayout { scene, object: lid, canvas: active, layout };
                 row = row.child(
                     Button::new(("copy-layout", i))
                         .label("Use this layout")
@@ -3636,7 +3636,7 @@ impl StudioWindow {
             )
     }
 
-    /// Several layers selected: align them, or delete them.
+    /// Several objects selected: align them, or delete them.
     fn multi_inspector(
         &self,
         scene: &Scene,
@@ -3646,19 +3646,19 @@ impl StudioWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (sid, fid) = (scene.id, canvas.id);
-        let layers: Vec<(Id, Layout)> = selection
+        let objects: Vec<(Id, Layout)> = selection
             .iter()
-            .filter_map(|id| scene.layer(*id).filter(|l| !scene.locked(l.id)))
+            .filter_map(|id| scene.object(*id).filter(|l| !scene.locked(l.id)))
             .filter_map(|l| self.frame_of(scene, l, fid).map(|lo| (l.id, lo)))
             .collect();
         let align_button = |i: usize, icon: &'static str, tip: &'static str, how: geo::Align| {
-            let layers = layers.clone();
+            let objects = objects.clone();
             ui::icon_button(("align", i), icon, tok::text_secondary())
                 .tooltip(move |w, cx| Tooltip::new(tip).build(w, cx))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    let layouts: Vec<Layout> = layers.iter().map(|(_, l)| *l).collect();
+                    let layouts: Vec<Layout> = objects.iter().map(|(_, l)| *l).collect();
                     let aligned = geo::align(&layouts, how);
-                    let moved = layers.iter().map(|(id, _)| *id).zip(aligned).collect();
+                    let moved = objects.iter().map(|(id, _)| *id).zip(aligned).collect();
                     this.set_layouts(sid, fid, moved, "Align objects", cx);
                 }))
         };
@@ -3673,17 +3673,17 @@ impl StudioWindow {
             .child(align_button(4, "align-center-horizontal", "Align middles", geo::Align::Middle))
             .child(align_button(5, "align-end-horizontal", "Align bottom edges", geo::Align::Bottom));
         let distribute_button = |i: usize, icon: &'static str, tip: &'static str, horizontal: bool| {
-            let layers = layers.clone();
+            let objects = objects.clone();
             ui::icon_button(("distribute", i), icon, tok::text_secondary())
                 .tooltip(move |w, cx| Tooltip::new(tip).build(w, cx))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    let layouts: Vec<Layout> = layers.iter().map(|(_, l)| *l).collect();
+                    let layouts: Vec<Layout> = objects.iter().map(|(_, l)| *l).collect();
                     let spaced = geo::distribute(&layouts, horizontal);
-                    let moved = layers.iter().map(|(id, _)| *id).zip(spaced).collect();
+                    let moved = objects.iter().map(|(id, _)| *id).zip(spaced).collect();
                     this.set_layouts(sid, fid, moved, "Distribute objects", cx);
                 }))
         };
-        let row = row.child(div().w(px(8.))).when(layers.len() >= 3, |r| {
+        let row = row.child(div().w(px(8.))).when(objects.len() >= 3, |r| {
             r.child(distribute_button(0, "align-horizontal-distribute-center", "Space evenly across", true))
                 .child(distribute_button(1, "align-vertical-distribute-center", "Space evenly down", false))
         });
@@ -3691,7 +3691,7 @@ impl StudioWindow {
             .child(div().text_color(tok::text_tertiary()).child("Drag any of them to move them together."))
             .child(row)
             .child(
-                Button::new("delete-layers")
+                Button::new("delete-objects")
                     .label("Delete")
                     .small()
                     .danger()
@@ -3704,25 +3704,25 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let canvas = self.current_canvas(workspace).clone();
         let scene = studio.selected_scene.and_then(|id| workspace.scene(id)).cloned();
-        let layer = scene.as_ref().and_then(|s| studio.selected_layer.and_then(|l| s.layer(l))).cloned();
+        let object = scene.as_ref().and_then(|s| studio.selected_object.and_then(|l| s.object(l))).cloned();
         let selection = studio.selection();
         let track = studio.selected_track.and_then(|t| workspace.track(t)).cloned();
         let strip = studio.selected_track.and_then(|t| lightair_core::MixerStrip::find(workspace, t));
         let mut body = div().flex().flex_col().gap_3().px_3();
-        if let (Some(sc), Some(l)) = (&scene, &layer)
+        if let (Some(sc), Some(l)) = (&scene, &object)
             && selection.len() == 1
             && let Some(bar) = self.prefab_bar(sc.id, l, cx)
         {
             body = body.child(div().pt_2().child(bar));
         }
-        let content = match (scene, layer) {
+        let content = match (scene, object) {
             (_, None) if track.is_some() => self.track_inspector(workspace, track.as_deref().unwrap(), body, cx),
             (_, None) if strip.is_some() => self.strip_inspector(workspace, strip.unwrap(), body, cx),
             (Some(scene), Some(_)) if selection.len() > 1 => {
                 self.multi_inspector(&scene, &canvas, &selection, body, cx)
             }
-            (Some(scene), Some(layer)) if layer.is_empty() => self.empty_inspector(&scene, &layer, &canvas, body, cx),
-            (Some(scene), Some(layer)) => self.layer_inspector(workspace, &scene, &layer, &canvas, body, cx),
+            (Some(scene), Some(object)) if object.is_empty() => self.empty_inspector(&scene, &object, &canvas, body, cx),
+            (Some(scene), Some(object)) => self.object_inspector(workspace, &scene, &object, &canvas, body, cx),
             (Some(scene), None) => {
                 let (sid, on_air) = (scene.id, workspace.program == Some(scene.id));
                 let header = div()
@@ -3758,8 +3758,8 @@ impl StudioWindow {
                     );
                 let info = div().text_size(px(12.)).text_color(tok::text_secondary()).child(format!(
                     "{} object{} · {}×{} @ {} fps",
-                    scene.layers.len(),
-                    if scene.layers.len() == 1 { "" } else { "s" },
+                    scene.objects.len(),
+                    if scene.objects.len() == 1 { "" } else { "s" },
                     canvas.width,
                     canvas.height,
                     canvas.fps_num / canvas.fps_den.max(1)

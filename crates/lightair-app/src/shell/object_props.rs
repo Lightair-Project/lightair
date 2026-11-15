@@ -1,4 +1,4 @@
-//! Inspector sections for what a layer shows (docs/07-scenes-layers-canvas.md): media
+//! Inspector sections for what a object shows (docs/07-scenes-objects-canvas.md): media
 //! transport, text content and style, colour. Content edits are source settings changes, so
 //! they're undoable and apply wherever the source appears.
 
@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use super::StudioWindow;
 use crate::ui::tok;
 
-/// The text field for the selected text layer.
+/// The text field for the selected text object.
 pub(super) struct TextEdit {
     source: Id,
     state: Entity<InputState>,
@@ -27,7 +27,7 @@ pub(super) struct TextEdit {
 
 /// Inspector state for content sections.
 #[derive(Default)]
-pub(super) struct LayerProps {
+pub(super) struct ObjectProps {
     text: Option<TextEdit>,
     media: Option<(Id, MediaStatus, Instant)>,
     /// The effect whose controls are shown.
@@ -53,7 +53,7 @@ pub(super) fn rgb_of(abgr: u32) -> u32 {
     ((abgr & 0xFF) << 16) | (abgr & 0xFF00) | ((abgr >> 16) & 0xFF)
 }
 
-/// Swatches offered for text and colour layers (RGB).
+/// Swatches offered for text and colour objects (RGB).
 pub(super) const PALETTE: &[u32] = &[0xFFFFFF, 0x0B0B0F, 0xFF4A3B, 0xFFB020, 0x2BD67B, 0x3B82F6, 0x8B5CF6, 0xF472B6];
 
 /// `settings` with `key` set (a merged copy: the reconciler updates libobs from the whole object).
@@ -73,13 +73,13 @@ fn clock(ms: i64) -> String {
 
 impl StudioWindow {
     /// Keeps the text field and the media status in step with the selection. Called from render.
-    pub(super) fn sync_layer_props(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn sync_object_props(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
         let source = studio
             .selected_scene
             .and_then(|s| workspace.scene(s))
-            .and_then(|s| studio.selected_layer.and_then(|l| s.layer(l)))
+            .and_then(|s| studio.selected_object.and_then(|l| s.object(l)))
             .and_then(|l| l.source.and_then(|i| workspace.sources.get(&i)))
             .cloned();
         let engine = studio.engine().clone();
@@ -127,7 +127,7 @@ impl StudioWindow {
             None => self.props.timer = None,
         }
 
-        // Media status, polled a few times a second while a media layer is selected.
+        // Media status, polled a few times a second while a media object is selected.
         match source.as_ref().filter(|i| is_media(&i.kind)) {
             Some(i) => {
                 let stale = self
@@ -158,7 +158,7 @@ impl StudioWindow {
         self.studio.read(cx).engine().post(move |s| s.reconciler.media_action(source, action));
     }
 
-    /// The content section for a layer's source, if its kind has one.
+    /// The content section for a object's source, if its kind has one.
     pub(super) fn content_section(&self, source: &Source, cx: &mut Context<Self>) -> Option<AnyElement> {
         if source.kind == TIMER_KIND {
             Some(div().child(self.timer_section(source, cx)).child(self.text_section(source, cx)).into_any_element())

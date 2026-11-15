@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, Track, diff};
+use lightair_core::{Command, Document, Source, Object, Layout, Workspace, Scene, Track, diff};
 use lightair_engine::outputs::{
     ClipsConfig, Container, OutputKey, OutputState, RecordingConfig, StreamConfig, default_encoders, runtime,
 };
@@ -112,7 +112,7 @@ fn record_and_stream() {
         json!({"local_file": wav.to_string_lossy(), "looping": true, "is_local_file": true}),
     );
     let mut scene = Scene::new("Main");
-    scene.layers.push(Layer::new("Colour", colour.id, [(canvas, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));
+    scene.objects.push(Object::new("Colour", colour.id, [(canvas, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));
     let track = Track::new("Tone", tone.id);
     for cmd in [
         Command::AddSource { source: colour },

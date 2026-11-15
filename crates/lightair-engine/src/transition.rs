@@ -1,8 +1,8 @@
-//! The Move transition (docs/07-scenes-layers-canvas.md, "Move transition details").
+//! The Move transition (docs/07-scenes-objects-canvas.md, "Move transition details").
 //!
 //! Switching from scene A to scene B builds a temporary scene in each canvas's canvas: B's
-//! layers that match a layer in A (same source first, then same name) start at A's layout and
-//! glide to B's; layers only in B fade in; layers only in A fade out. A libobs tick callback
+//! objects that match a object in A (same source first, then same name) start at A's layout and
+//! glide to B's; objects only in B fade in; objects only in A fade out. A libobs tick callback
 //! drives the glide every frame; when it finishes, each canvas cuts to B (which now looks
 //! identical) and the temporary scenes are released on the engine thread.
 
@@ -15,7 +15,7 @@ use crate::obs::{ObsScene, ObsSource};
 
 pub(crate) struct Tween {
     pub item: *mut sys::obs_sceneitem_t,
-    /// For a shaped layer: the item inside its group and the mask.
+    /// For a shaped object: the item inside its group and the mask.
     pub masked: Option<crate::reconcile::Masked>,
     pub from: Layout,
     pub to: Layout,
@@ -45,13 +45,13 @@ pub(crate) struct MoveAnim {
 
 unsafe impl Send for MoveAnim {}
 
-/// Which layer in `from` a layer of `to` continues: the one showing the same source, else the
-/// one with the same link (`Layer::link`). Never by name: two layers called "Logo" needn't be
+/// Which object in `from` a object of `to` continues: the one showing the same source, else the
+/// one with the same link (`Object::link`). Never by name: two objects called "Logo" needn't be
 /// the same thing.
-pub(crate) fn match_layer<'a>(from: &'a DocScene, layer: &lightair_core::Layer) -> Option<&'a lightair_core::Layer> {
-    let same_source = |l: &&lightair_core::Layer| layer.source.is_some() && l.source == layer.source;
-    let same_link = |l: &&lightair_core::Layer| layer.link.is_some() && l.link == layer.link;
-    from.layers.iter().find(same_source).or_else(|| from.layers.iter().find(same_link))
+pub(crate) fn match_object<'a>(from: &'a DocScene, object: &lightair_core::Object) -> Option<&'a lightair_core::Object> {
+    let same_source = |l: &&lightair_core::Object| object.source.is_some() && l.source == object.source;
+    let same_link = |l: &&lightair_core::Object| object.link.is_some() && l.link == object.link;
+    from.objects.iter().find(same_source).or_else(|| from.objects.iter().find(same_link))
 }
 
 fn ease_in_out(t: f32) -> f32 {
@@ -115,7 +115,7 @@ impl MoveAnim {
     }
 }
 
-/// Fade used for layers entering or leaving during a Move.
+/// Fade used for objects entering or leaving during a Move.
 pub(crate) fn item_fade(item: *mut sys::obs_sceneitem_t, show: bool, ms: u32, keep: &mut Vec<ObsSource>) {
     if let Some(fade) = ObsSource::create_private("fade_transition", &format!("move-fade-{}", Id::new()), None) {
         unsafe {

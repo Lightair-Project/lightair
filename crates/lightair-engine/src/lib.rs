@@ -33,7 +33,7 @@ pub use reconcile::Reconciler;
 pub use runtime::Runtime;
 
 /// OBS modules Lightair loads from an OBS 33 plugin set: the ones that only need libobs.
-/// Modules that link Qt or obs-frontend-api are handled by the compatibility layer
+/// Modules that link Qt or obs-frontend-api are handled by the compatibility object
 /// (docs/13-extensibility-and-compatibility.md).
 #[cfg(not(windows))]
 pub const DEFAULT_MODULES: &[&str] = &[
