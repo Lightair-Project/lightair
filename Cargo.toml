@@ -19,6 +19,7 @@ lightair-preview = { path = "crates/lightair-preview" }
 lightair-render = { path = "crates/lightair-render" }
 lightair-store = { path = "crates/lightair-store" }
 lightair-ui = { path = "crates/lightair-ui" }
+lightair-web = { path = "crates/lightair-web" }
 
 # external
 anyhow = "1"

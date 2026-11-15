@@ -1,0 +1,10 @@
+[package]
+name = "lightair-web-helper"
+description = "Chromium's helper processes for Lightair's web pages (Lightair Helper.app and its GPU, Renderer and Plugin twins on macOS)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lightair-web.workspace = true

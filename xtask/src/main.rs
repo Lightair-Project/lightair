@@ -114,7 +114,7 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 fn bundle() -> anyhow::Result<()> {
     anyhow::ensure!(cfg!(target_os = "macos"), "the .app bundle is for macOS; on Windows, `cargo xtask dev`");
     let root = root();
-    run(Command::new("cargo").current_dir(&root).args(["build", "-p", "lightair-app"]))?;
+    run(Command::new("cargo").current_dir(&root).args(["build", "-p", "lightair-app", "-p", "lightair-web-helper"]))?;
     let obs = PathBuf::from(std::env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into()));
     let app = root.join("target/debug/Lightair.app/Contents");
     let _ = std::fs::remove_dir_all(app.parent().unwrap());
@@ -136,13 +136,14 @@ fn bundle() -> anyhow::Result<()> {
             let entry = entry?;
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            // OBS's CEF helpers and UI frameworks aren't used by Lightair.
-            if name_str.starts_with("OBS Helper") {
+            // OBS's Chromium (CEF) and its helpers: Lightair bundles its own, below.
+            if name_str.starts_with("OBS Helper") || name_str == "Chromium Embedded Framework.framework" {
                 continue;
             }
             link_file(&entry.path(), &to.join(&name))?;
         }
     }
+    bundle_chromium(&root, &app)?;
     // Sign the bundle itself so macOS privacy settings identify Lightair. Nested OBS code keeps
     // OBS's own signatures; nothing outside target/ is modified.
     //
@@ -164,6 +165,52 @@ fn bundle() -> anyhow::Result<()> {
         eprintln!("signed with {identity}");
     }
     eprintln!("built {}", app.parent().unwrap().display());
+    Ok(())
+}
+
+/// Lightair's Chromium for web page sources (lightair-web): the pinned CEF framework the cef
+/// crate fetched into target/cef, and Chromium's four helper apps, Lightair's own (each the
+/// lightair-web-helper binary under the name Chromium looks for).
+fn bundle_chromium(root: &Path, app: &Path) -> anyhow::Result<()> {
+    let framework = std::fs::read_dir(root.join("target/cef"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|version| std::fs::read_dir(version.path()).into_iter().flatten().flatten())
+        .map(|platform| platform.path().join("Chromium Embedded Framework.framework"))
+        .find(|p| p.exists());
+    let Some(framework) = framework else {
+        eprintln!("no Chromium in target/cef (build lightair-web once): web pages won't paint");
+        return Ok(());
+    };
+    link_file(&framework, &app.join("Frameworks/Chromium Embedded Framework.framework"))?;
+    let helper = root.join("target/debug/lightair-web-helper");
+    for (suffix, id) in [("", ""), (" (GPU)", ".gpu"), (" (Renderer)", ".renderer"), (" (Plugin)", ".plugin")] {
+        let name = format!("Lightair Helper{suffix}");
+        let contents = app.join("Frameworks").join(format!("{name}.app")).join("Contents");
+        std::fs::create_dir_all(contents.join("MacOS"))?;
+        std::fs::copy(&helper, contents.join("MacOS").join(&name))?;
+        std::fs::write(
+            contents.join("Info.plist"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key><string>{name}</string>
+	<key>CFBundleExecutable</key><string>{name}</string>
+	<key>CFBundleIdentifier</key><string>app.lightair.dev.helper{id}</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleShortVersionString</key><string>0.1.0</string>
+	<key>LSMinimumSystemVersion</key><string>14.0</string>
+	<key>LSUIElement</key><true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+</dict>
+</plist>
+"#
+            ),
+        )?;
+    }
     Ok(())
 }
 
@@ -320,6 +367,11 @@ fn clippy(target: Option<&str>) -> anyhow::Result<usize> {
     cmd.args(["clippy", "--workspace", "--all-targets", "--message-format=json-render-diagnostics"]);
     if let Some(t) = target {
         cmd.args(["--target", t]);
+        // checking Windows from a Mac: lightair-web leaves Chromium out (Windows CEF can't be
+        // built here; on Windows itself it's built as on macOS)
+        if t.contains("windows") && !cfg!(windows) {
+            cmd.env("RUSTFLAGS", "--cfg lightair_cross_check");
+        }
         // gpui's build script compiles a Windows resource file with llvm-rc; Homebrew's LLVM
         // keeps it off PATH.
         let path = std::env::var_os("PATH").unwrap_or_default();

@@ -13,3 +13,8 @@ rustflags = [
 rustflags = [
   "-C", "link-args=-Wl,-rpath,@executable_path/../Frameworks -Wl,-rpath,/Applications/OBS.app/Contents/Frameworks",
 ]
+
+# Where the CEF crate keeps its pinned Chromium build (fetched once, kept across cleans of the
+# crates that use it).
+[env]
+CEF_PATH = { value = "target/cef", relative = true }
