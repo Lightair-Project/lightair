@@ -112,6 +112,12 @@ pub enum Place {
 /// Ctrl+1–9 are the scenes.
 const PLACE_KEYS: [&str; 3] = if cfg!(windows) { ["alt-1", "alt-2", "alt-3"] } else { ["ctrl-1", "ctrl-2", "ctrl-3"] };
 
+/// Whether a text field has the keyboard. Fields pass on keys they don't use (Backspace with
+/// nothing before the cursor, Enter, Esc), which must not then act on the show.
+fn typing(window: &Window) -> bool {
+    window.context_stack().iter().any(|c| c.contains("Input"))
+}
+
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(PLACE_KEYS[0], ShowLibrary, Some("Studio")),
@@ -1746,7 +1752,11 @@ impl Render for StudioWindow {
                     this.studio.update(cx, |s, cx| s.redo(cx))
                 }
             }))
-            .on_action(cx.listener(|this, _: &DeleteSelection, _, cx| {
+            .on_action(cx.listener(|this, _: &DeleteSelection, window, cx| {
+                // Backspace in an empty text field reaches here (the field passes it on)
+                if typing(window) {
+                    return;
+                }
                 if this.place == Place::Editor {
                     this.editor.update(cx, |e, cx| e.delete_selected(cx));
                 } else {
@@ -1754,7 +1764,10 @@ impl Render for StudioWindow {
                 }
             }))
             // in the Editor: the playhead a frame, a cut
-            .on_action(cx.listener(|this, _: &NudgeLeft, _, cx| {
+            .on_action(cx.listener(|this, _: &NudgeLeft, window, cx| {
+                if typing(window) {
+                    return;
+                }
                 if this.place == Place::Editor {
                     let k = Keystroke::parse("left").unwrap();
                     this.editor.update(cx, |e, cx| e.key(&k, cx));
@@ -1762,7 +1775,10 @@ impl Render for StudioWindow {
                 }
                 this.nudge(-1.0, 0.0, cx)
             }))
-            .on_action(cx.listener(|this, _: &NudgeRight, _, cx| {
+            .on_action(cx.listener(|this, _: &NudgeRight, window, cx| {
+                if typing(window) {
+                    return;
+                }
                 if this.place == Place::Editor {
                     let k = Keystroke::parse("right").unwrap();
                     this.editor.update(cx, |e, cx| e.key(&k, cx));
@@ -1770,7 +1786,10 @@ impl Render for StudioWindow {
                 }
                 this.nudge(1.0, 0.0, cx)
             }))
-            .on_action(cx.listener(|this, _: &NudgeUp, _, cx| {
+            .on_action(cx.listener(|this, _: &NudgeUp, window, cx| {
+                if typing(window) {
+                    return;
+                }
                 if this.place == Place::Editor {
                     let k = Keystroke::parse("up").unwrap();
                     this.editor.update(cx, |e, cx| e.key(&k, cx));
@@ -1778,7 +1797,10 @@ impl Render for StudioWindow {
                 }
                 this.nudge(0.0, -1.0, cx)
             }))
-            .on_action(cx.listener(|this, _: &NudgeDown, _, cx| {
+            .on_action(cx.listener(|this, _: &NudgeDown, window, cx| {
+                if typing(window) {
+                    return;
+                }
                 if this.place == Place::Editor {
                     let k = Keystroke::parse("down").unwrap();
                     this.editor.update(cx, |e, cx| e.key(&k, cx));
@@ -1796,6 +1818,9 @@ impl Render for StudioWindow {
                 // rotate gizmo first.
                 if this.renaming.is_some() {
                     this.finish_rename(false, window, cx);
+                } else if typing(window) {
+                    // Esc in any other text field leaves the field, not the selection
+                    window.blur(cx);
                 } else if this.crop_mode.is_some() && !this.crop_leaving {
                     this.leave_crop_view(std::time::Duration::ZERO, cx);
                 } else if this.rotate_tool {
@@ -1951,8 +1976,9 @@ impl Render for StudioWindow {
                     this.studio.update(cx, |s, cx| s.add_marker(cx))
                 }
             }))
-            .on_action(cx.listener(|this, _: &Take, _, cx| {
-                if this.cue_scenes {
+            .on_action(cx.listener(|this, _: &Take, window, cx| {
+                // ⌘↩ in a single-line field reaches here: never a take by accident
+                if this.cue_scenes && !typing(window) {
                     this.take(cx)
                 }
             }))
