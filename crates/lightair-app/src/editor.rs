@@ -50,9 +50,9 @@ enum Done {
     Frame(u64, Option<Picture>, Vec<lightair_render::seqrender::Placed>),
     Progress(f32),
     Exported(Result<PathBuf, String>),
-    /// Media made from Library items or files (probing takes a moment): placed at the time, or
-    /// (`None`) at the main track's end, or (`Some(u64::MAX)`) only kept in the project.
-    Media(Vec<TakePart>, Option<u64>, Option<usize>),
+    /// Media made from Library items or files (probing takes a moment), and where they go (on
+    /// a track, if given).
+    Media(Vec<TakePart>, Put, Option<usize>),
     /// Caption lines heard in the project's sound.
     Captions(Result<Vec<(u64, u64, String)>, String>),
     Downloaded(Result<(), String>),
@@ -76,6 +76,24 @@ enum Done {
     Proxied(PathBuf, Result<(), String>),
     /// The looks' thumbnails made.
     Thumbs(Result<(), String>),
+}
+
+/// Where media being added go.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Put {
+    /// At a time on the timeline.
+    At(u64),
+    /// At the main track's end.
+    End,
+    /// Only kept in the project (in the media panel), not on the timeline.
+    Keep,
+}
+
+impl Put {
+    /// At `t`, or the main track's end.
+    fn at(t: Option<u64>) -> Put {
+        t.map_or(Put::End, Put::At)
+    }
 }
 
 /// A medium being dragged from the media panel.
@@ -441,10 +459,22 @@ fn media_of(item: &Item) -> Vec<TakePart> {
             Some(TakePart::of(m))
         })
         .collect();
+    // whose sound each is: the recording's multitrack sidecar says
+    let sidecar: serde_json::Value = item
+        .files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with(".multitrack.json"))
+        .and_then(|f| std::fs::read(&f.path).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let named = |path: &Path| -> Option<String> {
+        let file = path.file_name()?.to_string_lossy().into_owned();
+        sidecar["tracks"].as_array()?.iter().find(|t| t["file"].as_str() == Some(file.as_str()))?["name"].as_str().map(String::from)
+    };
     for f in stems {
         if let Ok(mut m) = Media::from_file(&f.path) {
-            // "Lightair 2026-11-14 17-20-33 - Mic.wav": "Mic"
-            let stem = m.name.rsplit(" - ").next().unwrap_or(&m.name).to_string();
+            // (recordings from before the sidecar said: only the file's name, "… - Mic.wav")
+            let stem = named(&f.path).unwrap_or_else(|| m.name.rsplit(" - ").next().unwrap_or(&m.name).to_string());
             m.name = format!("{} · {stem}", item.title);
             m.item = Some(item.id);
             out.push(TakePart::of(m));
@@ -603,7 +633,7 @@ impl Editor {
         if self.project.is_none() {
             self.new_project("Untitled", cx);
         }
-        self.take_media(parts, None, None, cx);
+        self.take_media(parts, Put::End, None, cx);
     }
 
     /// Takes what the threads send.
@@ -650,7 +680,7 @@ impl Editor {
                                 });
                                 this.studio.update(cx, |s, _| s.library_version += 1);
                             }
-                            Done::Media(media, at, track) => this.take_media(media, at, track, cx),
+                            Done::Media(media, put, track) => this.take_media(media, put, track, cx),
                             Done::Captions(r) => this.take_captions(r, cx),
                             Done::Peaks(f, p) => {
                                 this.peaks.insert(f, p);
@@ -917,7 +947,7 @@ impl Editor {
                 },
                 cx,
             ),
-            MediaSource::Part(part) => self.take_media(vec![*part], at, track, cx),
+            MediaSource::Part(part) => self.take_media(vec![*part], Put::at(at), track, cx),
             MediaSource::Content(content, place) => {
                 let at = at.unwrap_or(self.playhead);
                 let mut made = None;
@@ -940,20 +970,24 @@ impl Editor {
                 let tx = self.tx.clone();
                 self.note = Some(format!("Adding “{}”…", item.title).into());
                 std::thread::spawn(move || {
-                    let _ = tx.send(Done::Media(media_of(&item), at, track));
+                    let _ = tx.send(Done::Media(media_of(&item), Put::at(at), track));
                 });
                 cx.notify();
             }
         }
     }
 
-    fn take_media(&mut self, parts: Vec<TakePart>, at: Option<u64>, track: Option<usize>, cx: &mut Context<Self>) {
+    fn take_media(&mut self, parts: Vec<TakePart>, put: Put, track: Option<usize>, cx: &mut Context<Self>) {
         if parts.is_empty() {
             self.note = Some("Its files couldn't be read (moved? Locate them in the Library).".into());
             return;
         }
         self.note = None;
         let ws = self.workspace.clone();
+        let at = match put {
+            Put::At(t) => Some(t),
+            Put::End | Put::Keep => None,
+        };
         self.change(
             |s| {
                 // made layers (text, colours) last as long as the longest part
@@ -973,8 +1007,8 @@ impl Editor {
                     let video = part.media.as_ref().is_some_and(|m| m.kind == MediaKind::Video);
                     let unplaced = part.place.is_none();
                     let quiet = part.mute_own_sound;
-                    let placed = match (at, start) {
-                        (Some(u64::MAX), _) => {
+                    let placed = match (put, start) {
+                        (Put::Keep, _) => {
                             if let Some(m) = part.media {
                                 s.add_media(m);
                             }
@@ -1052,7 +1086,7 @@ impl Editor {
             let Ok(Ok(Some(paths))) = picked.await else { return };
             std::thread::spawn(move || {
                 let media: Vec<TakePart> = paths.iter().filter_map(|p| Media::from_file(p).ok()).map(TakePart::of).collect();
-                let _ = tx.send(Done::Media(media, Some(u64::MAX), None));
+                let _ = tx.send(Done::Media(media, Put::Keep, None));
             });
         })
         .detach();
@@ -1211,7 +1245,7 @@ impl Editor {
             Codec::Gif => "gif",
             Codec::H264 => "mp4",
         };
-        let base = p.name.replace(['/', ':', '\\'], "-");
+        let base = lightair_core::file_safe(&p.name);
         let out = (1..)
             .map(|n| if n == 1 { folder.join(format!("{base}.{ext}")) } else { folder.join(format!("{base} {n}.{ext}")) })
             .find(|p| !p.exists())
@@ -1228,7 +1262,7 @@ impl Editor {
                     true
                 })
                 .map_err(|e| e.to_string())?;
-                let mut item = Item::new(Kind::Export, title, vec![ItemFile { path: out.clone(), format: None }], chrono::Utc::now().timestamp_millis());
+                let mut item = Item::new(Kind::Export, title, vec![ItemFile::new(out.clone())], chrono::Utc::now().timestamp_millis());
                 item.duration_ms = Some(duration);
                 let _ = Index::add_to(&ws, item);
                 Ok(out.clone())
@@ -1661,9 +1695,10 @@ impl Editor {
                             Some(m) if m.kind != MediaKind::Image => format!("{} · {}", p.what(), short(m.duration_ms)),
                             _ => p.what().to_string(),
                         };
-                        let thumb = match (&p.media, p.what()) {
-                            (Some(m), "Picture") => Some(m.path.clone()),
-                            (_, "Screen") => take.thumbnail.clone().filter(|t| t.exists()),
+                        use lightair_render::sequence::PartKind;
+                        let thumb = match (&p.media, p.kind()) {
+                            (Some(m), Some(PartKind::Picture)) => Some(m.path.clone()),
+                            (_, Some(PartKind::Screen)) => take.thumbnail.clone().filter(|t| t.exists()),
                             _ => None,
                         };
                         let icon = crate::library::part_icon(&p);
@@ -1912,7 +1947,8 @@ impl Editor {
                     tabs.push(("Transition", InspectorTab::Transition));
                 }
                 let tab = if tabs.iter().any(|t| t.1 == self.tab) { self.tab } else { InspectorTab::Text };
-                head = Some(self.inspector_head(if name == "Text" { "type" } else { "shapes" }, c.content.as_ref().map(looks::content_name).unwrap_or_default(), format!("{name} · {}", short(c.len_ms()))));
+                let icon = if matches!(c.content, Some(Content::Shape(_))) { "shapes" } else { "type" };
+                head = Some(self.inspector_head(icon, c.content.as_ref().map(looks::content_name).unwrap_or_default(), format!("{name} · {}", short(c.len_ms()))));
                 tab_row = Some(self.tab_bar(&tabs, tab, cx));
                 body = match tab {
                     InspectorTab::Video => self.transform_section(&c, body, cx),

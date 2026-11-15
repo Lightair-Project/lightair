@@ -383,7 +383,7 @@ impl Reconciler {
         folder: &std::path::Path,
         base: &str,
         program: bool,
-    ) -> Result<Vec<std::path::PathBuf>, String> {
+    ) -> Result<Vec<(std::path::PathBuf, String)>, String> {
         let settings = &project.outputs.recording;
         let host = self.audio.as_mut().ok_or("the audio engine isn't running")?;
         let tap = match settings.stem_point {
@@ -415,8 +415,9 @@ impl Reconciler {
             return Err("no tracks to record".into());
         }
         std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
-        let clean = |n: &str| n.chars().map(|c| if "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect::<String>();
+        let clean = lightair_core::file_safe;
         let mut used = HashSet::new();
+        let mut files = Vec::new();
         let specs = strips
             .into_iter()
             .map(|(id, name, channels)| {
@@ -426,10 +427,11 @@ impl Reconciler {
                     file = format!("{base} - {} {n}.wav", clean(&name));
                     n += 1;
                 }
+                // the file, and whose sound it is (its name as it was, not read back from the file's)
+                files.push((folder.join(&file), name));
                 crate::audio_host::StemSpec { id, path: folder.join(file), channels, tap, float }
             })
             .collect::<Vec<_>>();
-        let files = specs.iter().map(|s| s.path.clone()).collect();
         host.start_stems(specs)?;
         Ok(files)
     }

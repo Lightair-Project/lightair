@@ -190,7 +190,7 @@ impl StudioWindow {
                 }
                 // Sources already in the show but not in this scene: reuse them.
                 let in_scene: Vec<Id> = scene.iter().flat_map(|s| s.layers.iter().filter_map(|l| l.input)).collect();
-                let audio_only = |k: &str| k.contains("audio") || k.contains("input_capture");
+                let audio_only = lightair_core::kinds::is_audio;
                 let existing: Vec<_> = project
                     .inputs
                     .values()

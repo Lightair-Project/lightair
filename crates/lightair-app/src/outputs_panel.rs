@@ -281,7 +281,7 @@ impl OutputsPanel {
             .as_deref()
             .and_then(platforms::by_id)
             .or_else(|| platforms::guess(&d.server))
-            .unwrap_or(&PLATFORMS[PLATFORMS.len() - 1]);
+            .unwrap_or(platforms::custom());
         let server = platform.servers.iter().position(|(_, url)| *url == d.server);
         let name = cx.new(|cx| InputState::new(window, cx));
         name.update(cx, |i, cx| i.set_value(d.name.clone(), window, cx));
@@ -1031,7 +1031,7 @@ impl Render for OutputsPanel {
                 .as_deref()
                 .and_then(platforms::by_id)
                 .or_else(|| platforms::guess(&d.server))
-                .unwrap_or(&PLATFORMS[PLATFORMS.len() - 1]);
+                .unwrap_or(platforms::custom());
             // Which server, in words where we know it.
             let where_ = platform
                 .servers

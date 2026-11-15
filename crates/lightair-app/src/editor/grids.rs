@@ -245,7 +245,7 @@ impl Editor {
                             if all {
                                 c.effects.retain(|e| e.kind != kind);
                             } else if !c.effects.iter().any(|e| e.kind == kind) {
-                                c.effects.push(ClipEffect { kind: kind.into(), settings: settings.clone(), on: true });
+                                c.effects.push(ClipEffect::new(kind, settings.clone()));
                             }
                         }
                     },

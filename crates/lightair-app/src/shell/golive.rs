@@ -66,7 +66,8 @@ impl StudioWindow {
         }
         for (i, d) in project.outputs.destinations.iter().enumerate() {
             let (id, enabled) = (d.id, d.enabled);
-            let format = d.format.and_then(|f| project.format(f)).map_or("Landscape".to_string(), |f| f.name.clone());
+            // (no canvas chosen: the main one)
+            let format = d.format.and_then(|f| project.format(f)).unwrap_or(project.primary_format()).name.clone();
             destinations = destinations.child(
                 div()
                     .id(("golive-dest", i))

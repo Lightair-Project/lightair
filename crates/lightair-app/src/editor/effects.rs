@@ -34,8 +34,8 @@ impl Editor {
                         this.change(
                             |s| {
                                 if let Some(c) = s.clip_mut(cid) {
+                                    // (its keys are named for it: they go with it)
                                     c.effects.swap(n, n - 1);
-                                    renumber_keys(c, |k| if k == n { Some(n - 1) } else if k == n - 1 { Some(n) } else { Some(k) });
                                 }
                             },
                             cx,
@@ -48,12 +48,9 @@ impl Editor {
                             if let Some(c) = s.clip_mut(cid)
                                 && n < c.effects.len()
                             {
-                                c.effects.remove(n);
-                                renumber_keys(c, |k| match k.cmp(&n) {
-                                    std::cmp::Ordering::Less => Some(k),
-                                    std::cmp::Ordering::Equal => None,
-                                    std::cmp::Ordering::Greater => Some(k - 1),
-                                });
+                                let gone = c.effects.remove(n);
+                                let prefix = format!("fx.{}.", gone.id);
+                                c.anim.retain(|p, _| !p.starts_with(&prefix));
                             }
                         },
                         cx,
@@ -68,7 +65,7 @@ impl Editor {
                         // keyable, as every number is
                         let _ = (id, &settings);
                         let step = ((sl.max - sl.min) / 20.0) as f32;
-                        body = body.child(self.keyed(c, format!("fx.{n}.{}", sl.key), sl.label, std::rc::Rc::new(move |v| sl.display(v as f64)), step, (sl.min as f32, sl.max as f32), cx));
+                        body = body.child(self.keyed(c, format!("fx.{}.{}", e.id, sl.key), sl.label, std::rc::Rc::new(move |v| sl.display(v as f64)), step, (sl.min as f32, sl.max as f32), cx));
                     }
                     Control::Choice { key, label: name, options, default } => {
                         let cur = settings.get(key).cloned().unwrap_or(default.json());
@@ -136,23 +133,6 @@ impl Editor {
     }
 }
 
-/// An effect's keys ("fx.<n>.…") follow it to its new place (`None`: it's gone).
-fn renumber_keys(c: &mut Clip, to: impl Fn(usize) -> Option<usize>) {
-    let old = std::mem::take(&mut c.anim);
-    for (p, keys) in old {
-        let moved = p.strip_prefix("fx.").and_then(|rest| rest.split_once('.')).and_then(|(n, k)| n.parse::<usize>().ok().map(|n| (n, k.to_string())));
-        match moved {
-            Some((n, k)) => {
-                if let Some(m) = to(n) {
-                    c.anim.insert(format!("fx.{m}.{k}"), keys);
-                }
-            }
-            None => {
-                c.anim.insert(p, keys);
-            }
-        }
-    }
-}
 
 fn pick_json(p: Pick) -> serde_json::Value {
     p.json()
@@ -169,7 +149,7 @@ impl Editor {
                 if let Some(c) = s.clip_mut(first) {
                     for kind in ["fx.vhs", "fx.vignette"] {
                         if let Some(d) = catalog::def(kind) {
-                            c.effects.push(ClipEffect { kind: kind.into(), settings: d.defaults(), on: true });
+                            c.effects.push(ClipEffect::new(kind, d.defaults()));
                         }
                     }
                     c.hidden = vec![(0.62, 0.62, 0.3, 0.3)];

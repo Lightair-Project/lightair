@@ -263,11 +263,11 @@ fn set_base(c: &mut Clip, p: &str, v: f32) {
     }
 }
 
-/// "fx.<n>.<setting>": the effect's place and the setting.
-fn effect_setting<'a>(_: &Clip, p: &'a str) -> Option<(usize, &'a str)> {
+/// "fx.<id>.<setting>": the effect's place in the clip's effects, and the setting.
+fn effect_setting<'a>(c: &Clip, p: &'a str) -> Option<(usize, &'a str)> {
     let rest = p.strip_prefix("fx.")?;
-    let (n, k) = rest.split_once('.')?;
-    Some((n.parse().ok()?, k))
+    let (id, k) = rest.split_once('.')?;
+    Some((c.effects.iter().position(|e| e.id.to_string() == id)?, k))
 }
 
 /// A property's value at `t`.
