@@ -122,7 +122,7 @@ pub(crate) fn restyle(source: *mut sys::obs_source_t, css: String) {
 }
 
 unsafe extern "C" fn get_name(_: *mut c_void) -> *const c_char {
-    c"Web page".as_ptr()
+    c"Browser".as_ptr()
 }
 
 unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::obs_source_t) -> *mut c_void {

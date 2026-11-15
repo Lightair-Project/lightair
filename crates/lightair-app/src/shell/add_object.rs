@@ -43,9 +43,9 @@ enum Kind {
 const KINDS: &[(Kind, &str, &str, &str, &str)] = &[
     (Kind::Camera, "Capture", "camera", "Camera", "A webcam, capture card or phone"),
     (Kind::Display, "Capture", "monitor", "Display", "Everything on a screen"),
+    (Kind::Web, "Capture", "globe", "Browser", "A website, an overlay or an alert widget, live"),
     (Kind::Image, "Media", "image", "Image", "A picture or logo"),
     (Kind::Video, "Media", "clapperboard", "Video", "A video file, looped"),
-    (Kind::Web, "Media", "globe", "Web page", "A website, an overlay or an alert widget, live"),
     (Kind::Text, "Graphics", "type", "Text", "A title or caption"),
     (Kind::Colour, "Graphics", "square", "Colour", "A solid colour block"),
     (Kind::Timer, "Graphics", "timer", "Timer", "Countdown, stopwatch or clock"),
@@ -119,7 +119,7 @@ impl StudioWindow {
         }
         let url = super::object_props::web_address(&typed);
         let (w, h) = a.web_size;
-        let name = url.split("://").nth(1).and_then(|r| r.split('/').next()).filter(|h| !h.is_empty()).unwrap_or("Web page").to_string();
+        let name = url.split("://").nth(1).and_then(|r| r.split('/').next()).filter(|h| !h.is_empty()).unwrap_or("Browser").to_string();
         let settings = serde_json::json!({"url": url, "width": w, "height": h, "fps": 30});
         self.add_source_object(&name, lightair_engine::web::KIND, settings, (w as f32, h as f32), cx);
         self.close_add_object(window, cx);
@@ -301,7 +301,7 @@ impl StudioWindow {
                             .child(
                                 div().flex().justify_end().child(
                                     Button::new("add-web-page")
-                                        .label("Add web page")
+                                        .label("Add browser")
                                         .small()
                                         .primary()
                                         .on_click(cx.listener(|this, _, window, cx| this.add_web_page(window, cx))),
@@ -375,7 +375,7 @@ impl StudioWindow {
                                     match state.step {
                                         Step::Types => "Add object",
                                         Step::Cameras => "Choose a camera",
-                                        Step::Web => "Web page",
+                                        Step::Web => "Browser",
                                     },
                                 ))
                                 .when_some(scene.as_ref(), |d, s| {
