@@ -1,11 +1,11 @@
-//! From the project's mixer to the audio engine's graph (docs/plans/audio-engine.md): tracks,
+//! From the workspace's mixer to the audio engine's graph (docs/plans/audio-engine.md): tracks,
 //! buses, mixes and the master, with each effect's settings read through the catalog (missing
 //! values take the catalog's defaults).
 
 use lightair_audio as la;
 use la::dsp::*;
 use lightair_core::catalog::{self, EffectDef};
-use lightair_core::{Effect, Id, Project, Route, TrackChannels};
+use lightair_core::{Effect, Id, Workspace, Route, TrackChannels};
 use serde_json::Value;
 
 /// The engine's id for a document id.
@@ -169,9 +169,9 @@ fn fader(db: f32) -> f32 {
     if db.is_finite() { db } else { -145.0 }
 }
 
-/// The engine graph for a project's mixer.
-pub fn spec(project: &Project) -> la::GraphSpec {
-    let mut strips: Vec<la::Strip> = project
+/// The engine graph for a workspace's mixer.
+pub fn spec(workspace: &Workspace) -> la::GraphSpec {
+    let mut strips: Vec<la::Strip> = workspace
         .tracks
         .iter()
         .map(|t| {
@@ -203,7 +203,7 @@ pub fn spec(project: &Project) -> la::GraphSpec {
             }
         })
         .collect();
-    strips.extend(project.audio.buses.iter().map(|b| la::Strip {
+    strips.extend(workspace.audio.buses.iter().map(|b| la::Strip {
         name: b.name.clone(),
         trim_db: b.trim_db,
         inserts: inserts(&b.effects),
@@ -220,8 +220,8 @@ pub fn spec(project: &Project) -> la::GraphSpec {
         },
         ..la::Strip::bus(node(b.id))
     }));
-    let master = &project.audio.master;
-    let mut mixes: Vec<la::Mix> = project
+    let master = &workspace.audio.master;
+    let mut mixes: Vec<la::Mix> = workspace
         .audio
         .mixes
         .iter()
@@ -237,8 +237,8 @@ pub fn spec(project: &Project) -> la::GraphSpec {
             ..la::Mix::new(node(m.id))
         })
         .collect();
-    let a = &project.audio;
-    let cued = project.tracks.iter().any(|t| t.cue)
+    let a = &workspace.audio;
+    let cued = workspace.tracks.iter().any(|t| t.cue)
         || a.buses.iter().any(|b| b.cue)
         || a.mixes.iter().any(|m| m.cue)
         || master.cue;
@@ -266,8 +266,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn a_project_mixer_becomes_the_engine_graph() {
-        let mut p = Project::new("Show");
+    fn a_workspace_mixer_becomes_the_engine_graph() {
+        let mut p = Workspace::new("Show");
         let mic = Input::new("Mic", lightair_core::kinds::MIC, json!({}));
         let bus = Bus::new("Guests");
         let phones = AudioMix::new("Headphones");
@@ -316,9 +316,9 @@ mod tests {
     }
 
     #[test]
-    fn the_engine_chain_follows_the_project_order() {
+    fn the_engine_chain_follows_the_workspace_order() {
         use lightair_core::{Command, Document, MixerStrip};
-        let mut doc = Document::new(Project::new("Order"));
+        let mut doc = Document::new(Workspace::new("Order"));
         let mic = Input::new("Mic", "lightair_audio_device", json!({}));
         let mut t = Track::new("Host", mic.id);
         let names = ["audio.gate", "audio.eq", "audio.compressor", "audio.limiter"];
@@ -327,12 +327,12 @@ mod tests {
         doc.apply(&Command::AddInput { input: mic }).unwrap();
         doc.apply(&Command::AddTrack { track: t, index: None }).unwrap();
         let order = |doc: &Document| -> Vec<&'static str> {
-            let g = spec(doc.project());
+            let g = spec(doc.workspace());
             g.strips.iter().find(|s| s.id == node(tid)).unwrap().inserts.iter().map(|e| e.params.kind()).collect()
         };
         assert_eq!(order(&doc), names);
         // the limiter dragged to the top: removed, put back first (as the UI does)
-        let limiter = doc.project().track(tid).unwrap().effects[3].clone();
+        let limiter = doc.workspace().track(tid).unwrap().effects[3].clone();
         let strip = MixerStrip::Track(tid);
         doc.apply(&Command::Batch {
             label: "Move".into(),
@@ -343,7 +343,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(order(&doc), ["audio.limiter", "audio.gate", "audio.eq", "audio.compressor"]);
-        let g = spec(doc.project());
+        let g = spec(doc.workspace());
         let first = &g.strips.iter().find(|s| s.id == node(tid)).unwrap().inserts[0];
         assert_eq!(first.id, node(ids[3]), "the same effect (its id keeps its state in the engine)");
     }

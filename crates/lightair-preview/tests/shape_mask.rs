@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Crop, Document, Fit, Id, Input, Layer, Layout, Project, Scene, Shape, ShapeKind, diff};
+use lightair_core::{Command, Crop, Document, Fit, Id, Input, Layer, Layout, Workspace, Scene, Shape, ShapeKind, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -13,8 +13,8 @@ use serde_json::json;
 fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
-    let project = change.after.clone();
-    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let workspace = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&workspace, &patches));
 }
 
 /// Canvas pixel (x, y) of the newest frame (canvas is 320×180).
@@ -51,8 +51,8 @@ fn shapes_are_per_layer_and_follow_the_crop() {
         ..Default::default()
     })
     .unwrap();
-    let mut doc = Document::new(Project::new("Shapes"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Shapes"));
+    let f = doc.workspace().primary_canvas().id;
     // One 640×360 red input in two layers: left half and right half of the canvas.
     let r = Input::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 640, "height": 360}));
     let rid = r.id;
@@ -71,7 +71,7 @@ fn shapes_are_per_layer_and_follow_the_crop() {
 
     // A becomes a circle: its corner goes, B's stays (same input).
     let circle = Layout { shape: Some(Shape::new(ShapeKind::Circle)), ..left_box };
-    apply(&engine, &mut doc, Command::SetLayout { scene: sid, layer: aid, format: f, layout: circle });
+    apply(&engine, &mut doc, Command::SetLayout { scene: sid, layer: aid, canvas: f, layout: circle });
     let (a_corner, a_mid, b_corner) = (at(&preview, 4.0, 4.0), at(&preview, 80.0, 90.0), at(&preview, 164.0, 4.0));
     eprintln!("A corner {a_corner:?}, A middle {a_mid:?}, B corner {b_corner:?}");
     assert!(black(a_corner) && red(a_mid), "A is a circle");
@@ -80,7 +80,7 @@ fn shapes_are_per_layer_and_follow_the_crop() {
     // Crop A to the right half of the source (320×360 visible, fitted into 160×180): the circle
     // (radius 160 source px = 80 canvas px) is centred on what's left, at (80, 90).
     let cropped = Layout { crop: Crop { left: 320, top: 0, right: 0, bottom: 0 }, ..circle };
-    apply(&engine, &mut doc, Command::SetLayout { scene: sid, layer: aid, format: f, layout: cropped });
+    apply(&engine, &mut doc, Command::SetLayout { scene: sid, layer: aid, canvas: f, layout: cropped });
     let (inside, outside) = (at(&preview, 80.0, 20.0), at(&preview, 80.0, 4.0));
     eprintln!("cropped: (80,20) {inside:?}, (80,4) {outside:?}");
     // A mask on the uncropped source would centre at its middle — the crop's left edge — and
@@ -92,13 +92,13 @@ fn shapes_are_per_layer_and_follow_the_crop() {
     let mut shape = Shape::new(ShapeKind::Circle);
     shape.border = 16.0;
     let ringed = Layout { shape: Some(shape), ..cropped };
-    apply(&engine, &mut doc, Command::SetLayout { scene: sid, layer: aid, format: f, layout: ringed });
+    apply(&engine, &mut doc, Command::SetLayout { scene: sid, layer: aid, canvas: f, layout: ringed });
     let ring = at(&preview, 4.0, 90.0);
     eprintln!("border: {ring:?}");
     assert!(white(ring), "a white border inside the circle's edge");
 
     // No shape: back to a plain layer.
-    apply(&engine, &mut doc, Command::SetLayout { scene: sid, layer: aid, format: f, layout: left_box });
+    apply(&engine, &mut doc, Command::SetLayout { scene: sid, layer: aid, canvas: f, layout: left_box });
     assert!(red(at(&preview, 4.0, 4.0)), "the shape is gone");
     drop(preview);
     drop(engine);

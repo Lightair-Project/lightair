@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_engine::obs::{Data, Scene, Source};
+use lightair_engine::obs::{Data, ObsScene, ObsSource};
 use lightair_engine::{Engine, EngineConfig};
 
 #[test]
@@ -38,12 +38,12 @@ fn camera_studio_module_loads_and_renders() {
     let rendered = engine.call(|s| {
         let mut colour = Data::new();
         colour.set_int("color", 0xFF8899AAu32 as i64).set_int("width", 1280).set_int("height", 720);
-        let src = Source::create("color_source_v3", "Skin-ish", Some(&colour)).unwrap();
+        let src = ObsSource::create("color_source_v3", "Skin-ish", Some(&colour)).unwrap();
         let mut look = Data::new();
         look.set_int("smooth", 60).set_int("foundation", 40);
-        let filter = Source::create_private("lightair_camera_studio", "Camera Studio", Some(&look)).unwrap();
+        let filter = ObsSource::create_private("lightair_camera_studio", "Camera Studio", Some(&look)).unwrap();
         unsafe { lightair_engine::sys::obs_source_filter_add(src.as_ptr(), filter.as_ptr()) };
-        let scene = Scene::create("Main").unwrap();
+        let scene = ObsScene::create("Main").unwrap();
         scene.add(&src);
         s.sources.insert("src".into(), src);
         s.sources.insert("filter".into(), filter);

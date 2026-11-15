@@ -1,6 +1,6 @@
 //! The Move transition (docs/07-scenes-layers-canvas.md, "Move transition details").
 //!
-//! Switching from scene A to scene B builds a temporary scene in each format's canvas: B's
+//! Switching from scene A to scene B builds a temporary scene in each canvas's canvas: B's
 //! layers that match a layer in A (same input first, then same name) start at A's layout and
 //! glide to B's; layers only in B fade in; layers only in A fade out. A libobs tick callback
 //! drives the glide every frame; when it finishes, each canvas cuts to B (which now looks
@@ -11,7 +11,7 @@ use std::time::Instant;
 use libobs_sys as sys;
 use lightair_core::{Id, Layout, Scene as DocScene};
 
-use crate::obs::{Scene, Source};
+use crate::obs::{ObsScene, ObsSource};
 
 pub(crate) struct Tween {
     pub item: *mut sys::obs_sceneitem_t,
@@ -21,23 +21,23 @@ pub(crate) struct Tween {
     pub to: Layout,
 }
 
-pub(crate) struct FormatMove {
+pub(crate) struct CanvasMove {
     /// Owned to keep the temporary scene alive until the Move is cleaned up.
     #[allow(dead_code)]
-    pub temp: Scene,
+    pub temp: ObsScene,
     pub tweens: Vec<Tween>,
-    /// The format's transition and the scene to land on.
+    /// The canvas's transition and the scene to land on.
     pub transition: *mut sys::obs_source_t,
     pub dest: *mut sys::obs_source_t,
     /// Per-item fade transitions and shape masks, kept alive for the animation.
     #[allow(dead_code)]
-    pub fades: Vec<Source>,
+    pub fades: Vec<ObsSource>,
     #[allow(dead_code)]
     pub masks: Vec<crate::reconcile::Masked>,
 }
 
 pub(crate) struct MoveAnim {
-    pub formats: Vec<FormatMove>,
+    pub canvases: Vec<CanvasMove>,
     pub start: Instant,
     pub duration: f32,
     pub done: bool,
@@ -90,7 +90,7 @@ impl MoveAnim {
         }
         let t = (self.start.elapsed().as_secs_f32() / self.duration.max(0.001)).min(1.0);
         let e = ease_in_out(t);
-        for f in &self.formats {
+        for f in &self.canvases {
             for tw in &f.tweens {
                 unsafe {
                     crate::reconcile::layout_item(tw.item, tw.masked.as_ref(), &lerp_layout(&tw.from, &tw.to, e))
@@ -108,7 +108,7 @@ impl MoveAnim {
         if self.done {
             return;
         }
-        for f in &self.formats {
+        for f in &self.canvases {
             unsafe { sys::obs_transition_set(f.transition, f.dest) };
         }
         self.done = true;
@@ -116,8 +116,8 @@ impl MoveAnim {
 }
 
 /// Fade used for layers entering or leaving during a Move.
-pub(crate) fn item_fade(item: *mut sys::obs_sceneitem_t, show: bool, ms: u32, keep: &mut Vec<Source>) {
-    if let Some(fade) = Source::create_private("fade_transition", &format!("move-fade-{}", Id::new()), None) {
+pub(crate) fn item_fade(item: *mut sys::obs_sceneitem_t, show: bool, ms: u32, keep: &mut Vec<ObsSource>) {
+    if let Some(fade) = ObsSource::create_private("fade_transition", &format!("move-fade-{}", Id::new()), None) {
         unsafe {
             sys::obs_sceneitem_set_transition(item, show, fade.as_ptr());
             sys::obs_sceneitem_set_transition_duration(item, show, ms);

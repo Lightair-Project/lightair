@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Id, Input, Layer, Layout, Project, Scene, diff};
+use lightair_core::{Command, Document, Id, Input, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::outputs::{OutputKey, OutputState, StreamConfig, StreamProtocol, default_encoders, runtime};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -12,8 +12,8 @@ use serde_json::json;
 fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
-    let project = change.after.clone();
-    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let workspace = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&workspace, &patches));
 }
 
 fn wait<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {
@@ -52,8 +52,8 @@ fn urls_pick_the_protocol() {
 fn srt_udp_and_whip() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Protocols"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Protocols"));
+    let f = doc.workspace().primary_canvas().id;
     let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
     let mut scene = Scene::new("Main");
     scene.layers.push(Layer::new("Colour", colour.id, [(f, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));

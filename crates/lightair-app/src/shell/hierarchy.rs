@@ -9,7 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Clip, Command, Id, Layer, Layout, Project, Scene};
+use lightair_core::{Clip, Command, Id, Layer, Layout, Workspace, Scene};
 
 use super::StudioWindow;
 use super::assets::DraggedAsset;
@@ -85,10 +85,10 @@ pub(super) fn drop_command(
 }
 
 impl StudioWindow {
-    pub(super) fn hierarchy_panel(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn hierarchy_panel(&self, workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
         let studio = self.studio.read(cx);
-        let format = self.format_id(project);
-        let scene = studio.selected_scene.and_then(|id| project.scene(id)).cloned();
+        let canvas = self.canvas_id(workspace);
+        let scene = studio.selected_scene.and_then(|id| workspace.scene(id)).cloned();
         let selection = studio.selection();
         let col = div().flex().flex_col().size_full().pt_1();
         let Some(scene) = scene else {
@@ -104,7 +104,7 @@ impl StudioWindow {
         let mut items = Vec::new();
         for (i, (layer, depth, holds)) in list.into_iter().enumerate() {
             let id = layer.id;
-            let kind = layer.input.and_then(|i| project.inputs.get(&i)).map(|i| i.kind.clone()).unwrap_or_default();
+            let kind = layer.input.and_then(|i| workspace.inputs.get(&i)).map(|i| i.kind.clone()).unwrap_or_default();
             let prefab = layer.prefab.is_some();
             let icon = if prefab {
                 "package"
@@ -113,8 +113,8 @@ impl StudioWindow {
             } else {
                 ui::input_icon(&kind)
             };
-            let own_visible = layer.layouts.get(&format).is_some_and(|l| l.visible);
-            let shown = scene.shown(id, format);
+            let own_visible = layer.layouts.get(&canvas).is_some_and(|l| l.visible);
+            let shown = scene.shown(id, canvas);
             let locked = layer.locked;
             let inherited_lock = !locked && scene.locked(id);
             let is_sel = selection.contains(&id);
@@ -264,7 +264,7 @@ impl StudioWindow {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.exec(
-                            Command::SetLayerVisible { scene: scene_id, layer: id, format, visible: !own_visible },
+                            Command::SetLayerVisible { scene: scene_id, layer: id, canvas, visible: !own_visible },
                             cx,
                         )
                     })),
@@ -333,8 +333,8 @@ impl StudioWindow {
 
     fn drop_on_tree(&mut self, row: &DraggedRow, target: Option<(Id, TreeDrop)>, cx: &mut Context<Self>) {
         let RowTarget::Layer { scene, layer } = row.target else { return };
-        let project = self.studio.read(cx).project().clone();
-        let Some(sc) = project.scene(scene) else { return };
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some(sc) = workspace.scene(scene) else { return };
         if let Some(cmd) = drop_command(sc, layer, target, &self.collapsed_layers) {
             // Show where it went.
             if let Some((parent, TreeDrop::Into)) = target {
@@ -349,16 +349,16 @@ impl StudioWindow {
         &self,
         scene: &Scene,
         layer: &Layer,
-        format: &lightair_core::Format,
+        canvas: &lightair_core::Canvas,
         body: Div,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let lo = layer.layouts.get(&format.id).copied().unwrap_or(Layout::boxed(0., 0., 0., 0.));
-        let (sid, lid, fid) = (scene.id, layer.id, format.id);
+        let lo = layer.layouts.get(&canvas.id).copied().unwrap_or(Layout::boxed(0., 0., 0., 0.));
+        let (sid, lid, fid) = (scene.id, layer.id, canvas.id);
         let set = move |f: &dyn Fn(&mut Layout)| {
             let mut l = lo;
             f(&mut l);
-            Command::SetLayout { scene: sid, layer: lid, format: fid, layout: l }
+            Command::SetLayout { scene: sid, layer: lid, canvas: fid, layout: l }
         };
         let count = scene.layers.iter().filter(|l| scene.is_under(l.id, lid)).count();
         let header = div()
@@ -459,7 +459,7 @@ impl StudioWindow {
     /// The selected layers (with what's under them) as a clip, also put on the clipboard.
     pub(super) fn copy_selection(&mut self, cx: &mut Context<Self>) -> Option<Clip> {
         let studio = self.studio.read(cx);
-        let clip = Clip::copy(studio.project(), studio.selected_scene?, &studio.selection())?;
+        let clip = Clip::copy(studio.workspace(), studio.selected_scene?, &studio.selection())?;
         cx.write_to_clipboard(ClipboardItem::new_string(clip.to_text()));
         Some(clip)
     }
@@ -483,14 +483,14 @@ impl StudioWindow {
     pub(super) fn duplicate_selection(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let Some(scene) = studio.selected_scene else { return };
-        let Some(clip) = Clip::copy(studio.project(), scene, &studio.selection()) else { return };
+        let Some(clip) = Clip::copy(studio.workspace(), scene, &studio.selection()) else { return };
         self.place_clip(&clip, "Duplicate", cx);
     }
 
     fn place_clip(&mut self, clip: &Clip, label: &str, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
-        let Some(scene) = studio.selected_scene.and_then(|id| project.scene(id)) else { return };
+        let workspace = studio.workspace().clone();
+        let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
         // Beside the frontmost selected layer, in front of it.
         let selection = studio.selection();
         let anchor = scene.layers.iter().rev().find(|l| selection.contains(&l.id));
@@ -501,7 +501,7 @@ impl StudioWindow {
             }
             None => (None, None),
         };
-        let (commands, roots) = clip.paste(&project, scene.id, parent, index);
+        let (commands, roots) = clip.paste(&workspace, scene.id, parent, index);
         if commands.is_empty() {
             return;
         }
@@ -519,11 +519,11 @@ impl StudioWindow {
     /// ready to rename.
     pub(super) fn create_empty(&mut self, parent: Option<Id>, window: &mut Window, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
-        let Some(scene) = studio.selected_scene.and_then(|id| project.scene(id)) else { return };
+        let workspace = studio.workspace().clone();
+        let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
         // At the parent's pivot, or the middle of each canvas.
-        let at: Vec<(Id, (f32, f32))> = project
-            .formats
+        let at: Vec<(Id, (f32, f32))> = workspace
+            .canvases
             .iter()
             .map(|f| (f.id, if parent.is_some() { (0.0, 0.0) } else { (f.width as f32 / 2.0, f.height as f32 / 2.0) }))
             .collect();
@@ -541,8 +541,8 @@ impl StudioWindow {
     /// Puts the selected layers in a new empty at the middle of their box (⌘G).
     pub(super) fn group_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
-        let Some(scene) = studio.selected_scene.and_then(|id| project.scene(id)) else { return };
+        let workspace = studio.workspace().clone();
+        let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
         // Outermost selected layers, back to front as they're stored.
         let selection = studio.selection();
         let picked: Vec<&Layer> = scene
@@ -555,9 +555,9 @@ impl StudioWindow {
         }
         // Their shared parent, if they have one; otherwise the top level.
         let parent = picked[0].parent.filter(|p| picked.iter().all(|l| l.parent == Some(*p)));
-        // The pivot: the middle of their frames, per format, in the parent's space.
+        // The pivot: the middle of their frames, per canvas, in the parent's space.
         let mut layouts = Vec::new();
-        for f in &project.formats {
+        for f in &workspace.canvases {
             let frames: Vec<Layout> = picked.iter().filter_map(|l| self.frame_of(scene, l, f.id)).collect();
             let Some((x0, y0, x1, y1)) = frames
                 .iter()
@@ -593,8 +593,8 @@ impl StudioWindow {
     /// empties keep what they hold.
     pub(super) fn ungroup_selection(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
-        let Some(scene) = studio.selected_scene.and_then(|id| project.scene(id)) else { return };
+        let workspace = studio.workspace().clone();
+        let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
         let mut commands = Vec::new();
         let mut freed = Vec::new();
         for id in studio.selection() {
@@ -630,12 +630,12 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{TreeDrop, drop_command, rows};
-    use lightair_core::{Command, Document, Id, Input, Layer, Layout, Project, Scene};
+    use lightair_core::{Command, Document, Id, Input, Layer, Layout, Workspace, Scene};
 
     /// Back, Group{A, B}, Front — built through commands like the app does.
     fn scene() -> (Document, Id, [Id; 5]) {
-        let mut doc = Document::new(Project::new("T"));
-        let f = doc.project().primary_format().id;
+        let mut doc = Document::new(Workspace::new("T"));
+        let f = doc.workspace().primary_canvas().id;
         let input = Input::new("I", "color_source_v3", serde_json::json!({}));
         let iid = input.id;
         doc.apply(&Command::AddInput { input }).unwrap();
@@ -656,13 +656,13 @@ mod tests {
     }
 
     fn names(doc: &Document, sid: Id) -> Vec<String> {
-        doc.project().scene(sid).unwrap().layers.iter().map(|l| l.name.clone()).collect()
+        doc.workspace().scene(sid).unwrap().layers.iter().map(|l| l.name.clone()).collect()
     }
 
     #[test]
     fn rows_show_the_front_first_with_children_under_their_parent() {
         let (doc, sid, [_, group, ..]) = scene();
-        let sc = doc.project().scene(sid).unwrap();
+        let sc = doc.workspace().scene(sid).unwrap();
         let shown = |c: &HashSet<Id>| {
             rows(sc, c).iter().map(|(l, d, _)| format!("{}{}", " ".repeat(*d), l.name)).collect::<Vec<_>>()
         };
@@ -675,15 +675,15 @@ mod tests {
         let (mut doc, sid, [back, group, a, b, front]) = scene();
         let none = HashSet::new();
         let drop = |doc: &mut Document, layer: Id, target: Option<(Id, TreeDrop)>| {
-            let sc = doc.project().scene(sid).unwrap().clone();
+            let sc = doc.workspace().scene(sid).unwrap().clone();
             let cmd = drop_command(&sc, layer, target, &none).expect("a move");
             doc.apply(&cmd).unwrap();
-            assert!(doc.project().scene(sid).unwrap().is_well_formed());
+            assert!(doc.workspace().scene(sid).unwrap().is_well_formed());
         };
         // Front above B (in front of B, inside the group).
         drop(&mut doc, front, Some((b, TreeDrop::Above)));
         assert_eq!(names(&doc, sid), ["Back", "Group", "A", "B", "Front"]);
-        assert_eq!(doc.project().scene(sid).unwrap().layer(front).unwrap().parent, Some(group));
+        assert_eq!(doc.workspace().scene(sid).unwrap().layer(front).unwrap().parent, Some(group));
         // Back below A (behind A, inside the group).
         drop(&mut doc, back, Some((a, TreeDrop::Below)));
         assert_eq!(names(&doc, sid), ["Group", "Back", "A", "B", "Front"]);
@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn a_layer_cant_be_dropped_into_itself() {
         let (doc, sid, [_, group, a, ..]) = scene();
-        let sc = doc.project().scene(sid).unwrap();
+        let sc = doc.workspace().scene(sid).unwrap();
         assert!(drop_command(sc, group, Some((a, TreeDrop::Into)), &HashSet::new()).is_none());
         assert!(drop_command(sc, group, Some((group, TreeDrop::Above)), &HashSet::new()).is_none());
     }

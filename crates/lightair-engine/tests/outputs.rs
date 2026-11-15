@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Project, Scene, Track, diff};
+use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, Track, diff};
 use lightair_engine::outputs::{
     ClipsConfig, Container, OutputKey, OutputState, RecordingConfig, StreamConfig, default_encoders, runtime,
 };
@@ -103,8 +103,8 @@ fn record_and_stream() {
         }
     }
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Outputs"));
-    let format = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Outputs"));
+    let canvas = doc.workspace().primary_canvas().id;
     let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
     let tone = Input::new(
         "Tone",
@@ -112,7 +112,7 @@ fn record_and_stream() {
         json!({"local_file": wav.to_string_lossy(), "looping": true, "is_local_file": true}),
     );
     let mut scene = Scene::new("Main");
-    scene.layers.push(Layer::new("Colour", colour.id, [(format, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));
+    scene.layers.push(Layer::new("Colour", colour.id, [(canvas, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));
     let track = Track::new("Tone", tone.id);
     for cmd in [
         Command::AddInput { input: colour },
@@ -122,8 +122,8 @@ fn record_and_stream() {
     ] {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
-        let project = change.after.clone();
-        engine.call(move |s| s.reconciler.apply(&project, &patches));
+        let workspace = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     }
     let encoders = default_encoders(&engine.capabilities.encoders, 2500, false);
     eprintln!("encoders: {} + {}", encoders.video_encoder, encoders.audio_encoder);

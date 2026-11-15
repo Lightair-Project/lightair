@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Input, Project, Track, diff};
+use lightair_core::{Command, Document, Input, Workspace, Track, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -20,20 +20,20 @@ fn peak_of(ring: &mut rtrb::Consumer<f32>) -> (f32, usize) {
 fn a_smaller_buffer_restarts_the_engine_and_keeps_playing() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Block"));
+    let mut doc = Document::new(Workspace::new("Block"));
     let tone = Input::new("Tone", "lightair_test_tone", json!({"freq": 400.0, "amplitude": 0.3}));
     let mut t = Track::new("Tone", tone.id);
     t.cue = true;
     for cmd in [Command::AddInput { input: tone }, Command::AddTrack { track: t, index: None }] {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
-        let project = change.after.clone();
-        engine.call(move |s| s.reconciler.apply(&project, &patches));
+        let workspace = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     }
     std::thread::sleep(Duration::from_millis(400));
 
-    let project = (**doc.project()).clone();
-    assert!(engine.call(move |s| s.reconciler.set_audio_block(128, &project)), "changes while nothing records");
+    let workspace = (**doc.workspace()).clone();
+    assert!(engine.call(move |s| s.reconciler.set_audio_block(128, &workspace)), "changes while nothing records");
     std::thread::sleep(Duration::from_millis(500));
     let mut cue = engine.call(|s| s.reconciler.audio_test_monitor(false)).unwrap();
     std::thread::sleep(Duration::from_millis(100));

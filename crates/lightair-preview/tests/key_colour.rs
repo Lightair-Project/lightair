@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Input, Layer, Layout, Project, Scene, diff};
+use lightair_core::{Command, Document, Effect, Input, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -11,8 +11,8 @@ use serde_json::json;
 fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
-    let project = change.after.clone();
-    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let workspace = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&workspace, &patches));
 }
 
 fn centre(preview: &Preview) -> (u8, u8, u8) {
@@ -29,8 +29,8 @@ fn centre(preview: &Preview) -> (u8, u8, u8) {
 fn custom_key_colour_and_live_bypass() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Key"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Key"));
+    let f = doc.workspace().primary_canvas().id;
     // An orange screen: none of the presets.
     let screen = Input::new("Screen", "color_source_v3", json!({"color": 0xFF1E78FFu32, "width": 320, "height": 180}));
     let sid = screen.id;

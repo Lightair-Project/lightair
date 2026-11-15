@@ -2,7 +2,7 @@
 //! that aren't installed (they must not take the engine down). No cameras or microphones here,
 //! so the test never triggers a permission prompt.
 
-use lightair_core::{Document, Project, diff};
+use lightair_core::{Document, Workspace, diff};
 use lightair_engine::{Engine, EngineConfig};
 
 const COLLECTION: &str = r#"{
@@ -34,15 +34,15 @@ const COLLECTION: &str = r#"{
 fn imported_collection_reconciles() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Import"));
+    let mut doc = Document::new(Workspace::new("Import"));
     let board = concat!(env!("CARGO_MANIFEST_DIR"), "/../../branding/final/board.png");
     let collection = COLLECTION.replace("BOARD", board);
-    let (cmd, report) = lightair_store::import_obs_collection(&collection, doc.project()).unwrap();
+    let (cmd, report) = lightair_store::import_obs_collection(&collection, doc.workspace()).unwrap();
     assert_eq!(report.kept_plugin.len(), 2, "{report:#?}");
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
-    let project = change.after.clone();
-    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let workspace = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     std::thread::sleep(std::time::Duration::from_millis(200));
     let described = engine.call(|s| s.reconciler.describe());
     eprintln!("{described:#?}");
@@ -71,8 +71,8 @@ fn imported_collection_reconciles() {
     // Undo removes everything it added.
     let change = doc.undo().unwrap();
     let patches = diff(&change.before, &change.after);
-    let project = change.after.clone();
-    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let workspace = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     assert_eq!(engine.call(|s| s.reconciler.counts()), (0, 0, 0));
     drop(engine);
 }

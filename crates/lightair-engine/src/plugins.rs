@@ -2,7 +2,7 @@
 //! AudioToolbox C API, and VST3 ([`vst3`]). AUv3 units load out of process when the system
 //! chooses to, so a crashing one is reported rather than fatal.
 //!
-//! A plugin insert in the project ("audio.plugin": format, id, name, vendor, state) gets its
+//! A plugin insert in the workspace ("audio.plugin": format, id, name, vendor, state) gets its
 //! instance here, keyed by the effect's id. Loading is asynchronous: until it's ready the insert
 //! passes audio through, and [`changed`] tells the reconciler to play the mixer again.
 
@@ -63,7 +63,7 @@ pub(crate) fn on_main(job: Job) {
     }
 }
 
-// ------------------------------------------------------------------ the project's inserts
+// ------------------------------------------------------------------ the workspace's inserts
 
 /// A running plugin of either format.
 #[derive(Clone)]
@@ -287,7 +287,7 @@ pub fn hosted(effect: Id) -> Option<Hosted> {
 }
 
 /// Reads an insert's current state from its instance (what its editor changed). Remembered as
-/// applied, so writing it into the project doesn't give it back to the instance. Main thread.
+/// applied, so writing it into the workspace doesn't give it back to the instance. Main thread.
 pub fn take_state(effect: Id) -> Option<String> {
     let p = hosted(effect)?;
     let s = p.state()?;
@@ -308,10 +308,10 @@ pub fn retain(keep: &HashSet<Id>) {
     drop(gone);
 }
 
-/// The plugin inserts in a project (tracks, buses, mixes, master).
-pub fn inserts(project: &lightair_core::Project) -> HashSet<Id> {
-    let a = &project.audio;
-    project
+/// The plugin inserts in a workspace (tracks, buses, mixes, master).
+pub fn inserts(workspace: &lightair_core::Workspace) -> HashSet<Id> {
+    let a = &workspace.audio;
+    workspace
         .tracks
         .iter()
         .flat_map(|t| t.effects.iter())

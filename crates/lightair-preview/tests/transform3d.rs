@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Fit, Id, Input, Layer, Layout, Project, Scene, Shape, ShapeKind, diff};
+use lightair_core::{Command, Document, Fit, Id, Input, Layer, Layout, Workspace, Scene, Shape, ShapeKind, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -13,8 +13,8 @@ use serde_json::json;
 fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
-    let project = change.after.clone();
-    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let workspace = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&workspace, &patches));
 }
 
 fn at(preview: &Preview, x: f32, y: f32) -> (u8, u8, u8) {
@@ -65,8 +65,8 @@ fn flip_and_tilt() {
     })
     .unwrap();
     assert!(engine.capabilities.filters.iter().any(|f| f == "lightair_transform"), "filter registered");
-    let mut doc = Document::new(Project::new("3D"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("3D"));
+    let f = doc.workspace().primary_canvas().id;
     let image = Input::new("Halves", "image_source", json!({"file": png.to_string_lossy()}));
     let full = Layout { fit: Fit::Stretch, ..Layout::boxed(0.0, 0.0, 320.0, 180.0) };
     let layer = Layer::new("Halves", image.id, [(f, full)]);
@@ -78,7 +78,7 @@ fn flip_and_tilt() {
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
     let set = |doc: &mut Document, layout: Layout| {
-        apply(&engine, doc, Command::SetLayout { scene: sid, layer: lid, format: f, layout })
+        apply(&engine, doc, Command::SetLayout { scene: sid, layer: lid, canvas: f, layout })
     };
     std::thread::sleep(Duration::from_millis(300));
     assert!(red(at(&preview, 80.0, 90.0)) && blue(at(&preview, 240.0, 90.0)), "red left, blue right");

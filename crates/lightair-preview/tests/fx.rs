@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Fit, Input, Layer, Layout, Project, Scene, diff};
+use lightair_core::{Command, Document, Effect, Fit, Input, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::{Value, json};
@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
-    let project = change.after.clone();
-    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let workspace = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&workspace, &patches));
 }
 
 /// Y, Cb, Cr on a 16×16 grid of a frame rendered after the last change.
@@ -47,8 +47,8 @@ fn every_shader_effect_renders() {
         ..Default::default()
     })
     .unwrap();
-    let mut doc = Document::new(Project::new("FX"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("FX"));
+    let f = doc.workspace().primary_canvas().id;
     let input = Input::new("Picture", "image_source", json!({"file": picture.to_string_lossy()}));
     let iid = input.id;
     let mut scene = Scene::new("Main");

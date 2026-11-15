@@ -63,10 +63,10 @@ impl Drop for Data {
 }
 
 /// A strong reference to an `obs_source_t` (input, filter, transition or scene source).
-pub struct Source(NonNull<sys::obs_source_t>);
-unsafe impl Send for Source {}
+pub struct ObsSource(NonNull<sys::obs_source_t>);
+unsafe impl Send for ObsSource {}
 
-impl Source {
+impl ObsSource {
     pub fn create(type_id: &str, name: &str, settings: Option<&Data>) -> Option<Self> {
         let ptr = unsafe {
             sys::obs_source_create(
@@ -119,17 +119,17 @@ impl Source {
     }
 }
 
-impl Drop for Source {
+impl Drop for ObsSource {
     fn drop(&mut self) {
         unsafe { sys::obs_source_release(self.as_ptr()) }
     }
 }
 
 /// A strong reference to an `obs_scene_t`.
-pub struct Scene(pub(crate) NonNull<sys::obs_scene_t>);
-unsafe impl Send for Scene {}
+pub struct ObsScene(pub(crate) NonNull<sys::obs_scene_t>);
+unsafe impl Send for ObsScene {}
 
-impl Scene {
+impl ObsScene {
     pub fn create(name: &str) -> Option<Self> {
         NonNull::new(unsafe { sys::obs_scene_create(cstr(name).as_ptr()) }).map(Self)
     }
@@ -141,12 +141,12 @@ impl Scene {
         unsafe { sys::obs_scene_get_source(self.as_ptr()) }
     }
     /// Adds `source` on top of the scene and returns the scene item (owned by the scene).
-    pub fn add(&self, source: &Source) -> *mut sys::obs_sceneitem_t {
+    pub fn add(&self, source: &ObsSource) -> *mut sys::obs_sceneitem_t {
         unsafe { sys::obs_scene_add(self.as_ptr(), source.as_ptr()) }
     }
 
     /// Adds `source` scaled to fit inside the box (x, y, w, h), keeping its aspect ratio.
-    pub fn add_fitted(&self, source: &Source, x: f32, y: f32, w: f32, h: f32) -> *mut sys::obs_sceneitem_t {
+    pub fn add_fitted(&self, source: &ObsSource, x: f32, y: f32, w: f32, h: f32) -> *mut sys::obs_sceneitem_t {
         let item = self.add(source);
         if !item.is_null() {
             unsafe {
@@ -169,7 +169,7 @@ pub fn vec2(x: f32, y: f32) -> sys::vec2 {
 /// Dropping a `Scene` deletes it. Since OBS 33 every scene belongs to a canvas that holds its
 /// own reference, so the scene is removed from its canvas (`obs_source_remove`) before our
 /// reference is released; otherwise it would live until `obs_shutdown` and crash there.
-impl Drop for Scene {
+impl Drop for ObsScene {
     fn drop(&mut self) {
         unsafe {
             sys::obs_source_remove(self.source_ptr());
@@ -178,10 +178,10 @@ impl Drop for Scene {
     }
 }
 
-/// An additional libobs canvas (a Lightair format other than the primary one). Dropping it
+/// An additional libobs canvas (a Lightair canvas other than the primary one). Dropping it
 /// removes the canvas.
-pub struct Canvas(NonNull<sys::obs_canvas_t>);
-unsafe impl Send for Canvas {}
+pub struct ObsCanvas(NonNull<sys::obs_canvas_t>);
+unsafe impl Send for ObsCanvas {}
 
 fn canvas_video_info(width: u32, height: u32, fps_num: u32, fps_den: u32) -> sys::obs_video_info {
     let mut ovi = sys::obs_video_info::default();
@@ -195,7 +195,7 @@ fn canvas_video_info(width: u32, height: u32, fps_num: u32, fps_den: u32) -> sys
     ovi
 }
 
-impl Canvas {
+impl ObsCanvas {
     pub fn create(name: &str, width: u32, height: u32, fps_num: u32, fps_den: u32) -> Option<Self> {
         let mut ovi = canvas_video_info(width, height, fps_num, fps_den);
         // Sources activate and scenes are referenced, but audio is mixed once, by the main canvas.
@@ -207,8 +207,8 @@ impl Canvas {
         self.0.as_ptr()
     }
 
-    pub fn create_scene(&self, name: &str) -> Option<Scene> {
-        NonNull::new(unsafe { sys::obs_canvas_scene_create(self.as_ptr(), cstr(name).as_ptr()) }).map(Scene)
+    pub fn create_scene(&self, name: &str) -> Option<ObsScene> {
+        NonNull::new(unsafe { sys::obs_canvas_scene_create(self.as_ptr(), cstr(name).as_ptr()) }).map(ObsScene)
     }
 
     pub fn reset(&self, width: u32, height: u32, fps_num: u32, fps_den: u32) {
@@ -217,7 +217,7 @@ impl Canvas {
     }
 }
 
-impl Drop for Canvas {
+impl Drop for ObsCanvas {
     fn drop(&mut self) {
         unsafe {
             sys::obs_canvas_remove(self.as_ptr());

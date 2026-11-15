@@ -1,5 +1,5 @@
 //! App preferences (docs/14-data-persistence-settings.md, "Settings"): how Lightair behaves on
-//! this Mac, as opposed to project settings, which travel with the project.
+//! this Mac, as opposed to workspace settings, which travel with the workspace.
 
 use std::path::{Path, PathBuf};
 
@@ -30,8 +30,9 @@ pub struct Preferences {
     pub global_hotkeys: Vec<GlobalHotkey>,
     /// What the record button records.
     pub record_mode: RecordMode,
-    /// The project open last: the one Lightair opens next.
-    pub last_project: Option<PathBuf>,
+    /// The workspace open last: the one Lightair opens next.
+    #[serde(alias = "last_project")]
+    pub last_workspace: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,7 +92,7 @@ impl Default for Preferences {
             audio_block: 256,
             camera: CameraDefaults::default(),
             global_hotkeys: Vec::new(),
-            last_project: None,
+            last_workspace: None,
             record_mode: RecordMode::Program,
         }
     }

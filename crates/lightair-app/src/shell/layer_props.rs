@@ -75,12 +75,12 @@ impl StudioWindow {
     /// Keeps the text field and the media status in step with the selection. Called from render.
     pub(super) fn sync_layer_props(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
+        let workspace = studio.workspace().clone();
         let input = studio
             .selected_scene
-            .and_then(|s| project.scene(s))
+            .and_then(|s| workspace.scene(s))
             .and_then(|s| studio.selected_layer.and_then(|l| s.layer(l)))
-            .and_then(|l| l.input.and_then(|i| project.inputs.get(&i)))
+            .and_then(|l| l.input.and_then(|i| workspace.inputs.get(&i)))
             .cloned();
         let engine = studio.engine().clone();
 
@@ -146,8 +146,8 @@ impl StudioWindow {
     }
 
     fn set_text(&mut self, input: Id, text: String, cx: &mut Context<Self>) {
-        let project = self.studio.read(cx).project().clone();
-        let Some(i) = project.inputs.get(&input) else { return };
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some(i) = workspace.inputs.get(&input) else { return };
         if i.settings["text"].as_str() == Some(text.as_str()) {
             return;
         }
@@ -319,15 +319,15 @@ impl StudioWindow {
             let (shorter, longer) =
                 (set("seconds", json!((seconds - 60).max(10))), set("seconds", json!(seconds + 60)));
             // Then: which scene to go to when it ends (click to cycle).
-            let project = self.studio.read(cx).project().clone();
+            let workspace = self.studio.read(cx).workspace().clone();
             let end = input.settings["end_scene"].as_str().map(str::to_string);
-            let current = project.scenes.iter().position(|sc| Some(sc.id.to_string()) == end);
+            let current = workspace.scenes.iter().position(|sc| Some(sc.id.to_string()) == end);
             let next = match current {
-                None => project.scenes.first().map(|sc| json!(sc.id.to_string())),
-                Some(i) => project.scenes.get(i + 1).map(|sc| json!(sc.id.to_string())),
+                None => workspace.scenes.first().map(|sc| json!(sc.id.to_string())),
+                Some(i) => workspace.scenes.get(i + 1).map(|sc| json!(sc.id.to_string())),
             }
             .unwrap_or(Value::Null);
-            let then = current.map_or("Stay".to_string(), |i| format!("→ {}", project.scenes[i].name));
+            let then = current.map_or("Stay".to_string(), |i| format!("→ {}", workspace.scenes[i].name));
             let cycle = set("end_scene", next);
             col = col.child(
                 div()
@@ -418,12 +418,12 @@ impl StudioWindow {
     /// Which of an interface's channels a track takes: all, one (mono) or a pair (stereo).
     fn track_channels(
         &self,
-        project: &lightair_core::Project,
+        workspace: &lightair_core::Workspace,
         track: &lightair_core::Track,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         use lightair_core::TrackChannels;
-        let input = project.inputs.get(&track.input)?;
+        let input = workspace.inputs.get(&track.input)?;
         if input.kind != lightair_engine::devices::DEVICE_KIND {
             return None;
         }
@@ -530,7 +530,7 @@ impl StudioWindow {
     /// A mixer track: level, mute, and its effect chain (the mixer strip stays compact).
     pub(super) fn track_inspector(
         &self,
-        project: &lightair_core::Project,
+        workspace: &lightair_core::Workspace,
         track: &lightair_core::Track,
         body: Div,
         cx: &mut Context<Self>,
@@ -544,9 +544,9 @@ impl StudioWindow {
                 .child(div().flex_none().child(crate::ui::icon("audio-lines").size(px(16.)).text_color(tok::text_secondary())))
                 .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().font_weight(FontWeight::SEMIBOLD).child(track.name.clone())),
         )
-        .children(project.inputs.get(&track.input).and_then(|i| self.source_section(&i.clone(), cx)))
-        .children(self.track_channels(project, track, cx))
-        .child(self.track_routing(project, track, cx))
+        .children(workspace.inputs.get(&track.input).and_then(|i| self.source_section(&i.clone(), cx)))
+        .children(self.track_channels(workspace, track, cx))
+        .child(self.track_routing(workspace, track, cx))
         .child({
             let rec = track.record;
             let cmd = Command::UpdateTrack { track: lightair_core::Track { record: !rec, ..track.clone() } };

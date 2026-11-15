@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use lightair_core::{
-    Command, Document, Input, Layer, Layout, Project, Scene, TransitionKind, TransitionSettings, diff,
+    Command, Document, Input, Layer, Layout, Workspace, Scene, TransitionKind, TransitionSettings, diff,
 };
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
@@ -13,8 +13,8 @@ use serde_json::json;
 fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
-    let project = change.after.clone();
-    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let workspace = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&workspace, &patches));
 }
 
 fn sample(preview: &Preview) -> [(u8, u8, u8); 3] {
@@ -46,8 +46,8 @@ fn stinger_plays_over_the_switch() {
         return;
     }
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Stinger"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Stinger"));
+    let f = doc.workspace().primary_canvas().id;
     let r = Input::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 320, "height": 180}));
     let b = Input::new("Blue", "color_source_v3", json!({"color": 0xFFFF0000u32, "width": 320, "height": 180}));
     let mut a_scene = Scene::new("A");

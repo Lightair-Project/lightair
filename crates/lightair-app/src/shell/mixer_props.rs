@@ -5,7 +5,7 @@ use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{AudioMix, Bus, Command, Id, MixerStrip, Project, Route, Send, Track};
+use lightair_core::{AudioMix, Bus, Command, Id, MixerStrip, Workspace, Route, Send, Track};
 
 use super::StudioWindow;
 use crate::ui::{self, tok};
@@ -61,14 +61,14 @@ impl StudioWindow {
     /// Where a strip's output goes: Program, a bus (not itself or one that feeds it), or nowhere.
     fn route_choices(
         &self,
-        project: &Project,
+        workspace: &Workspace,
         own: Option<Id>,
         current: Route,
         set: impl Fn(Route) -> Command,
         cx: &mut Context<Self>,
     ) -> Div {
         let mut options = vec![("Program".to_string(), current == Route::Program, set(Route::Program))];
-        for b in &project.audio.buses {
+        for b in &workspace.audio.buses {
             if Some(b.id) == own {
                 continue;
             }
@@ -81,14 +81,14 @@ impl StudioWindow {
     /// Sends to each mix: on/off, level, before or after the fader.
     fn sends_rows(
         &self,
-        project: &Project,
+        workspace: &Workspace,
         key: Id,
         sends: &[Send],
         set: impl Fn(Vec<Send>) -> Command + Clone + 'static,
         cx: &mut Context<Self>,
     ) -> Div {
         let mut col = div().flex().flex_col().gap_1p5();
-        if project.audio.mixes.is_empty() {
+        if workspace.audio.mixes.is_empty() {
             return col.child(
                 div()
                     .text_size(px(11.))
@@ -96,7 +96,7 @@ impl StudioWindow {
                     .child("Add a mix in the mixer (+) to send to headphones, a VOD track or a guest."),
             );
         }
-        for (n, mix) in project.audio.mixes.iter().enumerate() {
+        for (n, mix) in workspace.audio.mixes.iter().enumerate() {
             let current = sends.iter().find(|s| s.mix == mix.id).copied();
             let others: Vec<Send> = sends.iter().filter(|s| s.mix != mix.id).copied().collect();
             let toggle = {
@@ -165,7 +165,7 @@ impl StudioWindow {
     }
 
     /// A track's place in the mix: output, pan, trim, polarity, mono, sends.
-    pub(super) fn track_routing(&self, project: &Project, track: &Track, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn track_routing(&self, workspace: &Workspace, track: &Track, cx: &mut Context<Self>) -> AnyElement {
         let t = track.clone();
         let upd = move |f: &dyn Fn(&mut Track)| {
             let mut n = t.clone();
@@ -174,7 +174,7 @@ impl StudioWindow {
         };
         let route = {
             let t = track.clone();
-            self.route_choices(project, None, track.route, move |r| Command::UpdateTrack { track: Track { route: r, ..t.clone() } }, cx)
+            self.route_choices(workspace, None, track.route, move |r| Command::UpdateTrack { track: Track { route: r, ..t.clone() } }, cx)
         };
         let pan = {
             let t = track.clone();
@@ -193,7 +193,7 @@ impl StudioWindow {
         let flip_mono = upd(&|n: &mut Track| n.mono = !mono);
         let sends = {
             let t = track.clone();
-            self.sends_rows(project, track.id, &track.sends, move |s| Command::UpdateTrack { track: Track { sends: s, ..t.clone() } }, cx)
+            self.sends_rows(workspace, track.id, &track.sends, move |s| Command::UpdateTrack { track: Track { sends: s, ..t.clone() } }, cx)
         };
         let pan_label = if track.pan.abs() < 0.005 {
             "C".to_string()
@@ -233,13 +233,13 @@ impl StudioWindow {
     }
 
     /// A bus, a mix or the master.
-    pub(super) fn strip_inspector(&self, project: &Project, strip: MixerStrip, body: Div, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn strip_inspector(&self, workspace: &Workspace, strip: MixerStrip, body: Div, cx: &mut Context<Self>) -> AnyElement {
         match strip {
             MixerStrip::Bus(id) => {
-                let Some(b) = project.audio.bus(id).cloned() else { return body.into_any_element() };
+                let Some(b) = workspace.audio.bus(id).cloned() else { return body.into_any_element() };
                 let route = {
                     let b2 = b.clone();
-                    self.route_choices(project, Some(id), b.route, move |r| Command::UpdateBus { bus: Bus { route: r, ..b2.clone() } }, cx)
+                    self.route_choices(workspace, Some(id), b.route, move |r| Command::UpdateBus { bus: Bus { route: r, ..b2.clone() } }, cx)
                 };
                 let pan = {
                     let b2 = b.clone();
@@ -247,7 +247,7 @@ impl StudioWindow {
                 };
                 let sends = {
                     let b2 = b.clone();
-                    self.sends_rows(project, id, &b.sends, move |s| Command::UpdateBus { bus: Bus { sends: s, ..b2.clone() } }, cx)
+                    self.sends_rows(workspace, id, &b.sends, move |s| Command::UpdateBus { bus: Bus { sends: s, ..b2.clone() } }, cx)
                 };
                 let rec = b.record;
                 let flip_rec = Command::UpdateBus { bus: Bus { record: !rec, ..b.clone() } };
@@ -273,9 +273,9 @@ impl StudioWindow {
                     .into_any_element()
             }
             MixerStrip::Mix(id) => {
-                let Some(m) = project.audio.mix(id).cloned() else { return body.into_any_element() };
-                let fed = project.tracks.iter().filter(|t| t.sends.iter().any(|s| s.mix == id)).count()
-                    + project.audio.buses.iter().filter(|b| b.sends.iter().any(|s| s.mix == id)).count();
+                let Some(m) = workspace.audio.mix(id).cloned() else { return body.into_any_element() };
+                let fed = workspace.tracks.iter().filter(|t| t.sends.iter().any(|s| s.mix == id)).count()
+                    + workspace.audio.buses.iter().filter(|b| b.sends.iter().any(|s| s.mix == id)).count();
                 body.child(header("split", m.name.clone(), "MIX"))
                     .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(format!(
                         "{fed} strip{} send{} to it. Use it for headphones, a Twitch VOD track, a guest's mix-minus or a music-free stream.",
@@ -333,7 +333,7 @@ impl StudioWindow {
                         .text_color(tok::text_secondary())
                         .child("What the stream and the recording's main track carry. A limiter here keeps it from clipping."),
                 )
-                .child(self.strip_effects_section(strip, &project.audio.master.effects, cx))
+                .child(self.strip_effects_section(strip, &workspace.audio.master.effects, cx))
                 .into_any_element(),
             MixerStrip::Track(_) => body.into_any_element(),
         }
@@ -341,10 +341,10 @@ impl StudioWindow {
 }
 
 /// New strips from the mixer's add menu.
-pub fn new_bus(project: &Project) -> Bus {
-    Bus::new(format!("Bus {}", project.audio.buses.len() + 1))
+pub fn new_bus(workspace: &Workspace) -> Bus {
+    Bus::new(format!("Bus {}", workspace.audio.buses.len() + 1))
 }
 
-pub fn new_mix(project: &Project) -> AudioMix {
-    AudioMix::new(format!("Mix {}", project.audio.mixes.len() + 1))
+pub fn new_mix(workspace: &Workspace) -> AudioMix {
+    AudioMix::new(format!("Mix {}", workspace.audio.mixes.len() + 1))
 }

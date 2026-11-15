@@ -8,7 +8,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::slider::Slider;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Project, Scene, ScreenLook};
+use lightair_core::{Command, Workspace, Scene, ScreenLook};
 
 use super::StudioWindow;
 use crate::ui::{self, tok};
@@ -38,7 +38,7 @@ fn note(text: &'static str) -> Div {
 
 impl StudioWindow {
     /// The section, for `scene`.
-    pub(super) fn screen_look_section(&self, project: &Project, scene: &Scene, cx: &mut Context<Self>) -> Div {
+    pub(super) fn screen_look_section(&self, workspace: &Workspace, scene: &Scene, cx: &mut Context<Self>) -> Div {
         let sid = scene.id;
         let on = scene.screen.is_some();
         let look = scene.screen.unwrap_or_default();
@@ -50,7 +50,7 @@ impl StudioWindow {
         let screens = scene
             .layers
             .iter()
-            .filter_map(|l| l.input.and_then(|i| project.inputs.get(&i)))
+            .filter_map(|l| l.input.and_then(|i| workspace.inputs.get(&i)))
             .filter(|i| i.kind == lightair_core::kinds::SCREEN)
             .count();
         if !on {

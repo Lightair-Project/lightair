@@ -18,7 +18,7 @@ use lightair_audio as la;
 use libobs_sys as sys;
 use parking_lot::Mutex;
 
-use crate::obs::Source;
+use crate::obs::ObsSource;
 
 pub const OUT_SOURCE: &str = "lightair_audio_out";
 pub const TEST_TONE: &str = "lightair_test_tone";
@@ -514,8 +514,8 @@ pub struct AudioHost {
     commands: rtrb::Producer<ToRt>,
     garbage: rtrb::Consumer<FromRt>,
     /// Held for the audio thread, which pushes into them until it stops (in `drop`).
-    _outs: Vec<Source>,
-    captures: HashMap<lightair_core::Id, (Source, Box<Capture>)>,
+    _outs: Vec<ObsSource>,
+    captures: HashMap<lightair_core::Id, (ObsSource, Box<Capture>)>,
     mixes: ([Option<la::NodeId>; OUT_MIXES - 1], Option<la::NodeId>),
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -538,8 +538,8 @@ impl AudioHost {
     pub fn start(sample_rate: u32, block: usize) -> Option<Self> {
         let block = block.clamp(64, la::MAX_BLOCK);
         register_types();
-        let outs: Vec<Source> = (0..=OUT_MIXES)
-            .map(|k| Source::create_private(OUT_SOURCE, &format!("Lightair mix {k}"), None))
+        let outs: Vec<ObsSource> = (0..=OUT_MIXES)
+            .map(|k| ObsSource::create_private(OUT_SOURCE, &format!("Lightair mix {k}"), None))
             .collect::<Option<_>>()?;
         for (k, out) in outs.iter().enumerate() {
             unsafe {
@@ -625,7 +625,7 @@ impl AudioHost {
 
     /// Starts taking `input`'s audio from its libobs source (which then stays out of libobs's
     /// own mixes).
-    pub fn capture(&mut self, input: lightair_core::Id, source: &Source) {
+    pub fn capture(&mut self, input: lightair_core::Id, source: &ObsSource) {
         if self.captures.contains_key(&input) {
             return;
         }
@@ -644,7 +644,7 @@ impl AudioHost {
         }
         let rt = RtInput::new(crate::audio::node(input), consumer, 2, PRIME, MOST);
         let _ = self.commands.push(ToRt::AddInput(rt));
-        let Some(held) = (unsafe { Source::from_borrowed(source.as_ptr()) }) else { return };
+        let Some(held) = (unsafe { ObsSource::from_borrowed(source.as_ptr()) }) else { return };
         self.captures.insert(input, (held, cap));
     }
 

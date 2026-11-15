@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Fit, Id, Input, Layer, Layout, Project, Scene, diff};
+use lightair_core::{Command, Document, Effect, Fit, Id, Input, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -12,8 +12,8 @@ use serde_json::json;
 fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
-    let project = change.after.clone();
-    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let workspace = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&workspace, &patches));
 }
 
 /// Luma on a 24×24 grid of the newest frame.
@@ -47,8 +47,8 @@ fn the_tracker_finds_the_face() {
         ..Default::default()
     })
     .unwrap();
-    let mut doc = Document::new(Project::new("Face"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Face"));
+    let f = doc.workspace().primary_canvas().id;
     let mut input = Input::new("Face", "image_source", json!({"file": image.to_string_lossy()}));
     let mut studio = Effect::new("Camera Studio", "lightair_camera_studio", json!({"debug_view": 2}));
     studio.enabled = false;
@@ -118,8 +118,8 @@ fn the_background_is_replaced_around_the_person() {
         ..Default::default()
     })
     .unwrap();
-    let mut doc = Document::new(Project::new("Background"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Background"));
+    let f = doc.workspace().primary_canvas().id;
     let mut input = Input::new("Person", "image_source", json!({"file": image.to_string_lossy()}));
     // Pure red behind the person (OBS colours are 0xAABBGGRR).
     let studio = Effect::new("Background", "studio.bg_replace", json!({"bg_mode": 3, "bg_color": 0xFF0000FFu32}));
@@ -202,8 +202,8 @@ fn background_edges_hold_still() {
         ..Default::default()
     })
     .unwrap();
-    let mut doc = Document::new(Project::new("Flicker"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Flicker"));
+    let f = doc.workspace().primary_canvas().id;
     let mut input = Input::new("Person", "image_source", json!({"file": image.to_string_lossy()}));
     // Moving grain first, so the segmenter sees a new, noisy frame every time (like a camera).
     input.effects.push(Effect::new("Grain", "fx.grain", json!({"amount": std::env::var("LIGHTAIR_GRAIN").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.35), "grain_size": 1.0, "colored": true})));
@@ -300,8 +300,8 @@ fn background_edges_steady_in_motion() {
         ..Default::default()
     })
     .unwrap();
-    let mut doc = Document::new(Project::new("Sway"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Sway"));
+    let f = doc.workspace().primary_canvas().id;
     let mut input = Input::new("Person", "image_source", json!({"file": image.to_string_lossy()}));
     input.effects.push(Effect::new("Sway", "fx.wave", json!({"amount": 0.35, "frequency": 0.1, "speed": 0.15})));
     input.effects.push(Effect::new("Grain", "fx.grain", json!({"amount": std::env::var("LIGHTAIR_GRAIN").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.2), "grain_size": 1.0, "colored": true})));

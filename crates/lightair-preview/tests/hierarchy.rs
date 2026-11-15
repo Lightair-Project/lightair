@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Fit, Id, Input, Layer, Layout, Project, Scene, diff};
+use lightair_core::{Command, Document, Fit, Id, Input, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -10,8 +10,8 @@ use serde_json::json;
 fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
-    let project = change.after.clone();
-    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let workspace = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&workspace, &patches));
 }
 
 /// Canvas pixel (x, y) of the newest frame (canvas is 320×180).
@@ -31,8 +31,8 @@ fn red(p: (u8, u8, u8)) -> bool {
 fn pictures_follow_their_empty() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Hierarchy"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Hierarchy"));
+    let f = doc.workspace().primary_canvas().id;
     let r = Input::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 40, "height": 40}));
     let rid = r.id;
     // An empty at (60, 60) holding a 40×40 red square centred on it.
@@ -53,9 +53,9 @@ fn pictures_follow_their_empty() {
 
     // Move the empty: the square goes with it.
     let set = |doc: &mut Document, f_: &dyn Fn(&mut Layout)| {
-        let mut layout = doc.project().scene(sid).unwrap().layer(gid).unwrap().layouts[&f];
+        let mut layout = doc.workspace().scene(sid).unwrap().layer(gid).unwrap().layouts[&f];
         f_(&mut layout);
-        Command::SetLayout { scene: sid, layer: gid, format: f, layout }
+        Command::SetLayout { scene: sid, layer: gid, canvas: f, layout }
     };
     let cmd = set(&mut doc, &|l| {
         l.x = 200.0;

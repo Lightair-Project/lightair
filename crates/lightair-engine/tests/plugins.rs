@@ -63,7 +63,7 @@ fn audio_units_scan_load_process_and_keep_state() {
 }
 
 #[test]
-fn a_project_insert_loads_and_reports() {
+fn a_workspace_insert_loads_and_reports() {
     let info = hipass(&plugins::scan_audio_units());
     let e = lightair_core::catalog::plugin_effect("au", &info.id, &info.name, &info.vendor);
     assert!(plugins::instance(&e).is_none(), "not loaded yet");

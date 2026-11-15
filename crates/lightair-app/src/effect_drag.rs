@@ -2,7 +2,7 @@
 //! audio effect to another strip. The engine runs a chain in this order.
 
 use gpui_kit::*;
-use lightair_core::{Command, Effect, Id, MixerStrip, Project};
+use lightair_core::{Command, Effect, Id, MixerStrip, Workspace};
 
 use crate::ui::{self, tok};
 
@@ -14,7 +14,7 @@ pub enum Home {
 }
 
 impl Home {
-    fn effects(self, p: &Project) -> Option<&[Effect]> {
+    fn effects(self, p: &Workspace) -> Option<&[Effect]> {
         Some(match self {
             Home::Input(id) => &p.inputs.get(&id)?.effects,
             Home::Strip(MixerStrip::Track(id)) => &p.track(id)?.effects,
@@ -69,7 +69,7 @@ impl Render for DraggedEffect {
 
 /// The command that puts the dragged effect before `before` in `to`'s chain (`None`: at the
 /// end). `None` when nothing would change, or the move makes no sense (audio onto video).
-pub fn move_cmd(p: &Project, d: &DraggedEffect, to: Home, before: Option<Id>) -> Option<Command> {
+pub fn move_cmd(p: &Workspace, d: &DraggedEffect, to: Home, before: Option<Id>) -> Option<Command> {
     // audio onto video, or an effect dropped on itself
     if matches!(d.home, Home::Input(_)) != matches!(to, Home::Input(_)) || before == Some(d.effect) {
         return None;
@@ -91,16 +91,16 @@ pub fn move_cmd(p: &Project, d: &DraggedEffect, to: Home, before: Option<Id>) ->
 mod tests {
     // not `super::*`: gpui's `test` attribute would shadow the standard one
     use super::{DraggedEffect, Home, move_cmd};
-    use lightair_core::{Command, Document, Effect, Id, Input, MixerStrip, Project, Track};
+    use lightair_core::{Command, Document, Effect, Id, Input, MixerStrip, Workspace, Track};
     use serde_json::json;
 
     fn chain(doc: &Document, t: Id) -> Vec<String> {
-        doc.project().track(t).unwrap().effects.iter().map(|e| e.name.clone()).collect()
+        doc.workspace().track(t).unwrap().effects.iter().map(|e| e.name.clone()).collect()
     }
 
     #[test]
     fn dragging_reorders_and_moves_between_strips() {
-        let mut doc = Document::new(Project::new("Drag"));
+        let mut doc = Document::new(Workspace::new("Drag"));
         let mic = Input::new("Mic", "lightair_audio_device", json!({}));
         let mut a = Track::new("A", mic.id);
         a.effects = ["Gate", "EQ", "Comp"].iter().map(|n| Effect::new(*n, "audio.gain", json!({}))).collect();
@@ -114,22 +114,22 @@ mod tests {
         let drag = |id: Id| DraggedEffect { home, effect: id, name: "x".into() };
 
         // Comp before Gate
-        let cmd = move_cmd(doc.project(), &drag(ids[2]), home, Some(ids[0])).unwrap();
+        let cmd = move_cmd(doc.workspace(), &drag(ids[2]), home, Some(ids[0])).unwrap();
         doc.apply(&cmd).unwrap();
         assert_eq!(chain(&doc, ta), ["Comp", "Gate", "EQ"]);
         // Comp to the end (dropped on +), downwards
-        let cmd = move_cmd(doc.project(), &drag(ids[2]), home, None).unwrap();
+        let cmd = move_cmd(doc.workspace(), &drag(ids[2]), home, None).unwrap();
         doc.apply(&cmd).unwrap();
         assert_eq!(chain(&doc, ta), ["Gate", "EQ", "Comp"]);
         // onto itself, or just before the one after it: nothing to do
-        assert!(move_cmd(doc.project(), &drag(ids[1]), home, Some(ids[1])).is_none());
-        assert!(move_cmd(doc.project(), &drag(ids[1]), home, Some(ids[2])).is_none());
+        assert!(move_cmd(doc.workspace(), &drag(ids[1]), home, Some(ids[1])).is_none());
+        assert!(move_cmd(doc.workspace(), &drag(ids[1]), home, Some(ids[2])).is_none());
         // EQ to the other track
-        let cmd = move_cmd(doc.project(), &drag(ids[1]), Home::Strip(MixerStrip::Track(tb)), None).unwrap();
+        let cmd = move_cmd(doc.workspace(), &drag(ids[1]), Home::Strip(MixerStrip::Track(tb)), None).unwrap();
         doc.apply(&cmd).unwrap();
         assert_eq!(chain(&doc, ta), ["Gate", "Comp"]);
         assert_eq!(chain(&doc, tb), ["EQ"]);
         // audio never lands on a video source
-        assert!(move_cmd(doc.project(), &drag(ids[0]), Home::Input(Id::new()), None).is_none());
+        assert!(move_cmd(doc.workspace(), &drag(ids[0]), Home::Input(Id::new()), None).is_none());
     }
 }

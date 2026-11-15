@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Project, Scene, diff};
+use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::media::{MediaAction, MediaState, MediaStatus};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -52,8 +52,8 @@ fn media_transport() {
     silence_wav(&wav, 6);
 
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Media"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Media"));
+    let f = doc.workspace().primary_canvas().id;
     let media =
         Input::new("Clip", "ffmpeg_source", json!({"local_file": wav.to_string_lossy(), "is_local_file": true}));
     let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF000000u32}));
@@ -69,8 +69,8 @@ fn media_transport() {
     ] {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
-        let project = change.after.clone();
-        engine.call(move |s| s.reconciler.apply(&project, &patches));
+        let workspace = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     }
 
     assert_eq!(engine.call(move |s| s.reconciler.media_status(colour_id)), None, "a colour isn't media");

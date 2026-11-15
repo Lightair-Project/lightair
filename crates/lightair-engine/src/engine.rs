@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use crossbeam_channel::{Sender, bounded, unbounded};
 use libobs_sys as sys;
 
-use crate::obs::{Scene, Source};
+use crate::obs::{ObsScene, ObsSource};
 use crate::runtime::Runtime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,8 +118,8 @@ pub struct Stats {
 #[derive(Default)]
 pub struct EngineState {
     /// Ad-hoc libobs objects (tests, diagnostics). The document lives in `reconciler`.
-    pub sources: HashMap<String, Source>,
-    pub scenes: HashMap<String, Scene>,
+    pub sources: HashMap<String, ObsSource>,
+    pub scenes: HashMap<String, ObsScene>,
     /// libobs objects mirroring the Lightair document.
     pub reconciler: crate::Reconciler,
     /// Running recordings and streams.

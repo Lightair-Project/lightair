@@ -93,7 +93,7 @@ impl Default for OutputStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputKey {
-    /// A recording of one canvas (by its format id); several can run at once.
+    /// A recording of one canvas (by its canvas id); several can run at once.
     Recording(Id),
     Stream(Id),
     /// The replay buffer behind the Clip button.
@@ -164,7 +164,7 @@ pub fn runtime() -> &'static OutputsRuntime {
     RUNTIME.get_or_init(OutputsRuntime::default)
 }
 
-/// A canvas's video output, as returned by `Reconciler::format_video`. Only the engine creates
+/// A canvas's video output, as returned by `Reconciler::canvas_video`. Only the engine creates
 /// these, so the pointer is always a live libobs video output.
 #[derive(Clone, Copy)]
 pub struct VideoOutput(pub(crate) *mut sys::video_t);
@@ -207,7 +207,7 @@ pub struct EncoderConfig {
 
 #[derive(Debug, Clone)]
 pub struct RecordingConfig {
-    /// The canvas (format id) recorded; it keys the output.
+    /// The canvas (canvas id) recorded; it keys the output.
     pub canvas: Id,
     pub path: PathBuf,
     /// Added to split files' names so canvases recorded together don't collide ("Vertical").
@@ -520,7 +520,7 @@ unsafe fn create_encoders(
             sys::obs_encoder_release(video);
             return Err(format!("Couldn't create the audio encoder ({}).", cfg.audio_encoder));
         }
-        // The format's canvas (main canvas when null), scaled when asked.
+        // The canvas's canvas (main canvas when null), scaled when asked.
         sys::obs_encoder_set_video(video, if video_output.is_null() { sys::obs_get_video() } else { video_output });
         if let Some((w, h)) = cfg.scaled {
             sys::obs_encoder_set_scaled_size(video, w & !1, h & !1);
@@ -620,8 +620,8 @@ unsafe fn start(
 }
 
 impl Outputs {
-    /// Starts recording one canvas. `video` is that format's canvas video
-    /// (`Reconciler::format_video`); `None` means the primary format. Several canvases can
+    /// Starts recording one canvas. `video` is that canvas's canvas video
+    /// (`Reconciler::canvas_video`); `None` means the primary canvas. Several canvases can
     /// record at once, each its own output and file.
     pub fn start_recording(&mut self, cfg: &RecordingConfig, video: Option<VideoOutput>) -> Result<(), String> {
         let video_output = video.map_or(std::ptr::null_mut(), |v| v.0);

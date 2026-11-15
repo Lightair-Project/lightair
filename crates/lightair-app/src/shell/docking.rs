@@ -144,16 +144,16 @@ impl Render for ShellPanel {
         }
         let region = self.region;
         shell.update(cx, |w, cx| {
-            let project = w.studio.read(cx).project().clone();
+            let workspace = w.studio.read(cx).workspace().clone();
             match region {
-                Region::Layers => w.hierarchy_panel(&project, cx).into_any_element(),
-                Region::Scenes => w.scenes_panel(&project, cx).into_any_element(),
-                Region::Canvas => w.canvas(&project, cx).into_any_element(),
+                Region::Layers => w.hierarchy_panel(&workspace, cx).into_any_element(),
+                Region::Scenes => w.scenes_panel(&workspace, cx).into_any_element(),
+                Region::Canvas => w.canvas_panel(&workspace, cx).into_any_element(),
                 Region::Inspector => {
                     w.ensure_colour_pickers(window, cx);
-                    w.inspector(&project, cx).into_any_element()
+                    w.inspector(&workspace, cx).into_any_element()
                 }
-                Region::Assets => w.assets_panel(&project, cx).into_any_element(),
+                Region::Assets => w.assets_panel(&workspace, cx).into_any_element(),
             }
         })
     }
@@ -251,7 +251,7 @@ impl StudioWindow {
                         self.studio.read(cx).engine().call(|_| lightair_engine::monitoring::devices());
                 }
                 if hook == "settings-canvases-edit" {
-                    let id = self.studio.read(cx).project().primary_format().id;
+                    let id = self.studio.read(cx).workspace().primary_canvas().id;
                     self.edit_canvas(id, window, cx);
                 }
                 self.open_settings(page, cx);
@@ -268,16 +268,16 @@ impl StudioWindow {
                 }
             }
             Ok("library") => self.show_place(super::Place::Library, cx),
-            Ok(hook @ ("new-project" | "new-project-live")) => {
-                // a second project, made and opened in place, then the Library (or Live)
-                self.new_project("Second show", cx);
-                if hook == "new-project" {
+            Ok(hook @ ("new-workspace" | "new-workspace-live")) => {
+                // a second workspace, made and opened in place, then the Library (or Live)
+                self.new_workspace("Second show", cx);
+                if hook == "new-workspace" {
                     self.show_place(super::Place::Library, cx);
                 }
             }
             Ok("editor-latest") => {
-                // the Editor with the workspace's newest recording added to a project
-                if let Some(dir) = self.studio.read(cx).project_dir() {
+                // the Editor with the workspace's newest recording added to a workspace
+                if let Some(dir) = self.studio.read(cx).workspace_dir() {
                     let index = lightair_store::recordings::Index::load(&dir);
                     if let Some(item) = index.newest_first().first() {
                         let id = item.id;
@@ -288,13 +288,13 @@ impl StudioWindow {
             }
             Ok("screen-layouts") => {
                 // the layout scenes, the display blank (an app that isn't there), Screen on air
-                let p = self.studio.read(cx).project().clone();
+                let p = self.studio.read(cx).workspace().clone();
                 if let Some(display) = p.inputs.values().find(|i| i.kind == lightair_core::kinds::SCREEN) {
                     let s = serde_json::json!({"mode": lightair_core::kinds::APP, "app": "app.lightair.nothing"});
                     self.exec(lightair_core::Command::SetInputSettings { input: display.id, settings: s }, cx);
                 }
                 self.add_screen_layouts(cx);
-                let p = self.studio.read(cx).project().clone();
+                let p = self.studio.read(cx).workspace().clone();
                 if let Some(scene) = p.scenes.iter().find(|s| s.name == "Screen") {
                     self.exec(lightair_core::Command::SetProgram { scene: Some(scene.id) }, cx);
                     self.studio.update(cx, |s, _| s.select_scene(scene.id));
@@ -302,10 +302,10 @@ impl StudioWindow {
             }
             Ok("studio-take") => {
                 // a 4-second take of the Main scene, its display pointed at an app that isn't
-                // there (nobody's screen in the files), into a folder beside the project
-                let p = self.studio.read(cx).project().clone();
+                // there (nobody's screen in the files), into a folder beside the workspace
+                let p = self.studio.read(cx).workspace().clone();
                 let mut settings = p.outputs.recording.clone();
-                if let Some(dir) = self.studio.read(cx).project_dir().and_then(|d| d.parent().map(|p| p.join("shot-recordings"))) {
+                if let Some(dir) = self.studio.read(cx).workspace_dir().and_then(|d| d.parent().map(|p| p.join("shot-recordings"))) {
                     settings.folder = Some(dir);
                 }
                 self.exec(lightair_core::Command::SetRecordingSettings { settings }, cx);
@@ -326,7 +326,7 @@ impl StudioWindow {
             Ok("cursor") => {
                 // the drawn pointer, big, on the background colour (not on a screen capture: no
                 // one's screen in the picture)
-                let p = self.studio.read(cx).project().clone();
+                let p = self.studio.read(cx).workspace().clone();
                 if let Some(bg) = p.inputs.values().find(|i| i.name == "Background") {
                     let mut e = lightair_core::catalog::def(lightair_core::catalog::CURSOR_KIND).unwrap().create();
                     e.settings["size"] = serde_json::json!(4.0);
@@ -335,9 +335,9 @@ impl StudioWindow {
                 }
                 // the logo sits where the pointer usually is
                 if let Some(scene) = p.program.and_then(|s| p.scene(s)) {
-                    let f = p.primary_format().id;
+                    let f = p.primary_canvas().id;
                     for l in scene.layers.iter().filter(|l| l.name == "Logo") {
-                        self.exec(lightair_core::Command::SetLayerVisible { scene: scene.id, layer: l.id, format: f, visible: false }, cx);
+                        self.exec(lightair_core::Command::SetLayerVisible { scene: scene.id, layer: l.id, canvas: f, visible: false }, cx);
                     }
                 }
             }
@@ -364,8 +364,8 @@ impl StudioWindow {
                 self.editor.update(cx, |e, cx| e.hook_trim(cx));
             }
             Ok("editor-zooms") => {
-                // the newest recording in a project, then a zoom added on its zoom track
-                if let Some(dir) = self.studio.read(cx).project_dir() {
+                // the newest recording in a workspace, then a zoom added on its zoom track
+                if let Some(dir) = self.studio.read(cx).workspace_dir() {
                     let index = lightair_store::recordings::Index::load(&dir);
                     if let Some(item) = index.newest_first().first() {
                         let id = item.id;
@@ -410,10 +410,10 @@ impl StudioWindow {
                 self.editor.update(cx, |e, cx| e.hook_looks(second, cx));
             }
             Ok("library-record") => {
-                // a short recording (into a folder beside the project, not the user's), a
+                // a short recording (into a folder beside the workspace, not the user's), a
                 // marker, then the Library once it's in
-                let mut settings = self.studio.read(cx).project().outputs.recording.clone();
-                if let Some(dir) = self.studio.read(cx).project_dir().and_then(|d| d.parent().map(|p| p.join("shot-recordings"))) {
+                let mut settings = self.studio.read(cx).workspace().outputs.recording.clone();
+                if let Some(dir) = self.studio.read(cx).workspace_dir().and_then(|d| d.parent().map(|p| p.join("shot-recordings"))) {
                     settings.folder = Some(dir);
                 }
                 self.exec(lightair_core::Command::SetRecordingSettings { settings }, cx);
@@ -429,7 +429,7 @@ impl StudioWindow {
                 .detach();
             }
             Ok("perf") => self.perf_open = true,
-            Ok("two-canvases") => self.add_format(lightair_core::Format::vertical(), cx),
+            Ok("two-canvases") => self.add_canvas(lightair_core::Canvas::vertical(), cx),
             Ok("dests") => {
                 // Sample destinations (no keys) to see the list.
                 for (name, server, platform, on) in [
@@ -442,7 +442,7 @@ impl StudioWindow {
                         name: name.into(),
                         server: server.into(),
                         enabled: on,
-                        format: None,
+                        canvas: None,
                         platform: Some(platform.into()),
                         encoding: None,
                     };
@@ -455,7 +455,7 @@ impl StudioWindow {
                     name: "Twitch".into(),
                     server: "rtmp://aps10.contribute.live-video.net/app/".into(),
                     enabled: true,
-                    format: None,
+                    canvas: None,
                     platform: Some("twitch".into()),
                     encoding: Some(lightair_core::Encoding {
                         bitrate_kbps: 8000,
@@ -483,7 +483,7 @@ impl StudioWindow {
                 // Rename the top object to "Renamed" and press Enter, as a person would.
                 let top = {
                     let s = self.studio.read(cx);
-                    s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
                 };
                 self.select_layer(top, cx);
                 self.rename_selection(window, cx);
@@ -501,7 +501,7 @@ impl StudioWindow {
             Ok("source") => {
                 let input = {
                     let s = self.studio.read(cx);
-                    s.project().inputs.values().find(|i| i.kind == lightair_core::kinds::SCREEN).map(|i| i.id)
+                    s.workspace().inputs.values().find(|i| i.kind == lightair_core::kinds::SCREEN).map(|i| i.id)
                 };
                 if let Some(id) = input {
                     self.open_source_picker(id, window, cx);
@@ -510,7 +510,7 @@ impl StudioWindow {
             Ok("crop") => {
                 let top = {
                     let s = self.studio.read(cx);
-                    s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
                 };
                 self.select_layer(top, cx);
                 self.crop_mode = top;
@@ -519,7 +519,7 @@ impl StudioWindow {
                 // A prefab from the top layer, and an instance of it.
                 let top = {
                     let s = self.studio.read(cx);
-                    s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
                 };
                 if let Some(top) = top {
                     self.select_layer(Some(top), cx);
@@ -529,7 +529,7 @@ impl StudioWindow {
                         self.place_asset(
                             &a.clone(),
                             super::assets::Placement::At(
-                                self.format_id(&self.studio.read(cx).project().clone()),
+                                self.canvas_id(&self.studio.read(cx).workspace().clone()),
                                 (400.0, 300.0),
                             ),
                             cx,
@@ -542,7 +542,7 @@ impl StudioWindow {
                 let top: Vec<lightair_core::Id> = {
                     let s = self.studio.read(cx);
                     s.selected_scene
-                        .and_then(|id| s.project().scene(id))
+                        .and_then(|id| s.workspace().scene(id))
                         .map(|sc| sc.layers.iter().rev().take(2).map(|l| l.id).collect())
                         .unwrap_or_default()
                 };
@@ -556,7 +556,7 @@ impl StudioWindow {
             Ok("zoom") => {
                 let top = {
                     let s = self.studio.read(cx);
-                    s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
                 };
                 self.select_layer(top, cx);
                 self.zoom = 2.5;
@@ -565,7 +565,7 @@ impl StudioWindow {
             Ok("gizmo") => {
                 let top = {
                     let s = self.studio.read(cx);
-                    s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
                 };
                 self.select_layer(top, cx);
                 self.rotate_tool = true;
@@ -576,7 +576,7 @@ impl StudioWindow {
                 self.add_input_layer("Board", "image_source", serde_json::json!({"file": board}), (1920.0, 1080.0), cx);
                 let (input, layer) = {
                     let s = self.studio.read(cx);
-                    let layer = s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().cloned());
+                    let layer = s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().cloned());
                     (layer.as_ref().and_then(|l| l.input), layer.map(|l| l.id))
                 };
                 self.select_layer(layer, cx);
@@ -617,7 +617,7 @@ impl StudioWindow {
             }
             Ok(hook @ ("audio-plugin" | "audio-plugins" | "audio-vst3")) => {
                 // the first track: Apple's AUDelay added (its editor opens), or the plugins page
-                let track = self.studio.read(cx).project().tracks.first().map(|t| t.id);
+                let track = self.studio.read(cx).workspace().tracks.first().map(|t| t.id);
                 if let Some(t) = track {
                     self.studio.update(cx, |s, cx| {
                         s.selected_layer = None;
@@ -640,7 +640,7 @@ impl StudioWindow {
             }
             Ok("audio-rename") => {
                 // the first track's name, being edited on its strip
-                if let Some(t) = self.studio.read(cx).project().tracks.first().map(|t| t.id) {
+                if let Some(t) = self.studio.read(cx).workspace().tracks.first().map(|t| t.id) {
                     self.mixer.update(cx, |m, cx| m.start_rename(lightair_core::MixerStrip::Track(t), window, cx));
                 }
             }
@@ -660,7 +660,7 @@ impl StudioWindow {
             Ok("audio-colours") => {
                 // the Streaming mixer with coloured strips (Mic red, Desktop blue, Music amber)
                 self.use_audio_template(lightair_core::templates::Template::Streaming, cx);
-                let tracks: Vec<lightair_core::Id> = self.studio.read(cx).project().tracks.iter().map(|t| t.id).collect();
+                let tracks: Vec<lightair_core::Id> = self.studio.read(cx).workspace().tracks.iter().map(|t| t.id).collect();
                 for (t, c) in tracks.into_iter().zip([0xE5484D, 0x0090FF, 0xFFB224]) {
                     self.exec(
                         lightair_core::Command::SetStripColor { strip: lightair_core::MixerStrip::Track(t), color: Some(c) },
@@ -672,7 +672,7 @@ impl StudioWindow {
             Ok("audio-template") => {
                 // the Streaming template (it changes no preferences), the mic selected
                 self.use_audio_template(lightair_core::templates::Template::Streaming, cx);
-                let first = self.studio.read(cx).project().tracks.first().map(|t| t.id);
+                let first = self.studio.read(cx).workspace().tracks.first().map(|t| t.id);
                 self.studio.update(cx, |s, cx| {
                     s.selected_layer = None;
                     s.select_track(first);
@@ -701,8 +701,8 @@ impl StudioWindow {
             }
             Ok(hook @ ("audio-mixer" | "audio-bus")) => {
                 // a Guests bus, a Headphones mix, the mic routed to the bus and sent to the mix
-                let project = self.studio.read(cx).project().clone();
-                if let Some(t) = project.tracks.first().map(|t| (**t).clone()) {
+                let workspace = self.studio.read(cx).workspace().clone();
+                if let Some(t) = workspace.tracks.first().map(|t| (**t).clone()) {
                     let bus = lightair_core::Bus::new("Guests");
                     let mix = lightair_core::AudioMix::new("Headphones");
                     let (bid, _mid) = (bus.id, mix.id);
@@ -735,7 +735,7 @@ impl StudioWindow {
             }
             Ok(hook @ ("audio-track" | "audio-sheet")) => {
                 // the first track, its effects open (or the audio catalog over it)
-                let track = self.studio.read(cx).project().tracks.first().map(|t| (**t).clone());
+                let track = self.studio.read(cx).workspace().tracks.first().map(|t| (**t).clone());
                 if let Some(t) = track {
                     let mut first = None;
                     for kind in ["audio.eq", "audio.compressor"] {
@@ -764,7 +764,7 @@ impl StudioWindow {
             Ok("select") => {
                 let top = {
                     let s = self.studio.read(cx);
-                    s.selected_scene.and_then(|id| s.project().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
+                    s.selected_scene.and_then(|id| s.workspace().scene(id)).and_then(|sc| sc.layers.last().map(|l| l.id))
                 };
                 self.select_layer(top, cx);
             }

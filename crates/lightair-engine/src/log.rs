@@ -11,7 +11,7 @@ unsafe extern "C" {
 
 unsafe extern "C" fn handler(level: c_int, fmt: *const c_char, args: sys::va_list, _param: *mut c_void) {
     let mut buf = [0 as c_char; 4096];
-    // SAFETY: libobs passes a valid printf-style format and matching va_list.
+    // SAFETY: libobs passes a valid printf-style canvas and matching va_list.
     let msg = unsafe {
         vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
         CStr::from_ptr(buf.as_ptr()).to_string_lossy()

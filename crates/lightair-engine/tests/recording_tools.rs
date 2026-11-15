@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Project, Scene, diff};
+use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::outputs::{Container, OutputState, RecordingConfig, default_encoders, runtime};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -44,8 +44,8 @@ fn pause_marker_split() {
     let dir = std::env::temp_dir().join(format!("lightair-rectools-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Rec"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Rec"));
+    let f = doc.workspace().primary_canvas().id;
     let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
     let mut scene = Scene::new("Main");
     scene.layers.push(Layer::new("Colour", colour.id, [(f, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));
@@ -57,8 +57,8 @@ fn pause_marker_split() {
     ] {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
-        let project = change.after.clone();
-        engine.call(move |s| s.reconciler.apply(&project, &patches));
+        let workspace = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     }
 
     let first = dir.join("take.mp4");

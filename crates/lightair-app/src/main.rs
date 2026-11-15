@@ -47,8 +47,8 @@ use lightair_preview::Preview;
 use crate::shell::StudioWindow;
 use crate::studio::Studio;
 
-fn projects_dir() -> PathBuf {
-    lightair_platform::paths::projects_dir()
+fn workspaces_dir() -> PathBuf {
+    lightair_platform::paths::workspaces_dir()
 }
 
 fn main() {
@@ -60,14 +60,14 @@ fn main() {
         .with_env_filter(std::env::var("LIGHTAIR_LOG").unwrap_or_else(|_| "info,libobs=warn".into()))
         .init();
 
-    // The canvas size comes from the project's primary format; read it before starting libobs.
+    // The canvas size comes from the workspace's primary canvas; read it before starting libobs.
     // the one asked for, the one open last, or the default
-    let project_dir = std::env::var_os("LIGHTAIR_PROJECT")
+    let workspace_dir = std::env::var_os("LIGHTAIR_PROJECT")
         .map(PathBuf::from)
-        .or_else(|| prefs::load_from(&prefs::path()).last_project.filter(|d| d.join("project.json").exists()))
-        .unwrap_or_else(|| projects_dir().join("Default.lightair"));
-    let canvas = lightair_store::load_snapshot(&project_dir)
-        .map(|p| (p.primary_format().width, p.primary_format().height))
+        .or_else(|| prefs::load_from(&prefs::path()).last_workspace.filter(|d| lightair_store::is_workspace(d)))
+        .unwrap_or_else(|| workspaces_dir().join("Default.lightair"));
+    let canvas = lightair_store::load_snapshot(&workspace_dir)
+        .map(|p| (p.primary_canvas().width, p.primary_canvas().height))
         .unwrap_or((1920, 1080));
 
     // This Mac's preferences: the sample rate is fixed once libobs starts.
@@ -85,7 +85,7 @@ fn main() {
         })
         .unwrap_or_else(|e| panic!("could not start the engine: {e}")),
     );
-    tracing::info!(version = engine.version, project = %project_dir.display(), "libobs started");
+    tracing::info!(version = engine.version, workspace = %workspace_dir.display(), "libobs started");
     if let Some((name, id)) = prefs.monitor_device.clone() {
         engine.call(move |_| lightair_engine::monitoring::set(&name, &id));
     }
@@ -95,7 +95,7 @@ fn main() {
     engine.call(move |s| {
         s.reconciler.set_monitor(monitor, program);
         // before the engine starts: nothing to restart
-        s.reconciler.set_audio_block(block, &lightair_core::Project::new(""));
+        s.reconciler.set_audio_block(block, &lightair_core::Workspace::new(""));
     });
     if let Ok(what) = std::env::var("LIGHTAIR_SELFTEST") {
         selftest::run(&engine, &what);
@@ -126,11 +126,11 @@ fn main() {
         shell::bind_keys(cx);
         shell::app_menu::bind(cx);
 
-        let starter: fn() -> lightair_core::Project = match std::env::var("LIGHTAIR_STARTER").as_deref() {
-            Ok("plain") => starter::plain_project,
-            _ => starter::starter_project,
+        let starter: fn() -> lightair_core::Workspace = match std::env::var("LIGHTAIR_STARTER").as_deref() {
+            Ok("plain") => starter::plain_workspace,
+            _ => starter::starter_workspace,
         };
-        let studio = cx.new(|_| Studio::open(engine.clone(), project_dir.clone(), starter));
+        let studio = cx.new(|_| Studio::open(engine.clone(), workspace_dir.clone(), starter));
 
         // Stats at 1 Hz; journal flush and periodic compaction.
         let ticker = studio.downgrade();

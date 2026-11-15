@@ -26,9 +26,9 @@ impl StudioWindow {
             self.studio.update(cx, |s, cx| s.go_live(cx));
             return;
         }
-        let project = self.studio.read(cx).project().clone();
+        let workspace = self.studio.read(cx).workspace().clone();
         let has_key =
-            project.outputs.destinations.iter().map(|d| (d.id, crate::secrets::stream_key(d.id).is_some())).collect();
+            workspace.outputs.destinations.iter().map(|d| (d.id, crate::secrets::stream_key(d.id).is_some())).collect();
         self.go_live_sheet = Some(GoLiveSheet { has_key, record_too: false });
         cx.notify();
     }
@@ -52,7 +52,7 @@ impl StudioWindow {
     pub(super) fn go_live_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let sheet = self.go_live_sheet.as_ref()?;
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
+        let workspace = studio.workspace().clone();
         let facts = studio.preflight_facts(&sheet.has_key, sheet.record_too);
         let recording = studio.is_recording();
         let checks = preflight::run(&facts);
@@ -60,14 +60,14 @@ impl StudioWindow {
         let record_too = sheet.record_too;
 
         let mut destinations = div().flex().flex_col().gap_1();
-        if project.outputs.destinations.is_empty() {
+        if workspace.outputs.destinations.is_empty() {
             destinations = destinations
                 .child(div().text_color(tok::text_tertiary()).child("No destinations yet. Add one in Outputs."));
         }
-        for (i, d) in project.outputs.destinations.iter().enumerate() {
+        for (i, d) in workspace.outputs.destinations.iter().enumerate() {
             let (id, enabled) = (d.id, d.enabled);
             // (no canvas chosen: the main one)
-            let format = d.format.and_then(|f| project.format(f)).unwrap_or(project.primary_format()).name.clone();
+            let canvas = d.canvas.and_then(|f| workspace.canvas(f)).unwrap_or(workspace.primary_canvas()).name.clone();
             destinations = destinations.child(
                 div()
                     .id(("golive-dest", i))
@@ -96,7 +96,7 @@ impl StudioWindow {
                             .text_color(if enabled { tok::text() } else { tok::text_tertiary() })
                             .child(d.name.clone()),
                     )
-                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(format)),
+                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(canvas)),
             );
         }
 

@@ -2,7 +2,7 @@
 //! encoder a choice means on this machine, the size it encodes at, and what Automatic picks for
 //! a destination.
 
-use lightair_core::{Destination, Encoding, Format, Project, RecordingSettings, VideoEncoder};
+use lightair_core::{Destination, Encoding, Canvas, Workspace, RecordingSettings, VideoEncoder};
 use lightair_engine::outputs::{
     EncoderConfig, H264_ENCODERS, HEVC_ENCODERS, PRORES_ENCODERS, aac_encoder, first_available,
 };
@@ -34,7 +34,7 @@ pub fn available(available: &[String], choice: VideoEncoder) -> bool {
 
 /// The size to encode at for a height (the width follows the canvas, both even); `None` when
 /// that is the canvas's own size or larger.
-pub fn scaled(canvas: &Format, height: Option<u32>) -> Option<(u32, u32)> {
+pub fn scaled(canvas: &Canvas, height: Option<u32>) -> Option<(u32, u32)> {
     let h = height?;
     // "1080p" means the short side: a vertical canvas scales its width to it.
     let (w, ch) = (canvas.width as f32, canvas.height as f32);
@@ -46,16 +46,16 @@ pub fn scaled(canvas: &Format, height: Option<u32>) -> Option<(u32, u32)> {
 
 /// What Automatic means for a destination: the shared bitrate, capped at what its platform
 /// takes; H.264, 2-second keyframes, the canvas's size.
-pub fn automatic(project: &Project, d: &Destination) -> Encoding {
+pub fn automatic(workspace: &Workspace, d: &Destination) -> Encoding {
     let platform = d.platform.as_deref().and_then(platforms::by_id).or_else(|| platforms::guess(&d.server));
     let cap = platform.and_then(|p| p.max_kbps).unwrap_or(u32::MAX);
-    Encoding { bitrate_kbps: project.outputs.stream_bitrate_kbps.min(cap), ..Encoding::default() }
+    Encoding { bitrate_kbps: workspace.outputs.stream_bitrate_kbps.min(cap), ..Encoding::default() }
 }
 
 /// A destination's encoders.
-pub fn for_stream(caps: &[String], project: &Project, d: &Destination) -> EncoderConfig {
-    let e = d.encoding.unwrap_or_else(|| automatic(project, d));
-    let canvas = d.format.and_then(|f| project.format(f)).unwrap_or(project.primary_format());
+pub fn for_stream(caps: &[String], workspace: &Workspace, d: &Destination) -> EncoderConfig {
+    let e = d.encoding.unwrap_or_else(|| automatic(workspace, d));
+    let canvas = d.canvas.and_then(|f| workspace.canvas(f)).unwrap_or(workspace.primary_canvas());
     EncoderConfig {
         video_encoder: encoder_id(caps, e.encoder),
         video_bitrate_kbps: e.bitrate_kbps,
@@ -69,7 +69,7 @@ pub fn for_stream(caps: &[String], project: &Project, d: &Destination) -> Encode
 }
 
 /// A recording's encoders for one canvas.
-pub fn for_recording(caps: &[String], settings: &RecordingSettings, canvas: &Format) -> EncoderConfig {
+pub fn for_recording(caps: &[String], settings: &RecordingSettings, canvas: &Canvas) -> EncoderConfig {
     EncoderConfig {
         video_encoder: encoder_id(caps, settings.encoder),
         video_bitrate_kbps: settings.bitrate_kbps,
@@ -132,30 +132,30 @@ mod tests {
 
     #[test]
     fn heights_scale_by_the_short_side() {
-        let landscape = Format::landscape();
+        let landscape = Canvas::landscape();
         assert_eq!(scaled(&landscape, Some(720)), Some((1280, 720)));
         assert_eq!(scaled(&landscape, Some(1080)), None, "its own size");
         assert_eq!(scaled(&landscape, None), None);
-        let vertical = Format::vertical();
+        let vertical = Canvas::vertical();
         assert_eq!(scaled(&vertical, Some(720)), Some((720, 1280)));
     }
 
     #[test]
     fn automatic_caps_at_the_platform() {
-        let mut project = Project::new("P");
-        project.outputs.stream_bitrate_kbps = 9000;
+        let mut workspace = Workspace::new("P");
+        workspace.outputs.stream_bitrate_kbps = 9000;
         let d = |platform: &str| Destination {
             id: lightair_core::Id::new(),
             name: platform.into(),
             server: "rtmp://example.com/live".into(),
             enabled: true,
-            format: None,
+            canvas: None,
             platform: Some(platform.into()),
             encoding: None,
         };
-        assert_eq!(automatic(&project, &d("twitch")).bitrate_kbps, 6000, "Twitch takes 6 Mbps");
-        assert_eq!(automatic(&project, &d("youtube")).bitrate_kbps, 9000);
-        let cfg = for_stream(&mac(), &project, &d("youtube"));
+        assert_eq!(automatic(&workspace, &d("twitch")).bitrate_kbps, 6000, "Twitch takes 6 Mbps");
+        assert_eq!(automatic(&workspace, &d("youtube")).bitrate_kbps, 9000);
+        let cfg = for_stream(&mac(), &workspace, &d("youtube"));
         assert!(cfg.constant_bitrate && cfg.keyint_sec == 2 && cfg.scaled.is_none());
     }
 }

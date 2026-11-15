@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Project, Scene, diff};
+use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::timers::{TIMER_KIND, TimerAction};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -10,8 +10,8 @@ use serde_json::json;
 fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
-    let project = change.after.clone();
-    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let workspace = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&workspace, &patches));
 }
 
 fn wait_text(engine: &Engine, id: lightair_core::Id, want: &str) -> String {
@@ -29,8 +29,8 @@ fn wait_text(engine: &Engine, id: lightair_core::Id, want: &str) -> String {
 fn countdown_and_stopwatch() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Timers"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Timers"));
+    let f = doc.workspace().primary_canvas().id;
     let countdown = Input::new("Countdown", TIMER_KIND, json!({"mode": "countdown", "seconds": 2, "end_text": "Go!"}));
     let watch = Input::new("Stopwatch", TIMER_KIND, json!({"mode": "stopwatch", "autostart": false}));
     let (cd, sw) = (countdown.id, watch.id);

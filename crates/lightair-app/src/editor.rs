@@ -19,7 +19,7 @@ use lightair_core::Id;
 use lightair_render::edit::Edit;
 use lightair_render::media::Codec;
 use lightair_render::seqrender::SequenceRenderer;
-use lightair_render::sequence::{EditProject, Media, MediaKind, Sequence, TakePart, TrackKind, Transform};
+use lightair_render::sequence::{Project, Media, MediaKind, Sequence, TakePart, TrackKind, Transform};
 use lightair_render::zoom;
 use lightair_store::recordings::{File as ItemFile, Index, Item, Kind};
 
@@ -239,7 +239,7 @@ const FADE_KNOB: f32 = 16.0;
 pub struct Editor {
     studio: Entity<Studio>,
     workspace: Option<PathBuf>,
-    project: Option<EditProject>,
+    project: Option<Project>,
     /// The workspace's Library, as the media panel lists it (read when it changes).
     library: Vec<Item>,
     library_seen: Option<u64>,
@@ -440,7 +440,7 @@ fn media_of(item: &Item) -> Vec<TakePart> {
     };
     let files: Vec<&ItemFile> = item.files.iter().filter(|f| playable(&f.path)).collect();
     let sound_only = |p: &Path| p.extension().is_some_and(|e| ["wav", "m4a", "mp3", "flac", "aac"].iter().any(|x| e.eq_ignore_ascii_case(x)));
-    // a recording of several formats: the first picture; a multitrack set: every file
+    // a recording of several canvases: the first picture; a multitrack set: every file
     let picture = files.iter().find(|f| !sound_only(&f.path)).copied();
     let pick: Vec<&ItemFile> = match (item.kind, picture) {
         (Kind::Multitrack, _) | (_, None) => files.clone(),
@@ -585,7 +585,7 @@ impl Editor {
 
     /// Shown: the workspace's last project opens (the workspace may have changed since).
     pub fn show(&mut self, cx: &mut Context<Self>) {
-        let ws = self.studio.read(cx).project_dir();
+        let ws = self.studio.read(cx).workspace_dir();
         if ws != self.workspace {
             self.stop(cx);
             self.workspace = ws.clone();
@@ -594,7 +594,7 @@ impl Editor {
             self.library_seen = None;
             *self.renderer.lock().unwrap() = None;
             if let Some(ws) = &ws
-                && let Some(last) = EditProject::list(ws).first()
+                && let Some(last) = Project::list(ws).first()
             {
                 self.open_project(last.id, cx);
             }
@@ -732,7 +732,7 @@ impl Editor {
 
     fn open_project(&mut self, id: Id, cx: &mut Context<Self>) {
         let Some(ws) = self.workspace.clone() else { return };
-        let Ok(p) = EditProject::load(&ws, id) else {
+        let Ok(p) = Project::load(&ws, id) else {
             self.note = Some("That project couldn't be read.".into());
             return;
         };
@@ -769,10 +769,10 @@ impl Editor {
 
     /// A new project (1080p, 30 fps) called `name`, opened.
     pub fn new_project(&mut self, name: &str, cx: &mut Context<Self>) -> Option<Id> {
-        let ws = self.workspace.clone().or_else(|| self.studio.read(cx).project_dir())?;
+        let ws = self.workspace.clone().or_else(|| self.studio.read(cx).workspace_dir())?;
         self.workspace = Some(ws.clone());
         let name = if name.trim().is_empty() { "Untitled".to_string() } else { name.trim().to_string() };
-        let mut p = EditProject::new(&name, (1920, 1080), 30);
+        let mut p = Project::new(&name, (1920, 1080), 30);
         p.save(&ws).ok()?;
         let id = p.id;
         self.open_project(id, cx);
@@ -820,11 +820,11 @@ impl Editor {
     fn delete_project(&mut self, cx: &mut Context<Self>) {
         let (Some(ws), Some(p)) = (self.workspace.clone(), self.project.take()) else { return };
         self.stop(cx);
-        let _ = EditProject::delete(&ws, p.id);
+        let _ = Project::delete(&ws, p.id);
         *self.renderer.lock().unwrap() = None;
         self.preview = None;
         self.note = Some(format!("Deleted “{}” (its media stay in the Library)", p.name).into());
-        if let Some(next) = EditProject::list(&ws).first() {
+        if let Some(next) = Project::list(&ws).first() {
             self.open_project(next.id, cx);
         }
         cx.notify();
@@ -1572,7 +1572,7 @@ impl Editor {
         let (ws, current) = (self.workspace.clone(), self.project.as_ref().map(|p| p.id));
         let name = self.project.as_ref().map_or("No project".to_string(), |p| p.name.clone());
         let picker = Button::new("ed-project").label(name).small().ghost().dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
-            for p in ws.as_ref().map(|w| EditProject::list(w)).unwrap_or_default() {
+            for p in ws.as_ref().map(|w| Project::list(w)).unwrap_or_default() {
                 let (me, id) = (me.clone(), p.id);
                 menu = menu.item(PopupMenuItem::new(p.name).checked(current == Some(p.id)).on_click(move |_, _, cx| {
                     if let Some(me) = me.upgrade() {

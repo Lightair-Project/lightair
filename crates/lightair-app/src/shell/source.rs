@@ -132,7 +132,7 @@ impl StudioWindow {
         let obs_key = self
             .studio
             .read(cx)
-            .project()
+            .workspace()
             .inputs
             .get(&input)
             .and_then(|i| lightair_engine::kinds::libobs_key(&i.kind, key))
@@ -149,8 +149,8 @@ impl StudioWindow {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let Some(path): Option<PathBuf> = paths.into_iter().next() else { return };
             let _ = this.update(cx, |this, cx| {
-                let project = this.studio.read(cx).project().clone();
-                let Some(i) = project.inputs.get(&input) else { return };
+                let workspace = this.studio.read(cx).workspace().clone();
+                let Some(i) = workspace.inputs.get(&input) else { return };
                 let settings = merged(&i.settings, key, json!(path.to_string_lossy()));
                 this.exec(Command::SetInputSettings { input, settings }, cx);
             });
@@ -167,8 +167,8 @@ impl StudioWindow {
             }
         });
         // Fresh lists: windows come and go.
-        let project = self.studio.read(cx).project().clone();
-        if let Some(i) = project.inputs.get(&input)
+        let workspace = self.studio.read(cx).workspace().clone();
+        if let Some(i) = workspace.inputs.get(&input)
             && let Some(key) = device_key(&i.kind, &i.settings)
         {
             self.source_options(input, key, true, cx);
@@ -305,8 +305,8 @@ impl StudioWindow {
     /// grouped by app.
     pub(super) fn source_picker_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let picker = self.source_picker.as_ref()?;
-        let project = self.studio.read(cx).project().clone();
-        let input = project.inputs.get(&picker.input)?.clone();
+        let workspace = self.studio.read(cx).workspace().clone();
+        let input = workspace.inputs.get(&picker.input)?.clone();
         let key = device_key(&input.kind, &input.settings)?;
         let id = input.id;
         let query = picker.search.read(cx).value().to_lowercase();
