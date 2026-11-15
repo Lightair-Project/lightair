@@ -5,7 +5,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use lightair_core::{AudioMix, Bus, Command, Document, Effect, Input, Project, Route, Send, Track, diff};
+use lightair_core::{AudioMix, Bus, Command, Document, Effect, Input, Workspace, Route, Send, Track, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -45,12 +45,12 @@ fn the_engine_mixes_tracks_into_libobs() {
     for mix in 0..2usize {
         unsafe { libobs_sys::obs_add_raw_audio_callback(mix, std::ptr::null(), Some(on_mix), mix as *mut _) };
     }
-    let mut doc = Document::new(Project::new("Engine"));
+    let mut doc = Document::new(Workspace::new("Engine"));
     let apply = |doc: &mut Document, cmd: Command| {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
-        let project = change.after.clone();
-        engine.call(move |s| s.reconciler.apply(&project, &patches));
+        let workspace = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     };
     let tone = Input::new("Tone", "lightair_test_tone", json!({"freq": 440.0, "amplitude": 0.5}));
     let mut track = Track::new("Tone", tone.id);
@@ -65,7 +65,7 @@ fn the_engine_mixes_tracks_into_libobs() {
     assert!((db(p[0]) - db(0.25)).abs() < 0.5, "0.5 through −6 dB: 0.25, and not mixed twice ({})", p[0]);
 
     // muted: the stream is silent
-    let t = (**doc.project().track(tid).unwrap()).clone();
+    let t = (**doc.workspace().track(tid).unwrap()).clone();
     apply(&mut doc, Command::UpdateTrack { track: Track { muted: true, ..t.clone() } });
     let p = peaks_after(600);
     assert!(p[0] < 1e-3, "muted: silence ({})", p[0]);

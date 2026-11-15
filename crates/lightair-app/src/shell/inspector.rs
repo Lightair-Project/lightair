@@ -1,6 +1,6 @@
 //! The Inspector's building blocks (docs/05-interface-shell.md, "Inspector"): collapsible
 //! sections, compact numeric fields, sliders, and the layer view (Transform, content, Effects,
-//! Camera Studio, Formats).
+//! Camera Studio, Canvases).
 
 use std::rc::Rc;
 
@@ -10,7 +10,7 @@ use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Fit, Format, Layer, Layout, Project, Scene, Shape, ShapeKind};
+use lightair_core::{Command, Fit, Canvas, Layer, Layout, Workspace, Scene, Shape, ShapeKind};
 
 use super::StudioWindow;
 use crate::ui::{self, tok};
@@ -194,27 +194,27 @@ impl StudioWindow {
     /// The Inspector for one layer.
     pub(super) fn layer_inspector(
         &self,
-        project: &Project,
+        workspace: &Workspace,
         scene: &Scene,
         layer: &Layer,
-        format: &Format,
+        canvas: &Canvas,
         body: Div,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let lo = layer.layouts.get(&format.id).copied().unwrap_or(Layout::boxed(0., 0., 100., 100.));
-        let (sid, lid, fid) = (scene.id, layer.id, format.id);
-        let input = layer.input.and_then(|i| project.inputs.get(&i)).cloned();
+        let lo = layer.layouts.get(&canvas.id).copied().unwrap_or(Layout::boxed(0., 0., 100., 100.));
+        let (sid, lid, fid) = (scene.id, layer.id, canvas.id);
+        let input = layer.input.and_then(|i| workspace.inputs.get(&i)).cloned();
         let kind = input.as_ref().map(|i| i.kind.clone()).unwrap_or_default();
         let set = move |f: &dyn Fn(&mut Layout)| {
             let mut l = lo;
             f(&mut l);
-            Command::SetLayout { scene: sid, layer: lid, format: fid, layout: l }
+            Command::SetLayout { scene: sid, layer: lid, canvas: fid, layout: l }
         };
 
         // Header: what it is, and the two actions people reach for.
         let full = set(&|l| {
             *l =
-                Layout { x: 0.0, y: 0.0, width: format.width as f32, height: format.height as f32, rotation: 0.0, ..*l }
+                Layout { x: 0.0, y: 0.0, width: canvas.width as f32, height: canvas.height as f32, rotation: 0.0, ..*l }
         });
         let header = div()
             .flex()
@@ -285,7 +285,7 @@ impl StudioWindow {
         .into_iter()
         .enumerate()
         {
-            let cmd = Command::SetLayout { scene: sid, layer: lid, format: fid, layout: Layout { fit, ..lo } };
+            let cmd = Command::SetLayout { scene: sid, layer: lid, canvas: fid, layout: Layout { fit, ..lo } };
             let on = lo.fit == fit;
             fits = fits.child(
                 div()
@@ -388,14 +388,14 @@ impl StudioWindow {
                 key("x"),
                 (-75.0, 75.0, 1.0),
                 lo.tilt_x,
-                move |v| Command::SetLayout { scene: sid, layer: lid, format: fid, layout: Layout { tilt_x: v, ..lo } },
+                move |v| Command::SetLayout { scene: sid, layer: lid, canvas: fid, layout: Layout { tilt_x: v, ..lo } },
                 cx,
             );
             let ty = self.slider(
                 key("y"),
                 (-75.0, 75.0, 1.0),
                 lo.tilt_y,
-                move |v| Command::SetLayout { scene: sid, layer: lid, format: fid, layout: Layout { tilt_y: v, ..lo } },
+                move |v| Command::SetLayout { scene: sid, layer: lid, canvas: fid, layout: Layout { tilt_y: v, ..lo } },
                 cx,
             );
             transform = transform.child(row("Tilt ↕", tx, format!("{:.0}°", lo.tilt_x))).child(row(
@@ -409,7 +409,7 @@ impl StudioWindow {
         let with_shape = |sh: Option<Shape>| Command::SetLayout {
             scene: sid,
             layer: lid,
-            format: fid,
+            canvas: fid,
             layout: Layout { shape: sh, ..lo },
         };
         let keep = |kind: ShapeKind| Some(Shape { kind, ..shape.unwrap_or(Shape::new(kind)) });
@@ -445,7 +445,7 @@ impl StudioWindow {
                 move |v: f32| {
                     let mut s = sh;
                     f(&mut s, v);
-                    Command::SetLayout { scene: sid, layer: lid, format: fid, layout: Layout { shape: Some(s), ..lo } }
+                    Command::SetLayout { scene: sid, layer: lid, canvas: fid, layout: Layout { shape: Some(s), ..lo } }
                 }
             };
             let key = |name: &str| format!("shape:{lid}:{fid}:{name}");
@@ -490,8 +490,8 @@ impl StudioWindow {
             }
             col = col.child(self.effects_section(input, cx));
         }
-        if project.formats.len() > 1 {
-            col = col.child(self.formats_section(project, layer, sid, cx));
+        if workspace.canvases.len() > 1 {
+            col = col.child(self.canvases_section(workspace, layer, sid, cx));
         }
         col.into_any_element()
     }

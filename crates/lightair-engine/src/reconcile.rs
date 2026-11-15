@@ -1,7 +1,7 @@
 //! The reconciler: makes libobs match the Lightair document (docs/04-engine-libobs.md,
 //! "Reconciler"). It consumes patches from `lightair_core::diff`, runs on the engine thread,
-//! and is idempotent: applying `diff(empty, project)` to an empty engine gives the same libobs
-//! state as any sequence of edits ending at `project`.
+//! and is idempotent: applying `diff(empty, workspace)` to an empty engine gives the same libobs
+//! state as any sequence of edits ending at `workspace`.
 //!
 //! libobs objects are named by their Lightair id, so user-facing names never collide.
 
@@ -10,45 +10,45 @@ use std::collections::{HashMap, HashSet};
 use libobs_sys as sys;
 use lightair_core::catalog::lower;
 use lightair_core::{
-    Effect, Fit, Format, Id, Layer, LayerPatch, Layout, Patch, Project, Track, TransitionKind, TransitionSettings,
+    Effect, Fit, Canvas, Id, Layer, LayerPatch, Layout, Patch, Workspace, Track, TransitionKind, TransitionSettings,
     diff_layers,
 };
 use parking_lot::Mutex;
 
 use crate::timers::{TIMER_KIND, TIMER_SOURCE, TimerAction, TimerStatus, Timers, on_timers_tick, tick_param};
-use crate::transition::{FormatMove, MoveAnim, Tween, item_fade, match_layer};
+use crate::transition::{CanvasMove, MoveAnim, Tween, item_fade, match_layer};
 
 use crate::meters::{MeterCell, db_to_mul, meters};
-use crate::obs::{Canvas, Data, Scene, Source, vec2};
+use crate::obs::{ObsCanvas, Data, ObsScene, ObsSource, vec2};
 use std::sync::Arc;
 
 /// libobs state owned on behalf of the document.
 ///
-/// Every document scene exists once per format: one libobs scene in that format's canvas,
+/// Every document scene exists once per canvas: one libobs scene in that canvas's canvas,
 /// all sharing the same input sources (docs/07-scenes-layers-canvas.md, "Formats").
 #[derive(Default)]
 pub struct Reconciler {
-    inputs: HashMap<Id, Source>,
+    inputs: HashMap<Id, ObsSource>,
     /// Input effect chains (Camera Studio, colour correction, …).
     input_effects: HashMap<Id, Chain>,
     /// Screen captures zoomed and given a drawn pointer by their scene's `ScreenLook` (the
     /// pointer filter, last on the input, and the settings it was given).
-    screen_looks: HashMap<Id, (Source, serde_json::Value)>,
-    /// Canvases for additional formats. The primary format uses libobs's main canvas.
-    canvases: HashMap<Id, Canvas>,
-    /// (scene, format) → libobs scene.
-    scenes: HashMap<(Id, Id), Scene>,
-    /// Scene items are owned by their scene; (scene, format, layer) → item.
+    screen_looks: HashMap<Id, (ObsSource, serde_json::Value)>,
+    /// Canvases for additional canvases. The primary canvas uses libobs's main canvas.
+    obs_canvases: HashMap<Id, ObsCanvas>,
+    /// (scene, canvas) → libobs scene.
+    scenes: HashMap<(Id, Id), ObsScene>,
+    /// Scene items are owned by their scene; (scene, canvas, layer) → item.
     items: HashMap<(Id, Id, Id), ItemPtr>,
     /// Shaped layers: the item above is a one-item group; this is the input's item inside it
     /// (carrying the crop) and the shape mask on the group.
     masks: HashMap<(Id, Id, Id), Masked>,
-    /// The layer being cropped (scene, format, layer): shown whole and unshaped meanwhile.
+    /// The layer being cropped (scene, canvas, layer): shown whole and unshaped meanwhile.
     crop_preview: Option<(Id, Id, Id)>,
     /// Leaving crop view: the ghost is fading out.
     crop_fading: bool,
-    formats: Vec<Id>,
-    primary_format: Option<Id>,
+    canvases: Vec<Id>,
+    primary_canvas: Option<Id>,
     program: Option<Id>,
     tracks: HashMap<Id, TrackState>,
     /// The audio engine playing the mixer (docs/plans/audio-engine.md); started with the first
@@ -59,8 +59,8 @@ pub struct Reconciler {
     monitor: Option<(String, bool)>,
     /// Frames per audio block (`None`: the default).
     audio_block: Option<usize>,
-    /// Each format's output channel goes through its own transition.
-    transitions: HashMap<Id, Source>,
+    /// Each canvas's output channel goes through its own transition.
+    transitions: HashMap<Id, ObsSource>,
     transition_settings: TransitionSettings,
     stinger: Option<lightair_core::Stinger>,
     /// The running Move, driven by a libobs tick callback.
@@ -80,7 +80,7 @@ struct TrackState {
     channel: u32,
     volmeter: VolmeterPtr,
     meter: Arc<MeterCell>,
-    filters: Vec<(Id, Source)>,
+    filters: Vec<(Id, ObsSource)>,
 }
 
 struct VolmeterPtr(*mut sys::obs_volmeter_t);
@@ -94,43 +94,43 @@ unsafe impl Send for ItemPtr {}
 /// shape mask, and the flip/3D transform (applied in that order).
 pub(crate) struct Masked {
     pub inner: *mut sys::obs_sceneitem_t,
-    pub filter: Source,
-    pub transform: Option<Source>,
+    pub filter: ObsSource,
+    pub transform: Option<ObsSource>,
 }
 unsafe impl Send for Masked {}
 
 impl Reconciler {
-    /// Applies patches computed from two snapshots; `project` is the newer one.
-    pub fn apply(&mut self, project: &Project, patches: &[Patch]) {
-        self.primary_format = Some(project.primary_format().id);
-        let transition_changed = self.transition_settings != project.transition || self.stinger != project.stinger;
-        self.transition_settings = project.transition;
-        self.stinger = project.stinger.clone();
+    /// Applies patches computed from two snapshots; `workspace` is the newer one.
+    pub fn apply(&mut self, workspace: &Workspace, patches: &[Patch]) {
+        self.primary_canvas = Some(workspace.primary_canvas().id);
+        let transition_changed = self.transition_settings != workspace.transition || self.stinger != workspace.stinger;
+        self.transition_settings = workspace.transition;
+        self.stinger = workspace.stinger.clone();
         self.cleanup();
-        // Formats are synced from the snapshot itself, so a rebuild against `empty_like()`
-        // (which keeps the formats) still creates every canvas.
-        let mut formats_added = false;
-        for format in &project.formats {
-            if !self.formats.contains(&format.id) {
-                self.add_format(project, format);
-                formats_added = true;
+        // Canvases are synced from the snapshot itself, so a rebuild against `empty_like()`
+        // (which keeps the canvases) still creates every canvas.
+        let mut canvases_added = false;
+        for canvas in &workspace.canvases {
+            if !self.canvases.contains(&canvas.id) {
+                self.add_canvas(workspace, canvas);
+                canvases_added = true;
             }
         }
-        for id in self.formats.clone() {
-            if project.format(id).is_none() {
-                self.remove_format(id);
+        for id in self.canvases.clone() {
+            if workspace.canvas(id).is_none() {
+                self.remove_canvas(id);
             }
         }
         // Set transitions up when they change, not at the switch: a stinger has to load its
         // video before it can play.
-        if transition_changed || formats_added {
+        if transition_changed || canvases_added {
             self.prepare_transitions();
         }
         let mut recreated = false;
         for patch in patches {
             match patch {
-                Patch::FormatAdded(_) | Patch::FormatRemoved(_) => {}
-                Patch::FormatChanged(format) => self.resize_format(format),
+                Patch::CanvasAdded(_) | Patch::CanvasRemoved(_) => {}
+                Patch::CanvasChanged(canvas) => self.resize_canvas(canvas),
                 Patch::InputAdded(input) => self.create_input(input),
                 Patch::InputChanged { before, after } => {
                     // a portable kind that plays as another libobs type now (Windows: a
@@ -138,7 +138,7 @@ impl Reconciler {
                     if crate::kinds::libobs_kind(&before.kind, &before.settings)
                         != crate::kinds::libobs_kind(&after.kind, &after.settings)
                     {
-                        self.recreate_input(after, project);
+                        self.recreate_input(after, workspace);
                         recreated = true;
                     } else if let Some(src) = self.inputs.get(&after.id) {
                         if before.settings != after.settings || draws_pointer(before) != draws_pointer(after) {
@@ -157,45 +157,45 @@ impl Reconciler {
                 // moving changes its children's world layouts, so they update too).
                 Patch::SceneAdded(scene) => {
                     let scene = scene.flatten();
-                    for format in self.formats.clone() {
-                        self.add_scene_in(&scene, format);
+                    for canvas in self.canvases.clone() {
+                        self.add_scene_in(&scene, canvas);
                     }
                 }
                 Patch::SceneChanged { before, after } => {
                     let (before, after) = (&before.flatten(), &after.flatten());
-                    for format in self.formats.clone() {
+                    for canvas in self.canvases.clone() {
                         for lp in diff_layers(before, after) {
                             match lp {
-                                LayerPatch::Added { layer, index } => self.add_layer(after.id, format, layer, index),
+                                LayerPatch::Added { layer, index } => self.add_layer(after.id, canvas, layer, index),
                                 LayerPatch::Removed { layer } => {
-                                    self.masks.remove(&(after.id, format, layer));
-                                    if let Some(item) = self.items.remove(&(after.id, format, layer)) {
+                                    self.masks.remove(&(after.id, canvas, layer));
+                                    if let Some(item) = self.items.remove(&(after.id, canvas, layer)) {
                                         unsafe { sys::obs_sceneitem_remove(item.0) };
                                     }
                                 }
                                 LayerPatch::Changed { layer } => {
                                     let index = after.layers.iter().position(|l| l.id == layer.id).unwrap_or(0);
-                                    self.update_layer(after.id, format, layer, index)
+                                    self.update_layer(after.id, canvas, layer, index)
                                 }
-                                LayerPatch::Order(order) => self.reorder(after.id, format, &order),
+                                LayerPatch::Order(order) => self.reorder(after.id, canvas, &order),
                             }
                         }
                     }
                 }
                 Patch::SceneRemoved(id) => {
                     if self.program == Some(*id) {
-                        self.set_program(None, project);
+                        self.set_program(None, workspace);
                     }
                     self.items.retain(|(scene, _, _), _| scene != id);
                     self.masks.retain(|(scene, _, _), _| scene != id);
                     self.scenes.retain(|(scene, _), _| scene != id);
                 }
-                Patch::ProgramChanged(program) => self.set_program(*program, project),
+                Patch::ProgramChanged(program) => self.set_program(*program, workspace),
                 Patch::TrackAdded(track) => self.add_track(track),
                 Patch::TrackChanged { before, after } => self.update_track(before, after),
                 Patch::TrackRemoved(id) => self.remove_track(*id),
                 Patch::TrackOrder(_) => {}
-                // The audio engine takes the mixer from the project (docs/plans/audio-engine.md).
+                // The audio engine takes the mixer from the workspace (docs/plans/audio-engine.md).
                 Patch::AudioSetup => {}
             }
         }
@@ -211,7 +211,7 @@ impl Reconciler {
             ) || matches!(p, Patch::InputChanged { after, .. } if after.kind == crate::devices::DEVICE_KIND)
         });
         if audio_changed {
-            self.sync_audio(project);
+            self.sync_audio(workspace);
         }
         let screens_changed = patches.iter().any(|p| {
             matches!(
@@ -226,20 +226,20 @@ impl Reconciler {
             )
         });
         if screens_changed || recreated {
-            self.sync_screen_looks(project);
+            self.sync_screen_looks(workspace);
         }
     }
 
     /// Puts each scene's `ScreenLook` on its screen captures: a pointer filter (zoom, drawn
     /// pointer, clicks) last on each, the capture's own pointer hidden while Lightair draws one.
     /// A capture in several scenes takes the look of the scene on air, else the first one's.
-    fn sync_screen_looks(&mut self, project: &Project) {
+    fn sync_screen_looks(&mut self, workspace: &Workspace) {
         let mut want: HashMap<Id, lightair_core::ScreenLook> = HashMap::new();
-        let on_air = project.program.and_then(|p| project.scene(p));
-        for scene in on_air.into_iter().chain(project.scenes.iter()) {
+        let on_air = workspace.program.and_then(|p| workspace.scene(p));
+        for scene in on_air.into_iter().chain(workspace.scenes.iter()) {
             let Some(look) = scene.screen else { continue };
             for layer in &scene.layers {
-                let Some(input) = layer.input.and_then(|i| project.inputs.get(&i)) else { continue };
+                let Some(input) = layer.input.and_then(|i| workspace.inputs.get(&i)) else { continue };
                 if is_screen(input) {
                     want.entry(input.id).or_insert(look);
                 }
@@ -250,7 +250,7 @@ impl Reconciler {
         for id in gone {
             if let (Some((filter, was)), Some(src)) = (self.screen_looks.remove(&id), self.inputs.get(&id)) {
                 unsafe { sys::obs_source_filter_remove(src.as_ptr(), filter.as_ptr()) };
-                if let Some(input) = project.inputs.get(&id).filter(|i| !draws_pointer(i))
+                if let Some(input) = workspace.inputs.get(&id).filter(|i| !draws_pointer(i))
                     && was["hide_capture"] == true
                 {
                     src.update(&data_from_json(&input_settings(input, false)));
@@ -258,7 +258,7 @@ impl Reconciler {
             }
         }
         for (id, look) in want {
-            let (Some(src), Some(input)) = (self.inputs.get(&id), project.inputs.get(&id)) else { continue };
+            let (Some(src), Some(input)) = (self.inputs.get(&id), workspace.inputs.get(&id)) else { continue };
             let settings = screen_look_settings(&look);
             // drawn before (a new filter: as the capture was made, with its own pointer)
             let hid = self.screen_looks.get(&id).map_or(draws_pointer(input), |(_, s)| s["hide_capture"] == true || draws_pointer(input));
@@ -269,7 +269,7 @@ impl Reconciler {
                     *was = settings;
                 }
                 None => {
-                    let Some(filter) = Source::create_private(crate::cursor::KIND, &format!("screen-look:{id}"), Some(&data_from_json(&settings))) else {
+                    let Some(filter) = ObsSource::create_private(crate::cursor::KIND, &format!("screen-look:{id}"), Some(&data_from_json(&settings))) else {
                         tracing::warn!("could not create the screen look");
                         continue;
                     };
@@ -296,9 +296,9 @@ impl Reconciler {
     }
 
     /// Brings the audio engine up to date: captures every track's input, releases inputs no
-    /// track uses, and plays the project's mixer.
-    fn sync_audio(&mut self, project: &Project) {
-        if !Self::engine_audio() || (project.tracks.is_empty() && self.audio.is_none()) {
+    /// track uses, and plays the workspace's mixer.
+    fn sync_audio(&mut self, workspace: &Workspace) {
+        if !Self::engine_audio() || (workspace.tracks.is_empty() && self.audio.is_none()) {
             return;
         }
         if self.audio.is_none() {
@@ -313,8 +313,8 @@ impl Reconciler {
         if let Err(e) = host.set_monitor(monitor) {
             tracing::warn!(%e, "direct monitoring unavailable; libobs monitors the cue");
         }
-        let wanted: HashSet<Id> = project.tracks.iter().map(|t| t.input).collect();
-        let is_device = |id: &Id| project.inputs.get(id).is_some_and(|i| i.kind == crate::devices::DEVICE_KIND);
+        let wanted: HashSet<Id> = workspace.tracks.iter().map(|t| t.input).collect();
+        let is_device = |id: &Id| workspace.inputs.get(id).is_some_and(|i| i.kind == crate::devices::DEVICE_KIND);
         let stale: Vec<Id> = host.captured().filter(|i| !wanted.contains(i) || is_device(i)).collect();
         for input in stale {
             host.release(input);
@@ -324,7 +324,7 @@ impl Reconciler {
             host.close_device(input);
         }
         for input in &wanted {
-            let Some(i) = project.inputs.get(input) else { continue };
+            let Some(i) = workspace.inputs.get(input) else { continue };
             if i.kind == crate::devices::DEVICE_KIND {
                 // an interface: the engine opens it itself, every channel
                 let device = i.settings["device"].as_str().unwrap_or("");
@@ -335,15 +335,15 @@ impl Reconciler {
                 host.capture(*input, src);
             }
         }
-        host.set(crate::audio::spec(project));
-        crate::plugins::retain(&crate::plugins::inserts(project));
-        let mut cells: Vec<_> = project
+        host.set(crate::audio::spec(workspace));
+        crate::plugins::retain(&crate::plugins::inserts(workspace));
+        let mut cells: Vec<_> = workspace
             .tracks
             .iter()
             .filter_map(|t| meters().get(t.id).map(|cell| (crate::audio::node(t.id), cell)))
             .collect();
         // buses, mixes and the master show in the mixer too
-        for id in project.audio.buses.iter().map(|b| b.id).chain(project.audio.mixes.iter().map(|m| m.id)) {
+        for id in workspace.audio.buses.iter().map(|b| b.id).chain(workspace.audio.mixes.iter().map(|m| m.id)) {
             let cell = meters().get(id).unwrap_or_else(|| meters().insert(id));
             cells.push((crate::audio::node(id), cell));
         }
@@ -357,7 +357,7 @@ impl Reconciler {
     /// `program` (audio-only recordings). Returns the files.
     /// Sets the audio engine's block size (frames): smaller is lower latency, larger a lighter
     /// load. Restarts the engine if it's running (not while multitrack files record: false).
-    pub fn set_audio_block(&mut self, frames: usize, project: &Project) -> bool {
+    pub fn set_audio_block(&mut self, frames: usize, workspace: &Workspace) -> bool {
         if self.audio_block == Some(frames) {
             return true;
         }
@@ -367,24 +367,24 @@ impl Reconciler {
         self.audio_block = Some(frames);
         if self.audio.as_ref().is_some_and(|a| a.block() != frames) {
             self.audio = None;
-            self.sync_audio(project);
+            self.sync_audio(workspace);
         }
         true
     }
 
     /// Plays the mixer again (a plugin insert finished loading: [`crate::plugins::changed`]).
-    pub fn refresh_audio(&mut self, project: &Project) {
-        self.sync_audio(project);
+    pub fn refresh_audio(&mut self, workspace: &Workspace) {
+        self.sync_audio(workspace);
     }
 
     pub fn start_stems(
         &mut self,
-        project: &Project,
+        workspace: &Workspace,
         folder: &std::path::Path,
         base: &str,
         program: bool,
     ) -> Result<Vec<(std::path::PathBuf, String)>, String> {
-        let settings = &project.outputs.recording;
+        let settings = &workspace.outputs.recording;
         let host = self.audio.as_mut().ok_or("the audio engine isn't running")?;
         let tap = match settings.stem_point {
             lightair_core::StemPoint::Raw => lightair_audio::Tap::Input,
@@ -392,8 +392,8 @@ impl Reconciler {
             lightair_core::StemPoint::PostFader => lightair_audio::Tap::PostFader,
         };
         let float = settings.stem_format == lightair_core::StemFormat::Float32;
-        let marked = project.tracks.iter().any(|t| t.record) || project.audio.buses.iter().any(|b| b.record);
-        let mut strips: Vec<(lightair_audio::NodeId, String, u16)> = project
+        let marked = workspace.tracks.iter().any(|t| t.record) || workspace.audio.buses.iter().any(|b| b.record);
+        let mut strips: Vec<(lightair_audio::NodeId, String, u16)> = workspace
             .tracks
             .iter()
             .filter(|t| t.record || !marked)
@@ -407,7 +407,7 @@ impl Reconciler {
                 (crate::audio::node(t.id), t.name.clone(), ch)
             })
             .collect();
-        strips.extend(project.audio.buses.iter().filter(|b| b.record).map(|b| (crate::audio::node(b.id), b.name.clone(), 2)));
+        strips.extend(workspace.audio.buses.iter().filter(|b| b.record).map(|b| (crate::audio::node(b.id), b.name.clone(), 2)));
         if program {
             strips.push((lightair_audio::PROGRAM, "Program".into(), 2));
         }
@@ -480,35 +480,35 @@ impl Reconciler {
         Some(self.audio.as_mut()?.meter(lightair_audio::PROGRAM))
     }
 
-    // ------------------------------------------------------------ formats
-    fn add_format(&mut self, project: &Project, format: &Format) {
-        if self.formats.contains(&format.id) {
+    // ------------------------------------------------------------ canvases
+    fn add_canvas(&mut self, workspace: &Workspace, canvas: &Canvas) {
+        if self.canvases.contains(&canvas.id) {
             return;
         }
-        if Some(format.id) != self.primary_format {
-            match Canvas::create(&format.id.to_string(), format.width, format.height, format.fps_num, format.fps_den) {
-                Some(canvas) => {
-                    self.canvases.insert(format.id, canvas);
+        if Some(canvas.id) != self.primary_canvas {
+            match ObsCanvas::create(&canvas.id.to_string(), canvas.width, canvas.height, canvas.fps_num, canvas.fps_den) {
+                Some(obs_canvas) => {
+                    self.obs_canvases.insert(canvas.id, obs_canvas);
                 }
                 None => {
-                    tracing::error!(format = format.name, "could not create a canvas");
+                    tracing::error!(canvas = canvas.name, "could not create a canvas");
                     return;
                 }
             }
         }
-        self.formats.push(format.id);
-        if let Some(tr) = Source::create_private("fade_transition", &format!("transition:{}", format.id), None) {
-            match self.canvases.get(&format.id) {
-                Some(canvas) => unsafe { sys::obs_canvas_set_channel(canvas.as_ptr(), 0, tr.as_ptr()) },
+        self.canvases.push(canvas.id);
+        if let Some(tr) = ObsSource::create_private("fade_transition", &format!("transition:{}", canvas.id), None) {
+            match self.obs_canvases.get(&canvas.id) {
+                Some(obs_canvas) => unsafe { sys::obs_canvas_set_channel(obs_canvas.as_ptr(), 0, tr.as_ptr()) },
                 None => unsafe { sys::obs_set_output_source(0, tr.as_ptr()) },
             }
-            self.transitions.insert(format.id, tr);
+            self.transitions.insert(canvas.id, tr);
         }
-        // Scenes that already exist get their version in the new format; scenes added later in
+        // Scenes that already exist get their version in the new canvas; scenes added later in
         // the same patch list arrive through SceneAdded.
-        for scene in &project.scenes {
+        for scene in &workspace.scenes {
             if self.scenes.keys().any(|(s, _)| *s == scene.id) {
-                self.add_scene_in(&scene.flatten(), format.id);
+                self.add_scene_in(&scene.flatten(), canvas.id);
             }
         }
         if let Some(program) = self.program {
@@ -516,8 +516,8 @@ impl Reconciler {
         }
     }
 
-    fn resize_format(&mut self, format: &Format) {
-        if Some(format.id) == self.primary_format {
+    fn resize_canvas(&mut self, canvas: &Canvas) {
+        if Some(canvas.id) == self.primary_canvas {
             // The main video can be reset while nothing records or streams from it.
             unsafe {
                 let mut ovi = std::mem::zeroed::<sys::obs_video_info>();
@@ -526,30 +526,30 @@ impl Reconciler {
                 }
                 // Not read once graphics are up, but must point at something.
                 ovi.graphics_module = if cfg!(windows) { c"libobs-d3d11".as_ptr() } else { c"libobs-opengl".as_ptr() };
-                ovi.base_width = format.width;
-                ovi.base_height = format.height;
-                ovi.output_width = format.width;
-                ovi.output_height = format.height;
-                ovi.fps_num = format.fps_num;
-                ovi.fps_den = format.fps_den.max(1);
+                ovi.base_width = canvas.width;
+                ovi.base_height = canvas.height;
+                ovi.output_width = canvas.width;
+                ovi.output_height = canvas.height;
+                ovi.fps_num = canvas.fps_num;
+                ovi.fps_den = canvas.fps_den.max(1);
                 let code = sys::obs_reset_video(&mut ovi);
                 if code != 0 {
                     tracing::warn!(code, "couldn't resize the main canvas (is something recording or live?)");
                 }
             }
-        } else if let Some(canvas) = self.canvases.get(&format.id) {
-            canvas.reset(format.width, format.height, format.fps_num, format.fps_den);
+        } else if let Some(obs_canvas) = self.obs_canvases.get(&canvas.id) {
+            obs_canvas.reset(canvas.width, canvas.height, canvas.fps_num, canvas.fps_den);
         }
     }
 
-    fn remove_format(&mut self, id: Id) {
+    fn remove_canvas(&mut self, id: Id) {
         self.finish_move();
         self.transitions.remove(&id);
         self.items.retain(|(_, f, _), _| *f != id);
         self.masks.retain(|(_, f, _), _| *f != id);
         self.scenes.retain(|(_, f), _| *f != id);
-        self.canvases.remove(&id);
-        self.formats.retain(|f| *f != id);
+        self.obs_canvases.remove(&id);
+        self.canvases.retain(|f| *f != id);
     }
 
     /// Makes an input's libobs source (as this platform plays its kind) and its effects.
@@ -562,7 +562,7 @@ impl Reconciler {
             None => input.kind.as_str(),
         };
         let settings = data_from_json(&input_settings(input, false));
-        match Source::create(kind, &input.id.to_string(), Some(&settings)) {
+        match ObsSource::create(kind, &input.id.to_string(), Some(&settings)) {
             Some(src) => {
                 if timer {
                     self.timers.add(input.id, src.as_ptr(), &input.settings);
@@ -594,17 +594,17 @@ impl Reconciler {
 
     /// A new source for an input whose libobs type changed, put back in every scene that shows
     /// it (the audio engine takes it again when audio syncs).
-    fn recreate_input(&mut self, input: &lightair_core::Input, project: &Project) {
+    fn recreate_input(&mut self, input: &lightair_core::Input, workspace: &Workspace) {
         let id = input.id;
-        let scenes: Vec<lightair_core::Scene> = project.scenes.iter().map(|s| s.flatten()).collect();
+        let scenes: Vec<lightair_core::Scene> = workspace.scenes.iter().map(|s| s.flatten()).collect();
         let using: Vec<(Id, Id)> = scenes
             .iter()
             .flat_map(|s| s.layers.iter().filter(|l| l.input == Some(id)).map(move |l| (s.id, l.id)))
             .collect();
         for (scene, layer) in &using {
-            for format in self.formats.clone() {
-                self.masks.remove(&(*scene, format, *layer));
-                if let Some(item) = self.items.remove(&(*scene, format, *layer)) {
+            for canvas in self.canvases.clone() {
+                self.masks.remove(&(*scene, canvas, *layer));
+                if let Some(item) = self.items.remove(&(*scene, canvas, *layer)) {
                     unsafe { sys::obs_sceneitem_remove(item.0) };
                 }
             }
@@ -621,32 +621,32 @@ impl Reconciler {
         }
         for scene in &scenes {
             for (index, layer) in scene.layers.iter().enumerate().filter(|(_, l)| l.input == Some(id)) {
-                for format in self.formats.clone() {
-                    if self.scenes.contains_key(&(scene.id, format)) {
-                        self.add_layer(scene.id, format, layer, index);
+                for canvas in self.canvases.clone() {
+                    if self.scenes.contains_key(&(scene.id, canvas)) {
+                        self.add_layer(scene.id, canvas, layer, index);
                     }
                 }
             }
         }
     }
 
-    fn add_scene_in(&mut self, scene: &lightair_core::Scene, format: Id) {
-        if self.scenes.contains_key(&(scene.id, format)) {
+    fn add_scene_in(&mut self, scene: &lightair_core::Scene, canvas: Id) {
+        if self.scenes.contains_key(&(scene.id, canvas)) {
             return;
         }
-        let name = format!("{}:{}", scene.id, format);
-        let obs_scene = match self.canvases.get(&format) {
-            Some(canvas) => canvas.create_scene(&name),
-            None => Scene::create(&name),
+        let name = format!("{}:{}", scene.id, canvas);
+        let obs_scene = match self.obs_canvases.get(&canvas) {
+            Some(obs_canvas) => obs_canvas.create_scene(&name),
+            None => ObsScene::create(&name),
         };
         let Some(obs_scene) = obs_scene else { return };
-        self.scenes.insert((scene.id, format), obs_scene);
+        self.scenes.insert((scene.id, canvas), obs_scene);
         for (index, layer) in scene.layers.iter().enumerate() {
-            self.add_layer(scene.id, format, layer, index);
+            self.add_layer(scene.id, canvas, layer, index);
         }
     }
 
-    /// The canvas behind a format, as a new strong reference (for previews).
+    /// The canvas behind a canvas, as a new strong reference (for previews).
     /// The libobs source of an input (borrowed; valid while the input exists).
     pub(crate) fn input_ptr(&self, input: Id) -> Option<*mut sys::obs_source_t> {
         self.inputs.get(&input).map(|s| s.as_ptr())
@@ -654,30 +654,30 @@ impl Reconciler {
 
     /// Shows a layer whole while it's being cropped (crop mode), or `None` to end it. The
     /// document is untouched: this is only how libobs draws it meanwhile.
-    pub fn set_crop_preview(&mut self, target: Option<(Id, Id, Id)>, project: &Project) {
+    pub fn set_crop_preview(&mut self, target: Option<(Id, Id, Id)>, workspace: &Workspace) {
         // The same target again while fading out: back in (the ghost fades in again).
         if self.crop_preview == target && !self.crop_fading {
             return;
         }
         let previous = std::mem::replace(&mut self.crop_preview, target);
         self.crop_fading = false;
-        for (scene, format, layer) in previous.into_iter().chain(target) {
-            let Some(s) = project.scene(scene).map(|s| s.flatten()) else { continue };
+        for (scene, canvas, layer) in previous.into_iter().chain(target) {
+            let Some(s) = workspace.scene(scene).map(|s| s.flatten()) else { continue };
             let Some(index) = s.layers.iter().position(|l| l.id == layer) else { continue };
             let l = s.layers[index].clone();
-            self.update_layer(scene, format, &l, index);
+            self.update_layer(scene, canvas, &l, index);
         }
     }
 
     /// Fades the crop view's ghost out (before `set_crop_preview(None)`, so leaving crop view
     /// doesn't pop): the picture then looks just as it will once the crop is applied again.
-    pub fn fade_crop_preview(&mut self, project: &Project) {
-        let Some((scene, format, layer)) = self.crop_preview else { return };
+    pub fn fade_crop_preview(&mut self, workspace: &Workspace) {
+        let Some((scene, canvas, layer)) = self.crop_preview else { return };
         self.crop_fading = true;
-        let Some(s) = project.scene(scene).map(|s| s.flatten()) else { return };
+        let Some(s) = workspace.scene(scene).map(|s| s.flatten()) else { return };
         let Some(index) = s.layers.iter().position(|l| l.id == layer) else { return };
         let l = s.layers[index].clone();
-        self.update_layer(scene, format, &l, index);
+        self.update_layer(scene, canvas, &l, index);
     }
 
     /// Whether the input's face effects see a face right now (`None`: it has none running).
@@ -805,48 +805,48 @@ impl Reconciler {
         (w > 0 && h > 0).then_some((w, h))
     }
 
-    /// The libobs scene source for a document scene in a format, if it exists.
-    pub fn scene_source(&self, scene: Id, format: Id) -> Option<*mut sys::obs_source_t> {
-        self.scenes.get(&(scene, format)).map(|s| s.source_ptr())
+    /// The libobs scene source for a document scene in a canvas, if it exists.
+    pub fn scene_source(&self, scene: Id, canvas: Id) -> Option<*mut sys::obs_source_t> {
+        self.scenes.get(&(scene, canvas)).map(|s| s.source_ptr())
     }
 
     /// A new strong reference to that scene source (the caller releases it), e.g. for Studio
     /// mode's preview of a scene that isn't on air.
-    pub fn scene_source_ref(&self, scene: Id, format: Id) -> Option<*mut sys::obs_source_t> {
-        self.scene_source(scene, format).map(|s| unsafe { sys::obs_source_get_ref(s) }).filter(|p| !p.is_null())
+    pub fn scene_source_ref(&self, scene: Id, canvas: Id) -> Option<*mut sys::obs_source_t> {
+        self.scene_source(scene, canvas).map(|s| unsafe { sys::obs_source_get_ref(s) }).filter(|p| !p.is_null())
     }
 
-    pub fn canvas_ref(&self, format: Id) -> Option<*mut sys::obs_canvas_t> {
-        if Some(format) == self.primary_format {
+    pub fn canvas_ref(&self, canvas: Id) -> Option<*mut sys::obs_canvas_t> {
+        if Some(canvas) == self.primary_canvas {
             return Some(unsafe { sys::obs_get_main_canvas() });
         }
-        self.canvases.get(&format).map(|c| unsafe { sys::obs_canvas_get_ref(c.as_ptr()) })
+        self.obs_canvases.get(&canvas).map(|c| unsafe { sys::obs_canvas_get_ref(c.as_ptr()) })
     }
 
-    /// The canvas's video output, for encoders recording or streaming a format.
-    pub fn format_video(&self, format: Id) -> Option<crate::outputs::VideoOutput> {
-        if Some(format) == self.primary_format {
+    /// The canvas's video output, for encoders recording or streaming a canvas.
+    pub fn canvas_video(&self, canvas: Id) -> Option<crate::outputs::VideoOutput> {
+        if Some(canvas) == self.primary_canvas {
             return Some(crate::outputs::VideoOutput(unsafe { sys::obs_get_video() }));
         }
-        self.canvases
-            .get(&format)
+        self.obs_canvases
+            .get(&canvas)
             .map(|c| crate::outputs::VideoOutput(unsafe { sys::obs_canvas_get_video(c.as_ptr()) }))
     }
 
-    fn dest(&self, program: Option<Id>, format: Id) -> *mut sys::obs_source_t {
-        program.and_then(|id| self.scenes.get(&(id, format))).map_or(std::ptr::null_mut(), |s| s.source_ptr())
+    fn dest(&self, program: Option<Id>, canvas: Id) -> *mut sys::obs_source_t {
+        program.and_then(|id| self.scenes.get(&(id, canvas))).map_or(std::ptr::null_mut(), |s| s.source_ptr())
     }
 
-    /// Puts `program` on air in every format instantly.
+    /// Puts `program` on air in every canvas instantly.
     fn land(&mut self, program: Option<Id>) {
-        for format in self.formats.clone() {
-            if let Some(tr) = self.transitions.get(&format) {
-                unsafe { sys::obs_transition_set(tr.as_ptr(), self.dest(program, format)) };
+        for canvas in self.canvases.clone() {
+            if let Some(tr) = self.transitions.get(&canvas) {
+                unsafe { sys::obs_transition_set(tr.as_ptr(), self.dest(program, canvas)) };
             }
         }
     }
 
-    fn set_program(&mut self, program: Option<Id>, project: &Project) {
+    fn set_program(&mut self, program: Option<Id>, workspace: &Workspace) {
         let previous = self.program;
         self.finish_move();
         let kind = match (previous, program) {
@@ -862,15 +862,15 @@ impl Reconciler {
             | TransitionKind::Dip
             | TransitionKind::Stinger => {
                 let (type_id, settings) = transition_source(&self.transition_settings, self.stinger.as_ref());
-                for format in self.formats.clone() {
-                    self.ensure_transition(format, type_id, &settings);
-                    if let Some(tr) = self.transitions.get(&format) {
+                for canvas in self.canvases.clone() {
+                    self.ensure_transition(canvas, type_id, &settings);
+                    if let Some(tr) = self.transitions.get(&canvas) {
                         unsafe {
                             sys::obs_transition_start(
                                 tr.as_ptr(),
                                 sys::OBS_TRANSITION_MODE_AUTO,
                                 ms,
-                                self.dest(program, format),
+                                self.dest(program, canvas),
                             )
                         };
                     }
@@ -878,7 +878,7 @@ impl Reconciler {
             }
             TransitionKind::Move => {
                 let (Some(a), Some(b)) = (previous, program) else { unreachable!() };
-                if !self.start_move(a, b, project) {
+                if !self.start_move(a, b, workspace) {
                     self.land(program);
                 }
             }
@@ -891,52 +891,52 @@ impl Reconciler {
             return;
         }
         let (type_id, settings) = transition_source(&self.transition_settings, self.stinger.as_ref());
-        for format in self.formats.clone() {
-            self.ensure_transition(format, type_id, &settings);
+        for canvas in self.canvases.clone() {
+            self.ensure_transition(canvas, type_id, &settings);
         }
     }
 
-    /// Makes `format`'s output transition a `type_id` source with `settings`, swapping the
+    /// Makes `canvas`'s output transition a `type_id` source with `settings`, swapping the
     /// source on the output channel when the type changes (libobs carries over what's showing).
-    fn ensure_transition(&mut self, format: Id, type_id: &str, settings: &serde_json::Value) {
-        let Some(current) = self.transitions.get(&format) else { return };
+    fn ensure_transition(&mut self, canvas: Id, type_id: &str, settings: &serde_json::Value) {
+        let Some(current) = self.transitions.get(&canvas) else { return };
         let current_type = unsafe { std::ffi::CStr::from_ptr(sys::obs_source_get_id(current.as_ptr())) };
         let data = data_from_json(settings);
         if current_type.to_bytes() == type_id.as_bytes() {
             current.update(&data);
             return;
         }
-        let Some(next) = Source::create_private(type_id, &format!("transition:{format}"), Some(&data)) else {
+        let Some(next) = ObsSource::create_private(type_id, &format!("transition:{canvas}"), Some(&data)) else {
             tracing::warn!(type_id, "transition type unavailable");
             return;
         };
         unsafe {
             sys::obs_transition_swap_begin(next.as_ptr(), current.as_ptr());
-            match self.canvases.get(&format) {
-                Some(canvas) => sys::obs_canvas_set_channel(canvas.as_ptr(), 0, next.as_ptr()),
+            match self.obs_canvases.get(&canvas) {
+                Some(obs_canvas) => sys::obs_canvas_set_channel(obs_canvas.as_ptr(), 0, next.as_ptr()),
                 None => sys::obs_set_output_source(0, next.as_ptr()),
             }
             sys::obs_transition_swap_end(next.as_ptr(), current.as_ptr());
         }
-        self.transitions.insert(format, next);
+        self.transitions.insert(canvas, next);
     }
 
     /// Builds the temporary scenes for a Move from `a` to `b` and starts the animation.
-    fn start_move(&mut self, a: Id, b: Id, project: &Project) -> bool {
+    fn start_move(&mut self, a: Id, b: Id, workspace: &Workspace) -> bool {
         let (Some(scene_a), Some(scene_b)) =
-            (project.scene(a).map(|s| s.flatten()), project.scene(b).map(|s| s.flatten()))
+            (workspace.scene(a).map(|s| s.flatten()), workspace.scene(b).map(|s| s.flatten()))
         else {
             return false;
         };
         let (scene_a, scene_b) = (&scene_a, &scene_b);
         let ms = self.transition_settings.duration_ms;
-        let mut formats = Vec::new();
-        for format in self.formats.clone() {
-            let (Some(tr), dest) = (self.transitions.get(&format), self.dest(Some(b), format)) else { continue };
-            let name = format!("move:{format}:{}", Id::new());
-            let temp = match self.canvases.get(&format) {
-                Some(canvas) => canvas.create_scene(&name),
-                None => Scene::create(&name),
+        let mut canvases = Vec::new();
+        for canvas in self.canvases.clone() {
+            let (Some(tr), dest) = (self.transitions.get(&canvas), self.dest(Some(b), canvas)) else { continue };
+            let name = format!("move:{canvas}:{}", Id::new());
+            let temp = match self.obs_canvases.get(&canvas) {
+                Some(obs_canvas) => obs_canvas.create_scene(&name),
+                None => ObsScene::create(&name),
             };
             let Some(temp) = temp else { continue };
             let mut tweens = Vec::new();
@@ -957,7 +957,7 @@ impl Reconciler {
                 .collect();
             // Layers leaving: at the bottom, fading out.
             for l in scene_a.layers.iter().filter(|l| !used.contains(&l.id)) {
-                let (Some(lo), Some(input)) = (l.layouts.get(&format), l.input.and_then(|i| self.inputs.get(&i)))
+                let (Some(lo), Some(input)) = (l.layouts.get(&canvas), l.input.and_then(|i| self.inputs.get(&i)))
                 else {
                     continue;
                 };
@@ -978,7 +978,7 @@ impl Reconciler {
             }
             // B's layers: gliding from A's layout when they continue, fading in otherwise.
             for (l, m) in scene_b.layers.iter().zip(&matches) {
-                let (Some(to), Some(input)) = (l.layouts.get(&format), l.input.and_then(|i| self.inputs.get(&i)))
+                let (Some(to), Some(input)) = (l.layouts.get(&canvas), l.input.and_then(|i| self.inputs.get(&i)))
                 else {
                     continue;
                 };
@@ -991,7 +991,7 @@ impl Reconciler {
                 else {
                     continue;
                 };
-                match m.as_ref().and_then(|m| m.layouts.get(&format)).filter(|f| f.visible) {
+                match m.as_ref().and_then(|m| m.layouts.get(&canvas)).filter(|f| f.visible) {
                     Some(from) => {
                         // B's shape and flips throughout; tilt glides.
                         let from = Layout { shape: to.shape, flip_h: to.flip_h, flip_v: to.flip_v, ..*from };
@@ -1008,14 +1008,14 @@ impl Reconciler {
                 }
             }
             unsafe { sys::obs_transition_set(tr.as_ptr(), temp.source_ptr()) };
-            formats.push(FormatMove { temp, tweens, transition: tr.as_ptr(), dest, fades, masks });
+            canvases.push(CanvasMove { temp, tweens, transition: tr.as_ptr(), dest, fades, masks });
         }
-        if formats.is_empty() {
+        if canvases.is_empty() {
             return false;
         }
         self.ensure_tick();
         *self.anim.lock() =
-            Some(MoveAnim { formats, start: std::time::Instant::now(), duration: ms as f32 / 1000.0, done: false });
+            Some(MoveAnim { canvases, start: std::time::Instant::now(), duration: ms as f32 / 1000.0, done: false });
         true
     }
 
@@ -1067,18 +1067,18 @@ impl Reconciler {
         }
     }
 
-    fn add_layer(&mut self, scene: Id, format: Id, layer: &Layer, index: usize) {
+    fn add_layer(&mut self, scene: Id, canvas: Id, layer: &Layer, index: usize) {
         let (Some(obs_scene), Some(input)) =
-            (self.scenes.get(&(scene, format)), layer.input.and_then(|i| self.inputs.get(&i)))
+            (self.scenes.get(&(scene, canvas)), layer.input.and_then(|i| self.inputs.get(&i)))
         else {
             tracing::warn!(%scene, layer = %layer.id, "layer references a missing scene or input");
             return;
         };
-        let layout = layer.layouts.get(&format);
-        let key = (scene, format, layer.id);
+        let layout = layer.layouts.get(&canvas);
+        let key = (scene, canvas, layer.id);
         let filtered = self.crop_preview == Some(key);
         let Some((item, masked)) =
-            (unsafe { add_item(obs_scene.as_ptr(), input, layout, &format!("{}:{format}", layer.id), filtered) })
+            (unsafe { add_item(obs_scene.as_ptr(), input, layout, &format!("{}:{canvas}", layer.id), filtered) })
         else {
             return;
         };
@@ -1087,28 +1087,28 @@ impl Reconciler {
         if let Some(m) = masked {
             self.masks.insert(key, m);
         }
-        self.update_layer(scene, format, layer, index);
+        self.update_layer(scene, canvas, layer, index);
     }
 
-    fn update_layer(&mut self, scene: Id, format: Id, layer: &Layer, index: usize) {
-        let key = (scene, format, layer.id);
+    fn update_layer(&mut self, scene: Id, canvas: Id, layer: &Layer, index: usize) {
+        let key = (scene, canvas, layer.id);
         let Some(item) = self.items.get(&key).copied() else { return };
         // Gaining or losing a shape changes the item's structure (so does crop view, which
         // needs the mask): rebuild it in place. The new item goes in before the old one comes
         // out, so no frame is drawn without the layer.
         let previewing = self.crop_preview == Some(key);
-        let shaped = previewing || layer.layouts.get(&format).is_some_and(|l| l.needs_filters());
+        let shaped = previewing || layer.layouts.get(&canvas).is_some_and(|l| l.needs_filters());
         if shaped != self.masks.contains_key(&key) {
             self.masks.remove(&key);
             self.items.remove(&key);
-            self.add_layer(scene, format, layer, index);
+            self.add_layer(scene, canvas, layer, index);
             unsafe { sys::obs_sceneitem_remove(item.0) };
             return;
         }
         unsafe {
             sys::obs_sceneitem_set_locked(item.0, layer.locked);
             let size = previewing.then(|| layer.input.and_then(|i| self.input_size(i))).flatten();
-            match layer.layouts.get(&format) {
+            match layer.layouts.get(&canvas) {
                 // Being cropped: the whole picture, where it would sit uncropped, with the shape
                 // in the crop window and the rest as a ghost that fades in.
                 Some(l) if size.is_some() && self.masks.contains_key(&key) => {
@@ -1122,7 +1122,7 @@ impl Reconciler {
                     }
                 }
                 Some(l) => layout_item(item.0, self.masks.get(&key), l),
-                // No layout in this format: the layer is hidden there.
+                // No layout in this canvas: the layer is hidden there.
                 None => {
                     sys::obs_sceneitem_set_visible(item.0, false);
                 }
@@ -1130,26 +1130,26 @@ impl Reconciler {
         }
     }
 
-    fn reorder(&mut self, scene: Id, format: Id, order: &[Id]) {
+    fn reorder(&mut self, scene: Id, canvas: Id, order: &[Id]) {
         for (index, layer) in order.iter().enumerate() {
-            if let Some(item) = self.items.get(&(scene, format, *layer)) {
+            if let Some(item) = self.items.get(&(scene, canvas, *layer)) {
                 unsafe { sys::obs_sceneitem_set_order_position(item.0, index as i32) };
             }
         }
     }
 
     /// What libobs actually holds, read back from libobs (not from our maps): per scene and
-    /// format, the items bottom-to-top with source, position, bounds, rotation and visibility.
+    /// canvas, the items bottom-to-top with source, position, bounds, rotation and visibility.
     /// Used to check that incremental reconciliation and a full rebuild produce identical state.
     /// What a Studio take records: the screens and cameras in the program (visible in the
-    /// primary format), each once, with its live source.
-    pub fn take_sources(&self, project: &Project) -> Vec<(lightair_core::Input, *mut sys::obs_source_t)> {
-        let Some(scene) = project.program.and_then(|p| project.scene(p)) else { return Vec::new() };
-        let format = project.primary_format().id;
+    /// primary canvas), each once, with its live source.
+    pub fn take_sources(&self, workspace: &Workspace) -> Vec<(lightair_core::Input, *mut sys::obs_source_t)> {
+        let Some(scene) = workspace.program.and_then(|p| workspace.scene(p)) else { return Vec::new() };
+        let canvas = workspace.primary_canvas().id;
         let mut out: Vec<(lightair_core::Input, *mut sys::obs_source_t)> = Vec::new();
         for layer in scene.flatten().layers {
-            let visible = layer.layouts.get(&format).is_none_or(|l| l.visible);
-            let Some(input) = layer.input.and_then(|i| project.inputs.get(&i)) else { continue };
+            let visible = layer.layouts.get(&canvas).is_none_or(|l| l.visible);
+            let Some(input) = layer.input.and_then(|i| workspace.inputs.get(&i)) else { continue };
             if !visible
                 || !matches!(input.kind.as_str(), lightair_core::kinds::SCREEN | lightair_core::kinds::CAMERA)
                 || out.iter().any(|(i, _)| i.id == input.id)
@@ -1206,9 +1206,9 @@ impl Reconciler {
         keys.sort();
         let mut out = Vec::new();
         for key in keys {
-            let (scene, format) = key;
+            let (scene, canvas) = key;
             out.push(format!(
-                "scene {scene} format {format}{}",
+                "scene {scene} format {canvas}{}",
                 if self.program == Some(*scene) { " (program)" } else { "" }
             ));
             unsafe { sys::obs_scene_enum_items(self.scenes[key].as_ptr(), Some(each), &mut out as *mut _ as *mut _) };
@@ -1288,9 +1288,9 @@ impl Reconciler {
         meters().remove(id);
     }
 
-    /// Items of what a format's canvas is showing right now (through its transition), as
+    /// Items of what a canvas's canvas is showing right now (through its transition), as
     /// "name x y" lines with positions of the item centres. For tests and diagnostics.
-    pub fn describe_on_air(&self, format: Id) -> Vec<String> {
+    pub fn describe_on_air(&self, canvas: Id) -> Vec<String> {
         unsafe extern "C" fn each(
             _: *mut sys::obs_scene_t,
             item: *mut sys::obs_sceneitem_t,
@@ -1308,7 +1308,7 @@ impl Reconciler {
             true
         }
         let mut out = Vec::new();
-        let Some(tr) = self.transitions.get(&format) else { return out };
+        let Some(tr) = self.transitions.get(&canvas) else { return out };
         unsafe {
             let active = sys::obs_transition_get_active_source(tr.as_ptr());
             if active.is_null() {
@@ -1329,18 +1329,18 @@ impl Reconciler {
     }
 
     /// Releases everything in dependency order (scenes before the inputs they use).
-    /// Everything from `project`, from scratch (another project opened): the main canvas takes
-    /// its primary format's size.
-    pub fn rebuild(&mut self, project: &Project) {
+    /// Everything from `workspace`, from scratch (another workspace opened): the main canvas takes
+    /// its primary canvas's size.
+    pub fn rebuild(&mut self, workspace: &Workspace) {
         self.clear();
-        let patches = lightair_core::diff(&project.empty_like(), project);
-        self.apply(project, &patches);
-        let primary = project.primary_format();
+        let patches = lightair_core::diff(&workspace.empty_like(), workspace);
+        self.apply(workspace, &patches);
+        let primary = workspace.primary_canvas();
         let mut ovi = unsafe { std::mem::zeroed::<sys::obs_video_info>() };
         let same = unsafe { sys::obs_get_video_info(&mut ovi) }
             && (ovi.base_width, ovi.base_height, ovi.fps_num, ovi.fps_den) == (primary.width, primary.height, primary.fps_num, primary.fps_den.max(1));
         if !same {
-            self.resize_format(primary);
+            self.resize_canvas(primary);
         }
     }
 
@@ -1362,8 +1362,8 @@ impl Reconciler {
         }
         self.audio = None; // stops the audio thread, releases the captures
         unsafe { sys::obs_set_output_source(0, std::ptr::null_mut()) };
-        for canvas in self.canvases.values() {
-            unsafe { sys::obs_canvas_set_channel(canvas.as_ptr(), 0, std::ptr::null_mut()) };
+        for obs_canvas in self.obs_canvases.values() {
+            unsafe { sys::obs_canvas_set_channel(obs_canvas.as_ptr(), 0, std::ptr::null_mut()) };
         }
         self.transitions.clear();
         for (id, mut chain) in self.input_effects.drain() {
@@ -1374,8 +1374,8 @@ impl Reconciler {
         self.masks.clear();
         self.items.clear();
         self.scenes.clear();
+        self.obs_canvases.clear();
         self.canvases.clear();
-        self.formats.clear();
         self.inputs.clear();
         self.program = None;
         // libobs destroys sources on its own thread. Wait until it has, so whatever is built
@@ -1475,7 +1475,7 @@ fn transform_settings(l: &Layout) -> serde_json::Value {
 /// the cropped picture and belongs to this layer alone.
 pub(crate) unsafe fn add_item(
     scene: *mut sys::obs_scene_t,
-    input: &Source,
+    input: &ObsSource,
     layout: Option<&Layout>,
     name: &str,
     always_filtered: bool,
@@ -1492,7 +1492,7 @@ pub(crate) unsafe fn add_item(
         }
         let inner = sys::obs_scene_add(sys::obs_sceneitem_group_get_scene(group), input.as_ptr());
         let shape = layout.shape.unwrap_or(lightair_core::Shape::new(lightair_core::ShapeKind::Rounded));
-        let filter = Source::create_private(
+        let filter = ObsSource::create_private(
             "lightair_shape_mask",
             &format!("mask {name}"),
             Some(&data_from_json(&mask_settings(&shape))),
@@ -1505,7 +1505,7 @@ pub(crate) unsafe fn add_item(
         };
         let group_source = sys::obs_sceneitem_get_source(group);
         sys::obs_source_filter_add(group_source, filter.as_ptr());
-        let transform = Source::create_private(
+        let transform = ObsSource::create_private(
             "lightair_transform",
             &format!("transform {name}"),
             Some(&data_from_json(&transform_settings(layout))),
@@ -1561,14 +1561,14 @@ unsafe fn apply_track_levels(src: *mut sys::obs_source_t, track: &Track) {
     }
 }
 
-type Chain = Vec<(Id, Source)>;
+type Chain = Vec<(Id, ObsSource)>;
 
 /// Creates libobs filters for an effect chain and attaches them to `src`, in order.
 unsafe fn chain_build(src: *mut sys::obs_source_t, effects: &[Effect]) -> Chain {
     let mut chain = Chain::new();
     for effect in effects {
         let Some(filter) =
-            Source::create_private(&effect.kind, &effect.id.to_string(), Some(&data_from_json(&effect.settings)))
+            ObsSource::create_private(&effect.kind, &effect.id.to_string(), Some(&data_from_json(&effect.settings)))
         else {
             tracing::warn!(kind = effect.kind, "could not create effect");
             continue;

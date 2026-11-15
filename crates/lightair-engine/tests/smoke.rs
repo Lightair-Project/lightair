@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use lightair_engine::obs::{Data, Scene, Source};
+use lightair_engine::obs::{Data, ObsScene, ObsSource};
 use lightair_engine::{Engine, EngineConfig};
 
 #[test]
@@ -31,8 +31,8 @@ fn engine_starts_renders_and_stops() {
     let ok = engine.call(|s| {
         let mut settings = Data::new();
         settings.set_int("color", 0xFF4A3BFF_u32 as i64).set_int("width", 1280).set_int("height", 720);
-        let Some(colour) = Source::create("color_source_v3", "Colour", Some(&settings)) else { return false };
-        let Some(scene) = Scene::create("Main") else { return false };
+        let Some(colour) = ObsSource::create("color_source_v3", "Colour", Some(&settings)) else { return false };
+        let Some(scene) = ObsScene::create("Main") else { return false };
         scene.add(&colour);
         s.sources.insert("colour".into(), colour);
         s.scenes.insert("main".into(), scene);

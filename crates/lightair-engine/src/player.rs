@@ -5,11 +5,11 @@
 use std::path::Path;
 
 use crate::media::{MediaState, MediaStatus};
-use crate::obs::{Data, Source};
+use crate::obs::{Data, ObsSource};
 use crate::sys;
 
 pub struct Player {
-    source: Source,
+    source: ObsSource,
 }
 
 // SAFETY: libobs sources are reference counted and their media calls take their own locks.
@@ -27,7 +27,7 @@ impl Player {
             .set_bool("restart_on_activate", false)
             .set_bool("close_when_inactive", false)
             .set_bool("hw_decode", true);
-        let source = Source::create_private("ffmpeg_source", "Library player", Some(&settings))?;
+        let source = ObsSource::create_private("ffmpeg_source", "Library player", Some(&settings))?;
         unsafe { sys::obs_source_set_monitoring_type(source.as_ptr(), sys::OBS_MONITORING_TYPE_MONITOR_ONLY) };
         Some(Player { source })
     }

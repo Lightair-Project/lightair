@@ -1,9 +1,9 @@
 //! The Library (docs/plans/screen-studio.md, "Library"): every recording Lightair made, by
-//! project. Projects down the side, the selection's items as cards grouped by day, and what can
-//! be done with them: play, reveal, rename, duplicate, move to another project, locate a moved
+//! workspace. Workspaces down the side, the selection's items as cards grouped by day, and what can
+//! be done with them: play, reveal, rename, duplicate, move to another workspace, locate a moved
 //! file, move to the Trash (asked first), and bring in older recordings.
 //!
-//! Each project's items come from its recordings index (`lightair_store::recordings`); the
+//! Each workspace's items come from its recordings index (`lightair_store::recordings`); the
 //! media stays where it was recorded.
 
 use std::collections::HashMap;
@@ -32,9 +32,9 @@ pub(crate) use inside::part_icon;
 /// Where each card is drawn (for picking with a box).
 type CardBounds = std::rc::Rc<std::cell::RefCell<HashMap<(PathBuf, Id), Bounds<Pixels>>>>;
 
-/// A project in the side list.
+/// A workspace in the side list.
 #[derive(Clone)]
-pub(crate) struct ProjectEntry {
+pub(crate) struct WorkspaceEntry {
     pub name: String,
     pub dir: PathBuf,
 }
@@ -50,11 +50,11 @@ struct Playing {
 
 pub struct Library {
     studio: Entity<Studio>,
-    projects: Vec<ProjectEntry>,
+    workspaces: Vec<WorkspaceEntry>,
     /// `None`: All recordings.
     selected: Option<PathBuf>,
     indexes: HashMap<PathBuf, Index>,
-    /// Bytes per project (counted on reload).
+    /// Bytes per workspace (counted on reload).
     sizes: HashMap<PathBuf, u64>,
     seen_version: Option<u64>,
     search: Entity<InputState>,
@@ -80,42 +80,42 @@ pub struct Library {
     /// Takes opened to show their parts, and their parts (`None`: being read).
     inside_open: std::collections::HashSet<Id>,
     inside: HashMap<Id, Option<Vec<lightair_render::sequence::TakePart>>>,
-    /// Asked for: open this project / make one with this name (the window does it).
-    pub open_project: Option<PathBuf>,
-    pub new_project: Option<String>,
-    /// The new project's name, being typed.
+    /// Asked for: open this workspace / make one with this name (the window does it).
+    pub open_workspace: Option<PathBuf>,
+    pub new_workspace: Option<String>,
+    /// The new workspace's name, being typed.
     naming: Option<Entity<InputState>>,
     _subscriptions: Vec<Subscription>,
 }
 
-/// The projects in Lightair's Projects folder (packages with a project.json), by name; and
+/// The workspaces in Lightair's Workspaces folder (packages with a workspace.json), by name; and
 /// the open one, wherever it is.
-pub(crate) fn list_projects(current: Option<&Path>) -> Vec<ProjectEntry> {
+pub(crate) fn list_workspaces(current: Option<&Path>) -> Vec<WorkspaceEntry> {
     let name_of = |dir: &Path| -> Option<String> {
-        let text = std::fs::read_to_string(dir.join("project.json")).ok()?;
+        let text = std::fs::read_to_string(lightair_store::manifest(dir)).ok()?;
         let v: serde_json::Value = serde_json::from_str(&text).ok()?;
         v["name"].as_str().map(String::from)
     };
-    // the Projects folder, and the open project's own folder (where its new projects go)
-    let mut folders = vec![lightair_platform::paths::projects_dir()];
+    // the Workspaces folder, and the open workspace's own folder (where its new workspaces go)
+    let mut folders = vec![lightair_platform::paths::workspaces_dir()];
     if let Some(parent) = current.and_then(Path::parent).filter(|p| *p != folders[0]) {
         folders.push(parent.to_path_buf());
     }
-    let mut out: Vec<ProjectEntry> = folders
+    let mut out: Vec<WorkspaceEntry> = folders
         .iter()
         .flat_map(|f| std::fs::read_dir(f).into_iter().flatten().flatten())
         .map(|e| e.path())
         .filter(|d| d.extension().is_some_and(|e| e == "lightair"))
-        .filter_map(|dir| Some(ProjectEntry { name: name_of(&dir)?, dir }))
+        .filter_map(|dir| Some(WorkspaceEntry { name: name_of(&dir)?, dir }))
         .collect();
     if let Some(cur) = current
         && !out.iter().any(|p| p.dir == cur)
         && let Some(name) = name_of(cur)
     {
-        out.push(ProjectEntry { name, dir: cur.to_path_buf() });
+        out.push(WorkspaceEntry { name, dir: cur.to_path_buf() });
     }
     out.sort_by_key(|p| p.name.to_lowercase());
-    // projects sharing a name are told apart by their folder
+    // workspaces sharing a name are told apart by their folder
     let names: Vec<String> = out.iter().map(|p| p.name.clone()).collect();
     for p in &mut out {
         if names.iter().filter(|n| **n == p.name).count() > 1
@@ -175,10 +175,10 @@ impl Library {
                 cx.notify();
             }
         })];
-        let selected = studio.read(cx).project_dir();
+        let selected = studio.read(cx).workspace_dir();
         Library {
             studio,
-            projects: Vec::new(),
+            workspaces: Vec::new(),
             selected,
             indexes: HashMap::new(),
             sizes: HashMap::new(),
@@ -199,36 +199,36 @@ impl Library {
             body_bounds: Default::default(),
             inside_open: Default::default(),
             inside: HashMap::new(),
-            open_project: None,
-            new_project: None,
+            open_workspace: None,
+            new_workspace: None,
             naming: None,
             _subscriptions: subs,
         }
     }
 
-    /// Reads the projects and their indexes again (when shown, and when a recording finishes).
+    /// Reads the workspaces and their indexes again (when shown, and when a recording finishes).
     pub fn reload(&mut self, cx: &mut Context<Self>) {
-        let current = self.studio.read(cx).project_dir();
-        self.projects = list_projects(current.as_deref());
-        self.indexes = self.projects.iter().map(|p| (p.dir.clone(), Index::load(&p.dir))).collect();
+        let current = self.studio.read(cx).workspace_dir();
+        self.workspaces = list_workspaces(current.as_deref());
+        self.indexes = self.workspaces.iter().map(|p| (p.dir.clone(), Index::load(&p.dir))).collect();
         self.sizes = self.indexes.iter().map(|(d, i)| (d.clone(), i.bytes())).collect();
-        if self.selected.as_ref().is_some_and(|s| !self.projects.iter().any(|p| &p.dir == s)) {
+        if self.selected.as_ref().is_some_and(|s| !self.workspaces.iter().any(|p| &p.dir == s)) {
             self.selected = None;
         }
         self.seen_version = Some(self.studio.read(cx).library_version);
         cx.notify();
     }
 
-    fn save(&mut self, project: &Path) {
-        if let Some(index) = self.indexes.get(project)
-            && let Err(e) = index.save(project)
+    fn save(&mut self, workspace: &Path) {
+        if let Some(index) = self.indexes.get(workspace)
+            && let Err(e) = index.save(workspace)
         {
             self.note = Some(format!("Couldn't save the Library: {e}").into());
         }
-        self.sizes.insert(project.to_path_buf(), self.indexes.get(project).map_or(0, Index::bytes));
+        self.sizes.insert(workspace.to_path_buf(), self.indexes.get(workspace).map_or(0, Index::bytes));
     }
 
-    /// The items shown: the selection's, filtered, newest first, with their project.
+    /// The items shown: the selection's, filtered, newest first, with their workspace.
     fn shown(&self, cx: &App) -> Vec<(PathBuf, Item)> {
         let query = self.search.read(cx).value().to_string();
         let mut out: Vec<(PathBuf, Item)> = self
@@ -244,8 +244,8 @@ impl Library {
 
     // ------------------------------------------------------------ actions
 
-    fn play(&mut self, project: &Path, id: Id, cx: &mut Context<Self>) {
-        let Some(item) = self.indexes.get(project).and_then(|i| i.get(id)).cloned() else { return };
+    fn play(&mut self, workspace: &Path, id: Id, cx: &mut Context<Self>) {
+        let Some(item) = self.indexes.get(workspace).and_then(|i| i.get(id)).cloned() else { return };
         // the first file that's there: the program's video, or the first audio file
         let Some(path) = item.files.iter().map(|f| f.path.clone()).find(|p| p.exists() && !p.extension().is_some_and(|e| e == "json")) else {
             self.note = Some("Its files aren't where they were. Locate them first.".into());
@@ -276,8 +276,8 @@ impl Library {
         cx.notify();
     }
 
-    fn reveal(&mut self, project: &Path, id: Id, cx: &mut Context<Self>) {
-        let Some(item) = self.indexes.get(project).and_then(|i| i.get(id)) else { return };
+    fn reveal(&mut self, workspace: &Path, id: Id, cx: &mut Context<Self>) {
+        let Some(item) = self.indexes.get(workspace).and_then(|i| i.get(id)) else { return };
         let target = item.files.iter().map(|f| f.path.clone()).find(|p| p.exists());
         match target {
             Some(p) => {
@@ -290,8 +290,8 @@ impl Library {
         cx.notify();
     }
 
-    fn start_rename(&mut self, project: PathBuf, id: Id, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(title) = self.indexes.get(&project).and_then(|i| i.get(id)).map(|i| i.title.clone()) else { return };
+    fn start_rename(&mut self, workspace: PathBuf, id: Id, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(title) = self.indexes.get(&workspace).and_then(|i| i.get(id)).map(|i| i.title.clone()) else { return };
         let input = cx.new(|cx| InputState::new(window, cx));
         input.update(cx, |s, cx| {
             s.set_value(title, window, cx);
@@ -304,27 +304,27 @@ impl Library {
             }
         });
         self._subscriptions.push(sub);
-        self.renaming = Some((project, id, input));
+        self.renaming = Some((workspace, id, input));
         cx.notify();
     }
 
     fn finish_rename(&mut self, cx: &mut Context<Self>) {
-        let Some((project, id, input)) = self.renaming.take() else { return };
+        let Some((workspace, id, input)) = self.renaming.take() else { return };
         let title = input.read(cx).value().trim().to_string();
         if !title.is_empty()
-            && let Some(item) = self.indexes.get_mut(&project).and_then(|i| i.get_mut(id))
+            && let Some(item) = self.indexes.get_mut(&workspace).and_then(|i| i.get_mut(id))
         {
             item.title = title;
-            self.save(&project);
+            self.save(&workspace);
         }
         cx.notify();
     }
 
-    fn duplicate(&mut self, project: PathBuf, id: Id, cx: &mut Context<Self>) {
-        let result = self.indexes.get_mut(&project).map(|i| i.duplicate(id));
+    fn duplicate(&mut self, workspace: PathBuf, id: Id, cx: &mut Context<Self>) {
+        let result = self.indexes.get_mut(&workspace).map(|i| i.duplicate(id));
         match result {
             Some(Ok(copy)) => {
-                self.save(&project);
+                self.save(&workspace);
                 self.note = Some(format!("Made “{}”", copy.title).into());
             }
             Some(Err(e)) => self.note = Some(format!("Couldn't duplicate it: {e}").into()),
@@ -340,7 +340,7 @@ impl Library {
         }
         match recordings::move_item(&from, &to, id) {
             Ok(_) => {
-                let name = self.projects.iter().find(|p| p.dir == to).map(|p| p.name.clone()).unwrap_or_default();
+                let name = self.workspaces.iter().find(|p| p.dir == to).map(|p| p.name.clone()).unwrap_or_default();
                 self.note = Some(format!("Moved to {name}").into());
             }
             Err(e) => self.note = Some(format!("Couldn't move it: {e}").into()),
@@ -348,7 +348,7 @@ impl Library {
         self.reload(cx);
     }
 
-    fn locate(&mut self, project: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    fn locate(&mut self, workspace: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -359,8 +359,8 @@ impl Library {
             let Ok(Ok(Some(paths))) = picked.await else { return };
             let Some(folder) = paths.into_iter().next() else { return };
             let _ = this.update(cx, |this, cx| {
-                let found = this.indexes.get_mut(&project).map_or(0, |i| i.locate_in(&folder));
-                this.save(&project);
+                let found = this.indexes.get_mut(&workspace).map_or(0, |i| i.locate_in(&folder));
+                this.save(&workspace);
                 this.note = Some(match found {
                     0 => "Nothing missing was in that folder.".into(),
                     1 => "Found 1 file.".into(),
@@ -373,13 +373,13 @@ impl Library {
     }
 
     /// A take, with its edit, copied into a folder the user picks, to give or keep.
-    fn export_package(&mut self, project: PathBuf, id: Id, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.indexes.get(&project).and_then(|i| i.get(id)).cloned() else { return };
+    fn export_package(&mut self, workspace: PathBuf, id: Id, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.indexes.get(&workspace).and_then(|i| i.get(id)).cloned() else { return };
         let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Put the package here".into()) });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else { return };
             let Some(folder) = paths.into_iter().next() else { return };
-            let edit = project.join("recordings").join("edits").join(format!("{id}.json"));
+            let edit = workspace.join("recordings").join("edits").join(format!("{id}.json"));
             let result = recordings::export_package(&item, Some(&edit), &folder);
             let _ = this.update(cx, |this, cx| {
                 this.note = Some(match result {
@@ -393,7 +393,7 @@ impl Library {
     }
 
     pub(crate) fn add_existing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project) = self.selected.clone().or_else(|| self.studio.read(cx).project_dir()) else { return };
+        let Some(workspace) = self.selected.clone().or_else(|| self.studio.read(cx).workspace_dir()) else { return };
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -404,11 +404,11 @@ impl Library {
             let Ok(Ok(Some(paths))) = picked.await else { return };
             let Some(folder) = paths.into_iter().next() else { return };
             let _ = this.update(cx, |this, cx| {
-                let index = this.indexes.entry(project.clone()).or_default();
+                let index = this.indexes.entry(workspace.clone()).or_default();
                 let found = index.existing_in(&folder);
                 let n = found.len();
                 index.items.extend(found);
-                this.save(&project);
+                this.save(&workspace);
                 this.note = Some(match n {
                     0 => "No new recordings in that folder.".into(),
                     1 => "Added 1 recording.".into(),
@@ -423,16 +423,16 @@ impl Library {
     fn trash(&mut self, cx: &mut Context<Self>) {
         let items = std::mem::take(&mut self.confirm_trash);
         let (mut moved, mut failed) = (0, None);
-        for (project, id) in &items {
-            match self.indexes.get_mut(project).map(|i| i.trash(*id, lightair_platform::files::trash)) {
+        for (workspace, id) in &items {
+            match self.indexes.get_mut(workspace).map(|i| i.trash(*id, lightair_platform::files::trash)) {
                 Some(Ok(())) => moved += 1,
                 Some(Err(e)) => failed = Some(e.to_string()),
                 None => {}
             }
-            self.picked.retain(|p| p != &(project.clone(), *id));
+            self.picked.retain(|p| p != &(workspace.clone(), *id));
         }
-        let projects: std::collections::HashSet<PathBuf> = items.iter().map(|(p, _)| p.clone()).collect();
-        for p in projects {
+        let workspaces: std::collections::HashSet<PathBuf> = items.iter().map(|(p, _)| p.clone()).collect();
+        for p in workspaces {
             self.save(&p);
         }
         self.note = Some(match failed {
@@ -443,8 +443,8 @@ impl Library {
         cx.notify();
     }
 
-    /// A field for the new project's name; Enter makes it, Escape (or leaving it empty) doesn't.
-    pub(crate) fn start_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// A field for the new workspace's name; Enter makes it, Escape (or leaving it empty) doesn't.
+    pub(crate) fn start_new_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Workspace name"));
         input.update(cx, |s, cx| s.focus(window, cx));
         let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, _, cx| match ev {
@@ -452,7 +452,7 @@ impl Library {
                 let name = input.read(cx).value().trim().to_string();
                 this.naming = None;
                 if !name.is_empty() {
-                    this.new_project = Some(name);
+                    this.new_workspace = Some(name);
                 }
                 cx.notify();
             }
@@ -506,16 +506,16 @@ impl Library {
                 .pl_2()
                 .child(div().flex_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child("WORKSPACES"))
                 .child(
-                    ui::icon_button("lib-new-project", "plus", tok::text_secondary())
+                    ui::icon_button("lib-new-workspace", "plus", tok::text_secondary())
                         .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("New workspace").build(w, cx))
-                        .on_click(cx.listener(|this, _, window, cx| this.start_new_project(window, cx))),
+                        .on_click(cx.listener(|this, _, window, cx| this.start_new_workspace(window, cx))),
                 ),
         );
         if let Some(input) = &self.naming {
             list = list.child(div().px_1().pb_1().child(TextInput::new(input).small()));
         }
-        let current = self.studio.read(cx).project_dir();
-        for (n, p) in self.projects.iter().enumerate() {
+        let current = self.studio.read(cx).workspace_dir();
+        for (n, p) in self.workspaces.iter().enumerate() {
             let dir = p.dir.clone();
             let on = self.selected.as_ref() == Some(&p.dir);
             let open = current.as_ref() == Some(&p.dir);
@@ -526,7 +526,7 @@ impl Library {
                     menu.item(PopupMenuItem::new("Open workspace").icon(ui::icon("folder-open")).disabled(open).on_click(move |_, _, cx| {
                         if let Some(me) = me2.upgrade() {
                             me.update(cx, |this, cx| {
-                                this.open_project = Some(dir2.clone());
+                                this.open_workspace = Some(dir2.clone());
                                 cx.notify();
                             });
                         }
@@ -540,7 +540,7 @@ impl Library {
                 }
             };
             list = list.child(
-                row(SharedString::from(format!("lib-project-{n}")), if open { "folder-open" } else { "folder" }, p.name.clone(), count(Some(&p.dir)), on)
+                row(SharedString::from(format!("lib-workspace-{n}")), if open { "folder-open" } else { "folder" }, p.name.clone(), count(Some(&p.dir)), on)
                     .when(open, |d| d.child(div().size(px(6.)).rounded_full().bg(tok::ok())))
                     .tooltip(move |w, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(if open { "Open now" } else { "Double-click to open" }).build(w, cx)
@@ -548,7 +548,7 @@ impl Library {
                     .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                         this.selected = Some(dir.clone());
                         if ev.click_count() >= 2 && !open {
-                            this.open_project = Some(dir.clone());
+                            this.open_workspace = Some(dir.clone());
                         }
                         cx.notify();
                     }))
@@ -566,7 +566,7 @@ impl Library {
             .border_r_1()
             .border_color(tok::border())
             .bg(tok::bg_panel())
-            .child(div().id("lib-projects").flex_1().min_h_0().overflow_y_scroll().child(list))
+            .child(div().id("lib-workspaces").flex_1().min_h_0().overflow_y_scroll().child(list))
             .child(
                 div()
                     .flex()
@@ -623,20 +623,20 @@ impl Library {
         row
     }
 
-    fn card(&self, project: &Path, item: &Item, n: usize, cx: &mut Context<Self>) -> AnyElement {
-        let (dir, id) = (project.to_path_buf(), item.id);
+    fn card(&self, workspace: &Path, item: &Item, n: usize, cx: &mut Context<Self>) -> AnyElement {
+        let (dir, id) = (workspace.to_path_buf(), item.id);
         let missing = !item.missing().is_empty();
         let thumbnail = item.thumbnail.clone().filter(|t| t.exists());
         let when = Local.timestamp_millis_opt(item.started_ms).single().map(|t| t.format("%H:%M").to_string()).unwrap_or_default();
         // its canvases (a recording of several), or what a take recorded (screen, camera)
-        let formats: Vec<String> = item.files.iter().filter_map(|f| f.format.clone().or_else(|| f.track.clone())).collect();
+        let canvases: Vec<String> = item.files.iter().filter_map(|f| f.canvas.clone().or_else(|| f.track.clone())).collect();
         let mut detail = vec![when, item.kind.label().to_string()];
-        if !formats.is_empty() {
-            detail.push(formats.join(" + "));
+        if !canvases.is_empty() {
+            detail.push(canvases.join(" + "));
         }
         let renaming = self.renaming.as_ref().filter(|(d, i, _)| *d == dir && *i == id).map(|(_, _, input)| input.clone());
-        let project_name = (self.selected.is_none())
-            .then(|| self.projects.iter().find(|p| p.dir == dir).map(|p| p.name.clone()))
+        let workspace_name = (self.selected.is_none())
+            .then(|| self.workspaces.iter().find(|p| p.dir == dir).map(|p| p.name.clone()))
             .flatten();
 
         let thumb = div()
@@ -703,7 +703,7 @@ impl Library {
             });
 
         let menu = {
-            let (me, dir, projects, title, kind) = (cx.entity().downgrade(), dir.clone(), self.projects.clone(), item.title.clone(), item.kind);
+            let (me, dir, workspaces, title, kind) = (cx.entity().downgrade(), dir.clone(), self.workspaces.clone(), item.title.clone(), item.kind);
             move |mut menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>| {
                 let act = |f: fn(&mut Library, PathBuf, Id, &mut Window, &mut Context<Library>)| {
                     let (me, dir) = (me.clone(), dir.clone());
@@ -727,7 +727,7 @@ impl Library {
                     .separator()
                     .item(PopupMenuItem::new("Rename…").icon(ui::icon("pencil")).on_click(act(|t, d, i, w, cx| t.start_rename(d, i, w, cx))))
                     .item(PopupMenuItem::new("Duplicate").icon(ui::icon("copy")).on_click(act(|t, d, i, _, cx| t.duplicate(d, i, cx))));
-                let others: Vec<ProjectEntry> = projects.iter().filter(|p| p.dir != dir).cloned().collect();
+                let others: Vec<WorkspaceEntry> = workspaces.iter().filter(|p| p.dir != dir).cloned().collect();
                 if !others.is_empty() {
                     let (me, dir) = (me.clone(), dir.clone());
                     menu = menu.submenu_with_icon(Some(ui::icon("folder-input")), "Move to workspace", window, cx, move |mut sub, _, _| {
@@ -807,7 +807,7 @@ impl Library {
                     .whitespace_nowrap()
                     .text_size(px(11.))
                     .text_color(tok::text_tertiary())
-                    .child(match project_name {
+                    .child(match workspace_name {
                         Some(p) => format!("{} · {p}", detail.join(" · ")),
                         None => detail.join(" · "),
                     }),
@@ -1096,7 +1096,7 @@ impl Render for Library {
         let searching = !self.search.read(cx).value().is_empty() || self.kind.is_some();
         let title = match &self.selected {
             None => "All recordings".to_string(),
-            Some(dir) => self.projects.iter().find(|p| &p.dir == dir).map(|p| p.name.clone()).unwrap_or_default(),
+            Some(dir) => self.workspaces.iter().find(|p| &p.dir == dir).map(|p| p.name.clone()).unwrap_or_default(),
         };
         let size = match &self.selected {
             None => self.sizes.values().sum(),

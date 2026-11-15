@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use lightair_core::{Id, Input, kinds};
 use serde_json::json;
 
-use crate::obs::{Canvas, Data, Scene, Source};
+use crate::obs::{ObsCanvas, Data, ObsScene, ObsSource};
 use crate::outputs::{Container, OutputKey, Outputs, RecordingConfig, default_encoders, runtime};
 use crate::sys;
 
@@ -34,9 +34,9 @@ pub struct Track {
 struct Part {
     key: Id,
     // dropped after the output stops (field order: scene, then canvas)
-    _own: Option<Source>,
-    _scene: Scene,
-    _canvas: Canvas,
+    _own: Option<ObsSource>,
+    _scene: ObsScene,
+    _canvas: ObsCanvas,
 }
 
 pub struct Take {
@@ -71,7 +71,7 @@ impl Take {
                 let mut settings = input.settings.clone();
                 settings["cursor"] = json!(false);
                 let Some((kind, s)) = crate::kinds::resolve(&input.kind, &settings) else { continue };
-                Source::create_private(kind, &format!("take:{}", input.id), Some(&Data::from_json(&s)))
+                ObsSource::create_private(kind, &format!("take:{}", input.id), Some(&Data::from_json(&s)))
             } else {
                 None
             };
@@ -82,11 +82,11 @@ impl Take {
             let (w, h) = unsafe { (sys::obs_source_get_width(live), sys::obs_source_get_height(live)) };
             let (w, h) = if w > 0 && h > 0 { (even(w), even(h)) } else { (1920, 1080) };
             let key = Id::new();
-            let Some(canvas) = Canvas::create(&format!("take:{key}"), w, h, fps.0, fps.1) else { continue };
-            let Some(scene) = canvas.create_scene(&format!("take:{key}")) else { continue };
+            let Some(obs_canvas) = ObsCanvas::create(&format!("take:{key}"), w, h, fps.0, fps.1) else { continue };
+            let Some(scene) = obs_canvas.create_scene(&format!("take:{key}")) else { continue };
             unsafe {
                 sys::obs_scene_add(scene.as_ptr(), src);
-                sys::obs_canvas_set_channel(canvas.as_ptr(), 0, scene.source_ptr());
+                sys::obs_canvas_set_channel(obs_canvas.as_ptr(), 0, scene.source_ptr());
             }
             let name = if screen {
                 screens += 1;
@@ -109,10 +109,10 @@ impl Take {
                 encoders: enc,
                 extra_mixes: Vec::new(),
             };
-            let video = crate::outputs::VideoOutput(unsafe { sys::obs_canvas_get_video(canvas.as_ptr()) });
+            let video = crate::outputs::VideoOutput(unsafe { sys::obs_canvas_get_video(obs_canvas.as_ptr()) });
             outputs.start_recording(&cfg, Some(video))?;
             tracks.push(Track { name, screen, input: input.id, file, width: w, height: h });
-            parts.push(Part { key, _own: own, _scene: scene, _canvas: canvas });
+            parts.push(Part { key, _own: own, _scene: scene, _canvas: obs_canvas });
         }
         if parts.is_empty() {
             return Err("The program has no screen or camera to record.".into());

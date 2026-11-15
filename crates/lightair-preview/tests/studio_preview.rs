@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Project, Scene, diff};
+use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Frame, Preview, sample_ycbcr};
 use serde_json::json;
@@ -31,8 +31,8 @@ fn is_blue((_, cb, cr): (u8, u8, u8)) -> bool {
 fn preview_shows_an_off_air_scene() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Studio mode"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Studio mode"));
+    let f = doc.workspace().primary_canvas().id;
     // libobs colours are ABGR.
     let red = Input::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 320, "height": 180}));
     let blue = Input::new("Blue", "color_source_v3", json!({"color": 0xFFFF0000u32, "width": 320, "height": 180}));
@@ -50,8 +50,8 @@ fn preview_shows_an_off_air_scene() {
     ] {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
-        let project = change.after.clone();
-        engine.call(move |s| s.reconciler.apply(&project, &patches));
+        let workspace = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     }
 
     let program = engine.call(|_| Preview::attach());

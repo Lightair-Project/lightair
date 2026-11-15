@@ -4,7 +4,7 @@ use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Id, Project, TransitionKind, TransitionSettings};
+use lightair_core::{Command, Id, Workspace, TransitionKind, TransitionSettings};
 
 use super::StudioWindow;
 use crate::ui::{self, tok};
@@ -79,9 +79,9 @@ pub(super) fn score(query: &str, label: &str) -> Option<u32> {
     Some(first * 4 + spread * 2 + (q.len() as u32).saturating_sub(word_starts))
 }
 
-fn entries(project: &Project, studio_mode: bool) -> Vec<Entry> {
+fn entries(workspace: &Workspace, studio_mode: bool) -> Vec<Entry> {
     use PaletteAction::*;
-    let mut out: Vec<Entry> = project
+    let mut out: Vec<Entry> = workspace
         .scenes
         .iter()
         .map(|s| Entry {
@@ -107,7 +107,7 @@ fn entries(project: &Project, studio_mode: bool) -> Vec<Entry> {
         ("Add text object", "", "type", AddText),
         ("Add colour object", "", "square", AddColour),
         ("Add timer object", "", "timer", AddTimer),
-        ("Add vertical format", "", "smartphone", AddVertical),
+        ("Add vertical canvas", "", "smartphone", AddVertical),
         ("Add screen recording scenes", "", "monitor", AddScreenLayouts),
         ("Start or stop a Studio take", "", "mouse-pointer-2", StudioTake),
         ("Import OBS scenes", "", "import", ImportObs),
@@ -132,8 +132,8 @@ fn entries(project: &Project, studio_mode: bool) -> Vec<Entry> {
 }
 
 /// Entries matching `query`, best first.
-pub(super) fn matches(project: &Project, studio_mode: bool, query: &str) -> Vec<Entry> {
-    let mut scored: Vec<(u32, usize, Entry)> = entries(project, studio_mode)
+pub(super) fn matches(workspace: &Workspace, studio_mode: bool, query: &str) -> Vec<Entry> {
+    let mut scored: Vec<(u32, usize, Entry)> = entries(workspace, studio_mode)
         .into_iter()
         .enumerate()
         .filter_map(|(i, e)| score(query, &e.label).map(|s| (s, i, e)))
@@ -174,7 +174,7 @@ impl StudioWindow {
     fn palette_matches(&self, cx: &App) -> Vec<Entry> {
         let Some(p) = &self.palette else { return vec![] };
         let query = p.input.read(cx).value().to_string();
-        matches(self.studio.read(cx).project(), self.studio_mode, &query)
+        matches(self.studio.read(cx).workspace(), self.studio_mode, &query)
     }
 
     fn run_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -218,7 +218,7 @@ impl StudioWindow {
             StudioTake => self.studio_take(cx),
             ImportObs => self.import_obs(window, cx),
             Transition(kind) => {
-                let current = self.studio.read(cx).project().transition;
+                let current = self.studio.read(cx).workspace().transition;
                 self.exec(Command::SetTransition { settings: TransitionSettings { kind, ..current } }, cx);
             }
             Undo => self.studio.update(cx, |s, cx| s.undo(cx)),
@@ -313,7 +313,7 @@ impl StudioWindow {
 #[cfg(test)]
 mod tests {
     use super::{matches, score};
-    use lightair_core::{Project, Scene};
+    use lightair_core::{Workspace, Scene};
 
     #[test]
     fn scoring() {
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn scenes_and_commands_are_found() {
-        let mut p = Project::new("P");
+        let mut p = Workspace::new("P");
         p.scenes.push(std::sync::Arc::new(Scene::new("Be Right Back")));
         assert_eq!(matches(&p, false, "brb")[0].label, "Be Right Back");
         assert_eq!(matches(&p, false, "cue")[0].label, "Cue scenes");

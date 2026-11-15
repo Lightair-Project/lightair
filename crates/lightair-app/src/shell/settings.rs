@@ -1,5 +1,5 @@
 //! Settings (⌘,; docs/14-data-persistence-settings.md, "Settings"): a window with a page per
-//! area. Recording, streaming, clips and canvases travel with the project; General is this
+//! area. Recording, streaming, clips and canvases travel with the workspace; General is this
 //! Mac's. Each destination has its own settings too, in Outputs (click it).
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -7,7 +7,7 @@ use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{ClipSettings, Command, Format, Reconnect, RecordingSettings, VideoEncoder};
+use lightair_core::{ClipSettings, Command, Canvas, Reconnect, RecordingSettings, VideoEncoder};
 
 use gpui_kit::component::input::{Input, InputState};
 
@@ -106,13 +106,13 @@ impl StudioWindow {
     }
 
     fn set_recording(&mut self, f: impl FnOnce(&mut RecordingSettings), cx: &mut Context<Self>) {
-        let mut settings = self.studio.read(cx).project().outputs.recording.clone();
+        let mut settings = self.studio.read(cx).workspace().outputs.recording.clone();
         f(&mut settings);
         self.exec(Command::SetRecordingSettings { settings }, cx);
     }
 
     fn set_clips(&mut self, f: impl FnOnce(&mut ClipSettings), cx: &mut Context<Self>) {
-        let mut settings = self.studio.read(cx).project().outputs.clips;
+        let mut settings = self.studio.read(cx).workspace().outputs.clips;
         f(&mut settings);
         self.exec(Command::SetClipSettings { settings }, cx);
     }
@@ -129,7 +129,7 @@ impl StudioWindow {
     }
 
     pub(super) fn edit_canvas(&mut self, id: lightair_core::Id, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(f) = self.studio.read(cx).project().format(id).cloned() else { return };
+        let Some(f) = self.studio.read(cx).workspace().canvas(id).cloned() else { return };
         let field = |value: String, window: &mut Window, cx: &mut Context<Self>| {
             let e = cx.new(|cx| InputState::new(window, cx));
             e.update(cx, |i, cx| i.set_value(value, window, cx));
@@ -146,8 +146,8 @@ impl StudioWindow {
     /// Applies the canvas edit: the new size, with every top-level object reframed into it.
     fn apply_canvas_edit(&mut self, cx: &mut Context<Self>) {
         let Some(edit) = &mut self.canvas_edit else { return };
-        let project = self.studio.read(cx).project().clone();
-        let Some(old) = project.format(edit.id).cloned() else { return };
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some(old) = workspace.canvas(edit.id).cloned() else { return };
         let num = |e: &Entity<InputState>, cx: &App| e.read(cx).value().trim().parse::<u32>().ok();
         let (Some(w), Some(h)) = (num(&edit.width, cx), num(&edit.height, cx)) else {
             edit.error = Some("Width and height are whole numbers of pixels.".into());
@@ -160,7 +160,7 @@ impl StudioWindow {
             return;
         }
         let name = edit.name.read(cx).value().trim().to_string();
-        let new = Format {
+        let new = Canvas {
             name: if name.is_empty() { old.name.clone() } else { name },
             width: w & !1,
             height: h & !1,
@@ -168,13 +168,13 @@ impl StudioWindow {
             fps_den: 1,
             ..old.clone()
         };
-        let mut commands = vec![Command::UpdateFormat { format: new.clone() }];
+        let mut commands = vec![Command::UpdateCanvas { canvas: new.clone() }];
         if (new.width, new.height) != (old.width, old.height) {
-            for scene in &project.scenes {
+            for scene in &workspace.scenes {
                 for layer in scene.layers.iter().filter(|l| l.parent.is_none()) {
                     if let Some(l) = layer.layouts.get(&old.id) {
                         let layout = crate::reframe::reframe(l, &old, &new);
-                        commands.push(Command::SetLayout { scene: scene.id, layer: layer.id, format: old.id, layout });
+                        commands.push(Command::SetLayout { scene: scene.id, layer: layer.id, canvas: old.id, layout });
                     }
                 }
             }
@@ -237,8 +237,8 @@ impl StudioWindow {
 
     /// The audio engine's buffer (frames), now and from now on.
     fn set_audio_block(&mut self, frames: usize, cx: &mut Context<Self>) {
-        let project = self.studio.read(cx).project().clone();
-        let done = self.studio.read(cx).engine().call(move |s| s.reconciler.set_audio_block(frames, &project));
+        let workspace = self.studio.read(cx).workspace().clone();
+        let done = self.studio.read(cx).engine().call(move |s| s.reconciler.set_audio_block(frames, &workspace));
         if done {
             self.set_pref(|p| p.audio_block = frames, cx);
         } else {
@@ -248,8 +248,8 @@ impl StudioWindow {
 
     /// Sets the mixer up as a template (one undo step), with the settings it wants.
     pub(super) fn use_audio_template(&mut self, t: lightair_core::templates::Template, cx: &mut Context<Self>) {
-        let project = self.studio.read(cx).project().clone();
-        self.exec(crate::mixer::template_command(&project, t), cx);
+        let workspace = self.studio.read(cx).workspace().clone();
+        self.exec(crate::mixer::template_command(&workspace, t), cx);
         if let Some(frames) = t.block() {
             self.set_audio_block(frames, cx);
         }
@@ -424,8 +424,8 @@ impl StudioWindow {
         let review = self.prefs.review_before_live;
         let confirm = self.prefs.confirm_end_stream;
         let studio = self.studio.read(cx);
-        let project_dir = studio.project_dir();
-        let name = studio.project().name.clone();
+        let workspace_dir = studio.workspace_dir();
+        let name = studio.workspace().name.clone();
         pages()
             .child(
                 group("Going live")
@@ -446,8 +446,8 @@ impl StudioWindow {
             )
             .child(group("Workspace").child(row(
                 name.as_str(),
-                project_dir.as_ref().map(|d| d.to_string_lossy().into_owned()).as_deref(),
-                reveal_button("reveal-project", project_dir),
+                workspace_dir.as_ref().map(|d| d.to_string_lossy().into_owned()).as_deref(),
+                reveal_button("reveal-workspace", workspace_dir),
             )))
             .child(note(&format!("General settings belong to this {}. The rest are saved with the workspace.", ui::MACHINE)))
     }
@@ -668,21 +668,21 @@ impl StudioWindow {
 
     fn recording_page(&self, cx: &mut Context<Self>) -> Div {
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
+        let workspace = studio.workspace().clone();
         let caps = studio.engine().capabilities.encoders.clone();
         let folder = studio.recording_folder();
-        let rec = project.outputs.recording.clone();
-        let targets = rec.targets(&project);
+        let rec = workspace.outputs.recording.clone();
+        let targets = rec.targets(&workspace);
 
         let mut canvases = group("Canvases");
-        for (i, f) in project.formats.iter().enumerate() {
+        for (i, f) in workspace.canvases.iter().enumerate() {
             let on = targets.contains(&f.id);
-            let (fid, r2, p2) = (f.id, rec.clone(), project.clone());
+            let (fid, r2, p2) = (f.id, rec.clone(), workspace.clone());
             canvases = canvases.child(row(
                 &format!("{} {}×{}", f.name, f.width, f.height),
                 None,
                 switch(("rec-canvas", i), on).on_click(cx.listener(move |this, _, _, cx| {
-                    let settings = r2.with_format(&p2, fid, !on);
+                    let settings = r2.with_canvas(&p2, fid, !on);
                     this.exec(Command::SetRecordingSettings { settings }, cx);
                 })),
             ));
@@ -820,8 +820,8 @@ impl StudioWindow {
                 .into_iter()
                 .map(|(p, l)| (l.to_string(), rec.stem_point == p, multi || only, set(RecordingSettings { stem_point: p, ..rec.clone() })))
                 .collect();
-        let project = self.studio.read(cx).project().clone();
-        let mixes: Vec<(String, bool, bool, Command)> = project
+        let workspace = self.studio.read(cx).workspace().clone();
+        let mixes: Vec<(String, bool, bool, Command)> = workspace
             .audio
             .mixes
             .iter()
@@ -875,9 +875,9 @@ impl StudioWindow {
     }
 
     fn streaming_page(&self, cx: &mut Context<Self>) -> Div {
-        let project = self.studio.read(cx).project().clone();
-        let kbps = project.outputs.stream_bitrate_kbps;
-        let rc = project.outputs.reconnect;
+        let workspace = self.studio.read(cx).workspace().clone();
+        let kbps = workspace.outputs.stream_bitrate_kbps;
+        let rc = workspace.outputs.reconnect;
         let set = |r: Reconnect| Command::SetReconnect { reconnect: r };
         let retries: Vec<(String, bool, bool, Command)> =
             [(0, "Off"), (5, "5 tries"), (20, "20 tries"), (100, "Keep trying")]
@@ -888,7 +888,7 @@ impl StudioWindow {
             .into_iter()
             .map(|d| (format!("{d} s"), rc.delay_s == d, rc.retries > 0, set(Reconnect { delay_s: d, ..rc })))
             .collect();
-        let custom = project.outputs.destinations.iter().filter(|d| d.encoding.is_some()).count();
+        let custom = workspace.outputs.destinations.iter().filter(|d| d.encoding.is_some()).count();
         pages()
             .child(
                 group("Quality")
@@ -928,8 +928,8 @@ impl StudioWindow {
     }
 
     fn clips_page(&self, cx: &mut Context<Self>) -> Div {
-        let project = self.studio.read(cx).project().clone();
-        let clips = project.outputs.clips;
+        let workspace = self.studio.read(cx).workspace().clone();
+        let clips = workspace.outputs.clips;
         let on = clips.enabled;
         let seconds: Vec<(String, bool, bool, Command)> = [15, 30, 60, 120, 300]
             .into_iter()
@@ -939,13 +939,13 @@ impl StudioWindow {
                 (label, clips.seconds == s, true, Command::SetClipSettings { settings })
             })
             .collect();
-        let canvases: Vec<(String, bool, bool, Command)> = project
-            .formats
+        let canvases: Vec<(String, bool, bool, Command)> = workspace
+            .canvases
             .iter()
             .map(|f| {
-                let format = (f.id != project.primary_format().id).then_some(f.id);
-                let settings = ClipSettings { format, ..clips };
-                (f.name.clone(), clips.format == format, true, Command::SetClipSettings { settings })
+                let canvas = (f.id != workspace.primary_canvas().id).then_some(f.id);
+                let settings = ClipSettings { canvas, ..clips };
+                (f.name.clone(), clips.canvas == canvas, true, Command::SetClipSettings { settings })
             })
             .collect();
         pages().child(
@@ -957,17 +957,17 @@ impl StudioWindow {
                         .on_click(cx.listener(move |this, _, _, cx| this.set_clips(|c| c.enabled = !on, cx))),
                 ))
                 .child(row("Length", None, chips("clips-length", seconds, cx)))
-                .when(project.formats.len() > 1, |g| g.child(row("Canvas", None, chips("clips-canvas", canvases, cx)))),
+                .when(workspace.canvases.len() > 1, |g| g.child(row("Canvas", None, chips("clips-canvas", canvases, cx)))),
         )
     }
 
     fn canvases_page(&self, cx: &mut Context<Self>) -> Div {
-        let project = self.studio.read(cx).project().clone();
-        let primary = project.primary_format().id;
+        let workspace = self.studio.read(cx).workspace().clone();
+        let primary = workspace.primary_canvas().id;
         let busy = lightair_engine::outputs::runtime().any_stream_running()
             || lightair_engine::outputs::runtime().any_recording_running();
         let mut list = group("Canvases");
-        for (i, f) in project.formats.iter().enumerate() {
+        for (i, f) in workspace.canvases.iter().enumerate() {
             let id = f.id;
             if let Some(edit) = self.canvas_edit.as_ref().filter(|e| e.id == id) {
                 list = list.child(self.canvas_editor(f, edit, busy, cx));
@@ -978,7 +978,7 @@ impl StudioWindow {
                 .flex()
                 .gap_1()
                 .child(
-                    Button::new(("edit-format", i))
+                    Button::new(("edit-canvas", i))
                         .label("Edit")
                         .xsmall()
                         .outline()
@@ -987,29 +987,29 @@ impl StudioWindow {
                 .child(if id == primary {
                     div().px_2().text_size(px(11.)).text_color(tok::text_tertiary()).child("Main").into_any_element()
                 } else {
-                    Button::new(("remove-format", i))
+                    Button::new(("remove-canvas", i))
                         .label("Remove")
                         .xsmall()
                         .ghost()
                         .on_click(
-                            cx.listener(move |this, _, _, cx| this.exec(Command::RemoveFormat { format: id }, cx)),
+                            cx.listener(move |this, _, _, cx| this.exec(Command::RemoveCanvas { canvas: id }, cx)),
                         )
                         .into_any_element()
                 });
             list = list.child(row(&f.name, Some(&detail), actions));
         }
-        let has = |w: u32, h: u32| project.formats.iter().any(|f| f.width == w && f.height == h);
+        let has = |w: u32, h: u32| workspace.canvases.iter().any(|f| f.width == w && f.height == h);
         let mut add = div().flex().flex_wrap().gap_1();
-        for (i, f) in [Format::vertical(), Format::square(), Format::portrait()].into_iter().enumerate() {
+        for (i, f) in [Canvas::vertical(), Canvas::square(), Canvas::portrait()].into_iter().enumerate() {
             if has(f.width, f.height) {
                 continue;
             }
             add = add.child(
-                Button::new(("settings-add-format", i))
+                Button::new(("settings-add-canvas", i))
                     .label(format!("{} {}×{}", f.name, f.width, f.height))
                     .xsmall()
                     .outline()
-                    .on_click(cx.listener(move |this, _, _, cx| this.add_format(f.clone(), cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| this.add_canvas(f.clone(), cx))),
             );
         }
         pages()
@@ -1020,7 +1020,7 @@ impl StudioWindow {
     }
 
     /// Editing one canvas: name, size (presets for its shape, or typed), frame rate.
-    fn canvas_editor(&self, f: &Format, edit: &CanvasEdit, busy: bool, cx: &mut Context<Self>) -> Div {
+    fn canvas_editor(&self, f: &Canvas, edit: &CanvasEdit, busy: bool, cx: &mut Context<Self>) -> Div {
         let vertical = f.height > f.width;
         let square = f.height == f.width;
         let presets: &[(u32, u32)] = if square {
@@ -1132,7 +1132,7 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let libobs = studio.engine().version.clone();
         let folders = [
-            ("Project", studio.project_dir()),
+            ("Workspace", studio.workspace_dir()),
             ("Recordings", Some(studio.recording_folder())),
             ("Preferences", crate::prefs::path().parent().map(|p| p.to_path_buf())),
         ];

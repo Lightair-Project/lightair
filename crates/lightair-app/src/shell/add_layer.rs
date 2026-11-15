@@ -97,13 +97,13 @@ impl StudioWindow {
     /// Reuses an input already in the show as a new layer in this scene.
     fn add_existing(&mut self, input: Id, window: &mut Window, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
+        let workspace = studio.workspace().clone();
         let Some(scene) = studio.selected_scene else { return };
-        let Some(i) = project.inputs.get(&input) else { return };
+        let Some(i) = workspace.inputs.get(&input) else { return };
         let size = studio.engine().call(move |s| s.reconciler.input_size(input)).unwrap_or((1280, 720));
         let (w, h) = (size.0 as f32, size.1 as f32);
-        let layouts: Vec<(Id, Layout)> = project
-            .formats
+        let layouts: Vec<(Id, Layout)> = workspace
+            .canvases
             .iter()
             .map(|f| {
                 let s = (f.width as f32 / w).min(f.height as f32 / h).min(1.0);
@@ -122,8 +122,8 @@ impl StudioWindow {
         let state = self.add_layer.as_ref()?;
         let query = state.search.read(cx).value().to_string();
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
-        let scene = studio.selected_scene.and_then(|id| project.scene(id)).cloned();
+        let workspace = studio.workspace().clone();
+        let scene = studio.selected_scene.and_then(|id| workspace.scene(id)).cloned();
 
         let card = |id: ElementId, icon: &'static str, name: String, hint: String| {
             div()
@@ -191,11 +191,11 @@ impl StudioWindow {
                 // Sources already in the show but not in this scene: reuse them.
                 let in_scene: Vec<Id> = scene.iter().flat_map(|s| s.layers.iter().filter_map(|l| l.input)).collect();
                 let audio_only = lightair_core::kinds::is_audio;
-                let existing: Vec<_> = project
+                let existing: Vec<_> = workspace
                     .inputs
                     .values()
                     .filter(|i| !in_scene.contains(&i.id) && !audio_only(&i.kind))
-                    .filter(|i| project.scenes.iter().any(|s| s.layers.iter().any(|l| l.input == Some(i.id))))
+                    .filter(|i| workspace.scenes.iter().any(|s| s.layers.iter().any(|l| l.input == Some(i.id))))
                     .filter(|i| matches(&query, &[&i.name, &i.kind]))
                     .cloned()
                     .collect();

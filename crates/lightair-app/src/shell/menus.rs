@@ -27,20 +27,20 @@ fn clip_on_clipboard(cx: &App) -> bool {
 impl StudioWindow {
     fn layer_facts(&self, cx: &App) -> Option<LayerFacts> {
         let studio = self.studio.read(cx);
-        let project = studio.project();
-        let scene = studio.selected_scene.and_then(|id| project.scene(id))?;
+        let workspace = studio.workspace();
+        let scene = studio.selected_scene.and_then(|id| workspace.scene(id))?;
         let layer = studio.selected_layer.and_then(|id| scene.layer(id))?;
-        let format = self.format_id(project);
+        let canvas = self.canvas_id(workspace);
         let device = layer
             .input
-            .and_then(|i| project.inputs.get(&i))
+            .and_then(|i| workspace.inputs.get(&i))
             .filter(|i| super::source::device_key(&i.kind, &i.settings).is_some())
             .map(|i| i.id);
         Some(LayerFacts {
             count: studio.selection().len(),
             empty: layer.is_empty(),
             has_parent: layer.parent.is_some(),
-            visible: layer.layouts.get(&format).is_some_and(|l| l.visible),
+            visible: layer.layouts.get(&canvas).is_some_and(|l| l.visible),
             locked: layer.locked,
             device,
         })
@@ -50,9 +50,9 @@ impl StudioWindow {
 
     /// A copy of a scene right after it: the same inputs, new layers.
     pub(super) fn duplicate_scene(&mut self, scene: Id, cx: &mut Context<Self>) {
-        let project = self.studio.read(cx).project().clone();
-        let Some(index) = project.scene_index(scene) else { return };
-        let original = &project.scenes[index];
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some(index) = workspace.scene_index(scene) else { return };
+        let original = &workspace.scenes[index];
         let mut copy = Scene::new(format!("{} copy", original.name));
         let ids: std::collections::HashMap<Id, Id> = original.layers.iter().map(|l| (l.id, Id::new())).collect();
         copy.layers = original
@@ -72,8 +72,8 @@ impl StudioWindow {
     /// new index.
     pub(super) fn arrange(&mut self, label: &str, to: impl Fn(usize, usize) -> usize, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
-        let Some(scene) = studio.selected_scene.and_then(|id| project.scene(id)) else { return };
+        let workspace = studio.workspace().clone();
+        let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
         let selection = studio.selection();
         let commands: Vec<Command> = scene
             .layers
@@ -94,17 +94,17 @@ impl StudioWindow {
     /// Shows or hides the selection (by the first layer's state).
     pub(super) fn toggle_selection_visible(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
-        let format = self.format_id(&project);
-        let Some(scene) = studio.selected_scene.and_then(|id| project.scene(id)) else { return };
+        let workspace = studio.workspace().clone();
+        let canvas = self.canvas_id(&workspace);
+        let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
         let selection = studio.selection();
         let visible = !selection
             .first()
             .and_then(|id| scene.layer(*id))
-            .is_some_and(|l| l.layouts.get(&format).is_some_and(|lo| lo.visible));
+            .is_some_and(|l| l.layouts.get(&canvas).is_some_and(|lo| lo.visible));
         let commands: Vec<Command> = selection
             .iter()
-            .map(|layer| Command::SetLayerVisible { scene: scene.id, layer: *layer, format, visible })
+            .map(|layer| Command::SetLayerVisible { scene: scene.id, layer: *layer, canvas, visible })
             .collect();
         if !commands.is_empty() {
             let label = if visible { "Show objects" } else { "Hide objects" };
@@ -114,8 +114,8 @@ impl StudioWindow {
 
     pub(super) fn toggle_selection_locked(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
-        let Some(scene) = studio.selected_scene.and_then(|id| project.scene(id)) else { return };
+        let workspace = studio.workspace().clone();
+        let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
         let selection = studio.selection();
         let locked = !selection.first().and_then(|id| scene.layer(*id)).is_some_and(|l| l.locked);
         let commands: Vec<Command> =
@@ -129,8 +129,8 @@ impl StudioWindow {
     /// Each selected layer out of its parent, in front of it, staying put on the canvas.
     pub(super) fn move_out_of_parent(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
-        let Some(scene) = studio.selected_scene.and_then(|id| project.scene(id)) else { return };
+        let workspace = studio.workspace().clone();
+        let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
         let commands: Vec<Command> = studio
             .selection()
             .iter()
@@ -146,49 +146,49 @@ impl StudioWindow {
         }
     }
 
-    /// The selected pictures fill the canvas (in the format being edited).
+    /// The selected pictures fill the canvas (in the canvas being edited).
     pub(super) fn fill_canvas(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
-        let format = self.format(&project).clone();
+        let workspace = studio.workspace().clone();
+        let canvas = self.current_canvas(&workspace).clone();
         let Some(scene) = studio.selected_scene else { return };
-        let Some(sc) = project.scene(scene) else { return };
+        let Some(sc) = workspace.scene(scene) else { return };
         let layouts: Vec<(Id, Layout)> = studio
             .selection()
             .iter()
             .filter_map(|id| sc.layer(*id).filter(|l| !l.is_empty()))
             .filter_map(|l| {
-                let world = sc.world(l.id, format.id)?;
+                let world = sc.world(l.id, canvas.id)?;
                 Some((
                     l.id,
                     Layout {
                         x: 0.0,
                         y: 0.0,
-                        width: format.width as f32,
-                        height: format.height as f32,
+                        width: canvas.width as f32,
+                        height: canvas.height as f32,
                         rotation: 0.0,
                         ..world
                     },
                 ))
             })
             .collect();
-        self.set_layouts(scene, format.id, layouts, "Fill canvas", cx);
+        self.set_layouts(scene, canvas.id, layouts, "Fill canvas", cx);
     }
 
     /// Before a right-click menu opens on the canvas: select the picture under the pointer
     /// (keeping the selection if it's already in it), or nothing.
     pub(super) fn canvas_right_down(&mut self, ev: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let project = self.studio.read(cx).project().clone();
-        let Some(format) = self.stage_at(&project, ev.position) else { return };
-        let Some(p) = self.to_canvas(&project, format, ev.position) else { return };
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some(canvas) = self.stage_at(&workspace, ev.position) else { return };
+        let Some(p) = self.to_canvas(&workspace, canvas, ev.position) else { return };
         let studio = self.studio.read(cx);
-        let Some(scene) = studio.selected_scene.and_then(|id| project.scene(id)) else { return };
+        let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
         let hit = scene
             .layers
             .iter()
             .rev()
             .filter(|l| !l.is_empty())
-            .find(|l| self.frame_of(scene, l, format).is_some_and(|lo| lo.visible && geo::contains(&lo, p)))
+            .find(|l| self.frame_of(scene, l, canvas).is_some_and(|lo| lo.visible && geo::contains(&lo, p)))
             .map(|l| l.id);
         let selection = studio.selection();
         match hit {
@@ -307,11 +307,11 @@ pub(super) fn scene_menu(
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let Some(w) = shell.upgrade() else { return menu };
-    let project = w.read(cx).studio.read(cx).project().clone();
-    let Some(index) = project.scene_index(scene) else { return menu };
-    let count = project.scenes.len();
-    let on_air = project.program == Some(scene);
-    let name = project.scenes[index].name.clone();
+    let workspace = w.read(cx).studio.read(cx).workspace().clone();
+    let Some(index) = workspace.scene_index(scene) else { return menu };
+    let count = workspace.scenes.len();
+    let on_air = workspace.program == Some(scene);
+    let name = workspace.scenes[index].name.clone();
     let s = shell.clone();
     let run = move |cmd: Command| {
         let s = s.clone();

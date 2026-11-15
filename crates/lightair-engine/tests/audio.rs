@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Input, Project, Track, diff};
+use lightair_core::{Command, Document, Input, Workspace, Track, diff};
 use lightair_engine::meters::meters;
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -51,7 +51,7 @@ fn track_levels_follow_the_fader() {
     tone_wav(&wav);
 
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Audio"));
+    let mut doc = Document::new(Workspace::new("Audio"));
     let input = Input::new(
         "Tone",
         "ffmpeg_source",
@@ -62,8 +62,8 @@ fn track_levels_follow_the_fader() {
     let apply = |doc: &mut Document, cmd: Command| {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
-        let project = change.after.clone();
-        engine.call(move |s| s.reconciler.apply(&project, &patches));
+        let workspace = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     };
     apply(&mut doc, Command::AddInput { input });
     apply(&mut doc, Command::AddTrack { track, index: None });

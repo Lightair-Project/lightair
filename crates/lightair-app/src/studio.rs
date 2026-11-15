@@ -1,7 +1,7 @@
 //! The studio: document + persistence + engine, as one GPUI model.
 //!
 //! Every change in the app goes through [`Studio::execute`]: the command is validated and
-//! applied to the document, appended to the project journal, and the resulting diff is sent to
+//! applied to the document, appended to the workspace journal, and the resulting diff is sent to
 //! the engine thread for reconciliation (docs/03-architecture.md, "Document flow").
 
 use std::collections::HashMap;
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::{Context, SharedString};
-use lightair_core::{Command, CommandError, Document, Id, Project, diff};
+use lightair_core::{Command, CommandError, Document, Id, Workspace, diff};
 use lightair_engine::outputs::{
     ClipsConfig, Container, OutputKey, OutputState, RecordingConfig, StreamConfig, default_encoders, runtime,
 };
@@ -20,9 +20,9 @@ use lightair_store::recordings::{self, File as ItemFile, Index, Item, Kind, Mark
 /// A recording on its way into the Library (docs/plans/screen-studio.md, "Library"). Its entry
 /// is written when it starts (so a crash still leaves it findable) and again when it finishes.
 struct Pending {
-    project: PathBuf,
+    workspace: PathBuf,
     item: Item,
-    /// The canvases recorded, with the format name that tells their files apart.
+    /// The canvases recorded, with the canvas name that tells their files apart.
     canvases: Vec<(Id, Option<String>)>,
     stopped: bool,
     /// Multitrack files still being written.
@@ -33,7 +33,7 @@ struct Pending {
 /// A Studio take in progress (docs/plans/screen-studio.md, 4.2): its folder, Library entry,
 /// and the input it logs.
 struct TakeRun {
-    project: Option<PathBuf>,
+    workspace: Option<PathBuf>,
     folder: PathBuf,
     item: Item,
     started: std::time::Instant,
@@ -107,35 +107,35 @@ pub struct Studio {
     pending: Option<Pending>,
     /// The Studio take being recorded.
     take: Option<TakeRun>,
-    /// The take just saved (project, item), for the window's card.
+    /// The take just saved (workspace, item), for the window's card.
     pub last_take: Option<(PathBuf, Id)>,
     /// Stills the window should take for the Library.
     pub thumbnails: Vec<ThumbnailRequest>,
-    /// Bumped when a project's recordings index changes (the Library reloads).
+    /// Bumped when a workspace's recordings index changes (the Library reloads).
     pub library_version: u64,
     /// Multitrack audio files being recorded: their base name and paths.
     /// Multitrack audio being recorded: its files' base name, and each file with whose sound it is.
     stems: Option<(String, Vec<(std::path::PathBuf, String)>)>,
-    /// What a new project starts as.
-    starter: fn() -> Project,
+    /// What a new workspace starts as.
+    starter: fn() -> Workspace,
 }
 
 impl Studio {
-    pub fn open(engine: Arc<Engine>, dir: PathBuf, starter: fn() -> Project) -> Self {
-        let (project, package, issue) = match lightair_store::Package::open(&dir, starter) {
+    pub fn open(engine: Arc<Engine>, dir: PathBuf, starter: fn() -> Workspace) -> Self {
+        let (workspace, package, issue) = match lightair_store::Package::open(&dir, starter) {
             Ok(opened) => {
                 let issue = (opened.recovered > 0)
                     .then(|| SharedString::from(format!("Recovered {} unsaved change(s)", opened.recovered)));
-                (opened.project, Some(opened.package), issue)
+                (opened.workspace, Some(opened.package), issue)
             }
             Err(e) => {
-                tracing::error!(%e, "could not open the project; using an unsaved one");
-                (Project::new("Untitled"), None, Some(SharedString::from(format!("Workspace not saved: {e}"))))
+                tracing::error!(%e, "could not open the workspace; using an unsaved one");
+                (Workspace::new("Untitled"), None, Some(SharedString::from(format!("Workspace not saved: {e}"))))
             }
         };
-        let selected_scene = project.program.or(project.scenes.first().map(|s| s.id));
+        let selected_scene = workspace.program.or(workspace.scenes.first().map(|s| s.id));
         let mut studio = Self {
-            doc: Document::new(project),
+            doc: Document::new(workspace),
             package,
             engine,
             selected_scene,
@@ -165,13 +165,13 @@ impl Studio {
         studio
     }
 
-    /// Brings an older project's effects up to date (saved, but not an undo step).
+    /// Brings an older workspace's effects up to date (saved, but not an undo step).
     fn migrate(&mut self) {
-        let mut commands = lightair_core::catalog::migrate(self.doc.project());
+        let mut commands = lightair_core::catalog::migrate(self.doc.workspace());
         // tracks' libobs audio filters: the audio engine runs its own (LIGHTAIR_LEGACY_AUDIO
         // keeps libobs mixing, so the filters stay)
         if std::env::var("LIGHTAIR_LEGACY_AUDIO").map_or(true, |v| v != "1") {
-            commands.extend(lightair_core::catalog::migrate_audio(self.doc.project()));
+            commands.extend(lightair_core::catalog::migrate_audio(self.doc.workspace()));
         }
         if commands.is_empty() {
             return;
@@ -187,17 +187,17 @@ impl Studio {
                 tracing::warn!(%e, "couldn't save the updated effects");
             }
         }
-        self.doc = Document::new(self.doc.project().as_ref().clone());
+        self.doc = Document::new(self.doc.workspace().as_ref().clone());
         tracing::info!(count = commands.len(), "effects updated to the effect stack");
     }
 
-    /// Where the project lives on disk (`None` for an unsaved project).
-    pub fn project_dir(&self) -> Option<std::path::PathBuf> {
+    /// Where the workspace lives on disk (`None` for an unsaved workspace).
+    pub fn workspace_dir(&self) -> Option<std::path::PathBuf> {
         self.package.as_ref().map(|p| p.dir().to_path_buf())
     }
 
-    /// The project's `assets` folder (prefabs, images, video, sound), made if missing; `None`
-    /// for an unsaved project.
+    /// The workspace's `assets` folder (prefabs, images, video, sound), made if missing; `None`
+    /// for an unsaved workspace.
     pub fn assets_dir(&self) -> Option<std::path::PathBuf> {
         let dir = self.package.as_ref()?.dir().join("assets");
         std::fs::create_dir_all(&dir).ok()?;
@@ -208,8 +208,8 @@ impl Studio {
         &self.engine
     }
 
-    pub fn project(&self) -> &Arc<Project> {
-        self.doc.project()
+    pub fn workspace(&self) -> &Arc<Workspace> {
+        self.doc.workspace()
     }
 
     /// Applies, journals and reconciles a command. Errors are shown in the status bar.
@@ -235,12 +235,12 @@ impl Studio {
         }
     }
 
-    /// Merges an OBS scene collection into the project as one undo step; the report goes to
+    /// Merges an OBS scene collection into the workspace as one undo step; the report goes to
     /// the status bar (summary) and the log (details).
     pub fn import_obs(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         let result = std::fs::read_to_string(path)
             .map_err(|e| e.to_string())
-            .and_then(|json| lightair_store::import_obs_collection(&json, self.project()).map_err(|e| e.to_string()));
+            .and_then(|json| lightair_store::import_obs_collection(&json, self.workspace()).map_err(|e| e.to_string()));
         match result {
             Ok((command, report)) => {
                 for (group, items) in [
@@ -270,12 +270,12 @@ impl Studio {
 
     /// Plays the newest clip full-frame on top of the live scene; it removes itself when done.
     pub fn replay_last_clip(&mut self, cx: &mut Context<Self>) {
-        let (Some(path), Some(scene)) = (self.last_clip.clone(), self.project().program) else {
+        let (Some(path), Some(scene)) = (self.last_clip.clone(), self.workspace().program) else {
             self.issue = Some("Save a clip first, then replay it.".into());
             cx.notify();
             return;
         };
-        let p = self.project().clone();
+        let p = self.workspace().clone();
         let input = lightair_core::Input::new(
             "Replay",
             "ffmpeg_source",
@@ -288,7 +288,7 @@ impl Studio {
             }),
         );
         let layouts: Vec<(Id, lightair_core::Layout)> = p
-            .formats
+            .canvases
             .iter()
             .map(|f| (f.id, lightair_core::Layout::boxed(0.0, 0.0, f.width as f32, f.height as f32)))
             .collect();
@@ -320,7 +320,7 @@ impl Studio {
             return;
         }
         self.replays.retain(|r| !finished.contains(r));
-        let p = self.project().clone();
+        let p = self.workspace().clone();
         let commands: Vec<Command> = finished
             .into_iter()
             .filter(|(scene, layer, _)| p.scene(*scene).is_some_and(|s| s.layer(*layer).is_some()))
@@ -334,8 +334,8 @@ impl Studio {
     /// Plays the mixer again once a plugin insert has loaded (it passes audio through until then).
     pub fn refresh_plugins(&mut self) {
         if lightair_engine::plugins::changed() {
-            let project = self.project().clone();
-            self.engine.post(move |s| s.reconciler.refresh_audio(&project));
+            let workspace = self.workspace().clone();
+            self.engine.post(move |s| s.reconciler.refresh_audio(&workspace));
         }
     }
 
@@ -344,13 +344,13 @@ impl Studio {
         let ended = self.engine.call(|s| s.reconciler.take_ended_timers());
         for id in ended {
             let target = self
-                .project()
+                .workspace()
                 .inputs
                 .get(&id)
                 .and_then(|i| i.settings["end_scene"].as_str().map(str::to_string))
-                .and_then(|s| self.project().scenes.iter().find(|sc| sc.id.to_string() == s).map(|sc| sc.id));
+                .and_then(|s| self.workspace().scenes.iter().find(|sc| sc.id.to_string() == s).map(|sc| sc.id));
             if let Some(scene) = target
-                && self.project().program != Some(scene)
+                && self.workspace().program != Some(scene)
             {
                 let _ = self.execute(Command::SetProgram { scene: Some(scene) }, cx);
             }
@@ -369,17 +369,17 @@ impl Studio {
         }
         let (pending, _) = self.refit.take().unwrap();
         self.engine.post(|s| s.reconciler.release_inputs());
-        let project = self.project().clone();
+        let workspace = self.workspace().clone();
         let commands: Vec<Command> = pending
             .iter()
             .zip(sizes)
             .filter_map(|(est, size)| {
-                let current = project.scene(est.scene)?.layer(est.layer)?.layouts.get(&est.format)?;
+                let current = workspace.scene(est.scene)?.layer(est.layer)?.layouts.get(&est.canvas)?;
                 let size = size.filter(|_| *current == est.layout)?;
                 Some(Command::SetLayout {
                     scene: est.scene,
                     layer: est.layer,
-                    format: est.format,
+                    canvas: est.canvas,
                     layout: est.refit(size),
                 })
             })
@@ -422,23 +422,23 @@ impl Studio {
         }
     }
 
-    /// Writes the project files and empties the journal (on a timer, on quit, after undo).
-    /// Opens another project in place of this one: this one is saved, the engine is rebuilt from
+    /// Writes the workspace files and empties the journal (on a timer, on quit, after undo).
+    /// Opens another workspace in place of this one: this one is saved, the engine is rebuilt from
     /// the other. Not while recording or live.
     pub fn switch_to(&mut self, dir: &std::path::Path, cx: &mut Context<Self>) -> Result<(), String> {
         if self.is_recording() || self.take.is_some() || runtime().any_stream_running() {
             return Err("Stop recording and streaming first.".into());
         }
-        if self.project_dir().as_deref() == Some(dir) {
+        if self.workspace_dir().as_deref() == Some(dir) {
             return Ok(());
         }
         let opened = lightair_store::Package::open(dir, self.starter).map_err(|e| e.to_string())?;
         self.compact();
         self.package = Some(opened.package);
-        self.doc = Document::new(opened.project);
+        self.doc = Document::new(opened.workspace);
         self.migrate();
-        let project = self.doc.project().clone();
-        self.selected_scene = project.program.or(project.scenes.first().map(|s| s.id));
+        let workspace = self.doc.workspace().clone();
+        self.selected_scene = workspace.program.or(workspace.scenes.first().map(|s| s.id));
         self.selected_layer = None;
         self.also_selected.clear();
         self.selected_track = None;
@@ -450,24 +450,24 @@ impl Studio {
         self.issue = (opened.recovered > 0).then(|| format!("Recovered {} unsaved change(s)", opened.recovered).into());
         self.engine.call(move |s| {
             s.outputs.stop_clips();
-            s.reconciler.rebuild(&project);
+            s.reconciler.rebuild(&workspace);
         });
         self.sync_clips();
         self.library_version += 1;
-        // opened next time too (not by a copy started on a given project: tests, screenshots)
+        // opened next time too (not by a copy started on a given workspace: tests, screenshots)
         if std::env::var_os("LIGHTAIR_PROJECT").is_none() {
             let mut prefs = crate::prefs::load_from(&crate::prefs::path());
-            prefs.last_project = Some(dir.to_path_buf());
+            prefs.last_workspace = Some(dir.to_path_buf());
             let _ = crate::prefs::save_to(&crate::prefs::path(), &prefs);
         }
         cx.notify();
         Ok(())
     }
 
-    /// Makes a new project called `name` beside the open one (in the Projects folder), from the
+    /// Makes a new workspace called `name` beside the open one (in the Workspaces folder), from the
     /// starter, and returns its folder (not opened).
-    pub fn create_project(&self, name: &str) -> Result<PathBuf, String> {
-        let base = self.project_dir().and_then(|d| d.parent().map(Path::to_path_buf)).unwrap_or_else(lightair_platform::paths::projects_dir);
+    pub fn create_workspace(&self, name: &str) -> Result<PathBuf, String> {
+        let base = self.workspace_dir().and_then(|d| d.parent().map(Path::to_path_buf)).unwrap_or_else(lightair_platform::paths::workspaces_dir);
         let clean: String = name.trim().chars().map(|c| if matches!(c, '/' | '\\' | ':') { '-' } else { c }).collect();
         let clean = if clean.is_empty() { "Untitled".to_string() } else { clean };
         let dir = (1..)
@@ -487,7 +487,7 @@ impl Studio {
 
     pub fn compact(&mut self) {
         if let Some(pkg) = &mut self.package
-            && let Err(e) = pkg.compact(self.doc.project())
+            && let Err(e) = pkg.compact(self.doc.workspace())
         {
             tracing::error!(%e, "compaction failed");
         }
@@ -506,7 +506,7 @@ impl Studio {
 
     // ------------------------------------------------------------ outputs
     pub fn recording_folder(&self) -> PathBuf {
-        self.project()
+        self.workspace()
             .outputs
             .recording
             .folder
@@ -516,7 +516,7 @@ impl Studio {
 
     /// Keeps the replay buffer running exactly when clips are on.
     fn sync_clips(&mut self) {
-        let settings = self.project().outputs.clips;
+        let settings = self.workspace().outputs.clips;
         let running = runtime().get(OutputKey::Clips).state.is_running();
         if settings.enabled && !running {
             let cfg = ClipsConfig {
@@ -524,9 +524,9 @@ impl Studio {
                 seconds: settings.seconds,
                 encoders: default_encoders(&self.engine.capabilities.encoders, 8000, false),
             };
-            let format = settings.format;
+            let canvas = settings.canvas;
             self.engine.post(move |s| {
-                let video = format.and_then(|f| s.reconciler.format_video(f));
+                let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
                 if let Err(e) = s.outputs.start_clips(&cfg, video) {
                     tracing::error!(%e, "replay buffer failed to start");
                 }
@@ -558,8 +558,8 @@ impl Studio {
             let name = status.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
             self.issue = Some(format!("Clip saved: {}", name.unwrap_or_default()).into());
             self.last_clip = status.path.clone();
-            if let (Some(dir), Some(path)) = (self.project_dir(), status.path.clone()) {
-                let seconds = self.project().outputs.clips.seconds as u64;
+            if let (Some(dir), Some(path)) = (self.workspace_dir(), status.path.clone()) {
+                let seconds = self.workspace().outputs.clips.seconds as u64;
                 let started = chrono::Utc::now().timestamp_millis() - seconds as i64 * 1000;
                 let title = format!("Clip · {}", chrono::Local::now().format("%-d %b, %H:%M:%S"));
                 let mut item = Item::new(Kind::Clip, title, vec![ItemFile::new(path)], started);
@@ -592,16 +592,16 @@ impl Studio {
             self.finish_stems(cx);
             return;
         }
-        let project = self.project().clone();
-        let settings = project.outputs.recording.clone();
+        let workspace = self.workspace().clone();
+        let settings = workspace.outputs.recording.clone();
         let container = match settings.container.as_str() {
             "mkv" => Container::Mkv,
             "mov" => Container::Mov,
             _ => Container::HybridMp4,
         };
-        // Every chosen canvas, each to its own file; with several, the format's name tells
+        // Every chosen canvas, each to its own file; with several, the canvas's name tells
         // them apart ("Lightair 2026-11-12 10-00-00 Vertical.mp4").
-        let targets = settings.targets(&project);
+        let targets = settings.targets(&workspace);
         let several = targets.len() > 1;
         let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string();
         // Make the journal durable before outputs start (docs/14, "Saving, autosave & recovery").
@@ -609,7 +609,7 @@ impl Studio {
         // Multitrack audio files (and, audio only, the program) beside the video.
         let mut stems = false;
         if settings.multitrack || settings.audio_only {
-            let (p, folder, base) = (project.clone(), self.recording_folder(), format!("Lightair {stamp}"));
+            let (p, folder, base) = (workspace.clone(), self.recording_folder(), format!("Lightair {stamp}"));
             let program = settings.audio_only;
             match self.engine.call(move |s| s.reconciler.start_stems(&p, &folder, &base, program)) {
                 Ok(files) => {
@@ -620,21 +620,21 @@ impl Studio {
             }
         }
         // its Library entry
-        if let Some(dir) = self.project_dir() {
+        if let Some(dir) = self.workspace_dir() {
             let kind = if settings.audio_only { Kind::Multitrack } else { Kind::Recording };
-            let title = format!("{} · {}", project.name, chrono::Local::now().format("%-d %b, %H:%M"));
+            let title = format!("{} · {}", workspace.name, chrono::Local::now().format("%-d %b, %H:%M"));
             let mut item = Item::new(kind, title, Vec::new(), chrono::Utc::now().timestamp_millis());
             let thumbnail_due = (!settings.audio_only).then(|| {
                 item.thumbnail = Some(recordings::thumbnails_dir(&dir).join(format!("{}.png", item.id)));
                 std::time::Instant::now() + std::time::Duration::from_secs(3)
             });
             self.pending = Some(Pending {
-                project: dir,
+                workspace: dir,
                 item,
                 canvases: if settings.audio_only {
                     Vec::new()
                 } else {
-                    targets.iter().map(|c| (*c, several.then(|| project.format(*c).map(|f| f.name.clone()).unwrap_or_default()))).collect()
+                    targets.iter().map(|c| (*c, several.then(|| workspace.canvas(*c).map(|f| f.name.clone()).unwrap_or_default()))).collect()
                 },
                 stopped: false,
                 stems,
@@ -646,15 +646,15 @@ impl Studio {
             return;
         }
         for canvas in targets {
-            let label = several.then(|| project.format(canvas).map(|f| f.name.clone()).unwrap_or_default());
+            let label = several.then(|| workspace.canvas(canvas).map(|f| f.name.clone()).unwrap_or_default());
             let name = match &label {
                 Some(l) => format!("Lightair {stamp} {}.{}", lightair_core::file_safe(l), container.extension()),
                 None => format!("Lightair {stamp}.{}", container.extension()),
             };
-            let Some(format) = project.format(canvas) else { continue };
+            let Some(shape) = workspace.canvas(canvas) else { continue };
             let path = self.recording_folder().join(&name);
             if let Some(p) = &mut self.pending {
-                p.item.files.push(ItemFile { format: label.clone(), ..ItemFile::new(path) });
+                p.item.files.push(ItemFile { canvas: label.clone(), ..ItemFile::new(path) });
             }
             let cfg = RecordingConfig {
                 canvas,
@@ -662,25 +662,25 @@ impl Studio {
                 label,
                 split_minutes: settings.split_minutes,
                 container,
-                encoders: crate::encoding::for_recording(&self.engine.capabilities.encoders, &settings, format),
+                encoders: crate::encoding::for_recording(&self.engine.capabilities.encoders, &settings, shape),
                 // the engine plays the first five mixes into libobs mixes 1-5, in mixer order
                 extra_mixes: settings
                     .file_mixes
                     .iter()
-                    .filter_map(|m| project.audio.mixes.iter().position(|x| x.id == *m))
+                    .filter_map(|m| workspace.audio.mixes.iter().position(|x| x.id == *m))
                     .filter(|&k| k < 5)
                     .map(|k| k + 1)
                     .collect(),
             };
             self.engine.post(move |s| {
-                let video = s.reconciler.format_video(canvas);
+                let video = s.reconciler.canvas_video(canvas);
                 if let Err(e) = s.outputs.start_recording(&cfg, video) {
                     tracing::error!(%e, "recording failed to start");
                 }
             });
         }
         if let Some(p) = &self.pending {
-            let (dir, item) = (p.project.clone(), p.item.clone());
+            let (dir, item) = (p.workspace.clone(), p.item.clone());
             self.index_add(&dir, item);
         }
         cx.notify();
@@ -708,12 +708,12 @@ impl Studio {
             cx.notify();
             return;
         }
-        let project = self.project().clone();
+        let workspace = self.workspace().clone();
         let stamp = chrono::Local::now().format("%Y-%m-%d %H.%M.%S");
         let folder = self.recording_folder().join(format!("Take {stamp}.lightair-take"));
-        let fps = (project.primary_format().fps_num, project.primary_format().fps_den);
+        let fps = (workspace.primary_canvas().fps_num, workspace.primary_canvas().fps_den);
         self.flush();
-        let (f, p, caps) = (folder.clone(), project.clone(), self.engine.capabilities.encoders.clone());
+        let (f, p, caps) = (folder.clone(), workspace.clone(), self.engine.capabilities.encoders.clone());
         let started = self.engine.call(move |s| {
             let sources = s.reconciler.take_sources(&p);
             let take = lightair_engine::take::Take::start(sources, &f, fps, &mut s.outputs, &caps)?;
@@ -731,11 +731,11 @@ impl Studio {
         };
         // the scene as it is: what the take doesn't record (images, text, colours) rebuilt in
         // the Editor, and where everything was
-        if let Some(scene) = lightair_store::take_scene::TakeScene::of(&project, &folder) {
+        if let Some(scene) = lightair_store::take_scene::TakeScene::of(&workspace, &folder) {
             let _ = scene.write(&folder);
         }
         // the audio engine's stems, beside the video
-        let (p, f) = (project.clone(), folder.clone());
+        let (p, f) = (workspace.clone(), folder.clone());
         let audio = match self.engine.call(move |s| s.reconciler.start_stems(&p, &f, "Audio", false)) {
             Ok(files) => files,
             Err(e) => {
@@ -755,14 +755,14 @@ impl Studio {
         let title = format!("Take · {}", chrono::Local::now().format("%-d %b, %H:%M"));
         let mut item = Item::new(Kind::Take, title, Vec::new(), chrono::Utc::now().timestamp_millis());
         item.files = tracks.iter().map(|t| ItemFile { track: Some(t.name.clone()), ..ItemFile::new(t.file.clone()) }).collect();
-        let project_dir = self.project_dir();
-        if let Some(dir) = &project_dir {
+        let workspace_dir = self.workspace_dir();
+        if let Some(dir) = &workspace_dir {
             item.thumbnail = Some(recordings::thumbnails_dir(dir).join(format!("{}.png", item.id)));
             // written now, so a take cut short is still in the Library
             self.index_add(dir, item.clone());
         }
         self.take = Some(TakeRun {
-            project: project_dir,
+            workspace: workspace_dir,
             folder,
             item,
             started: std::time::Instant::now(),
@@ -861,7 +861,7 @@ impl Studio {
             t.item.thumbnail = None;
         }
         t.item.files.retain(|f| f.path.exists());
-        if let Some(dir) = t.project {
+        if let Some(dir) = t.workspace {
             let id = t.item.id;
             self.index_add(&dir, t.item);
             self.last_take = Some((dir, id));
@@ -869,9 +869,9 @@ impl Studio {
         self.issue = Some(format!("Take saved: {}", t.folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).into());
     }
 
-    /// Writes an item to a project's recordings index (and tells the Library).
-    fn index_add(&mut self, project: &std::path::Path, item: Item) {
-        if let Err(e) = Index::add_to(project, item) {
+    /// Writes an item to a workspace's recordings index (and tells the Library).
+    fn index_add(&mut self, workspace: &std::path::Path, item: Item) {
+        if let Err(e) = Index::add_to(workspace, item) {
             tracing::warn!(%e, "couldn't write the recordings index");
         }
         self.library_version += 1;
@@ -885,7 +885,7 @@ impl Studio {
             if let Some(path) = runtime().get(OutputKey::Recording(*canvas)).path
                 && !p.item.files.iter().any(|f| f.path == path)
             {
-                p.item.files.push(ItemFile { format: label.clone(), ..ItemFile::new(path) });
+                p.item.files.push(ItemFile { canvas: label.clone(), ..ItemFile::new(path) });
             }
         }
         if p.thumbnail_due.is_some_and(|t| t <= std::time::Instant::now()) {
@@ -907,16 +907,16 @@ impl Studio {
         // files that were never written (it failed to start)
         p.item.files.retain(|f| f.path.exists());
         if p.item.files.is_empty() {
-            let mut index = Index::load(&p.project);
+            let mut index = Index::load(&p.workspace);
             index.items.retain(|i| i.id != p.item.id);
-            let _ = index.save(&p.project);
+            let _ = index.save(&p.workspace);
             self.library_version += 1;
             return;
         }
         if p.item.duration_ms.is_none() {
             p.item.duration_ms = p.item.files.iter().find_map(|f| recordings::mp4_duration_ms(&f.path));
         }
-        let (dir, item) = (p.project, p.item);
+        let (dir, item) = (p.workspace, p.item);
         self.index_add(&dir, item);
     }
 
@@ -1006,8 +1006,8 @@ impl Studio {
 
     /// Starts every enabled destination.
     pub fn go_live(&mut self, cx: &mut Context<Self>) {
-        let project = self.project().clone();
-        let enabled: Vec<_> = project.outputs.destinations.iter().filter(|d| d.enabled).cloned().collect();
+        let workspace = self.workspace().clone();
+        let enabled: Vec<_> = workspace.outputs.destinations.iter().filter(|d| d.enabled).cloned().collect();
         if enabled.is_empty() {
             self.issue = Some("Add a destination in Outputs to go live.".into());
             cx.notify();
@@ -1021,17 +1021,17 @@ impl Studio {
                 self.issue = Some(format!("No stream key saved for {}.", d.name).into());
                 continue;
             };
-            let reconnect = project.outputs.reconnect;
+            let reconnect = workspace.outputs.reconnect;
             let cfg = StreamConfig {
                 id: d.id,
                 server: d.server.clone(),
                 key,
-                encoders: crate::encoding::for_stream(&self.engine.capabilities.encoders, &project, &d),
+                encoders: crate::encoding::for_stream(&self.engine.capabilities.encoders, &workspace, &d),
                 reconnect: Some((reconnect.retries, reconnect.delay_s)),
             };
-            let format = d.format;
+            let canvas = d.canvas;
             self.engine.post(move |s| {
-                let video = format.and_then(|f| s.reconciler.format_video(f));
+                let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
                 if let Err(e) = s.outputs.start_stream(&cfg, video) {
                     tracing::error!(%e, "stream failed to start");
                 }
@@ -1048,18 +1048,18 @@ impl Studio {
     /// Surfaces output failures as issues (called on the stats tick).
     fn check_outputs(&mut self) {
         let mut keys = vec![OutputKey::Clips];
-        keys.extend(self.project().formats.iter().map(|f| OutputKey::Recording(f.id)));
-        keys.extend(self.project().outputs.destinations.iter().map(|d| OutputKey::Stream(d.id)));
+        keys.extend(self.workspace().canvases.iter().map(|f| OutputKey::Recording(f.id)));
+        keys.extend(self.workspace().outputs.destinations.iter().map(|d| OutputKey::Stream(d.id)));
         for key in keys {
             if let OutputState::Failed(msg) = runtime().get(key).state {
                 let label = match key {
-                    OutputKey::Recording(canvas) => match self.project().format(canvas) {
-                        Some(f) if self.project().formats.len() > 1 => format!("Recording ({})", f.name),
+                    OutputKey::Recording(canvas) => match self.workspace().canvas(canvas) {
+                        Some(f) if self.workspace().canvases.len() > 1 => format!("Recording ({})", f.name),
                         _ => "Recording".to_string(),
                     },
                     OutputKey::Clips => "Clips".to_string(),
                     OutputKey::Stream(id) => self
-                        .project()
+                        .workspace()
                         .outputs
                         .destinations
                         .iter()
@@ -1091,7 +1091,7 @@ impl Studio {
     }
 
     fn mic_tracks(&self) -> Vec<(Id, String)> {
-        let p = self.project();
+        let p = self.workspace();
         p.tracks
             .iter()
             .filter(|t| p.inputs.get(&t.input).is_some_and(|i| lightair_core::kinds::is_mic(&i.kind)))
@@ -1118,7 +1118,7 @@ impl Studio {
         if mics.is_empty() {
             return;
         }
-        let p = self.project().clone();
+        let p = self.workspace().clone();
         let all_muted = mics.iter().all(|(id, _)| p.tracks.iter().any(|t| t.id == *id && t.muted));
         let commands = mics.iter().map(|(id, _)| Command::SetTrackMuted { track: *id, muted: !all_muted }).collect();
         let label = if all_muted { "Unmute microphones" } else { "Mute microphones" };
@@ -1129,15 +1129,15 @@ impl Studio {
 
     /// What the Go Live review checks. `has_key` is looked up once by the caller (Keychain).
     pub fn preflight_facts(&self, has_key: &HashMap<Id, bool>, record_too: bool) -> crate::preflight::Facts {
-        let p = self.project();
+        let p = self.workspace();
         let enabled: Vec<_> = p.outputs.destinations.iter().filter(|d| d.enabled).collect();
         let encoders = default_encoders(&self.engine.capabilities.encoders, p.outputs.stream_bitrate_kbps, true);
         let encoder_ok = self.engine.capabilities.encoders.contains(&encoders.video_encoder);
-        // Identical settings share an encoder: one per distinct format.
-        let mut formats: Vec<_> = enabled.iter().map(|d| d.format).collect();
-        formats.sort_by_key(|f| f.map(|id| id.to_string()));
-        formats.dedup();
-        let target_fps = p.primary_format().fps_num as f64 / p.primary_format().fps_den.max(1) as f64;
+        // Identical settings share an encoder: one per distinct canvas.
+        let mut canvases: Vec<_> = enabled.iter().map(|d| d.canvas).collect();
+        canvases.sort_by_key(|f| f.map(|id| id.to_string()));
+        canvases.dedup();
+        let target_fps = p.primary_canvas().fps_num as f64 / p.primary_canvas().fps_den.max(1) as f64;
         crate::preflight::Facts {
             destinations: p
                 .outputs
@@ -1153,7 +1153,7 @@ impl Studio {
                 "obs_x264" => "x264 (software)".to_string(),
                 id => format!("{} H.264", lightair_engine::outputs::encoder_maker(id)),
             }),
-            encoders: formats.len() as u32,
+            encoders: canvases.len() as u32,
             video_kbps: encoders.video_bitrate_kbps,
             audio_kbps: encoders.audio_bitrate_kbps,
             lagged_recent: self.recent_lagged,
@@ -1169,7 +1169,7 @@ impl Studio {
         }
     }
 
-    fn push(&self, before: Arc<Project>, after: Arc<Project>) {
+    fn push(&self, before: Arc<Workspace>, after: Arc<Workspace>) {
         let patches = diff(&before, &after);
         if patches.is_empty() {
             return;
@@ -1178,9 +1178,9 @@ impl Studio {
     }
 
     fn rebuild_engine(&self) {
-        let project = self.doc.project().clone();
-        let empty = Arc::new(project.empty_like());
-        self.push(empty, project);
+        let workspace = self.doc.workspace().clone();
+        let empty = Arc::new(workspace.empty_like());
+        self.push(empty, workspace);
     }
 
     /// Every selected layer, the Inspector's first.
@@ -1231,7 +1231,7 @@ impl Studio {
     }
 
     fn fix_selection(&mut self) {
-        let p = self.doc.project();
+        let p = self.doc.workspace();
         // a mixer strip: a track, bus, mix or the master
         if self.selected_track.is_some_and(|t| lightair_core::MixerStrip::find(p, t).is_none()) {
             self.selected_track = None;

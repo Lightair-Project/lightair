@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Input, Project, Route, Track, TrackChannels, diff};
+use lightair_core::{Command, Document, Input, Workspace, Route, Track, TrackChannels, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -13,12 +13,12 @@ use serde_json::json;
 fn each_track_takes_its_channels() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Interface"));
+    let mut doc = Document::new(Workspace::new("Interface"));
     let apply = |doc: &mut Document, cmd: Command| {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
-        let project = change.after.clone();
-        engine.call(move |s| s.reconciler.apply(&project, &patches));
+        let workspace = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     };
     // an interface input (no such device here: the test feeds it)
     let iface = Input::new("Interface", "lightair_audio_device", json!({"device": "Lightair test interface"}));

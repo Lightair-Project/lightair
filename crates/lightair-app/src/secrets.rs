@@ -1,4 +1,4 @@
-//! Secrets live in the OS credential store, never in project files
+//! Secrets live in the OS credential store, never in workspace files
 //! (docs/14-data-persistence-settings.md, "Security of stored data").
 
 use lightair_core::Id;

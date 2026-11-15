@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Input, Project, Track, TrackChannels, diff};
+use lightair_core::{Command, Document, Effect, Input, Workspace, Track, TrackChannels, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -12,12 +12,12 @@ fn tracks_record_to_aligned_files() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let dir = std::env::temp_dir().join(format!("lightair-stems-{}", std::process::id()));
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Stems"));
+    let mut doc = Document::new(Workspace::new("Stems"));
     let apply = |doc: &mut Document, cmd: Command| {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
-        let project = change.after.clone();
-        engine.call(move |s| s.reconciler.apply(&project, &patches));
+        let workspace = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     };
     let tone = Input::new("Tone", "lightair_test_tone", json!({"freq": 440.0, "amplitude": 0.5}));
     let mut host = Track::new("Host", tone.id);
@@ -30,9 +30,9 @@ fn tracks_record_to_aligned_files() {
     apply(&mut doc, Command::AddTrack { track: guest, index: None });
     std::thread::sleep(Duration::from_millis(500));
 
-    let project = doc.project().clone();
+    let workspace = doc.workspace().clone();
     let d = dir.clone();
-    let files = engine.call(move |s| s.reconciler.start_stems(&project, &d, "Show", true)).unwrap();
+    let files = engine.call(move |s| s.reconciler.start_stems(&workspace, &d, "Show", true)).unwrap();
     assert_eq!(files.len(), 3, "two tracks and the program");
     std::thread::sleep(Duration::from_millis(1000));
     let report = engine.call(|s| s.reconciler.stop_stems()).expect("finished");

@@ -12,8 +12,8 @@ actions!(
         HideApp,
         HideOthers,
         ShowAll,
-        NewProject,
-        OpenProject,
+        NewWorkspace,
+        OpenWorkspace,
         AddExistingRecordings,
         ImportObsScenes,
         CloseWindow,
@@ -26,7 +26,7 @@ actions!(
         AddColourObject,
         AddTimerObject,
         AddScreenScenes,
-        AddVerticalFormat,
+        AddVerticalCanvas,
         ToggleRecord,
         PauseRecord,
         SplitRecord,
@@ -58,8 +58,8 @@ pub fn menus() -> Vec<Menu> {
             act("Quit Lightair", Quit),
         ]),
         Menu::new("File").items([
-            act("New Workspace…", NewProject),
-            act("Open Workspace…", OpenProject),
+            act("New Workspace…", NewWorkspace),
+            act("Open Workspace…", OpenWorkspace),
             MenuItem::separator(),
             act("Add Existing Recordings…", AddExistingRecordings),
             act("Import OBS Scenes…", ImportObsScenes),
@@ -114,7 +114,7 @@ pub fn menus() -> Vec<Menu> {
             act("Lock or Unlock", ToggleLayerLocked),
             act("Fill Canvas", FillCanvas),
             MenuItem::separator(),
-            act("Add Vertical Format", AddVerticalFormat),
+            act("Add Vertical Canvas", AddVerticalCanvas),
         ]),
         Menu::new("Record").items([
             act("Record or Stop", ToggleRecord),
@@ -144,8 +144,8 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new(crate::ui::key("cmd-q"), Quit, None),
         KeyBinding::new(crate::ui::key("cmd-h"), HideApp, None),
         KeyBinding::new(crate::ui::key("cmd-alt-h"), HideOthers, None),
-        KeyBinding::new(crate::ui::key("cmd-n"), NewProject, Some("Studio")),
-        KeyBinding::new(crate::ui::key("cmd-o"), OpenProject, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-n"), NewWorkspace, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-o"), OpenWorkspace, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-w"), CloseWindow, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-r"), ToggleRecord, Some("Studio")),
     ]);
@@ -157,11 +157,11 @@ impl StudioWindow {
     pub(super) fn menu_actions(&self, el: Div, cx: &mut Context<Self>) -> Div {
         el.on_action(cx.listener(|this, _: &About, _, cx| this.open_settings(settings::Page::About, cx)))
             .on_action(cx.listener(|this, _: &KeyboardShortcuts, _, cx| this.open_settings(settings::Page::Shortcuts, cx)))
-            .on_action(cx.listener(|this, _: &NewProject, window, cx| {
+            .on_action(cx.listener(|this, _: &NewWorkspace, window, cx| {
                 this.show_place(Place::Library, cx);
-                this.library.update(cx, |l, cx| l.start_new_project(window, cx));
+                this.library.update(cx, |l, cx| l.start_new_workspace(window, cx));
             }))
-            .on_action(cx.listener(|this, _: &OpenProject, _, cx| this.show_place(Place::Library, cx)))
+            .on_action(cx.listener(|this, _: &OpenWorkspace, _, cx| this.show_place(Place::Library, cx)))
             .on_action(cx.listener(|this, _: &AddExistingRecordings, window, cx| {
                 this.show_place(Place::Library, cx);
                 this.library.update(cx, |l, cx| l.add_existing(window, cx));
@@ -177,7 +177,7 @@ impl StudioWindow {
             .on_action(cx.listener(|this, _: &AddColourObject, _, cx| this.add_colour(cx)))
             .on_action(cx.listener(|this, _: &AddTimerObject, _, cx| this.add_timer(cx)))
             .on_action(cx.listener(|this, _: &AddScreenScenes, _, cx| this.add_screen_layouts(cx)))
-            .on_action(cx.listener(|this, _: &AddVerticalFormat, _, cx| this.add_vertical(cx)))
+            .on_action(cx.listener(|this, _: &AddVerticalCanvas, _, cx| this.add_vertical(cx)))
             .on_action(cx.listener(|this, _: &ToggleRecord, _, cx| this.record_click(cx)))
             .on_action(cx.listener(|this, _: &PauseRecord, _, cx| this.studio.update(cx, |s, cx| s.pause_recording(cx))))
             .on_action(cx.listener(|this, _: &SplitRecord, _, cx| this.studio.update(cx, |s, cx| s.split_recording(cx))))

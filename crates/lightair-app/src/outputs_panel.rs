@@ -11,7 +11,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Destination, Encoding, Format, Id, Project, VideoEncoder};
+use lightair_core::{Command, Destination, Encoding, Canvas, Id, Workspace, VideoEncoder};
 use lightair_engine::outputs::{OutputKey, OutputState, StreamProtocol, runtime};
 
 use crate::platforms::{self, PLATFORMS, Platform, Shape};
@@ -35,7 +35,7 @@ struct Edit {
     server_input: Entity<InputState>,
     /// A new key; empty keeps the saved one.
     key: Entity<InputState>,
-    format: Option<Id>,
+    canvas: Option<Id>,
     /// `None`: Automatic.
     encoding: Option<Encoding>,
     error: Option<String>,
@@ -51,14 +51,14 @@ struct Configure {
     /// The pasted server address (when it hasn't).
     server_input: Entity<InputState>,
     key: Entity<InputState>,
-    format: Option<Id>,
+    canvas: Option<Id>,
     error: Option<String>,
-    /// A vertical format was asked for: pick it once it exists.
+    /// A vertical canvas was asked for: pick it once it exists.
     want_vertical: bool,
 }
 
-/// Asks the window to add a vertical format (reframing every scene into it).
-pub struct AddVerticalFormat;
+/// Asks the window to add a vertical canvas (reframing every scene into it).
+pub struct AddVerticalCanvas;
 
 pub struct OutputsPanel {
     studio: Entity<Studio>,
@@ -87,8 +87,8 @@ fn host_of(server: &str) -> String {
     server.split("://").nth(1).unwrap_or(server).split(['/', ':']).next().unwrap_or(server).to_string()
 }
 
-/// "16:9", "9:16", "1:1" for a format.
-fn aspect_label(f: &Format) -> String {
+/// "16:9", "9:16", "1:1" for a canvas.
+fn aspect_label(f: &Canvas) -> String {
     fn gcd(a: u32, b: u32) -> u32 {
         if b == 0 { a } else { gcd(b, a % b) }
     }
@@ -96,16 +96,16 @@ fn aspect_label(f: &Format) -> String {
     format!("{}:{}", f.width / g, f.height / g)
 }
 
-/// The format after `current` in the project's list (wrapping), for the badge's click.
-fn next_format(project: &Project, current: Option<Id>) -> Option<Id> {
-    let cur = current.unwrap_or(project.primary_format().id);
-    let i = project.formats.iter().position(|f| f.id == cur).unwrap_or(0);
-    let next = &project.formats[(i + 1) % project.formats.len()];
-    (next.id != project.primary_format().id).then_some(next.id)
+/// The canvas after `current` in the workspace's list (wrapping), for the badge's click.
+fn next_canvas(workspace: &Workspace, current: Option<Id>) -> Option<Id> {
+    let cur = current.unwrap_or(workspace.primary_canvas().id);
+    let i = workspace.canvases.iter().position(|f| f.id == cur).unwrap_or(0);
+    let next = &workspace.canvases[(i + 1) % workspace.canvases.len()];
+    (next.id != workspace.primary_canvas().id).then_some(next.id)
 }
 
-fn format_badge(id: impl Into<ElementId>, project: &Project, format: Option<Id>) -> Stateful<Div> {
-    let f = format.and_then(|id| project.format(id)).unwrap_or(project.primary_format());
+fn canvas_badge(id: impl Into<ElementId>, workspace: &Workspace, canvas: Option<Id>) -> Stateful<Div> {
+    let f = canvas.and_then(|id| workspace.canvas(id)).unwrap_or(workspace.primary_canvas());
     div()
         .id(id)
         .px_1p5()
@@ -118,7 +118,7 @@ fn format_badge(id: impl Into<ElementId>, project: &Project, format: Option<Id>)
         .text_size(px(10.))
         .font_family("Menlo")
         .text_color(tok::text_secondary())
-        .when(project.formats.len() > 1, |d| d.cursor_pointer().hover(|d| d.bg(tok::bg_selected())))
+        .when(workspace.canvases.len() > 1, |d| d.cursor_pointer().hover(|d| d.bg(tok::bg_selected())))
         .child(aspect_label(f))
 }
 
@@ -175,12 +175,12 @@ impl OutputsPanel {
         Self { studio, setup: None, focus: cx.focus_handle() }
     }
 
-    /// Asks for a vertical format, to send once it's there.
+    /// Asks for a vertical canvas, to send once it's there.
     pub fn request_vertical(&mut self, cx: &mut Context<Self>) {
         if let Some(Setup::Configure(c)) = &mut self.setup {
             c.want_vertical = true;
         }
-        cx.emit(AddVerticalFormat);
+        cx.emit(AddVerticalCanvas);
     }
 
     pub fn open_picker(&mut self, cx: &mut Context<Self>) {
@@ -201,10 +201,10 @@ impl OutputsPanel {
                 .placeholder(if platform.id == "custom" { "Stream key, token or SRT stream ID" } else { "Stream key" })
                 .masked(true)
         });
-        // The shape it wants: a vertical format for vertical platforms, when there is one.
-        let project = self.studio.read(cx).project().clone();
-        let format = match platform.shape {
-            Shape::Vertical => project.formats.iter().find(|f| f.height > f.width).map(|f| f.id),
+        // The shape it wants: a vertical canvas for vertical platforms, when there is one.
+        let workspace = self.studio.read(cx).workspace().clone();
+        let canvas = match platform.shape {
+            Shape::Vertical => workspace.canvases.iter().find(|f| f.height > f.width).map(|f| f.id),
             Shape::Landscape => None,
         };
         let first = if platform.servers.is_empty() { server_input.clone() } else { key.clone() };
@@ -214,7 +214,7 @@ impl OutputsPanel {
             server: platforms::nearest_server(platform),
             server_input,
             key,
-            format,
+            canvas,
             error: None,
             want_vertical: false,
         }));
@@ -246,9 +246,9 @@ impl OutputsPanel {
             cx.notify();
             return;
         }
-        let project = self.studio.read(cx).project().clone();
+        let workspace = self.studio.read(cx).workspace().clone();
         let base = if c.platform.id == "custom" { host_of(&server) } else { c.platform.name.to_string() };
-        let taken = |n: &str| project.outputs.destinations.iter().any(|d| d.name == n);
+        let taken = |n: &str| workspace.outputs.destinations.iter().any(|d| d.name == n);
         let name =
             if taken(&base) { (2..).map(|n| format!("{base} {n}")).find(|n| !taken(n)).unwrap_or(base) } else { base };
         let destination = Destination {
@@ -256,7 +256,7 @@ impl OutputsPanel {
             name,
             server,
             enabled: true,
-            format: c.format,
+            canvas: c.canvas,
             platform: Some(c.platform.id.to_string()),
             encoding: None,
         };
@@ -274,8 +274,8 @@ impl OutputsPanel {
 
     /// Opens a destination's settings.
     pub fn open_edit(&mut self, id: Id, window: &mut Window, cx: &mut Context<Self>) {
-        let project = self.studio.read(cx).project().clone();
-        let Some(d) = project.outputs.destinations.iter().find(|d| d.id == id).cloned() else { return };
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some(d) = workspace.outputs.destinations.iter().find(|d| d.id == id).cloned() else { return };
         let platform = d
             .platform
             .as_deref()
@@ -301,7 +301,7 @@ impl OutputsPanel {
             server,
             server_input,
             key,
-            format: d.format,
+            canvas: d.canvas,
             encoding: d.encoding,
             error: None,
         }));
@@ -310,8 +310,8 @@ impl OutputsPanel {
 
     fn save_edit(&mut self, cx: &mut Context<Self>) {
         let Some(Setup::Edit(e)) = &mut self.setup else { return };
-        let project = self.studio.read(cx).project().clone();
-        let Some(old) = project.outputs.destinations.iter().find(|d| d.id == e.id).cloned() else { return };
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some(old) = workspace.outputs.destinations.iter().find(|d| d.id == e.id).cloned() else { return };
         let server = match e.server.and_then(|i| e.platform.servers.get(i)) {
             Some((_, url)) => url.to_string(),
             None => e.server_input.read(cx).value().trim().to_string(),
@@ -333,7 +333,7 @@ impl OutputsPanel {
         let destination = Destination {
             name: if name.is_empty() { old.name.clone() } else { name },
             server,
-            format: e.format,
+            canvas: e.canvas,
             encoding: e.encoding,
             ..old
         };
@@ -353,7 +353,7 @@ impl OutputsPanel {
         cx.notify();
     }
 
-    fn edit_view(&self, e: &Edit, project: &Project, cx: &mut Context<Self>) -> Div {
+    fn edit_view(&self, e: &Edit, workspace: &Workspace, cx: &mut Context<Self>) -> Div {
         let p = e.platform;
         let caps = self.studio.read(cx).engine().capabilities.encoders.clone();
         let label = |text: &'static str| {
@@ -429,13 +429,13 @@ impl OutputsPanel {
 
         // Shape.
         let mut shapes = div().flex().flex_wrap().gap_1();
-        for (i, f) in project.formats.iter().enumerate() {
-            let id = (f.id != project.primary_format().id).then_some(f.id);
+        for (i, f) in workspace.canvases.iter().enumerate() {
+            let id = (f.id != workspace.primary_canvas().id).then_some(f.id);
             shapes = shapes.child(
-                chip(("edit-shape", i), format!("{} {}", f.name, aspect_label(f)), e.format == id, true).on_click(
+                chip(("edit-shape", i), format!("{} {}", f.name, aspect_label(f)), e.canvas == id, true).on_click(
                     cx.listener(move |this, _, _, cx| {
                         if let Some(Setup::Edit(e)) = &mut this.setup {
-                            e.format = id;
+                            e.canvas = id;
                         }
                         cx.notify();
                     }),
@@ -444,8 +444,8 @@ impl OutputsPanel {
         }
 
         // Quality: Automatic, or its own.
-        let destination = project.outputs.destinations.iter().find(|d| d.id == e.id).cloned();
-        let auto = destination.as_ref().map(|d| crate::encoding::automatic(project, d)).unwrap_or_default();
+        let destination = workspace.outputs.destinations.iter().find(|d| d.id == e.id).cloned();
+        let auto = destination.as_ref().map(|d| crate::encoding::automatic(workspace, d)).unwrap_or_default();
         let automatic = e.encoding.is_none();
         let summary = |enc: &Encoding| {
             format!(
@@ -641,19 +641,19 @@ impl OutputsPanel {
 
     /// The Add destination dialog, drawn over the window while open.
     pub fn dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let project = self.studio.read(cx).project().clone();
-        // The vertical format asked for has arrived: send it.
+        let workspace = self.studio.read(cx).workspace().clone();
+        // The vertical canvas asked for has arrived: send it.
         if let Some(Setup::Configure(c)) = &mut self.setup
             && c.want_vertical
-            && let Some(f) = project.formats.iter().find(|f| f.height > f.width)
+            && let Some(f) = workspace.canvases.iter().find(|f| f.height > f.width)
         {
-            c.format = Some(f.id);
+            c.canvas = Some(f.id);
             c.want_vertical = false;
         }
         let body = match self.setup.as_ref()? {
             Setup::Pick => self.picker(cx),
-            Setup::Configure(c) => self.configure(c, &project, cx),
-            Setup::Edit(e) => self.edit_view(e, &project, cx),
+            Setup::Configure(c) => self.configure(c, &workspace, cx),
+            Setup::Edit(e) => self.edit_view(e, &workspace, cx),
         };
         let close = cx.listener(|this, _, _, cx| {
             this.setup = None;
@@ -695,7 +695,7 @@ impl OutputsPanel {
     }
 
     /// A platform's details: server, key, shape.
-    fn configure(&self, c: &Configure, project: &Project, cx: &mut Context<Self>) -> Div {
+    fn configure(&self, c: &Configure, workspace: &Workspace, cx: &mut Context<Self>) -> Div {
         let p = c.platform;
         let field_label = |text: &'static str| {
             div().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(tok::text_secondary()).child(text)
@@ -750,11 +750,11 @@ impl OutputsPanel {
                 .ghost()
                 .on_click(move |_, _, cx| cx.open_url(url))
         });
-        // Shape: the project's formats, the platform's preferred one marked.
+        // Shape: the workspace's canvases, the platform's preferred one marked.
         let mut shapes = div().flex().flex_wrap().gap_1();
-        for (i, f) in project.formats.iter().enumerate() {
-            let id = (f.id != project.primary_format().id).then_some(f.id);
-            let on = c.format == id;
+        for (i, f) in workspace.canvases.iter().enumerate() {
+            let id = (f.id != workspace.primary_canvas().id).then_some(f.id);
+            let on = c.canvas == id;
             let fits = match p.shape {
                 Shape::Vertical => f.height > f.width,
                 Shape::Landscape => f.width >= f.height,
@@ -778,13 +778,13 @@ impl OutputsPanel {
                     .when(fits && p.id != "custom", |d| d.child(div().size(px(5.)).rounded_full().bg(tok::ok())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Setup::Configure(c)) = &mut this.setup {
-                            c.format = id;
+                            c.canvas = id;
                         }
                         cx.notify();
                     })),
             );
         }
-        let no_vertical = p.shape == Shape::Vertical && !project.formats.iter().any(|f| f.height > f.width);
+        let no_vertical = p.shape == Shape::Vertical && !workspace.canvases.iter().any(|f| f.height > f.width);
         div()
             .flex()
             .flex_col()
@@ -846,14 +846,14 @@ impl OutputsPanel {
                                 .gap_2()
                                 .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(tok::warn()).child(
                                     format!(
-                                        "{} wants vertical video, and this workspace has no vertical format yet.",
+                                        "{} wants vertical video, and this workspace has no vertical canvas yet.",
                                         p.name
                                     ),
                                 ))
                                 .child(
                                     Button::new("add-vertical")
                                         .flex_none()
-                                        .label("Add vertical format")
+                                        .label("Add vertical canvas")
                                         .xsmall()
                                         .outline()
                                         .on_click(cx.listener(|this, _, _, cx| this.request_vertical(cx))),
@@ -895,7 +895,7 @@ impl Render for OutputsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.request_animation_frame();
         let studio = self.studio.read(cx);
-        let project = studio.project().clone();
+        let workspace = studio.workspace().clone();
         let folder = studio.recording_folder();
         let card = |id: ElementId| {
             div()
@@ -931,13 +931,13 @@ impl Render for OutputsPanel {
         };
 
         // ---- Recording: each canvas, recorded or not (Record records all that are on).
-        let settings = project.outputs.recording.clone();
-        let targets = settings.targets(&project);
-        let several = project.formats.len() > 1;
+        let settings = workspace.outputs.recording.clone();
+        let targets = settings.targets(&workspace);
+        let several = workspace.canvases.len() > 1;
         let container = settings.container.to_uppercase();
         let folder_name = folder.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         let mut recordings = div().flex().flex_col().gap_0p5();
-        for (i, f) in project.formats.iter().enumerate() {
+        for (i, f) in workspace.canvases.iter().enumerate() {
             let fid = f.id;
             let on = targets.contains(&fid);
             let st = runtime().get(OutputKey::Recording(fid));
@@ -969,7 +969,7 @@ impl Render for OutputsPanel {
                     .child(status(state))
                     .when(several, |d| {
                         let s2 = settings.clone();
-                        let p2 = project.clone();
+                        let p2 = workspace.clone();
                         d.child(
                             toggle(("rec-toggle", i), on)
                                 .tooltip(move |w, cx| {
@@ -981,7 +981,7 @@ impl Render for OutputsPanel {
                                     .build(w, cx)
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    let settings = s2.with_format(&p2, fid, !on);
+                                    let settings = s2.with_canvas(&p2, fid, !on);
                                     this.studio.update(cx, |s, cx| {
                                         let _ = s.execute(Command::SetRecordingSettings { settings }, cx);
                                     })
@@ -1001,7 +1001,7 @@ impl Render for OutputsPanel {
         // ---- Streaming
         let mut streams = div().flex().flex_col().gap_0p5();
         if runtime().any_stream_running() {
-            let live = project
+            let live = workspace
                 .outputs
                 .destinations
                 .iter()
@@ -1017,7 +1017,7 @@ impl Render for OutputsPanel {
                     .child(format!("Live on {live} · {encoders} encoder{}", if encoders == 1 { "" } else { "s" })),
             );
         }
-        for (i, d) in project.outputs.destinations.iter().enumerate() {
+        for (i, d) in workspace.outputs.destinations.iter().enumerate() {
             let id = d.id;
             let enabled = d.enabled;
             let st = runtime().get(OutputKey::Stream(id));
@@ -1046,14 +1046,14 @@ impl Render for OutputsPanel {
                     .on_click(cx.listener(move |this, _, window, cx| this.open_edit(id, window, cx)))
                     .child(badge(platform, 28.))
                     .child(two_lines(d.name.clone(), where_))
-                    .child(format_badge(("dest-format", i), &project, d.format).on_click(cx.listener({
-                        let project = project.clone();
-                        let current = d.format;
+                    .child(canvas_badge(("dest-canvas", i), &workspace, d.canvas).on_click(cx.listener({
+                        let workspace = workspace.clone();
+                        let current = d.canvas;
                         move |this, _, _, cx| {
                             cx.stop_propagation();
-                            let format = next_format(&project, current);
+                            let canvas = next_canvas(&workspace, current);
                             this.studio.update(cx, |s, cx| {
-                                let _ = s.execute(Command::SetDestinationFormat { destination: id, format }, cx);
+                                let _ = s.execute(Command::SetDestinationCanvas { destination: id, canvas }, cx);
                             })
                         }
                     })))
@@ -1197,7 +1197,7 @@ impl gpui_kit::component::dock::Panel for OutputsPanel {
 }
 
 impl EventEmitter<gpui_kit::component::dock::PanelEvent> for OutputsPanel {}
-impl EventEmitter<AddVerticalFormat> for OutputsPanel {}
+impl EventEmitter<AddVerticalCanvas> for OutputsPanel {}
 impl EventEmitter<OpenRecordingSettings> for OutputsPanel {}
 
 impl Focusable for OutputsPanel {

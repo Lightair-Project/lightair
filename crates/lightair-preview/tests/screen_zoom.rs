@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Fit, Input, Layer, Layout, Project, Scene, diff};
+use lightair_core::{Command, Document, Effect, Fit, Input, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -13,8 +13,8 @@ use serde_json::json;
 fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
-    let project = change.after.clone();
-    engine.call(move |s| s.reconciler.apply(&project, &patches));
+    let workspace = change.after.clone();
+    engine.call(move |s| s.reconciler.apply(&workspace, &patches));
 }
 
 /// Y, Cb, Cr on a 16×16 grid of a frame rendered after `wait`.
@@ -67,8 +67,8 @@ fn the_follow_zoom_magnifies_and_lets_go() {
     std::fs::create_dir_all(&dir).unwrap();
     let picture = gradient(&dir);
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Zoom"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Zoom"));
+    let f = doc.workspace().primary_canvas().id;
     let input = Input::new("Picture", "image_source", json!({"file": picture.to_string_lossy()}));
     let iid = input.id;
     let mut scene = Scene::new("Main");

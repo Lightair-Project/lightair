@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Input, Layer, Layout, Project, Scene, diff};
+use lightair_core::{Command, Document, Input, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -30,8 +30,8 @@ fn each_source_records_at_its_own_size() {
         return;
     }
     let engine = Engine::start(EngineConfig { canvas: (1280, 720), output: (1280, 720), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Take"));
-    let f = doc.project().primary_format().id;
+    let mut doc = Document::new(Workspace::new("Take"));
+    let f = doc.workspace().primary_canvas().id;
     let wide = Input::new("Wide", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 1600, "height": 900}));
     let tall = Input::new("Tall", "color_source_v3", json!({"color": 0xFF22AA44u32, "width": 480, "height": 640}));
     let (wid, tid) = (wide.id, tall.id);
@@ -47,16 +47,16 @@ fn each_source_records_at_its_own_size() {
     ] {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
-        let project = change.after.clone();
-        engine.call(move |s| s.reconciler.apply(&project, &patches));
+        let workspace = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     }
     let dir = std::env::temp_dir().join(format!("lightair-take-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let project = doc.project().clone();
+    let workspace = doc.workspace().clone();
     let (folder, caps) = (dir.clone(), engine.capabilities.encoders.clone());
     let tracks = engine
         .call(move |s| {
-            let sources: Vec<_> = project
+            let sources: Vec<_> = workspace
                 .inputs
                 .values()
                 .filter_map(|i| s.reconciler.input_type(i.id).map(|_| ((**i).clone(), i.id)))

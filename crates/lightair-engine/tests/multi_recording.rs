@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Format, Input, Layer, Layout, Project, Scene, diff};
+use lightair_core::{Command, Document, Canvas, Input, Layer, Layout, Workspace, Scene, diff};
 use lightair_engine::outputs::{Container, OutputKey, RecordingConfig, default_encoders, runtime};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -45,10 +45,10 @@ fn two_canvases_record_together() {
     let dir = std::env::temp_dir().join(format!("lightair-multirec-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let engine = Engine::start(EngineConfig { canvas: (640, 360), output: (640, 360), ..Default::default() }).unwrap();
-    // A landscape (primary) and a vertical format, one scene laid out in both.
-    let mut doc = Document::new(Project::new("Two"));
-    let landscape = doc.project().primary_format().id;
-    let vertical = Format { width: 360, height: 640, ..Format::vertical() };
+    // A landscape (primary) and a vertical canvas, one scene laid out in both.
+    let mut doc = Document::new(Workspace::new("Two"));
+    let landscape = doc.workspace().primary_canvas().id;
+    let vertical = Canvas { width: 360, height: 640, ..Canvas::vertical() };
     let vid = vertical.id;
     let colour = Input::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 640}));
     let mut scene = Scene::new("Main");
@@ -59,15 +59,15 @@ fn two_canvases_record_together() {
     ));
     let scene_id = scene.id;
     for cmd in [
-        Command::AddFormat { format: vertical },
+        Command::AddCanvas { canvas: vertical },
         Command::AddInput { input: colour },
         Command::AddScene { scene, index: None },
         Command::SetProgram { scene: Some(scene_id) },
     ] {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
-        let project = change.after.clone();
-        engine.call(move |s| s.reconciler.apply(&project, &patches));
+        let workspace = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     }
 
     let encoders = default_encoders(&engine.capabilities.encoders, 2500, false);
@@ -86,7 +86,7 @@ fn two_canvases_record_together() {
             };
             engine
                 .call(move |s| {
-                    let video = s.reconciler.format_video(canvas);
+                    let video = s.reconciler.canvas_video(canvas);
                     s.outputs.start_recording(&cfg, video)
                 })
                 .expect("recording starts");

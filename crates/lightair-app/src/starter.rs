@@ -1,18 +1,18 @@
-//! The project a first launch starts with (until onboarding generates one from the user's
+//! The workspace a first launch starts with (until onboarding generates one from the user's
 //! devices; docs/05-interface-shell.md, "Onboarding").
 
-use lightair_core::{Command, Input, Layer, Layout, Project, Scene, Track};
+use lightair_core::{Command, Input, Layer, Layout, Workspace, Scene, Track};
 use serde_json::json;
 
-pub fn starter_project() -> Project {
-    let mut p = Project::new("My Show");
-    let format = p.primary_format().clone();
-    let (w, h) = (format.width as f32, format.height as f32);
+pub fn starter_workspace() -> Workspace {
+    let mut p = Workspace::new("My Show");
+    let canvas = p.primary_canvas().clone();
+    let (w, h) = (canvas.width as f32, canvas.height as f32);
 
     let background = Input::new(
         "Background",
         "color_source_v3",
-        json!({"color": 0xFF1B1B1Cu32, "width": format.width, "height": format.height}),
+        json!({"color": 0xFF1B1B1Cu32, "width": canvas.width, "height": canvas.height}),
     );
     let display = Input::new("Main display", lightair_core::kinds::SCREEN, crate::shell::display_settings());
     let icon_path = brand_icon();
@@ -20,19 +20,19 @@ pub fn starter_project() -> Project {
 
     let mut main = Scene::new("Main");
     main.layers = vec![
-        Layer::new("Background", background.id, [(format.id, Layout::boxed(0.0, 0.0, w, h))]),
-        Layer::new("Main display", display.id, [(format.id, Layout::boxed(w * 0.05, h * 0.08, w * 0.9, h * 0.84))]),
-        Layer::new("Logo", logo.id, [(format.id, Layout::boxed(w - 200.0, h - 200.0, 160.0, 160.0))]),
+        Layer::new("Background", background.id, [(canvas.id, Layout::boxed(0.0, 0.0, w, h))]),
+        Layer::new("Main display", display.id, [(canvas.id, Layout::boxed(w * 0.05, h * 0.08, w * 0.9, h * 0.84))]),
+        Layer::new("Logo", logo.id, [(canvas.id, Layout::boxed(w - 200.0, h - 200.0, 160.0, 160.0))]),
     ];
     let mut soon = Scene::new("Starting Soon");
     soon.layers = vec![
-        Layer::new("Background", background.id, [(format.id, Layout::boxed(0.0, 0.0, w, h))]),
-        Layer::new("Logo", logo.id, [(format.id, Layout::boxed(w / 2.0 - 160.0, h / 2.0 - 160.0, 320.0, 320.0))]),
+        Layer::new("Background", background.id, [(canvas.id, Layout::boxed(0.0, 0.0, w, h))]),
+        Layer::new("Logo", logo.id, [(canvas.id, Layout::boxed(w / 2.0 - 160.0, h / 2.0 - 160.0, 320.0, 320.0))]),
     ];
     let mut brb = Scene::new("Be Right Back");
     brb.layers = vec![
-        Layer::new("Background", background.id, [(format.id, Layout::boxed(0.0, 0.0, w, h))]),
-        Layer::new("Logo", logo.id, [(format.id, Layout::boxed(80.0, h - 240.0, 160.0, 160.0))]),
+        Layer::new("Background", background.id, [(canvas.id, Layout::boxed(0.0, 0.0, w, h))]),
+        Layer::new("Logo", logo.id, [(canvas.id, Layout::boxed(80.0, h - 240.0, 160.0, 160.0))]),
     ];
 
     let mic = Input::new(crate::mixer::SYSTEM_DEFAULT, lightair_core::kinds::MIC, json!({"device": "default"}));
@@ -53,7 +53,7 @@ pub fn starter_project() -> Project {
         Command::AddTrack { track: mic_track, index: None },
         Command::AddTrack { track: desktop_track, index: None },
     ] {
-        cmd.apply(&mut p).expect("starter project is valid");
+        cmd.apply(&mut p).expect("starter workspace is valid");
     }
     p
 }
@@ -61,10 +61,10 @@ pub fn starter_project() -> Project {
 /// A starter with no capture sources (colour, text, a timer and silent tracks), so it never
 /// triggers a camera, screen or microphone permission prompt. Used for screenshots and demos
 /// with `LIGHTAIR_STARTER=plain`.
-pub fn plain_project() -> Project {
-    let mut p = Project::new("Demo");
-    let format = p.primary_format().clone();
-    let (w, h) = (format.width as f32, format.height as f32);
+pub fn plain_workspace() -> Workspace {
+    let mut p = Workspace::new("Demo");
+    let canvas = p.primary_canvas().clone();
+    let (w, h) = (canvas.width as f32, canvas.height as f32);
     let bg = Input::new("Background", "color_source_v3", json!({"color": 0xFF2A1A12u32, "width": w, "height": h}));
     let card = Input::new("Card", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 960, "height": 540}));
     let title = Input::new(
@@ -79,7 +79,7 @@ pub fn plain_project() -> Project {
     );
     let icon = brand_icon();
     let logo = Input::new("Logo", "image_source", json!({"file": icon.to_string_lossy()}));
-    let f = format.id;
+    let f = canvas.id;
     let mut main = Scene::new("Main");
     main.layers.push(Layer::new("Background", bg.id, [(f, Layout::boxed(0.0, 0.0, w, h))]));
     main.layers.push(Layer::new("Card", card.id, [(f, Layout::boxed(480.0, 270.0, 960.0, 540.0))]));

@@ -1,10 +1,10 @@
 //! Auto-reframe (docs/07-scenes-layers-canvas.md, "Formats"): a first layout for a layer in a
-//! newly added format. Full-canvas layers (backgrounds) fill the new canvas; everything else
+//! newly added canvas. Full-canvas layers (backgrounds) fill the new canvas; everything else
 //! keeps its arrangement, scaled to the new width and centred vertically. The user refines it.
 
-use lightair_core::{Fit, Format, Layout};
+use lightair_core::{Fit, Canvas, Layout};
 
-pub fn reframe(l: &Layout, from: &Format, to: &Format) -> Layout {
+pub fn reframe(l: &Layout, from: &Canvas, to: &Canvas) -> Layout {
     let (fw, fh, tw, th) = (from.width as f32, from.height as f32, to.width as f32, to.height as f32);
     let full = l.x.abs() < 1.0 && l.y.abs() < 1.0 && (l.width - fw).abs() < 2.0 && (l.height - fh).abs() < 2.0;
     if full {
@@ -21,7 +21,7 @@ mod tests {
 
     #[test]
     fn backgrounds_fill_and_others_scale_into_a_centred_band() {
-        let (land, vert) = (Format::landscape(), Format::vertical());
+        let (land, vert) = (Canvas::landscape(), Canvas::vertical());
         let bg = reframe(&Layout::boxed(0.0, 0.0, 1920.0, 1080.0), &land, &vert);
         assert_eq!((bg.x, bg.y, bg.width, bg.height, bg.fit), (0.0, 0.0, 1080.0, 1920.0, Fit::Fill));
         let logo = reframe(&Layout::boxed(960.0, 540.0, 192.0, 108.0), &land, &vert);

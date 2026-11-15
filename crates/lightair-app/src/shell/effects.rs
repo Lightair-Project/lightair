@@ -59,18 +59,18 @@ impl Owner {
         }
     }
     /// Its effects and name.
-    fn find(self, project: &lightair_core::Project) -> Option<(String, Vec<Effect>)> {
+    fn find(self, workspace: &lightair_core::Workspace) -> Option<(String, Vec<Effect>)> {
         match self {
-            Owner::Input(id) => project.inputs.get(&id).map(|i| (i.name.clone(), i.effects.clone())),
-            Owner::Track(id) => project.track(id).map(|t| (t.name.clone(), t.effects.clone())),
+            Owner::Input(id) => workspace.inputs.get(&id).map(|i| (i.name.clone(), i.effects.clone())),
+            Owner::Track(id) => workspace.track(id).map(|t| (t.name.clone(), t.effects.clone())),
             Owner::Strip(lightair_core::MixerStrip::Bus(id)) => {
-                project.audio.bus(id).map(|b| (b.name.clone(), b.effects.clone()))
+                workspace.audio.bus(id).map(|b| (b.name.clone(), b.effects.clone()))
             }
             Owner::Strip(lightair_core::MixerStrip::Mix(id)) => {
-                project.audio.mix(id).map(|m| (m.name.clone(), m.effects.clone()))
+                workspace.audio.mix(id).map(|m| (m.name.clone(), m.effects.clone()))
             }
-            Owner::Strip(lightair_core::MixerStrip::Master) => Some(("Program".into(), project.audio.master.effects.clone())),
-            Owner::Strip(lightair_core::MixerStrip::Track(id)) => project.track(id).map(|t| (t.name.clone(), t.effects.clone())),
+            Owner::Strip(lightair_core::MixerStrip::Master) => Some(("Program".into(), workspace.audio.master.effects.clone())),
+            Owner::Strip(lightair_core::MixerStrip::Track(id)) => workspace.track(id).map(|t| (t.name.clone(), t.effects.clone())),
         }
     }
     fn audio(self) -> bool {
@@ -88,10 +88,10 @@ impl Owner {
     }
 
     /// Whose effect `effect` is (a mixer strip's: the audio inserts).
-    fn of_audio_effect(project: &lightair_core::Project, effect: Id) -> Option<(Owner, Effect)> {
+    fn of_audio_effect(workspace: &lightair_core::Workspace, effect: Id) -> Option<(Owner, Effect)> {
         let has = |effects: &[Effect]| effects.iter().find(|e| e.id == effect).cloned();
-        let a = &project.audio;
-        project
+        let a = &workspace.audio;
+        workspace
             .tracks
             .iter()
             .find_map(|t| has(&t.effects).map(|e| (Owner::Track(t.id), e)))
@@ -425,7 +425,7 @@ impl StudioWindow {
         }
         let mut group_open = true;
         let mut first_heading = true;
-        // (macOS's own camera effect; Windows segments with MediaPipe whatever the project says)
+        // (macOS's own camera effect; Windows segments with MediaPipe whatever the workspace says)
         let system =
             !cfg!(windows) && e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM);
         if system {
@@ -593,7 +593,7 @@ impl StudioWindow {
                     let tracks: Vec<(String, String)> = self
                         .studio
                         .read(cx)
-                        .project()
+                        .workspace()
                         .tracks
                         .iter()
                         .map(|t| (t.id.0.to_string(), t.name.clone()))
@@ -826,9 +826,9 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let input = studio
             .selected_layer
-            .and_then(|l| studio.selected_scene.and_then(|s| studio.project().scene(s)).and_then(|s| s.layer(l)))
+            .and_then(|l| studio.selected_scene.and_then(|s| studio.workspace().scene(s)).and_then(|s| s.layer(l)))
             .and_then(|l| l.input)
-            .and_then(|i| studio.project().inputs.get(&i).cloned());
+            .and_then(|i| studio.workspace().inputs.get(&i).cloned());
         let Some(input) = input else {
             self.colour_pickers.clear();
             return;
@@ -869,8 +869,8 @@ impl StudioWindow {
     }
 
     fn set_effect_colour(&mut self, iid: Owner, eid: Id, key: &'static str, abgr: u32, cx: &mut Context<Self>) {
-        let project = self.studio.read(cx).project().clone();
-        let Some((_, effects)) = iid.find(&project) else { return };
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some((_, effects)) = iid.find(&workspace) else { return };
         let Some(e) = effects.iter().find(|e| e.id == eid) else { return };
         if e.settings.get(key).and_then(Value::as_u64) == Some(abgr as u64) {
             return;
@@ -887,8 +887,8 @@ impl StudioWindow {
     /// before the key (on air, the picture stays as viewers see it).
     fn pick_colour(&mut self, iid: Owner, eid: Id, key: &'static str, cx: &mut Context<Self>) {
         use lightair_engine::outputs::runtime;
-        let project = self.studio.read(cx).project().clone();
-        let Some((_, effects)) = iid.find(&project) else { return };
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some((_, effects)) = iid.find(&workspace) else { return };
         let Some(effect) = effects.iter().find(|e| e.id == eid) else { return };
         let filter = if effect.kind.starts_with("studio.") { catalog::STUDIO_ID } else { eid };
         let restore = catalog::lower(&effects).iter().find(|f| f.id == filter).is_some_and(|f| f.enabled);
@@ -923,8 +923,8 @@ impl StudioWindow {
     }
 
     pub(super) fn move_effect(&mut self, iid: Owner, eid: Id, by: i32, cx: &mut Context<Self>) {
-        let project = self.studio.read(cx).project().clone();
-        let Some((_, effects)) = iid.find(&project) else { return };
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some((_, effects)) = iid.find(&workspace) else { return };
         let Some(at) = effects.iter().position(|e| e.id == eid) else { return };
         let to = at as i32 + by;
         if to < 0 || to as usize >= effects.len() {
@@ -941,15 +941,15 @@ impl StudioWindow {
 
     /// An effect dropped on this chain: before `before`, or last.
     fn drop_effect(&mut self, d: &crate::effect_drag::DraggedEffect, to: Owner, before: Option<Id>, cx: &mut Context<Self>) {
-        let project = self.studio.read(cx).project().clone();
-        if let Some(cmd) = crate::effect_drag::move_cmd(&project, d, to.home(), before) {
+        let workspace = self.studio.read(cx).workspace().clone();
+        if let Some(cmd) = crate::effect_drag::move_cmd(&workspace, d, to.home(), before) {
             self.exec(cmd, cx);
         }
     }
 
     pub(super) fn duplicate_effect(&mut self, iid: Owner, eid: Id, cx: &mut Context<Self>) {
-        let project = self.studio.read(cx).project().clone();
-        let Some((_, effects)) = iid.find(&project) else { return };
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some((_, effects)) = iid.find(&workspace) else { return };
         let Some(at) = effects.iter().position(|e| e.id == eid) else { return };
         let mut copy = effects[at].clone();
         copy.id = Id::new();
@@ -965,13 +965,13 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let Some(input) = studio
             .selected_layer
-            .and_then(|l| studio.selected_scene.and_then(|s| studio.project().scene(s)).and_then(|s| s.layer(l)))
+            .and_then(|l| studio.selected_scene.and_then(|s| studio.workspace().scene(s)).and_then(|s| s.layer(l)))
             .and_then(|l| l.input)
         else {
             return;
         };
         let wants = studio
-            .project()
+            .workspace()
             .inputs
             .get(&input)
             .is_some_and(|i| i.effects.iter().any(|e| e.enabled && e.kind.starts_with("studio.")));
@@ -1013,8 +1013,8 @@ impl StudioWindow {
 
     /// Adds an effect from the catalog (a face effect already in the stack opens instead).
     fn add_from_catalog(&mut self, input: Owner, def: &'static EffectDef, window: &mut Window, cx: &mut Context<Self>) {
-        let project = self.studio.read(cx).project().clone();
-        let Some((_, effects)) = input.find(&project) else { return };
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some((_, effects)) = input.find(&workspace) else { return };
         if def.is_studio()
             && let Some(e) = effects.iter().find(|e| e.kind == def.kind)
         {
@@ -1144,7 +1144,7 @@ impl StudioWindow {
     }
 
     /// Shows a plugin insert's own editor (in front, if it's open already). Closing it saves the
-    /// plugin's state in the project (one undo step).
+    /// plugin's state in the workspace (one undo step).
     pub(super) fn open_plugin_editor(&mut self, effect: Id, cx: &mut Context<Self>) {
         use lightair_engine::plugins::Hosted;
         if let Some(ed) = self.plugin_editors.get(&effect).filter(|ed| ed.is_open()) {
@@ -1152,9 +1152,9 @@ impl StudioWindow {
             return;
         }
         let Some(hosted) = lightair_engine::plugins::hosted(effect) else { return };
-        let project = self.studio.read(cx).project().clone();
-        let Some((owner, e)) = Owner::of_audio_effect(&project, effect) else { return };
-        let strip = owner.find(&project).map(|(n, _)| n).unwrap_or_default();
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some((owner, e)) = Owner::of_audio_effect(&workspace, effect) else { return };
+        let strip = owner.find(&workspace).map(|(n, _)| n).unwrap_or_default();
         let title = format!("{} — {}", e.name, strip);
         match hosted {
             Hosted::Vst3(p) => {
@@ -1212,11 +1212,11 @@ impl StudioWindow {
         .detach();
     }
 
-    /// Writes a plugin insert's current state into the project, if it changed.
+    /// Writes a plugin insert's current state into the workspace, if it changed.
     pub(super) fn save_plugin_state(&mut self, effect: Id, cx: &mut Context<Self>) {
         let Some(state) = lightair_engine::plugins::take_state(effect) else { return };
-        let project = self.studio.read(cx).project().clone();
-        let Some((owner, e)) = Owner::of_audio_effect(&project, effect) else { return };
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some((owner, e)) = Owner::of_audio_effect(&workspace, effect) else { return };
         if e.settings.get("state").and_then(Value::as_str) == Some(state.as_str()) {
             return;
         }
@@ -1230,8 +1230,8 @@ impl StudioWindow {
         if self.plugin_editors.is_empty() {
             return;
         }
-        let project = self.studio.read(cx).project().clone();
-        let present = lightair_engine::plugins::inserts(&project);
+        let workspace = self.studio.read(cx).workspace().clone();
+        let present = lightair_engine::plugins::inserts(&workspace);
         self.plugin_editors.retain(|id, ed| {
             let keep = present.contains(id);
             if !keep {
@@ -1245,8 +1245,8 @@ impl StudioWindow {
         let sheet = self.effect_sheet.as_ref()?;
         let (iid, page) = (sheet.owner, sheet.page);
         let query = sheet.search.read(cx).value().to_string();
-        let project = self.studio.read(cx).project().clone();
-        let (owner_name, owner_effects) = iid.find(&project)?;
+        let workspace = self.studio.read(cx).workspace().clone();
+        let (owner_name, owner_effects) = iid.find(&workspace)?;
         let searching = !query.trim().is_empty();
         // a track's sheet is the audio catalog; a source's, the video one
         let (list, categories): (&'static [EffectDef], &[Category]) =

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Input, Project, Track, diff};
+use lightair_core::{Command, Document, Input, Workspace, Track, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -19,12 +19,12 @@ fn peak_of(ring: &mut rtrb::Consumer<f32>) -> f32 {
 fn the_monitor_hears_the_cued_tracks() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Project::new("Monitor"));
+    let mut doc = Document::new(Workspace::new("Monitor"));
     let apply = |doc: &mut Document, cmd: Command| {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
-        let project = change.after.clone();
-        engine.call(move |s| s.reconciler.apply(&project, &patches));
+        let workspace = change.after.clone();
+        engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     };
     let a = Input::new("A", "lightair_test_tone", json!({"freq": 300.0, "amplitude": 0.4}));
     let b = Input::new("B", "lightair_test_tone", json!({"freq": 500.0, "amplitude": 0.2}));
