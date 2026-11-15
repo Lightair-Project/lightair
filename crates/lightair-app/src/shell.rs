@@ -343,9 +343,9 @@ pub struct StudioWindow {
     pan: (f32, f32),
     /// The performance panel under the FPS readout is open.
     perf_open: bool,
-    /// Whether macOS's Backgrounds picture was last made green (Background removal on macOS's
-    /// model); `None` before the first look.
-    green_screen: Option<bool>,
+    /// macOS's camera effects as last set (`effects::sync_macos_effects`); `None` before the
+    /// first look.
+    macos_fx: Option<effects::MacosEffects>,
     /// A pan drag: where the pointer started and the pan then.
     panning: Option<(Point<Pixels>, (f32, f32))>,
     /// Space is held: dragging the canvas pans it.
@@ -470,6 +470,10 @@ impl StudioWindow {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(40)).await;
+                // macOS's camera effects follow the scene on air (at once, not on a slow timer)
+                if this.update(cx, |this, cx| this.sync_macos_effects(cx)).is_err() {
+                    break;
+                }
                 let pressed = crate::shortcuts::take_pressed();
                 if pressed.is_empty() {
                     continue;
@@ -591,7 +595,7 @@ impl StudioWindow {
             selected_asset: None,
             zoom: 1.0,
             pan: (0.0, 0.0),
-            green_screen: None,
+            macos_fx: None,
             perf_open: false,
             panning: None,
             space_down: false,

@@ -83,14 +83,20 @@ fn green_key(engine: &Engine) {
     use crate::system_effects as sys;
     let was_on = sys::backgrounds_on();
     println!("SELFTEST backgrounds on for Lightair: {was_on:?}");
-    if was_on == Some(false) {
+    // LIGHTAIR_SET_LATE=1: turned on while the camera runs (as a scene change does)
+    let late = std::env::var("LIGHTAIR_SET_LATE").is_ok_and(|v| v == "1");
+    if was_on == Some(false) && !late {
         println!("SELFTEST turn backgrounds on: {} -> {:?}", sys::set_backgrounds_on(true), sys::backgrounds_on());
     }
     let before = sys::background_picture();
     println!("SELFTEST picture before: {before:?}");
-    println!("SELFTEST set green: {}", sys::set_background_colour(sys::GREEN));
+    // LIGHTAIR_KEY=blue: a blue screen
+    let blue = std::env::var("LIGHTAIR_KEY").is_ok_and(|k| k == "blue");
+    if !late {
+        println!("SELFTEST set {}: {}", if blue { "blue" } else { "green" }, sys::set_background_colour(if blue { sys::BLUE } else { sys::GREEN }));
+    }
     println!("SELFTEST picture now: {:?}", sys::background_picture());
-    let report = engine.call(|s| {
+    let report = engine.call(move |s| {
         let devices = lightair_engine::kinds::cameras();
         let Some((name, uid)) = devices.into_iter().find(|(n, _)| !n.contains("Virtual") && !n.contains("VCam")) else {
             return "no camera device".to_string();
@@ -106,6 +112,7 @@ fn green_key(engine: &Engine) {
         look.set_int("bg_mode", 2);
         look.set_int("bg_model", lightair_core::catalog::BG_MODEL_SYSTEM);
         look.set_int("bg_feather", 30);
+        look.set_int("bg_key", i64::from(blue));
         if let Some(fx) = ObsSource::create_private(crate::camera_studio::KIND, "Self-test green key", Some(&look)) {
             unsafe { lightair_engine::sys::obs_source_filter_add(cam.as_ptr(), fx.as_ptr()) };
             s.sources.insert("fx".into(), fx);
@@ -125,6 +132,10 @@ fn green_key(engine: &Engine) {
     println!("SELFTEST camera device: {report}");
     let preview = engine.call(|_| lightair_preview::Preview::attach());
     // the camera starting, and macOS's effect warming up
+    if late {
+        std::thread::sleep(Duration::from_secs(3));
+        println!("SELFTEST late: colour {} on {}", sys::set_background_colour(if blue { sys::BLUE } else { sys::GREEN }), sys::set_backgrounds_on(true));
+    }
     std::thread::sleep(Duration::from_secs(6));
     let (w, h) = engine.call(|s| s.sources.get("cam").map_or((0, 0), |c| (c.width(), c.height())));
     println!("SELFTEST camera frames: {w}x{h}");
@@ -139,7 +150,7 @@ fn green_key(engine: &Engine) {
             let Some((_, cb, cr)) = lightair_preview::sample_ycbcr(&frame, fx * cw, fy * ch) else { continue };
             if cb > 170 && cr > 170 {
                 keyed += 1;
-            } else if cb < 100 && cr < 100 {
+            } else if (cb < 100 && cr < 100) || (blue && cb > 170 && cr < 110) {
                 green += 1;
             } else {
                 other += 1;
@@ -159,7 +170,7 @@ fn green_key(engine: &Engine) {
         println!("SELFTEST top corners mean YCbCr: ({}, {}, {})", sum.0 / k, sum.1 / k, sum.2 / k);
         let n = (keyed + green + other).max(1) as f32;
         println!(
-            "SELFTEST frame: {:.0}% keyed out (magenta shows), {:.1}% green left, {:.0}% neither (the person)",
+            "SELFTEST frame: {:.0}% keyed out (magenta shows), {:.1}% key colour left, {:.0}% neither (the person)",
             keyed as f32 * 100.0 / n,
             green as f32 * 100.0 / n,
             other as f32 * 100.0 / n

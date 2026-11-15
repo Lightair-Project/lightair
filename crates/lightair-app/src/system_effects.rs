@@ -189,8 +189,9 @@ pub fn set_backgrounds_on(on: bool) -> bool {
     true
 }
 
-/// The green Background removal keys out: pure sRGB green.
+/// The colours Background removal keys out: pure sRGB green, or blue.
 pub const GREEN: [u8; 3] = [0, 255, 0];
+pub const BLUE: [u8; 3] = [0, 0, 255];
 
 #[cfg(test)]
 mod tests {
