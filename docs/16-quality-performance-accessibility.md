@@ -46,11 +46,17 @@ Lightair is measured against OBS Studio of the same engine version with an equiv
 Run everything with `cargo xtask test` (a filter or `--nocapture` after it goes to every test
 program). It builds all test programs, then runs them side by side, slowest first, from small
 folders of their own, without the camera and capture-card modules that wait seconds on macOS
-services (the smoke test still loads every module). Tests that sample frames mid-animation
-(transitions) run after the rest, alone; tests that count dropped frames skip that check while
-sharing the GPU (plain `cargo test` still checks it). The suite takes under twenty seconds, where
-`cargo test` runs the programs one after another for minutes. Each engine test file is its own
-program because libobs runs once per process.
+services (the smoke test still loads every module). Tests that count dropped frames skip that
+check while sharing the GPU (plain `cargo test` still checks it). The suite runs in under twenty
+seconds, where `cargo test` runs the programs one after another for minutes.
+
+Each crate's integration tests are one test program (`tests/<crate>/main.rs`, a module per
+file), built and linked once. libobs runs once per process, so an engine or preview test starts
+with `lightair_engine::testing::ran_in_own_process()`: `cargo xtask test` runs each such test as
+a process of its own, and plain `cargo test` re-runs the program for it. Tests that depend on
+this Mac (its audio devices, its macOS version) or change it (a global shortcut) are ignored;
+`cargo xtask test --machine` runs them too. `cargo xtask check` is the edit loop and `cargo xtask
+precommit` what a commit needs (docs/build-speed.md).
 
 | Level | What | Tooling |
 |---|---|---|

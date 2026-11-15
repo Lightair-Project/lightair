@@ -24,6 +24,8 @@ pub mod plugins;
 mod reconcile;
 mod runtime;
 pub mod studio_take;
+#[doc(hidden)]
+pub mod testing;
 pub mod timers;
 mod transition;
 

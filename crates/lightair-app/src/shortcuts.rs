@@ -470,6 +470,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "changes this Mac: registers a real global shortcut; cargo xtask test --machine"]
     fn macos_takes_a_registration() {
         // An unlikely combination, registered and released again.
         let refused = register(&[(GlobalAction::Scene(5), "ctrl-alt-cmd-f12".into())]);

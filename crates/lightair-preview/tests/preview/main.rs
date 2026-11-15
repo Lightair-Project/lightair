@@ -1,0 +1,17 @@
+//! lightair-preview's tests against real libobs, one test program (one build and link, not one per file).
+//! libobs runs once per process: a test that starts an engine runs in a process of its
+//! own (`lightair_engine::testing`).
+
+mod crop_view;
+mod effects;
+mod face_tracking;
+mod fx;
+mod hierarchy;
+mod key_colour;
+mod resize_canvas;
+mod screen_zoom;
+mod shape_mask;
+mod stinger;
+mod studio_preview;
+mod transform3d;
+mod transitions;

@@ -33,9 +33,16 @@ uuid = { version = "1", features = ["v7", "serde"] }
 gpui-kit = "0.9.1"
 
 [profile.dev]
-# Dependencies (GPUI, gpui-kit) are slow when unoptimised; keep our own code debuggable.
+# Line tables: backtraces and stepping by line, without variables' and types' descriptions,
+# which made every object several times larger and slower to write (docs/build-speed.md).
+# For a session in the debugger with variables: CARGO_PROFILE_DEV_DEBUG=full cargo build.
+debug = "line-tables-only"
+
+# Dependencies (GPUI, gpui-kit) are slow when unoptimised; keep our own code debuggable. Their
+# debug info isn't read: backtraces still name their functions.
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
 
 # gpui-component with a switch to hide the dock's "…" panel menu (third_party/gpui-component/LIGHTAIR-PATCH.md).
 [patch.crates-io]
