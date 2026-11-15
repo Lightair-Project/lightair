@@ -194,6 +194,7 @@ pub fn source_icon(kind: &str) -> &'static str {
         "color_source_v3" => "square",
         "ffmpeg_source" | "vlc_source" => "clapperboard",
         "lightair_timer" => "timer",
+        "lightair_web" => "globe",
         lightair_core::kinds::MIC | lightair_core::kinds::DESKTOP_AUDIO | lightair_core::kinds::APP_AUDIO => "mic",
         _ => "layers",
     }
