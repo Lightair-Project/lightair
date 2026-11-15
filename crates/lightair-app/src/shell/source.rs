@@ -39,28 +39,6 @@ fn merged(settings: &Value, key: &str, value: Value) -> Value {
     s
 }
 
-/// Apps whose windows are never what you want to capture (and Lightair itself: a mirror).
-const HIDDEN_APPS: &[&str] = &[
-    "Dock",
-    "Window Server",
-    "Control Center",
-    "Control Centre",
-    "Notification Center",
-    "Notification Centre",
-    "SystemUIServer",
-    "Wallpaper",
-    "Spotlight",
-    "TextInputMenuAgent",
-    "Lightair",
-    "lightair",
-    // Windows
-    "Program Manager",
-    "explorer.exe",
-    "TextInputHost.exe",
-    "ApplicationFrameHost.exe",
-    "lightair.exe",
-];
-
 /// "[App] Title" (macOS) or "[app.exe]: Title" (Windows): the app and the window's title.
 fn app_and_title(label: &str) -> (String, String) {
     match label.strip_prefix('[').and_then(|r| r.split_once(']')) {
@@ -78,9 +56,15 @@ pub(super) struct Choice {
     pub value: Value,
 }
 
+/// A choice's value as the platform's window list gives it (a window's number, or a string).
+fn value_text(v: &Value) -> String {
+    v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())
+}
+
 /// Turns libobs's labels into titles: "[App] Window title" for windows, "Name: WxH @ x,y" for
-/// displays. Drops placeholders and system windows. (`key` is the portable setting.)
-pub(super) fn choices(key: &str, options: &[(String, Value)]) -> Vec<Choice> {
+/// displays. Drops placeholders, and the windows `hide` says to (Lightair's and the system's:
+/// [`lightair_platform::apps::hide_window`]). (`key` is the portable setting.)
+pub(super) fn choices(key: &str, options: &[(String, Value)], hide: impl Fn(&Value) -> bool) -> Vec<Choice> {
     let mut out = Vec::new();
     for (label, value) in options {
         let label = label.trim();
@@ -90,7 +74,7 @@ pub(super) fn choices(key: &str, options: &[(String, Value)]) -> Vec<Choice> {
         let choice = match key {
             "window" => {
                 let (app, title) = app_and_title(label);
-                if HIDDEN_APPS.contains(&app.as_str()) || title.is_empty() {
+                if hide(value) || title.is_empty() {
                     continue;
                 }
                 Choice { title, detail: app.clone(), group: app, value: value.clone() }
@@ -104,7 +88,7 @@ pub(super) fn choices(key: &str, options: &[(String, Value)]) -> Vec<Choice> {
                 // Windows lists the app's windows: the app is what's shown
                 let (app, title) = app_and_title(label);
                 let (app, detail) = if app.is_empty() { (title, String::new()) } else { (app, title) };
-                if HIDDEN_APPS.contains(&app.as_str()) {
+                if hide(value) {
                     continue;
                 }
                 Choice { title: app.trim_end_matches(".exe").to_string(), detail, group: String::new(), value: value.clone() }
@@ -187,7 +171,7 @@ impl StudioWindow {
     fn current_source(&self, source: &Source, cx: &mut Context<Self>) -> Option<(String, String)> {
         let key = device_key(&source.kind, &source.settings)?;
         let current = source.settings[key].clone();
-        let list = choices(key, &self.source_options(source.id, key, false, cx));
+        let list = choices(key, &self.source_options(source.id, key, false, cx), |v| lightair_platform::apps::hide_window(&value_text(v)));
         Some(match list.into_iter().find(|c| c.value == current) {
             Some(c) => (c.title, c.detail),
             None if current.is_null() || current == json!("") || current == json!(0) => {
@@ -311,7 +295,7 @@ impl StudioWindow {
         let id = source.id;
         let query = picker.search.read(cx).value().to_lowercase();
         let current = source.settings[key].clone();
-        let list: Vec<Choice> = choices(key, &self.source_options(id, key, false, cx))
+        let list: Vec<Choice> = choices(key, &self.source_options(id, key, false, cx), |v| lightair_platform::apps::hide_window(&value_text(v)))
             .into_iter()
             .filter(|c| {
                 query.is_empty() || c.title.to_lowercase().contains(&query) || c.detail.to_lowercase().contains(&query)
@@ -515,7 +499,8 @@ mod tests {
             ("[Notes] Shopping list".to_string(), json!(4)),
             (" ".to_string(), json!(0)),
         ];
-        let c = choices("window", &windows);
+        // (the platform says which to hide, by owner: here, the Dock's and Lightair's)
+        let c = choices("window", &windows, |v| *v == json!(2) || *v == json!(3));
         let titles: Vec<_> = c.iter().map(|c| (c.group.as_str(), c.title.as_str())).collect();
         assert_eq!(
             titles,
@@ -523,14 +508,14 @@ mod tests {
             "system windows and Lightair are hidden"
         );
         let displays = [("Built-in Retina Display: 3024x1964 @ 0,0".to_string(), json!("uuid"))];
-        let d = &choices("display", &displays)[0];
+        let d = &choices("display", &displays, |_| false)[0];
         assert_eq!((d.title.as_str(), d.detail.as_str()), ("Built-in Retina Display", "3024 × 1964"));
 
         // Windows's window_capture labels
         let windows = [("[chrome.exe]: Lightair docs".to_string(), json!("a:b:chrome.exe"))];
-        let c = &choices("window", &windows)[0];
+        let c = &choices("window", &windows, |_| false)[0];
         assert_eq!((c.group.as_str(), c.title.as_str()), ("chrome.exe", "Lightair docs"));
-        let a = &choices("app", &windows)[0];
+        let a = &choices("app", &windows, |_| false)[0];
         assert_eq!((a.title.as_str(), a.detail.as_str()), ("chrome", "Lightair docs"));
     }
 }

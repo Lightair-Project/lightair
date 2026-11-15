@@ -437,8 +437,9 @@ impl StudioWindow {
         };
         let channels = devices
             .iter()
-            .find(|d| if device.is_empty() { d.default } else { d.name == device })
+            .find(|d| if lightair_engine::devices::is_system_default(&device) { d.default } else { d.id == device || d.name == device })
             .map_or(2, |d| d.channels);
+        let shown = lightair_engine::devices::device_name(&device).unwrap_or_else(|| crate::mixer::SYSTEM_DEFAULT.to_string());
         // the device: the system default, or any source the Mac has
         let picker = {
             let me = cx.entity().downgrade();
@@ -446,14 +447,14 @@ impl StudioWindow {
             let base = source.settings.clone();
             let current = device.clone();
             Button::new("track-device")
-                .label(if device.is_empty() { "System default".to_string() } else { device.clone() })
+                .label(shown)
                 .small()
                 .outline()
                 .dropdown_menu(move |mut menu, _, _| {
-                    let mut choices = vec![(String::new(), "System default".to_string())];
+                    let mut choices = vec![(String::new(), crate::mixer::SYSTEM_DEFAULT.to_string())];
                     choices.extend(devices.iter().map(|d| {
                         let n = if d.channels == 1 { "1 input".to_string() } else { format!("{} inputs", d.channels) };
-                        (d.name.clone(), format!("{} · {n}", d.name))
+                        (d.id.clone(), format!("{} · {n}", d.name))
                     }));
                     for (value, label) in choices {
                         let (me, track) = (me.clone(), track.clone());

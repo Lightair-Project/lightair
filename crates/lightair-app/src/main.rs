@@ -89,7 +89,7 @@ fn main() {
     if let Some((name, id)) = prefs.headphones_device.clone() {
         engine.call(move |_| lightair_engine::monitoring::set(&name, &id));
     }
-    let monitor = prefs.low_latency_headphones.then(|| prefs.headphones_device.clone().map_or(String::new(), |(name, _)| name));
+    let monitor = prefs.low_latency_headphones.then(|| prefs.headphones_device.clone().map_or(String::new(), |(_, id)| id));
     let program = prefs.headphones_hear_program;
     let block = prefs.audio_block;
     engine.call(move |s| {

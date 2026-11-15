@@ -18,7 +18,7 @@ pub fn devices() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     unsafe { sys::obs_enum_audio_monitoring_devices(Some(each), &mut out as *mut _ as *mut c_void) };
     if !out.iter().any(|(_, id)| id == "default") {
-        out.insert(0, ("System default".into(), "default".into()));
+        out.insert(0, ("System Default".into(), "default".into()));
     }
     out
 }

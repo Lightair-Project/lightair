@@ -35,7 +35,7 @@ pub fn starter_workspace() -> Workspace {
         Object::new("Logo", logo.id, [(canvas.id, Layout::boxed(80.0, h - 240.0, 160.0, 160.0))]),
     ];
 
-    let mic = Source::new(crate::mixer::SYSTEM_DEFAULT, lightair_core::kinds::MIC, json!({"device": "default"}));
+    let mic = Source::new(crate::mixer::SYSTEM_DEFAULT, lightair_core::kinds::MIC, json!({"device": ""}));
     let desktop = Source::new("Desktop audio", lightair_core::kinds::DESKTOP_AUDIO, json!({}));
     let mut mic_track = Track::new(crate::mixer::SYSTEM_DEFAULT, mic.id);
     mic_track.effects = crate::mixer::voice_clarity();

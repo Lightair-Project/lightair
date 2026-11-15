@@ -312,6 +312,10 @@ impl StudioWindow {
         let Some(mut clip) = Clip::copy(studio.workspace(), scene, &[object]) else { return };
         let name = clip.objects[0].name.clone();
         clip.objects[0].prefab = None;
+        clip.objects[0].prefab_id = None;
+        // its own id, kept in the file: instances stay linked when it's renamed
+        let prefab_id = lightair_core::Id::new();
+        clip.prefab_id = Some(prefab_id);
         let path = free_name(&dir, &name, "prefab");
         let Ok(text) = serde_json::to_string_pretty(&clip) else { return };
         if let Err(e) = std::fs::write(&path, text) {
@@ -319,7 +323,7 @@ impl StudioWindow {
             return;
         }
         let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        self.exec(Command::SetObjectPrefab { scene, object, prefab: Some(file) }, cx);
+        self.exec(Command::SetObjectPrefab { scene, object, prefab: Some(file), prefab_id: Some(prefab_id) }, cx);
         self.selected_asset = Some(path);
         self.refresh_assets();
     }
@@ -361,9 +365,37 @@ impl StudioWindow {
         });
     }
 
+    /// A prefab file's contents. One saved before prefabs had ids is given one now (and saved
+    /// with it), so what's placed from it from here on links by it.
     fn read_prefab(&self, file: &str, cx: &App) -> Option<Clip> {
         let path = self.studio.read(cx).assets_dir()?.join(file);
-        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+        let mut clip: Clip = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+        if clip.prefab_id.is_none() {
+            clip.prefab_id = Some(lightair_core::Id::new());
+            if let Ok(text) = serde_json::to_string_pretty(&clip) {
+                let _ = std::fs::write(&path, text);
+            }
+        }
+        Some(clip)
+    }
+
+    /// An instance's prefab: its file where it was last, else (renamed) the file in the assets
+    /// folder with its id; its path and contents. An instance from before prefabs had ids goes
+    /// by its file name alone.
+    fn find_prefab(&self, object: &Object, cx: &App) -> Option<(std::path::PathBuf, Clip)> {
+        let dir = self.studio.read(cx).assets_dir()?;
+        let read = |p: &Path| -> Option<Clip> { serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok() };
+        if let Some(file) = &object.prefab
+            && let Some(clip) = read(&dir.join(file))
+            && (object.prefab_id.is_none() || clip.prefab_id == object.prefab_id)
+        {
+            return Some((dir.join(file), clip));
+        }
+        let id = object.prefab_id?;
+        std::fs::read_dir(&dir).ok()?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "prefab")).find_map(|p| {
+            let clip = read(&p)?;
+            (clip.prefab_id == Some(id)).then_some((p, clip))
+        })
     }
 
     /// Adds an asset to the scene: a prefab instance, or a object for an image, video or sound.
@@ -487,8 +519,10 @@ impl StudioWindow {
     /// The bar on an instance's Inspector: which prefab, and what to do with the link.
     pub(super) fn prefab_bar(&self, scene: Id, object: &Object, cx: &mut Context<Self>) -> Option<AnyElement> {
         let file = object.prefab.clone()?;
-        let name = Path::new(&file).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(file.clone());
-        let missing = self.read_prefab(&file, cx).is_none();
+        let found = self.find_prefab(object, cx);
+        let shown = found.as_ref().map_or(Path::new(&file).to_path_buf(), |(p, _)| p.clone());
+        let name = shown.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(file.clone());
+        let missing = found.is_none();
         let id = object.id;
         let button = |key: &'static str, label: &'static str, tip: &'static str| {
             gpui_kit::component::button::Button::new(key).label(label).tooltip(tip)
@@ -537,7 +571,7 @@ impl StudioWindow {
                                 .xsmall()
                                 .ghost()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.exec(Command::SetObjectPrefab { scene, object: id, prefab: None }, cx)
+                                    this.exec(Command::SetObjectPrefab { scene, object: id, prefab: None, prefab_id: None }, cx)
                                 })),
                         ),
                 )
@@ -548,10 +582,8 @@ impl StudioWindow {
     /// Back to the prefab: the instance is rebuilt from the file.
     pub(super) fn revert_prefab(&mut self, scene: Id, root: Id, cx: &mut Context<Self>) {
         let workspace = self.studio.read(cx).workspace().clone();
-        let Some(file) = workspace.scene(scene).and_then(|s| s.object(root)).and_then(|l| l.prefab.clone()) else {
-            return;
-        };
-        let Some(clip) = self.read_prefab(&file, cx) else { return };
+        let Some(object) = workspace.scene(scene).and_then(|s| s.object(root)).cloned() else { return };
+        let Some((_, clip)) = self.find_prefab(&object, cx) else { return };
         let (commands, new_root) = clip.replace_instance(&workspace, scene, root);
         if commands.is_empty() {
             return;
@@ -564,14 +596,22 @@ impl StudioWindow {
     pub(super) fn apply_prefab(&mut self, scene: Id, root: Id, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
-        let Some(dir) = studio.assets_dir() else { return };
-        let Some(file) = workspace.scene(scene).and_then(|s| s.object(root)).and_then(|l| l.prefab.clone()) else {
-            return;
+        let Some(object) = workspace.scene(scene).and_then(|s| s.object(root)).cloned() else { return };
+        let Some(file) = object.prefab.clone() else { return };
+        // into its file, wherever it is now (renamed: found by its id)
+        let path = match self.find_prefab(&object, cx) {
+            Some((p, _)) => p,
+            None => match self.studio.read(cx).assets_dir() {
+                Some(dir) => dir.join(&file),
+                None => return,
+            },
         };
         let Some(mut clip) = Clip::copy(&workspace, scene, &[root]) else { return };
         clip.objects[0].prefab = None;
+        clip.objects[0].prefab_id = None;
+        clip.prefab_id = object.prefab_id;
         let Ok(text) = serde_json::to_string_pretty(&clip) else { return };
-        if let Err(e) = std::fs::write(dir.join(&file), text) {
+        if let Err(e) = std::fs::write(&path, text) {
             tracing::warn!(%e, "could not save the prefab");
             return;
         }
@@ -579,7 +619,12 @@ impl StudioWindow {
         let mut scratch = (*workspace).clone();
         let mut commands = Vec::new();
         for sc in &workspace.scenes {
-            for l in sc.objects.iter().filter(|l| l.prefab.as_deref() == Some(file.as_str()) && l.id != root) {
+            // its instances: by its id (or, from before ids, by the file's name)
+            let same = |l: &&Object| match object.prefab_id {
+                Some(id) => l.prefab_id == Some(id),
+                None => l.prefab_id.is_none() && l.prefab.as_deref() == Some(file.as_str()),
+            };
+            for l in sc.objects.iter().filter(same).filter(|l| l.id != root) {
                 let (cmds, _) = clip.replace_instance(&scratch, sc.id, l.id);
                 for c in &cmds {
                     let _ = c.apply(&mut scratch);

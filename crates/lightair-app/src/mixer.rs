@@ -65,8 +65,8 @@ pub fn template_command(workspace: &lightair_core::Workspace, t: lightair_core::
         .iter()
         .filter(|d| d.channels >= least)
         .max_by_key(|d| d.channels)
-        .map(|d| Mics { kind: lightair_engine::devices::DEVICE_KIND.into(), device: d.name.clone(), channels: d.channels })
-        .unwrap_or(Mics { kind: lightair_engine::devices::DEVICE_KIND.into(), device: String::new(), channels: 1 });
+        .map(|d| Mics { kind: lightair_engine::devices::DEVICE_KIND.into(), device: d.id.clone(), name: d.name.clone(), channels: d.channels })
+        .unwrap_or(Mics { kind: lightair_engine::devices::DEVICE_KIND.into(), device: String::new(), name: SYSTEM_DEFAULT.into(), channels: 1 });
     lightair_core::templates::apply(workspace, t, &mics)
 }
 
@@ -1414,7 +1414,7 @@ impl MixerPanel {
                         let mut devices = vec![(String::new(), SYSTEM_DEFAULT.to_string())];
                         devices.extend(lightair_engine::devices::input_devices().into_iter().map(|d| {
                             let n = if d.channels == 1 { "1 input".to_string() } else { format!("{} inputs", d.channels) };
-                            (d.name.clone(), format!("{} · {n}", d.name))
+                            (d.id.clone(), format!("{} · {n}", d.name))
                         }));
                         for (value, label) in devices {
                             let to = TrackSource::Device(value);
@@ -1884,7 +1884,11 @@ enum TrackSource {
 impl TrackSource {
     fn of(i: &Source) -> Self {
         match i.kind.as_str() {
-            lightair_engine::devices::DEVICE_KIND => TrackSource::Device(i.settings["device"].as_str().unwrap_or("").into()),
+            // ("default", as some were saved, is the system's too)
+            lightair_engine::devices::DEVICE_KIND => {
+                let d = i.settings["device"].as_str().unwrap_or("");
+                TrackSource::Device(if lightair_engine::devices::is_system_default(d) { String::new() } else { d.into() })
+            }
             kinds::APP_AUDIO => TrackSource::App(i.settings["app"].as_str().unwrap_or("").into()),
             kinds::DESKTOP_AUDIO => TrackSource::Desktop,
             _ => TrackSource::Other,
@@ -1895,7 +1899,7 @@ impl TrackSource {
     fn source(&self, app_name: &str) -> (String, &'static str, serde_json::Value) {
         match self {
             TrackSource::Device(d) => (
-                if d.is_empty() { SYSTEM_DEFAULT.into() } else { d.clone() },
+                lightair_engine::devices::device_name(d).unwrap_or_else(|| SYSTEM_DEFAULT.into()),
                 lightair_engine::devices::DEVICE_KIND,
                 json!({ "device": d }),
             ),
@@ -1995,7 +1999,7 @@ fn strip_views(p: &Workspace) -> Vec<StripView> {
         let i = p.sources.get(&t.source)?;
         let current = TrackSource::of(i);
         let (icon, label) = match &current {
-            TrackSource::Device(d) => ("mic", if d.is_empty() { SYSTEM_DEFAULT.into() } else { d.clone() }),
+            TrackSource::Device(d) => ("mic", lightair_engine::devices::device_name(d).unwrap_or_else(|| SYSTEM_DEFAULT.into())),
             TrackSource::Desktop => ("volume-2", "Desktop audio".into()),
             TrackSource::App(b) if b.is_empty() => ("app-window", "Pick an app".into()),
             TrackSource::App(_) => ("app-window", i.name.clone()),

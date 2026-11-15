@@ -22,7 +22,7 @@ crossbeam-channel.workspace = true
 libc = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parking_lot.workspace = true
-cpal = "0.16"
+cpal = "0.18"
 base64 = "0.22"
 vst3 = "0.3"
 lightair-platform.workspace = true

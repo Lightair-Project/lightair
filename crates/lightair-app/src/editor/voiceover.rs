@@ -22,13 +22,13 @@ impl Recorder {
     fn start(at: u64) -> Result<Recorder, String> {
         let device = cpal::default_host().default_input_device().ok_or("no microphone")?;
         let config = device.default_input_config().map_err(|e| e.to_string())?;
-        let (rate, channels) = (config.sample_rate().0, config.channels() as usize);
+        let (rate, channels) = (config.sample_rate(), config.channels() as usize);
         let samples = Arc::new(Mutex::new(Vec::with_capacity(rate as usize * channels * 60)));
         let into = samples.clone();
-        let err = |e: cpal::StreamError| tracing::warn!(%e, "voice-over");
+        let err = |e: cpal::Error| tracing::warn!(%e, "voice-over");
         let stream = match config.sample_format() {
-            cpal::SampleFormat::I16 => device.build_input_stream(&config.into(), move |d: &[i16], _| into.lock().unwrap().extend(d.iter().map(|s| *s as f32 / 32768.0)), err, None),
-            _ => device.build_input_stream(&config.into(), move |d: &[f32], _| into.lock().unwrap().extend_from_slice(d), err, None),
+            cpal::SampleFormat::I16 => device.build_input_stream(config.into(), move |d: &[i16], _| into.lock().unwrap().extend(d.iter().map(|s| *s as f32 / 32768.0)), err, None),
+            _ => device.build_input_stream(config.into(), move |d: &[f32], _| into.lock().unwrap().extend_from_slice(d), err, None),
         }
         .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
