@@ -263,7 +263,8 @@ impl StudioWindow {
     /// Tells the audio engine where and what to monitor, from the preferences.
     fn apply_headphones(&self, cx: &mut Context<Self>) {
         let p = &self.prefs;
-        let device = p.low_latency_headphones.then(|| p.headphones_device.clone().map_or(String::new(), |(name, _)| name));
+        // the device by its id (the same one libobs's monitoring uses)
+        let device = p.low_latency_headphones.then(|| p.headphones_device.clone().map_or(String::new(), |(_, id)| id));
         let program = p.headphones_hear_program;
         self.studio.read(cx).engine().call(move |s| s.reconciler.set_headphones(device, program));
     }
@@ -454,7 +455,7 @@ impl StudioWindow {
 
     fn audio_page(&self, cx: &mut Context<Self>) -> Div {
         let prefs = &self.prefs;
-        let current = prefs.headphones_device.clone().unwrap_or(("System default".into(), "default".into()));
+        let current = prefs.headphones_device.clone().unwrap_or((crate::mixer::SYSTEM_DEFAULT.into(), "default".into()));
         let devices = self.headphones_devices.clone();
         let me = cx.entity().downgrade();
         let device = Button::new("headphones-device").label(current.0.clone()).small().outline().dropdown_menu(

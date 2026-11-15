@@ -6,7 +6,7 @@ use std::process::Child;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use lightair_render::sequence::Sequence;
 
 /// Sound playing. Dropped: it stops.
@@ -54,13 +54,11 @@ impl Speaker {
     }
 
     fn open(seq: &Sequence, from_ms: u64, limit_ms: Option<u64>) -> Option<Speaker> {
-        let host = cpal::default_host();
-        let chosen = crate::prefs::load_from(&crate::prefs::path()).headphones_device.map(|(name, _)| name).filter(|n| !n.is_empty() && n != "default");
-        let device = chosen
-            .and_then(|name| host.output_devices().ok()?.find(|d| d.name().is_ok_and(|n| n == name)))
-            .or_else(|| host.default_output_device())?;
+        // the headphones chosen in Settings (by their id), else the system's output
+        let chosen = crate::prefs::load_from(&crate::prefs::path()).headphones_device.map(|(_, id)| id).unwrap_or_default();
+        let device = lightair_engine::devices::find_output(&chosen).or_else(|| lightair_engine::devices::find_output(""))?;
         let config = device.default_output_config().ok()?;
-        let (rate, channels) = (config.sample_rate().0, config.channels() as usize);
+        let (rate, channels) = (config.sample_rate(), config.channels() as usize);
         // a snippet's length and its fades, in frames
         let limit = limit_ms.map(|ms| ms * rate as u64 / 1000);
         let (fade_in, fade_out) = ((rate / 400) as u64, (rate / 60) as u64);
@@ -112,7 +110,7 @@ impl Speaker {
         let going = go.clone();
         let stream = device
             .build_output_stream(
-                &cpal::StreamConfig { channels: channels as u16, sample_rate: cpal::SampleRate(rate), buffer_size: cpal::BufferSize::Default },
+                cpal::StreamConfig { channels: channels as u16, sample_rate: rate, buffer_size: cpal::BufferSize::Default },
                 move |data: &mut [f32], _| {
                     data.fill(0.0);
                     if !going.load(Ordering::Relaxed) {

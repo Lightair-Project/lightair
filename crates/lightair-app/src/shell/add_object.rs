@@ -244,8 +244,8 @@ impl StudioWindow {
                 }
                 let mut grid = div().grid().grid_cols(2).gap_1();
                 for (i, (label, uid)) in cams.into_iter().enumerate() {
-                    let virtual_cam =
-                        label.contains("Virtual") || label.contains("VCam") || label.contains("Extension");
+                    // (by the device's transport type, not its name)
+                    let virtual_cam = lightair_platform::devices::camera_is_virtual(&uid);
                     let hint = if virtual_cam { "Virtual camera" } else { "Camera" };
                     grid = grid.child(card(("camera", i).into(), "camera", label.clone(), hint.into()).on_click(
                         cx.listener(move |this, _, window, cx| {

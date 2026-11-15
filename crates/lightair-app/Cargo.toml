@@ -29,7 +29,7 @@ tracing-subscriber.workspace = true
 parking_lot.workspace = true
 futures-channel = "0.3"
 # The Editor player's sound.
-cpal = "0.16"
+cpal = "0.18"
 rtrb = "0.3"
 # Library thumbnails (PNG); elsewhere than macOS, the preview's frames as images (frame_view.rs).
 image = { version = "0.25", default-features = false, features = ["png"] }
