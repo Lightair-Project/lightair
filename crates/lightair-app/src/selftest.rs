@@ -329,12 +329,20 @@ fn web(engine: &Engine) {
     let preview = engine.call(|_| lightair_preview::Preview::attach());
     let start = std::time::Instant::now();
     let mut next = 1;
-    while start.elapsed() < Duration::from_secs(8) {
+    while start.elapsed() < Duration::from_secs(10) {
         lightair_web::pump();
         std::thread::sleep(Duration::from_millis(8));
         if start.elapsed() >= Duration::from_secs(next) {
             next += 1;
             // halfway: the box resized (a window-like resize: the page lays out at the new size)
+            if next == 8 {
+                // custom CSS: the page turns green
+                engine.call(|s| {
+                    if let Some(page) = s.sources.get("page") {
+                        page.update(&Data::from_json(&serde_json::json!({"css": "body { background: %2300ff00 !important; }".replace("%23", "#")})));
+                    }
+                });
+            }
             if next == 6 {
                 // then zoomed to 200%: the 300 px strip covers 600 pixels
                 engine.call(|s| {

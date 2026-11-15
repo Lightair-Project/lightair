@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::DropdownMenu;
-use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
+use gpui_kit::component::input::{Editor, EditorState, Input as TextInput, InputEvent, InputState};
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -25,6 +25,19 @@ pub(super) struct TextEdit {
     _events: Subscription,
 }
 
+/// The custom CSS editor for the selected web page.
+pub(super) struct CssEdit {
+    source: Id,
+    state: Entity<EditorState>,
+    _events: Subscription,
+}
+
+/// One-click additions to a web page's custom CSS.
+const CSS_SNIPPETS: &[(&str, &str, &str)] = &[
+    ("Transparent background", "Shows the scene through the page", "html, body { background: transparent !important; }"),
+    ("Hide scrollbars", "No scrollbars, the page still scrolls", "html, body { overflow: hidden !important; }\n::-webkit-scrollbar { display: none; }"),
+];
+
 /// Inspector state for content sections.
 #[derive(Default)]
 pub(super) struct ObjectProps {
@@ -35,6 +48,8 @@ pub(super) struct ObjectProps {
     timer: Option<(Id, TimerStatus, Instant)>,
     /// The address field for the selected web page.
     web: Option<TextEdit>,
+    /// Its custom CSS.
+    web_css: Option<CssEdit>,
 }
 
 pub(super) fn is_text(kind: &str) -> bool {
@@ -148,6 +163,41 @@ impl StudioWindow {
             None => self.props.web = None,
         }
 
+        // Its custom CSS: the page restyles as it's typed; kept (undoably) on ⌘↩ or blur.
+        match source.as_ref().filter(|i| is_web(&i.kind)) {
+            Some(i) => {
+                let css = i.settings["css"].as_str().unwrap_or("").to_string();
+                if !self.props.web_css.as_ref().is_some_and(|t| t.source == i.id) {
+                    let state = cx.new(|cx| {
+                        EditorState::new(window, cx)
+                            .language("css")
+                            .line_number(false)
+                            .placeholder("body { font-size: 32px; }")
+                            .default_value(css.clone())
+                    });
+                    let id = i.id;
+                    let events = cx.subscribe_in(&state, window, move |this, state, ev: &InputEvent, _, cx| match ev {
+                        InputEvent::Change => {
+                            let css = state.read(cx).value().to_string();
+                            this.studio.read(cx).engine().post(move |s| s.reconciler.web_restyle(id, css));
+                        }
+                        InputEvent::Blur | InputEvent::PressEnter { secondary: true, .. } => {
+                            let css = state.read(cx).value().to_string();
+                            this.set_web_css(id, css, cx);
+                        }
+                        _ => {}
+                    });
+                    self.props.web_css = Some(CssEdit { source: i.id, state, _events: events });
+                }
+                let t = self.props.web_css.as_ref().unwrap();
+                let focused = t.state.read(cx).focus_handle(cx).is_focused(window);
+                if !focused && t.state.read(cx).value() != css.as_str() {
+                    t.state.update(cx, |s, cx| s.set_value(css, window, cx));
+                }
+            }
+            None => self.props.web_css = None,
+        }
+
         // Timer status, polled the same way.
         match source.as_ref().filter(|i| i.kind == TIMER_KIND) {
             Some(i) => {
@@ -200,6 +250,15 @@ impl StudioWindow {
             return;
         }
         self.exec(Command::SetSourceSettings { source, settings: with(&i.settings, "url", json!(url)) }, cx);
+    }
+
+    fn set_web_css(&mut self, source: Id, css: String, cx: &mut Context<Self>) {
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some(i) = workspace.sources.get(&source) else { return };
+        if i.settings["css"].as_str().unwrap_or("") == css {
+            return;
+        }
+        self.exec(Command::SetSourceSettings { source, settings: with(&i.settings, "css", json!(css)) }, cx);
     }
 
     fn media(&self, source: Id, action: MediaAction, cx: &mut Context<Self>) {
@@ -714,6 +773,50 @@ impl StudioWindow {
             set(&[("zoom", json!(zoom_in))]),
             cx,
         ))
+        .child(label("Custom CSS"))
+        .when_some(self.props.web_css.as_ref().filter(|t| t.source == source.id), |d, t| {
+            d.child(
+                div()
+                    .h(px(120.))
+                    .rounded(px(6.))
+                    .overflow_hidden()
+                    .bg(tok::bg_raised())
+                    .text_size(px(11.))
+                    .child(Editor::new(&t.state).h(px(120.)).bordered(false)),
+            )
+        })
+        .child({
+            let css = settings["css"].as_str().unwrap_or("").to_string();
+            let mut row = div().flex().flex_wrap().gap_1();
+            for (i, (name, tip, snippet)) in CSS_SNIPPETS.iter().enumerate() {
+                let added = css.contains(snippet);
+                let next = if added {
+                    css.replace(snippet, "").trim().to_string()
+                } else if css.trim().is_empty() {
+                    snippet.to_string()
+                } else {
+                    format!("{}\n{snippet}", css.trim_end())
+                };
+                let cmd = set(&[("css", json!(next))]);
+                row = row.child(
+                    div()
+                        .id(("web-css-snippet", i))
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(4.))
+                        .text_size(px(11.))
+                        .cursor_pointer()
+                        .when(added, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                        .when(!added, |d| {
+                            d.bg(tok::bg_raised()).text_color(tok::text_tertiary()).hover(|d| d.text_color(tok::text_secondary()))
+                        })
+                        .child(*name)
+                        .tooltip(crate::ui::tip(*tip))
+                        .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
+                );
+            }
+            row
+        })
     }
 
     /// `page` (a web page's new size, `w × h`) with the selected object's box resized to match
