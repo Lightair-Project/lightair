@@ -136,6 +136,8 @@ pub struct Studio {
     pub last_clip: Option<PathBuf>,
     /// The canvas the virtual camera shows (`None`: the primary one).
     pub virtual_camera_canvas: Option<Id>,
+    /// The scene it shows (`None`: whatever is on air).
+    pub virtual_camera_scene: Option<Id>,
     /// What other apps call the virtual camera (whose extension is installed), looked up when it
     /// starts.
     pub virtual_camera_name: &'static str,
@@ -198,6 +200,7 @@ impl Studio {
             mic_history: Default::default(),
             last_clip: None,
             virtual_camera_canvas: None,
+            virtual_camera_scene: None,
             virtual_camera_name: VIRTUAL_CAMERA_NAMES[0],
             replays: Vec::new(),
             starter,
@@ -599,12 +602,29 @@ impl Studio {
     fn start_virtual_camera(&mut self) {
         self.virtual_camera_name = virtual_camera_name();
         let canvas = self.virtual_camera_canvas.filter(|c| self.workspace().canvas(*c).is_some());
+        // one scene: on the chosen canvas (its size), else the primary
+        let scene = self.virtual_camera_scene.filter(|id| self.workspace().scene(*id).is_some());
+        let shape = canvas.and_then(|c| self.workspace().canvas(c)).unwrap_or_else(|| self.workspace().primary_canvas());
+        let (canvas_id, size) = (shape.id, (shape.width, shape.height, shape.fps_num, shape.fps_den));
         self.engine.post(move |s| {
             let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
-            if let Err(e) = s.outputs.start_virtual_camera(video) {
+            let scene = scene.and_then(|id| s.reconciler.scene_source(id, canvas_id)).map(|source| {
+                lightair_engine::outputs::VirtualCameraScene { source, width: size.0, height: size.1, fps_num: size.2, fps_den: size.3 }
+            });
+            if let Err(e) = s.outputs.start_virtual_camera(video, scene) {
                 tracing::warn!(%e, "virtual camera didn't start");
             }
         });
+    }
+
+    /// Which scene the virtual camera shows (`None`: the one on air); restarted on it if running.
+    pub fn set_virtual_camera_scene(&mut self, scene: Option<Id>, cx: &mut Context<Self>) {
+        self.virtual_camera_scene = scene;
+        if self.virtual_camera().is_running() {
+            self.engine.post(|s| s.outputs.stop_virtual_camera());
+            self.start_virtual_camera();
+        }
+        cx.notify();
     }
 
     /// What the virtual camera shows: a canvas (`None`: the primary); restarted on it if running.

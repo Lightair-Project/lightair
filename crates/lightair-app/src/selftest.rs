@@ -208,7 +208,7 @@ fn virtual_camera(engine: &Engine) {
         s.sources.insert("back".into(), back);
         s.scenes.insert("selftest".into(), scene);
         s.set_program("selftest");
-        s.outputs.start_virtual_camera(None)
+        s.outputs.start_virtual_camera(None, None)
     });
     println!("SELFTEST start: {started:?}");
     std::thread::sleep(Duration::from_secs(1));
@@ -258,6 +258,26 @@ fn virtual_camera(engine: &Engine) {
                 println!("SELFTEST colour back (YCbCr, magenta is about 73/227/244): centre {:?} corner {:?}", at(0.5, 0.5), at(0.1, 0.1));
             }
             None => println!("SELFTEST colour back: no frame"),
+        }
+        // one scene, not the one on air: a green scene while magenta stays on air
+        engine.call(|s| {
+            s.outputs.stop_virtual_camera();
+            let green = Data::from_json(&serde_json::json!({"color": 0xFF00FF00u32, "width": 1920, "height": 1080}));
+            let src = ObsSource::create("color_source_v3", "Self-test green", Some(&green)).unwrap();
+            let scene = ObsScene::create("Self-test green scene").unwrap();
+            scene.add(&src);
+            let pick = lightair_engine::outputs::VirtualCameraScene { source: scene.source_ptr(), width: 1920, height: 1080, fps_num: 30, fps_den: 1 };
+            s.sources.insert("green".into(), src);
+            s.scenes.insert("green".into(), scene);
+            println!("SELFTEST start on a scene: {:?}", s.outputs.start_virtual_camera(None, Some(pick)));
+        });
+        std::thread::sleep(Duration::from_secs(2));
+        match preview.latest_frame() {
+            Some(f) => {
+                let at = |x: f32, y: f32| lightair_preview::sample_ycbcr(&f, x, y);
+                println!("SELFTEST scene back (YCbCr, green is about 182/30/12): centre {:?}", at(0.5, 0.5));
+            }
+            None => println!("SELFTEST scene back: no frame"),
         }
         drop(preview);
     }
