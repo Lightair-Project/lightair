@@ -213,13 +213,19 @@ fn virtual_camera(engine: &Engine) {
     println!("SELFTEST start: {started:?}");
     std::thread::sleep(Duration::from_secs(1));
     println!("SELFTEST state: {:?}", lightair_engine::outputs::runtime().get(lightair_engine::outputs::OutputKey::VirtualCamera).state);
-    // the virtual camera's device, by the UUID OBS's plugin declares
-    let uuid = std::process::Command::new("defaults")
-        .args(["read", "/Applications/OBS.app/Contents/PlugIns/mac-virtualcam.plugin/Contents/Info", "OBSCameraDeviceUUID"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    // the virtual camera's device: Lightair's own when installed, else OBS's (by the UUID its
+    // plugin declares)
+    let ours = "2DF109AC-DE07-42DF-A0D7-098033FFE986".to_string();
+    let uuid = if lightair_engine::kinds::cameras().iter().any(|(_, u)| u.eq_ignore_ascii_case(&ours)) {
+        ours
+    } else {
+        std::process::Command::new("defaults")
+            .args(["read", "/Applications/OBS.app/Contents/PlugIns/mac-virtualcam.plugin/Contents/Info", "OBSCameraDeviceUUID"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
     let found = engine.call(move |s| {
         let devices = lightair_engine::kinds::cameras();
         let Some((name, uid)) = devices.into_iter().find(|(_, u)| u.eq_ignore_ascii_case(&uuid)) else {

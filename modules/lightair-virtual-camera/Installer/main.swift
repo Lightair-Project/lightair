@@ -55,11 +55,17 @@ final class Installer: NSObject, NSApplicationDelegate, OSSystemExtensionRequest
         column.spacing = 18
         column.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
         column.translatesAutoresizingMaskIntoConstraints = false
-        window.contentView = column
+        let content = NSView()
+        content.addSubview(column)
+        window.contentView = content
         NSLayoutConstraint.activate([
             icon.widthAnchor.constraint(equalToConstant: 64), icon.heightAnchor.constraint(equalToConstant: 64),
-            text.widthAnchor.constraint(equalToConstant: 320),
+            column.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            column.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            column.topAnchor.constraint(equalTo: content.topAnchor),
+            column.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor),
             row.leadingAnchor.constraint(equalTo: column.leadingAnchor, constant: 20),
+            row.trailingAnchor.constraint(equalTo: column.trailingAnchor, constant: -20),
         ])
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
