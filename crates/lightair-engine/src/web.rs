@@ -4,7 +4,7 @@
 //! play it), so it reaches the mixer like any other source's.
 //!
 //! Settings: `url`; `width`, `height` (the frame's size: the page's in CSS pixels at 100%);
-//! `fps`; `zoom` (percent, as a browser's).
+//! `fps`; `zoom` (percent, as a browser's); `css` (added to the page each time it loads).
 
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::Arc;
@@ -25,16 +25,20 @@ struct Web {
     options: lightair_web::PageOptions,
 }
 
+fn string(settings: *mut sys::obs_data_t, key: &CStr) -> String {
+    let s = unsafe { sys::obs_data_get_string(settings, key.as_ptr()) };
+    if s.is_null() { String::new() } else { unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned() }
+}
+
 fn options(settings: *mut sys::obs_data_t) -> lightair_web::PageOptions {
     unsafe {
-        let url = sys::obs_data_get_string(settings, c"url".as_ptr());
-        let url = if url.is_null() { String::new() } else { CStr::from_ptr(url).to_string_lossy().into_owned() };
         lightair_web::PageOptions {
-            url,
+            url: string(settings, c"url"),
             width: sys::obs_data_get_int(settings, c"width".as_ptr()).clamp(16, 7680) as u32,
             height: sys::obs_data_get_int(settings, c"height".as_ptr()).clamp(16, 7680) as u32,
             fps: sys::obs_data_get_int(settings, c"fps".as_ptr()).clamp(1, 60) as u32,
             zoom: sys::obs_data_get_int(settings, c"zoom".as_ptr()).clamp(25, 500) as f32 / 100.0,
+            css: string(settings, c"css"),
         }
     }
 }
@@ -91,17 +95,29 @@ fn open(o: &lightair_web::PageOptions, target: &Target) -> Option<lightair_web::
     Some(lightair_web::Page::open(o.clone(), sink, audio))
 }
 
-/// Loads a web page source's page again (`source` is its libobs source).
-pub(crate) fn reload(source: *mut sys::obs_source_t) {
+/// The page of a web page source (`source` is its libobs source; any other kind: none).
+fn page_of<'a>(source: *mut sys::obs_source_t) -> Option<&'a lightair_web::Page> {
     unsafe {
         let id = sys::obs_source_get_id(source);
         if id.is_null() || CStr::from_ptr(id).to_bytes() != KIND.as_bytes() {
-            return;
+            return None;
         }
         let data = sys::obs_obj_get_data(source as *mut c_void) as *const Web;
-        if let Some(page) = data.as_ref().and_then(|web| web.page.as_ref()) {
-            page.reload();
-        }
+        data.as_ref().and_then(|web| web.page.as_ref())
+    }
+}
+
+/// Loads a web page source's page again.
+pub(crate) fn reload(source: *mut sys::obs_source_t) {
+    if let Some(page) = page_of(source) {
+        page.reload();
+    }
+}
+
+/// Restyles a web page source's page now (custom CSS being typed, not yet its setting).
+pub(crate) fn restyle(source: *mut sys::obs_source_t, css: String) {
+    if let Some(page) = page_of(source) {
+        page.restyle(css);
     }
 }
 
@@ -110,6 +126,9 @@ unsafe extern "C" fn get_name(_: *mut c_void) -> *const c_char {
 }
 
 unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::obs_source_t) -> *mut c_void {
+    // a page paints only when it changes, irregularly: its newest frame shows at once (libobs's
+    // buffering, made for steady video, would hold it for a second or more)
+    unsafe { sys::obs_source_set_async_unbuffered(source, true) };
     let target = Target(Arc::new(Mutex::new(Some(source as usize))));
     let o = options(settings);
     let page = open(&o, &target);

@@ -33,6 +33,8 @@ pub struct PageOptions {
     /// Page zoom, as a browser's (1.0: 100%): the page lays out `width / zoom` CSS pixels
     /// wide, drawn sharp at `zoom` pixels each, so the frame stays `width × height`.
     pub zoom: f32,
+    /// Style sheet added to the page each time it loads (after its own, so it wins ties).
+    pub css: String,
 }
 
 impl PageOptions {
@@ -65,6 +67,11 @@ impl Page {
     /// Loads the page again, skipping the cache.
     pub fn reload(&self) {
         imp::request(imp::Request::Reload { id: self.id });
+    }
+
+    /// Restyles the page now with `css` (while it's being typed; [`Page::update`] keeps it).
+    pub fn restyle(&self, css: String) {
+        imp::request(imp::Request::Style { id: self.id, css });
     }
 }
 
@@ -110,6 +117,7 @@ mod imp {
         Open { id: u64, options: PageOptions, sink: FrameSink, audio: AudioSink },
         Update { id: u64, options: PageOptions },
         Reload { id: u64 },
+        Style { id: u64, css: String },
         Close { id: u64 },
     }
 
@@ -308,7 +316,45 @@ mod imp {
     struct Live {
         browser: Option<Browser>,
         view: Arc<Mutex<((u32, u32), f32)>>,
+        /// The custom style sheet, read by the load handler.
+        css: Arc<Mutex<String>>,
         options: PageOptions,
+    }
+
+    /// `s` as a JavaScript string literal.
+    fn js_string(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '<' => out.push_str("\\u003c"),
+                '\u{2028}' => out.push_str("\\u2028"),
+                '\u{2029}' => out.push_str("\\u2029"),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    /// Puts `css` in the page's own style element (made the first time), last in the document.
+    fn inject(frame: &Frame, css: &str) {
+        let code = format!(
+            "(function(){{var e=document.getElementById('lightair-css');if(!e){{e=document.createElement('style');e.id='lightair-css';(document.head||document.documentElement).appendChild(e);}}e.textContent={};}})();",
+            js_string(css)
+        );
+        frame.execute_java_script(Some(&CefString::from(code.as_str())), Some(&CefString::from("lightair://style")), 0);
+    }
+
+    fn restyle(browser: &Browser, css: &str) {
+        tracing::debug!(len = css.len(), "restyling a web page");
+        if let Some(frame) = browser.main_frame() {
+            inject(&frame, css);
+        }
     }
 
     fn view_of(o: &PageOptions) -> ((u32, u32), f32) {
@@ -411,13 +457,32 @@ mod imp {
         }
     }
 
+    wrap_load_handler! {
+        struct PageLoad {
+            css: Arc<Mutex<String>>,
+        }
+        impl LoadHandler {
+            fn on_load_end(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, _http_status_code: ::std::os::raw::c_int) {
+                let Some(frame) = frame else { return };
+                let css = self.css.lock().clone();
+                if frame.is_main() == 1 && !css.trim().is_empty() {
+                    inject(frame, &css);
+                }
+            }
+        }
+    }
+
     wrap_client! {
         struct PageClient {
             render: RenderHandler,
             life: LifeSpanHandler,
             audio: AudioHandler,
+            load: LoadHandler,
         }
         impl Client {
+            fn load_handler(&self) -> Option<LoadHandler> {
+                Some(self.load.clone())
+            }
             fn audio_handler(&self) -> Option<AudioHandler> {
                 Some(self.audio.clone())
             }
@@ -433,7 +498,13 @@ mod imp {
     fn open(id: u64, options: PageOptions, sink: FrameSink, audio: AudioSink) {
         let view = Arc::new(Mutex::new(view_of(&options)));
         let format = Arc::new(Mutex::new((48_000, 2)));
-        let mut client = PageClient::new(PageRender::new(view.clone(), sink), PageLife::new(id), PageAudio::new(format, audio));
+        let css = Arc::new(Mutex::new(options.css.clone()));
+        let mut client = PageClient::new(
+            PageRender::new(view.clone(), sink),
+            PageLife::new(id),
+            PageAudio::new(format, audio),
+            PageLoad::new(css.clone()),
+        );
         let window = WindowInfo { windowless_rendering_enabled: 1, ..Default::default() };
         let browser_settings = BrowserSettings {
             windowless_frame_rate: options.fps.clamp(1, 60) as i32,
@@ -441,7 +512,7 @@ mod imp {
             ..Default::default()
         };
         let url = CefString::from(options.url.as_str());
-        PAGES.with(|pages| pages.borrow_mut().insert(id, Live { browser: None, view, options }));
+        PAGES.with(|pages| pages.borrow_mut().insert(id, Live { browser: None, view, css, options }));
         if browser_host_create_browser(Some(&window), Some(&mut client), Some(&url), Some(&browser_settings), None, None) != 1 {
             tracing::warn!("Chromium didn't open a page");
         }
@@ -453,7 +524,11 @@ mod imp {
             let Some(live) = pages.get_mut(&id) else { return };
             let before = std::mem::replace(&mut live.options, options.clone());
             *live.view.lock() = view_of(&options);
+            *live.css.lock() = options.css.clone();
             let Some(browser) = &live.browser else { return };
+            if before.css != options.css && before.url == options.url {
+                restyle(browser, &options.css);
+            }
             if let Some(host) = browser.host() {
                 if before.zoom != options.zoom {
                     host.notify_screen_info_changed();
@@ -477,6 +552,17 @@ mod imp {
         PAGES.with(|pages| {
             if let Some(browser) = pages.borrow().get(&id).and_then(|live| live.browser.clone()) {
                 browser.reload_ignore_cache();
+            }
+        });
+    }
+
+    fn style(id: u64, css: String) {
+        PAGES.with(|pages| {
+            let pages = pages.borrow();
+            let Some(live) = pages.get(&id) else { return };
+            *live.css.lock() = css.clone();
+            if let Some(browser) = &live.browser {
+                restyle(browser, &css);
             }
         });
     }
@@ -511,6 +597,7 @@ mod imp {
                 Request::Open { id, options, sink, audio } => open(id, options, sink, audio),
                 Request::Update { id, options } => update(id, options),
                 Request::Reload { id } => reload(id),
+                Request::Style { id, css } => style(id, css),
                 Request::Close { id } => close(id),
             }
         }
@@ -572,6 +659,7 @@ mod imp {
         Open { id: u64, options: PageOptions, sink: FrameSink, audio: AudioSink },
         Update { id: u64, options: PageOptions },
         Reload { id: u64 },
+        Style { id: u64, css: String },
         Close { id: u64 },
     }
 

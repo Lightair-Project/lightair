@@ -65,6 +65,13 @@ impl Reconciler {
         }
     }
 
+    /// Restyles a web page source's page now, with custom CSS not yet in its settings.
+    pub fn web_restyle(&self, source: Id, css: String) {
+        if let Some(src) = self.source_ptr(source) {
+            crate::web::restyle(src, css);
+        }
+    }
+
     /// Loads a web page source's page again.
     pub fn web_reload(&self, source: Id) {
         if let Some(src) = self.source_ptr(source) {
