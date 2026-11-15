@@ -163,7 +163,13 @@ impl StudioWindow {
             None => self.props.web = None,
         }
 
-        // Its custom CSS: the page restyles as it's typed; kept (undoably) on ⌘↩ or blur.
+        // Its custom CSS: the page restyles as it's typed; kept (undoably) when the field is
+        // left, or when the Inspector moves on without it being left (what was typed stays).
+        let shown = source.as_ref().filter(|i| is_web(&i.kind)).map(|i| i.id);
+        if let Some(old) = self.props.web_css.as_ref().filter(|t| Some(t.source) != shown) {
+            let (id, css) = (old.source, old.state.read(cx).value().to_string());
+            self.set_web_css(id, css, cx);
+        }
         match source.as_ref().filter(|i| is_web(&i.kind)) {
             Some(i) => {
                 let css = i.settings["css"].as_str().unwrap_or("").to_string();
@@ -172,7 +178,7 @@ impl StudioWindow {
                         EditorState::new(window, cx)
                             .language("css")
                             .line_number(false)
-                            .placeholder("body { font-size: 32px; }")
+                            .placeholder("Type CSS to restyle this page")
                             .default_value(css.clone())
                     });
                     let id = i.id;
@@ -181,7 +187,7 @@ impl StudioWindow {
                             let css = state.read(cx).value().to_string();
                             this.studio.read(cx).engine().post(move |s| s.reconciler.web_restyle(id, css));
                         }
-                        InputEvent::Blur | InputEvent::PressEnter { secondary: true, .. } => {
+                        InputEvent::Blur => {
                             let css = state.read(cx).value().to_string();
                             this.set_web_css(id, css, cx);
                         }
