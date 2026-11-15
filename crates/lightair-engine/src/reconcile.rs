@@ -1714,6 +1714,7 @@ fn screen_zoom_pointer_settings(l: &lightair_core::ScreenZoomPointer) -> serde_j
         "zoom_hold_s": l.zoom_hold_s,
         "zoom_motion": l.zoom_motion,
         "zoom_typing": l.zoom_typing,
+        "zoom_badge": l.zoom_badge,
     })
 }
 

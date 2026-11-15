@@ -445,6 +445,25 @@ impl StudioWindow {
             }
         })
         .detach();
+        // The badge by the real pointer while viewers see the screen zoomed in (on the user's
+        // screen only): following the pointer every frame while shown.
+        cx.spawn(async move |this, cx| {
+            let mut badge: Option<lightair_platform::pointer_badge::Badge> = None;
+            loop {
+                let zoom = lightair_engine::pointer::live_zoom();
+                if zoom.is_some() && badge.is_none() {
+                    badge = lightair_platform::pointer_badge::Badge::new();
+                }
+                if let Some(b) = &mut badge {
+                    b.show(zoom);
+                }
+                cx.background_executor().timer(std::time::Duration::from_millis(if zoom.is_some() { 16 } else { 100 })).await;
+                if this.upgrade().is_none() {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(40)).await;
