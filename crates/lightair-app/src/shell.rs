@@ -314,7 +314,8 @@ pub struct StudioWindow {
     plugin_list: Option<std::sync::Arc<Vec<lightair_engine::plugins::PluginInfo>>>,
     /// Audio interfaces (for track channel pickers), and when they were read.
     interfaces: RefCell<(std::time::Instant, Vec<lightair_engine::devices::DeviceInfo>)>,
-    transition_menu: bool,
+    /// The transition tile playing its preview (under the pointer), and since when.
+    transition_hover: Option<(usize, Instant)>,
     /// The object showing crop handles instead of resize handles.
     crop_mode: Option<Id>,
     crop_preview_sent: Option<(Id, Id, Id)>,
@@ -579,8 +580,8 @@ impl StudioWindow {
             plugin_editors: Default::default(),
             plugin_list: None,
             interfaces: RefCell::new((std::time::Instant::now(), Vec::new())),
-            transition_menu: false,
             crop_mode: None,
+            transition_hover: None,
             crop_preview_sent: None,
             rotate_tool: false,
             gizmo_hover: None,
@@ -2682,71 +2683,126 @@ impl StudioWindow {
         self.open_add_object(window, cx);
     }
 
+    /// A transition tile under the pointer plays its preview (redrawn each frame while it is).
+    fn hover_transition(&mut self, i: usize, hovered: bool, cx: &mut Context<Self>) {
+        if !hovered {
+            if self.transition_hover.is_some_and(|(k, _)| k == i) {
+                self.transition_hover = None;
+                cx.notify();
+            }
+            return;
+        }
+        self.transition_hover = Some((i, Instant::now()));
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                let still = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.transition_hover.is_some_and(|(k, _)| k == i)
+                });
+                if !matches!(still, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// How scenes change on air: a tile per kind, then its settings as rows (duration;
+    /// direction for Slide and Wipe; the video and its cut point for Stinger).
     fn transition_picker(&self, workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
         let current = workspace.transition;
-        // The list of kinds, shown under the row while open.
-        let item = |i: usize, kind: TransitionKind| {
-            let active = current.kind == kind;
+        let set = move |settings: TransitionSettings| Command::SetTransition { settings };
+        // the kinds, as tiles
+        let tile = |i: usize, kind: TransitionKind| {
+            let on = current.kind == kind;
+            let about = match kind {
+                TransitionKind::Cut => "Switches at once",
+                TransitionKind::Fade => "Crossfades to the new scene",
+                TransitionKind::Move => "Objects in both scenes glide to their new place; the rest fade",
+                TransitionKind::Slide => "The new scene pushes the old one out",
+                TransitionKind::Wipe => "The new scene wipes across the old one",
+                TransitionKind::Dip => "Fades through black",
+                TransitionKind::Stinger => "A video plays over the switch",
+            };
+            // hovered: it plays (A, the switch, B, again); otherwise it shows the switch midway
+            let playing = self.transition_hover.filter(|(k, _)| *k == i).map(|(_, since)| {
+                let t = since.elapsed().as_secs_f32() % 1.8;
+                ((t - 0.3) / 1.0).clamp(0.0, 1.0)
+            });
+            let cmd = set(TransitionSettings { kind, ..current });
             div()
                 .id(("tr-kind", i))
                 .flex()
+                .flex_col()
+                .gap_1()
+                .p(px(3.))
+                .pb_1()
+                .rounded(px(8.))
+                .border_1()
+                .cursor_pointer()
+                .when(on, |d| d.bg(tok::bg_selected()).border_color(tok::accent_primary()))
+                .when(!on, |d| d.bg(tok::bg_app()).border_color(tok::border()).hover(|d| d.border_color(tok::border_strong())))
+                .child(transition_preview(kind, current.direction, playing))
+                .child(
+                    div()
+                        .text_center()
+                        .text_size(px(11.))
+                        .text_color(if on { tok::text() } else { tok::text_secondary() })
+                        .child(kind.label()),
+                )
+                .tooltip(ui::tip(about))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| this.hover_transition(i, *hovered, cx)))
+                .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx)))
+        };
+        let mut grid = div().grid().grid_cols(4).gap_1p5();
+        for (i, k) in TransitionKind::ALL.iter().enumerate() {
+            grid = grid.child(tile(i, *k));
+        }
+        let row = |name: &'static str, control: AnyElement| {
+            div()
+                .flex()
                 .items_center()
                 .gap_2()
-                .h(px(28.))
-                .px_2()
-                .rounded(px(5.))
-                .text_size(px(12.))
-                .cursor_pointer()
-                .when(active, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
-                .when(!active, |d| d.text_color(tok::text_secondary()))
-                .hover(|d| d.bg(tok::bg_raised()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.transition_menu = false;
-                    this.exec(Command::SetTransition { settings: TransitionSettings { kind, ..current } }, cx)
-                }))
-                .child(kind.label())
+                .min_h(px(28.))
+                .child(div().w(px(72.)).flex_none().text_size(px(12.)).text_color(tok::text_secondary()).child(name))
+                .child(div().flex_1().min_w_0().flex().items_center().child(control))
         };
-        let next_ms = match current.duration_ms {
-            0..=300 => 500,
-            301..=500 => 800,
-            501..=800 => 1200,
-            _ => 300,
-        };
-        let direction = current.kind.directional().then(|| {
-            let icon = match current.direction {
-                Direction::Left => "arrow-left",
-                Direction::Right => "arrow-right",
-                Direction::Up => "arrow-up",
-                Direction::Down => "arrow-down",
-            };
-            ui::icon_button("tr-direction", icon, tok::text_secondary())
-                .tooltip(|w, cx| Tooltip::new("Direction").build(w, cx))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let settings = TransitionSettings { direction: current.direction.next(), ..current };
-                    this.exec(Command::SetTransition { settings }, cx)
-                }))
-        });
-        let kinds: Vec<_> = if self.transition_menu {
-            TransitionKind::ALL.iter().enumerate().map(|(i, k)| item(i, *k)).collect()
-        } else {
-            Vec::new()
-        };
-        // Stinger: its video and when the scene changes underneath it.
-        let stinger = (current.kind == TransitionKind::Stinger).then(|| {
+        let mut body = div().flex().flex_col().gap_2().child(grid);
+        // duration (a cut has none)
+        if current.kind != TransitionKind::Cut {
+            let durations: Vec<(&'static str, Command, bool)> = [(300u32, "0.3 s"), (500, "0.5 s"), (800, "0.8 s"), (1200, "1.2 s")]
+                .into_iter()
+                .map(|(ms, label)| (label, set(TransitionSettings { duration_ms: ms, ..current }), current.duration_ms == ms))
+                .collect();
+            body = body.child(row("Duration", self.segmented("tr-duration", durations, cx).flex_1().into_any_element()));
+        }
+        if current.kind.directional() {
+            let dirs: Vec<(&'static str, Command, bool)> = [(Direction::Left, "←"), (Direction::Right, "→"), (Direction::Up, "↑"), (Direction::Down, "↓")]
+                .into_iter()
+                .map(|(d, label)| (label, set(TransitionSettings { direction: d, ..current }), current.direction == d))
+                .collect();
+            body = body.child(row("Direction", self.segmented("tr-direction", dirs, cx).flex_1().into_any_element()));
+        }
+        // Stinger: its video, and when the scene changes underneath it
+        if current.kind == TransitionKind::Stinger {
             let st = workspace.stinger.clone();
             let name = st
                 .as_ref()
                 .and_then(|s| std::path::Path::new(&s.path).file_name().map(|n| n.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| "Choose video…".into());
-            // a long file name, shortened (a button doesn't shrink)
-            let name = if name.chars().count() > 24 { format!("{}…", name.chars().take(22).collect::<String>()) } else { name };
-            let mut row = div().flex().items_center().gap_1().w_full().child(
+                .unwrap_or_else(|| "Choose a video…".into());
+            body = body.child(row(
+                "Video",
                 Button::new("stinger-file")
                     .label(name)
-                    .xsmall()
+                    .icon(ui::icon("film"))
+                    .small()
                     .outline()
-                    .on_click(cx.listener(|this, _, window, cx| this.choose_stinger(window, cx))),
-            );
+                    .w_full()
+                    .on_click(cx.listener(|this, _, window, cx| this.choose_stinger(window, cx)))
+                    .into_any_element(),
+            ));
             if let Some(st) = st {
                 let step = |delta: i64| {
                     let mut s = st.clone();
@@ -2754,81 +2810,35 @@ impl StudioWindow {
                     Command::SetStinger { stinger: Some(s) }
                 };
                 let (earlier, later) = (step(-100), step(100));
-                row = row
-                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).ml_1().child("cut at"))
+                let stepper = div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .p(px(2.))
+                    .rounded(px(7.))
+                    .bg(tok::bg_app())
                     .child(
-                        Button::new("stinger-earlier")
-                            .label("−")
-                            .xsmall()
-                            .ghost()
+                        ui::icon_button("stinger-earlier", "minus", tok::text_secondary())
                             .on_click(cx.listener(move |this, _, _, cx| this.exec(earlier.clone(), cx))),
                     )
-                    .child(div().text_size(px(11.)).font_family("Menlo").child(format!("{} ms", st.cut_ms)))
+                    .child(div().w(px(56.)).text_center().text_size(px(12.)).font_family("Menlo").child(format!("{:.1} s", st.cut_ms as f32 / 1000.0)))
                     .child(
-                        Button::new("stinger-later")
-                            .label("+")
-                            .xsmall()
-                            .ghost()
+                        ui::icon_button("stinger-later", "plus", tok::text_secondary())
                             .on_click(cx.listener(move |this, _, _, cx| this.exec(later.clone(), cx))),
                     );
+                body = body.child(row(
+                    "Cut at",
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(stepper)
+                        .child(ui::info("stinger-cut-info", "When the scene changes underneath the video: when it covers the picture."))
+                        .into_any_element(),
+                ));
             }
-            row
-        });
-        let row = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                div()
-                    .id("tr-current")
-                    .flex()
-                    .flex_1()
-                    .items_center()
-                    .gap_1p5()
-                    .h(px(26.))
-                    .px_2()
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(tok::bg_raised()))
-                    .child(ui::icon("arrow-right-left").size(px(13.)).text_color(tok::text_tertiary()))
-                    .child(div().flex_1().text_size(px(12.)).child(current.kind.label()))
-                    .child(
-                        ui::icon(if self.transition_menu { "chevron-up" } else { "chevron-down" })
-                            .size(px(12.))
-                            .text_color(tok::text_tertiary()),
-                    )
-                    .tooltip(|w, cx| Tooltip::new("Transition between scenes").build(w, cx))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.transition_menu = !this.transition_menu;
-                        cx.notify();
-                    })),
-            )
-            .children(direction)
-            .child(
-                div()
-                    .id("tr-duration")
-                    .px_1p5()
-                    .h(px(22.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(tok::border_strong())
-                    .text_size(px(11.))
-                    .font_family("Menlo")
-                    .text_color(tok::text_secondary())
-                    .cursor_pointer()
-                    .hover(|d| d.bg(tok::bg_raised()))
-                    .when(current.kind == TransitionKind::Cut, |d| d.opacity(0.4))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.exec(
-                            Command::SetTransition { settings: TransitionSettings { duration_ms: next_ms, ..current } },
-                            cx,
-                        )
-                    }))
-                    .child(format!("{} ms", current.duration_ms)),
-            );
-        div().flex().flex_col().gap_1().px_2().pb_2().child(row).children(kinds).children(stinger)
+        }
+        body
     }
 
     fn scenes_panel(&self, workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4089,5 +4099,88 @@ impl StudioWindow {
             .children(issue.map(|i| div().child(i)))
             .child(div().flex_1())
             .child(div().text_color(tok::text_tertiary()).child(concat!("Lightair ", env!("CARGO_PKG_VERSION"))))
+    }
+}
+
+/// A transition, drawn small: scene A (slate, a light card on the left) becoming scene B
+/// (warm, a dark card on the right). `t`: how far through (0 A .. 1 B) while it plays;
+/// `None`: a still that shows what the transition does.
+fn transition_preview(kind: TransitionKind, direction: Direction, t: Option<f32>) -> Div {
+    let still = t.is_none();
+    let t = t.unwrap_or(match kind {
+        TransitionKind::Slide | TransitionKind::Dip => 0.38,
+        TransitionKind::Stinger => 0.45,
+        _ => 0.5,
+    });
+    let ease = |x: f32| x * x * (3.0 - 2.0 * x);
+    let e = ease(t);
+    let a_bg: Hsla = rgb(0x3A4150).into();
+    let b_bg: Hsla = rgb(0xE07B39).into();
+    let card = |x: f32, y: f32, w: f32, h: f32, colour: Hsla| {
+        div().absolute().left(relative(x)).top(relative(y)).w(relative(w)).h(relative(h)).rounded(px(2.)).bg(colour)
+    };
+    let a_card: Hsla = rgb(0xE9EAEE).into();
+    let b_card: Hsla = rgb(0x24201E).into();
+    // a whole scene, placed at (x, y) of the frame
+    let scene = |b: bool, x: f32, y: f32| {
+        div()
+            .absolute()
+            .left(relative(x))
+            .top(relative(y))
+            .size_full()
+            .bg(if b { b_bg } else { a_bg })
+            .child(if b { card(0.52, 0.24, 0.32, 0.52, b_card) } else { card(0.14, 0.3, 0.36, 0.4, a_card) })
+    };
+    let frame = div().relative().w_full().h(px(34.)).rounded(px(4.)).overflow_hidden();
+    match kind {
+        // a still cut: the two scenes as two frames, a gap between (no blend, a jump)
+        TransitionKind::Cut if still => frame
+            .child(scene(false, 0.0, 0.0))
+            .child(scene(true, 0.54, 0.0))
+            .child(div().absolute().left(relative(0.46)).top_0().w(relative(0.08)).h_full().bg(tok::bg_app())),
+        TransitionKind::Cut => frame.child(scene(t >= 0.5, 0.0, 0.0)),
+        TransitionKind::Fade => frame.child(scene(false, 0.0, 0.0)).child(scene(true, 0.0, 0.0).opacity(e)),
+        // the backgrounds crossfade while one card glides to where it is in B
+        TransitionKind::Move => {
+            let lerp = |a: f32, b: f32| a + (b - a) * e;
+            frame
+                .child(div().absolute().size_full().bg(a_bg))
+                .child(div().absolute().size_full().bg(b_bg).opacity(e))
+                .child(card(lerp(0.14, 0.52), lerp(0.3, 0.24), lerp(0.36, 0.32), lerp(0.4, 0.52), a_card))
+        }
+        TransitionKind::Slide => {
+            let (dx, dy) = match direction {
+                Direction::Left => (-1.0, 0.0),
+                Direction::Right => (1.0, 0.0),
+                Direction::Up => (0.0, -1.0),
+                Direction::Down => (0.0, 1.0),
+            };
+            frame.child(scene(false, dx * e, dy * e)).child(scene(true, -dx * (1.0 - e), -dy * (1.0 - e)))
+        }
+        // B revealed from the right edge, with a bright edge line
+        TransitionKind::Wipe => {
+            let w = e.max(0.001);
+            frame
+                .child(scene(false, 0.0, 0.0))
+                .child(
+                    div()
+                        .absolute()
+                        .left(relative(1.0 - w))
+                        .top_0()
+                        .w(relative(w))
+                        .h_full()
+                        .overflow_hidden()
+                        .child(div().absolute().left(relative(-(1.0 - w) / w)).top_0().w(relative(1.0 / w)).h_full().child(scene(true, 0.0, 0.0))),
+                )
+                .child(div().absolute().left(relative(1.0 - w)).top_0().w(px(1.5)).h_full().bg(rgb(0xFFFFFF)))
+        }
+        // through black: A darkens, then B comes up
+        TransitionKind::Dip => frame
+            .child(scene(t >= 0.5, 0.0, 0.0))
+            .child(div().absolute().size_full().bg(rgb(0x000000)).opacity(1.0 - (2.0 * t - 1.0).abs())),
+        // a band sweeps across, the scenes swapping behind it
+        TransitionKind::Stinger => frame
+            .child(scene(t >= 0.5, 0.0, 0.0))
+            .child(div().absolute().left(relative(-0.55 + 1.6 * t)).top_0().w(relative(0.5)).h_full().bg(rgb(0x7C5CFF))),
     }
 }
