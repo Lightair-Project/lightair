@@ -215,6 +215,10 @@ impl StudioWindow {
         // Development: open a dialog on launch for screenshots (no clicking needed).
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
             Ok("add-object") => self.open_add_object(window, cx),
+            Ok("add-display") => {
+                self.open_add_object(window, cx);
+                self.pick_display(window, cx);
+            }
             Ok("settings") => self.toggle_settings(cx),
             Ok("virtual-camera-on") => self.studio.update(cx, |s, cx| s.toggle_virtual_camera(cx)),
             Ok("bottom-closed") => {

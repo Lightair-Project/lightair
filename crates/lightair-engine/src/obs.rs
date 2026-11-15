@@ -230,6 +230,44 @@ impl Drop for ObsCanvas {
     }
 }
 
+/// The choices a source instance offers for a list setting, as (label, value), read with its
+/// current settings applied (some sources fill their lists only then).
+pub(crate) fn source_list_items(src: *mut sys::obs_source_t, property: &str) -> Vec<(String, serde_json::Value)> {
+    let mut out = Vec::new();
+    unsafe {
+        let props = sys::obs_source_properties(src);
+        if props.is_null() {
+            return out;
+        }
+        let settings = sys::obs_source_get_settings(src);
+        sys::obs_properties_apply_settings(props, settings);
+        sys::obs_data_release(settings);
+        let p = sys::obs_properties_get(props, cstr(property).as_ptr());
+        if !p.is_null() {
+            let int = sys::obs_property_list_format(p) == sys::OBS_COMBO_FORMAT_INT;
+            let text = |ptr: *const std::ffi::c_char| {
+                if ptr.is_null() { None } else { Some(CStr::from_ptr(ptr).to_string_lossy().into_owned()) }
+            };
+            for i in 0..sys::obs_property_list_item_count(p) {
+                let label = text(sys::obs_property_list_item_name(p, i)).unwrap_or_default();
+                let value = if int {
+                    serde_json::Value::from(sys::obs_property_list_item_int(p, i))
+                } else {
+                    match text(sys::obs_property_list_item_string(p, i)) {
+                        Some(v) => serde_json::Value::from(v),
+                        None => continue,
+                    }
+                };
+                if !label.is_empty() {
+                    out.push((label, value));
+                }
+            }
+        }
+        sys::obs_properties_destroy(props);
+    }
+    out
+}
+
 /// Items of a list property of a source type, as (label, value) — e.g. the camera devices of
 /// `av_capture_source_v2`'s `device` property. Call on the engine thread.
 pub fn property_items(source_type: &str, property: &str) -> Vec<(String, String)> {

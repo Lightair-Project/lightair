@@ -1,6 +1,6 @@
 //! The Add Object picker (docs/05-interface-shell.md, "Layers"): searchable object types as
 //! tiles in groups (what each is, on hover), with a second step where a type needs one: the
-//! camera, or a web page's address and size.
+//! camera, the display (each shown live), or a web page's address and size.
 
 use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -15,7 +15,46 @@ use crate::ui::{self, tok};
 pub(super) enum Step {
     Types,
     Cameras,
+    Displays,
     Web,
+}
+
+/// The displays to choose from, each captured live for its thumbnail while the step is open.
+pub(super) struct DisplayThumbs {
+    items: Vec<(lightair_engine::displays::Display, lightair_preview::Preview)>,
+    engine: std::sync::Arc<lightair_engine::Engine>,
+}
+
+impl DisplayThumbs {
+    fn open(engine: &std::sync::Arc<lightair_engine::Engine>) -> Self {
+        let found = engine.call(|_| lightair_engine::displays::list(true));
+        let items = found
+            .into_iter()
+            .map(|d| {
+                let preview = lightair_preview::Preview::attach();
+                preview.set_own_size(true);
+                let (w, h) = d.size.unwrap_or((16, 9));
+                preview.set_size(Some((480, (480 * h / w.max(1)).max(2))));
+                if let Some(c) = &d.capture {
+                    preview.set_source(Some(unsafe { lightair_engine::sys::obs_source_get_ref(c.as_ptr()) }));
+                }
+                (d, preview)
+            })
+            .collect();
+        Self { items, engine: engine.clone() }
+    }
+}
+
+impl Drop for DisplayThumbs {
+    fn drop(&mut self) {
+        let mut displays = Vec::new();
+        for (d, preview) in self.items.drain(..) {
+            preview.set_source(None);
+            displays.push(d);
+        }
+        // the captures go on the engine thread, with libobs's other work
+        self.engine.post(move |_| drop(displays));
+    }
 }
 
 pub(super) struct AddObject {
@@ -24,6 +63,7 @@ pub(super) struct AddObject {
     /// A web page's address, and its size (CSS pixels).
     web_url: Entity<InputState>,
     web_size: (u32, u32),
+    displays: Option<DisplayThumbs>,
     _events: Subscription,
 }
 
@@ -70,7 +110,7 @@ impl StudioWindow {
                 cx.notify();
             }
         });
-        self.add_object = Some(AddObject { step: Step::Types, search, web_url, web_size: (1920, 1080), _events: events });
+        self.add_object = Some(AddObject { step: Step::Types, search, web_url, web_size: (1920, 1080), displays: None, _events: events });
         cx.notify();
     }
 
@@ -78,6 +118,11 @@ impl StudioWindow {
         self.add_object = None;
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// Opens the display step (for screenshots).
+    pub(super) fn pick_display(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick(Kind::Display, window, cx);
     }
 
     fn pick(&mut self, kind: Kind, window: &mut Window, cx: &mut Context<Self>) {
@@ -91,7 +136,13 @@ impl StudioWindow {
                 return;
             }
             Kind::Display => {
-                self.add_source_object("Display", lightair_core::kinds::SCREEN, super::display_settings(), (1920.0, 1080.0), cx)
+                let thumbs = DisplayThumbs::open(self.studio.read(cx).engine());
+                if let Some(a) = &mut self.add_object {
+                    a.step = Step::Displays;
+                    a.displays = Some(thumbs);
+                }
+                cx.notify();
+                return;
             }
             Kind::Image => self.add_image(window, cx),
             Kind::Video => self.add_video(window, cx),
@@ -107,6 +158,15 @@ impl StudioWindow {
                 return;
             }
         }
+        self.close_add_object(window, cx);
+    }
+
+    /// Adds a capture of the display chosen (`value`: its `display` setting).
+    fn add_display(&mut self, name: &str, value: serde_json::Value, size: Option<(u32, u32)>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut settings = super::display_settings();
+        settings["display"] = value;
+        let (w, h) = size.map_or((1920.0, 1080.0), |(w, h)| (w as f32, h as f32));
+        self.add_source_object(name, lightair_core::kinds::SCREEN, settings, (w, h), cx);
         self.close_add_object(window, cx);
     }
 
@@ -212,6 +272,7 @@ impl StudioWindow {
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(a) = &mut this.add_object {
                         a.step = Step::Types;
+                        a.displays = None;
                     }
                     cx.notify();
                 }))
@@ -309,6 +370,76 @@ impl StudioWindow {
                             ),
                     );
             }
+            Step::Displays => {
+                body = body.child(back(cx));
+                let items: Vec<_> = state
+                    .displays
+                    .as_ref()
+                    .map_or(&[][..], |t| &t.items[..])
+                    .iter()
+                    .filter(|(d, _)| matches(&query, &[&d.name]))
+                    .collect();
+                if items.is_empty() {
+                    body = body.child(div().p_3().text_color(tok::text_tertiary()).child("No displays found"));
+                }
+                let mut grid = div().grid().grid_cols(2).gap_2().pb_2();
+                for (i, (d, preview)) in items.into_iter().enumerate() {
+                    let (w, h) = d.size.unwrap_or((16, 9));
+                    let detail = match (d.size, d.main) {
+                        (Some((w, h)), true) => format!("{w} × {h} · Main"),
+                        (Some((w, h)), false) => format!("{w} × {h}"),
+                        (None, true) => "Main".into(),
+                        (None, false) => String::new(),
+                    };
+                    let (name, value, size) = (d.name.clone(), d.value.clone(), d.size);
+                    grid = grid.child(
+                        div()
+                            .id(("display", i))
+                            .flex()
+                            .flex_col()
+                            .gap_1p5()
+                            .p_1p5()
+                            .rounded(px(10.))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(tok::bg_selected()))
+                            .child(
+                                div()
+                                    .relative()
+                                    .w_full()
+                                    // the display's own shape
+                                    .pb(relative(h as f32 / w.max(1) as f32))
+                                    .rounded(px(6.))
+                                    .overflow_hidden()
+                                    .bg(gpui_kit::black())
+                                    .border_1()
+                                    .border_color(tok::border())
+                                    .when_some(preview.latest_frame(), |c, f| {
+                                        c.child(crate::frame_view::frame(f).absolute().size_full().object_fit(ObjectFit::Contain))
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .px_0p5()
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(d.name.clone()),
+                                    )
+                                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(detail)),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.add_display(&name, value.clone(), size, window, cx)
+                            })),
+                    );
+                }
+                body = body.child(grid);
+            }
             Step::Cameras => {
                 body = body.child(back(cx));
                 let cams: Vec<_> =
@@ -375,6 +506,7 @@ impl StudioWindow {
                                     match state.step {
                                         Step::Types => "Add object",
                                         Step::Cameras => "Choose a camera",
+                                        Step::Displays => "Choose a display",
                                         Step::Web => "Browser",
                                     },
                                 ))

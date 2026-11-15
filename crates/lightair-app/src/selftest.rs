@@ -16,6 +16,7 @@ pub fn run(engine: &Engine, what: &str) {
         "green-key" => green_key(engine),
         "virtual-camera" => virtual_camera(engine),
         "web" => web(engine),
+        "displays" => displays(engine),
         // puts Lightair's Backgrounds back: LIGHTAIR_BG_PICTURE and LIGHTAIR_BG_ON (0/1)
         "restore-backgrounds" => {
             use crate::system_effects as sys;
@@ -366,4 +367,36 @@ fn web(engine: &Engine) {
             println!("SELFTEST {} s: page {w}x{h}, program YCbCr {colour:?}, at x 768 {at_768:?} (magenta is about 73/227/244), sound peak {peak:.3}", next - 1);
         }
     }
+}
+
+/// `LIGHTAIR_SELFTEST=displays`: the displays the picker lists, and whether each one's capture
+/// renders a live thumbnail (numbers only: its size, frames, mean brightness).
+fn displays(engine: &Engine) {
+    let found = engine.call(|_| lightair_engine::displays::list(true));
+    println!("SELFTEST displays: {}", found.len());
+    let mut previews = vec![];
+    for d in &found {
+        let preview = lightair_preview::Preview::attach();
+        preview.set_own_size(true);
+        let (w, h) = d.size.unwrap_or((16, 9));
+        preview.set_size(Some((480, (480 * h / w.max(1)).max(2))));
+        if let Some(c) = &d.capture {
+            preview.set_source(Some(unsafe { lightair_engine::sys::obs_source_get_ref(c.as_ptr()) }));
+        }
+        previews.push(preview);
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    for (d, p) in found.iter().zip(&previews) {
+        let frame = p.latest_frame();
+        let size = frame.as_ref().map(lightair_preview::frame_size);
+        let mean = frame.as_ref().and_then(|f| lightair_preview::frame_rgba(f, 64)).map(|(_, _, px)| {
+            px.chunks(4).map(|c| (c[0] as u32 + c[1] as u32 + c[2] as u32) / 3).sum::<u32>() / (px.len() as u32 / 4).max(1)
+        });
+        println!("SELFTEST {:?} {:?} main={} capture={} frames={} thumbnail={size:?} mean={mean:?}", d.name, d.size, d.main, d.capture.is_some(), p.frames());
+    }
+    for p in &previews {
+        p.set_source(None);
+    }
+    drop(previews);
+    engine.call(move |_| drop(found));
 }
