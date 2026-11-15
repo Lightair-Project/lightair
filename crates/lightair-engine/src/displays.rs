@@ -66,31 +66,48 @@ fn parse_label(label: &str) -> (String, Option<(u32, u32)>, bool) {
     (name.trim().to_string(), size, rest.contains("Primary"))
 }
 
+/// Settings for the screen capture source in `mode`, with `key` (the portable "display",
+/// "window" or "app") set to `value`: (libobs kind, its settings).
+fn screen_settings(mode: i64, key: &str, value: Option<&serde_json::Value>) -> Option<(&'static str, serde_json::Value)> {
+    let mut s = serde_json::json!({"mode": mode, "cursor": true});
+    if let Some(v) = value {
+        s[key] = v.clone();
+    }
+    crate::kinds::resolve(lightair_core::kinds::SCREEN, &s)
+}
+
+/// What the screen capture source offers for `key` ("display", "window" or "app") in `mode`:
+/// its labels and values, as it lists them. Engine thread.
+pub fn screen_options(mode: i64, key: &str) -> Vec<(String, serde_json::Value)> {
+    // (listed in its own mode: that's what keeps the lists to windows and apps on screen; with
+    // nothing chosen yet libobs logs that it has no window to capture, harmlessly)
+    let (Some((kind, settings)), Some(obs_key)) =
+        (screen_settings(mode, key, None), crate::kinds::libobs_key(lightair_core::kinds::SCREEN, key))
+    else {
+        return vec![];
+    };
+    match crate::obs::ObsSource::create_private(kind, "Lightair screen choices", Some(&crate::obs::Data::from_json(&settings))) {
+        Some(lister) => crate::obs::source_list_items(lister.as_ptr(), obs_key),
+        None => vec![],
+    }
+}
+
+/// A private capture of one of those choices (for a thumbnail; release it on the engine
+/// thread). Engine thread.
+pub fn screen_capture(mode: i64, key: &str, value: &serde_json::Value, name: &str) -> Option<crate::obs::ObsSource> {
+    let (kind, settings) = screen_settings(mode, key, Some(value))?;
+    crate::obs::ObsSource::create_private(kind, name, Some(&crate::obs::Data::from_json(&settings)))
+}
+
 /// The displays, each with a capture of it (`captures`). Engine thread.
 pub fn list(captures: bool) -> Vec<Display> {
-    use lightair_core::kinds::{DISPLAY, SCREEN};
-    let settings = |display: Option<&serde_json::Value>| {
-        let mut s = serde_json::json!({"mode": DISPLAY, "cursor": true});
-        if let Some(d) = display {
-            s["display"] = d.clone();
-        }
-        crate::kinds::resolve(SCREEN, &s)
-    };
-    let (Some((kind, first)), Some(key)) = (settings(None), crate::kinds::libobs_key(SCREEN, "display")) else {
-        return vec![];
-    };
-    let Some(lister) = crate::obs::ObsSource::create_private(kind, "Lightair displays", Some(&crate::obs::Data::from_json(&first))) else {
-        return vec![];
-    };
+    use lightair_core::kinds::DISPLAY;
     let main = main_display_uuid();
-    crate::obs::source_list_items(lister.as_ptr(), key)
+    screen_options(DISPLAY, "display")
         .into_iter()
         .map(|(label, value)| {
             let (name, size, primary) = parse_label(&label);
-            let capture = captures
-                .then(|| settings(Some(&value)))
-                .flatten()
-                .and_then(|(kind, s)| crate::obs::ObsSource::create_private(kind, &name, Some(&crate::obs::Data::from_json(&s))));
+            let capture = if captures { screen_capture(DISPLAY, "display", &value, &name) } else { None };
             let is_main = primary || (main.is_some() && value.as_str() == main.as_deref());
             Display { name, size, value, main: is_main, capture }
         })

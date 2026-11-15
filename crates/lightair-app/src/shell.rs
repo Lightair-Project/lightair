@@ -20,6 +20,7 @@ use serde_json::json;
 
 pub(crate) mod app_menu;
 mod add_object;
+mod screen_pick;
 mod assets;
 mod docking;
 mod effects;
@@ -1725,6 +1726,7 @@ impl StudioWindow {
 impl Render for StudioWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.request_animation_frame();
+        self.tick_add_object();
         self.ensure_dock(window, cx);
         self.sync_crop_preview(cx);
         self.refresh_sizes(cx);
