@@ -392,7 +392,9 @@ Each phase ships with tests and screenshots, like the audio plan.
    I-beam and crosshair are drawn as Lightair's own, any other shape is the system's picture);
    the pointer and follow-zoom on any display and on window captures (each capture's frame);
    zooming in while typing; pause in takes (the input log leaves the pauses out, as the files
-   do; take.json lists them as `pauses_ms`).
+   do; take.json lists them as `pauses_ms`).; a badge by the real pointer while the live picture is zoomed in
+   (`lightair_platform::pointer_badge`: a not-shared window, so never in a screen capture;
+   "Pointer badge" in the scene inspector; macOS only for now).
 
    Still open from this phase: the alignment test against a real screen (the CI machines have no
    display). Not planned: the "Camera cutout" layout.

@@ -136,6 +136,14 @@ impl StudioWindow {
                     cx,
                 ),
             ));
+            let badge = super::settings::switch("screen-zoom-badge", look.zoom_badge)
+                .on_click(cx.listener(move |this, _, _, cx| this.exec(set(ScreenZoomPointer { zoom_badge: !look.zoom_badge, ..look }), cx)));
+            body = body.child(row("Pointer badge", div().flex().child(badge)));
+            if look.zoom_badge {
+                body = body.child(note(
+                    "While viewers see the zoom, a badge by your pointer says so. Only you see it: it's never in the picture.",
+                ));
+            }
             body = body.child(note(match look.zoom {
                 ScreenZoomPointer::ZOOM_CLICKS => "Zooms in where you click (and, when typing, where you clicked last) and follows the pointer, then back out once you stop.",
                 ScreenZoomPointer::ZOOM_TOGGLE => "Press the key to zoom in and follow the pointer; press it again to zoom back out.",

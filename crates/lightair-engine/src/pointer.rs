@@ -186,6 +186,8 @@ struct Style {
     zoom_motion: f32,
     /// On clicks: typing zooms in too, looking where the last click was.
     zoom_typing: bool,
+    /// Tells the badge by the real pointer when it's live and zoomed in.
+    zoom_badge: bool,
 }
 
 /// The follow-zoom's camera (capture pixels).
@@ -317,6 +319,27 @@ fn capture_frame(context: *mut sys::obs_source_t) -> Option<(f32, f32, f32, f32)
     frame
 }
 
+// ------------------------------------------------------------------ the badge
+
+/// Each zoomed-in filter on a live capture (with its badge on): its zoom, and when it said so
+/// (by filter).
+static LIVE_ZOOMS: std::sync::Mutex<Vec<(usize, f32, Instant)>> = std::sync::Mutex::new(Vec::new());
+
+fn report_zoom(filter: usize, zoom: Option<f32>) {
+    let mut all = LIVE_ZOOMS.lock().unwrap_or_else(|e| e.into_inner());
+    all.retain(|z| z.0 != filter);
+    if let Some(scale) = zoom {
+        all.push((filter, scale, Instant::now()));
+    }
+}
+
+/// What viewers see now, for the badge by the real pointer (`lightair_platform::pointer_badge`):
+/// the most a live capture is zoomed in; `None` when none is.
+pub fn live_zoom() -> Option<f32> {
+    let all = LIVE_ZOOMS.lock().unwrap_or_else(|e| e.into_inner());
+    all.iter().filter(|z| z.2.elapsed() < Duration::from_millis(500) && z.1 > 1.02).map(|z| z.1).reduce(f32::max)
+}
+
 fn rgb_of(c: u32) -> [f32; 3] {
     [(c & 0xFF) as f32 / 255.0, ((c >> 8) & 0xFF) as f32 / 255.0, ((c >> 16) & 0xFF) as f32 / 255.0]
 }
@@ -399,6 +422,7 @@ unsafe fn read_look(settings: *mut sys::obs_data_t) -> Style {
         zoom_hold: float(c"zoom_hold_s").max(0.2),
         zoom_motion: float(c"zoom_motion").clamp(0.0, 1.0),
         zoom_typing: flag(c"zoom_typing"),
+        zoom_badge: flag(c"zoom_badge"),
     }
 }
 
@@ -419,6 +443,7 @@ unsafe extern "C" fn get_defaults(settings: *mut sys::obs_data_t) {
         sys::obs_data_set_default_double(settings, c"zoom_hold_s".as_ptr(), 2.0);
         sys::obs_data_set_default_double(settings, c"zoom_motion".as_ptr(), 0.5);
         sys::obs_data_set_default_bool(settings, c"zoom_typing".as_ptr(), true);
+        sys::obs_data_set_default_bool(settings, c"zoom_badge".as_ptr(), true);
     }
 }
 
@@ -449,6 +474,7 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, context: *mut sys::o
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let f = unsafe { Box::from_raw(data as *mut Filter) };
+    report_zoom(f.context as usize, None);
     if f.textures.is_some() || f.picture_tex.is_some() {
         unsafe {
             sys::obs_enter_graphics();
@@ -510,6 +536,13 @@ unsafe extern "C" fn tick(data: *mut c_void, seconds: f32) {
         f.frame_read = Some(Instant::now());
     }
     zoom_tick(f, dt);
+    // what viewers see, for the badge: zoomed in, on a capture that's live
+    let parent = unsafe { sys::obs_filter_get_parent(f.context) };
+    let live = !parent.is_null() && unsafe { sys::obs_source_active(parent) };
+    match f.cam.filter(|_| live && f.look.zoom_badge) {
+        Some(cam) => report_zoom(f.context as usize, Some(cam.scale)),
+        None => report_zoom(f.context as usize, None),
+    }
 }
 
 /// The follow-zoom, a step on.
