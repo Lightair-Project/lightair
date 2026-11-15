@@ -8,7 +8,7 @@ mod encoding;
 mod eyedropper;
 mod frame_view;
 mod geometry;
-mod hotkeys;
+mod shortcuts;
 mod library;
 mod mixer;
 #[cfg(target_os = "macos")]
@@ -86,14 +86,14 @@ fn main() {
         .unwrap_or_else(|e| panic!("could not start the engine: {e}")),
     );
     tracing::info!(version = engine.version, workspace = %workspace_dir.display(), "libobs started");
-    if let Some((name, id)) = prefs.monitor_device.clone() {
+    if let Some((name, id)) = prefs.headphones_device.clone() {
         engine.call(move |_| lightair_engine::monitoring::set(&name, &id));
     }
-    let monitor = prefs.direct_monitor.then(|| prefs.monitor_device.clone().map_or(String::new(), |(name, _)| name));
-    let program = prefs.monitor_program;
+    let monitor = prefs.low_latency_headphones.then(|| prefs.headphones_device.clone().map_or(String::new(), |(name, _)| name));
+    let program = prefs.headphones_hear_program;
     let block = prefs.audio_block;
     engine.call(move |s| {
-        s.reconciler.set_monitor(monitor, program);
+        s.reconciler.set_headphones(monitor, program);
         // before the engine starts: nothing to restart
         s.reconciler.set_audio_block(block, &lightair_core::Workspace::new(""));
     });

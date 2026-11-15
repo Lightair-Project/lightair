@@ -8,7 +8,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::slider::Slider;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Command, Workspace, Scene, ScreenLook};
+use lightair_core::{Command, Workspace, Scene, ScreenZoomPointer};
 
 use super::StudioWindow;
 use crate::ui::{self, tok};
@@ -38,13 +38,13 @@ fn note(text: &'static str) -> Div {
 
 impl StudioWindow {
     /// The section, for `scene`.
-    pub(super) fn screen_look_section(&self, workspace: &Workspace, scene: &Scene, cx: &mut Context<Self>) -> Div {
+    pub(super) fn screen_zoom_pointer_section(&self, workspace: &Workspace, scene: &Scene, cx: &mut Context<Self>) -> Div {
         let sid = scene.id;
         let on = scene.screen.is_some();
         let look = scene.screen.unwrap_or_default();
-        let set = move |l: ScreenLook| Command::SetSceneScreen { scene: sid, screen: Some(l) };
+        let set = move |l: ScreenZoomPointer| Command::SetScreenZoomPointer { scene: sid, screen: Some(l) };
         let toggle = super::settings::switch("screen-look-on", on).on_click(cx.listener(move |this, _, _, cx| {
-            this.exec(Command::SetSceneScreen { scene: sid, screen: if on { None } else { Some(ScreenLook::default()) } }, cx)
+            this.exec(Command::SetScreenZoomPointer { scene: sid, screen: if on { None } else { Some(ScreenZoomPointer::default()) } }, cx)
         }));
         let mut body = self.section("Screen zoom & pointer", Some(toggle.into_any_element()), cx);
         let screens = scene
@@ -60,7 +60,7 @@ impl StudioWindow {
             body = body.child(note("Add a screen to this scene: it zooms and draws the pointer there."));
         }
         // clicks (for the zoom and their effects) need the OS to let Lightair see them
-        let wants_clicks = look.zoom == ScreenLook::ZOOM_CLICKS || (look.cursor && !look.cursor_hidden && look.clicks > 0);
+        let wants_clicks = look.zoom == ScreenZoomPointer::ZOOM_CLICKS || (look.pointer_drawn && !look.pointer_hidden && look.clicks > 0);
         if wants_clicks && !lightair_platform::input::can_listen() {
             body = body.child(
                 div()
@@ -104,21 +104,21 @@ impl StudioWindow {
             .child(self.segmented(
                 "screen-zoom",
                 vec![
-                    ("Off", set(ScreenLook { zoom: ScreenLook::ZOOM_OFF, ..look }), look.zoom == ScreenLook::ZOOM_OFF),
-                    ("On clicks", set(ScreenLook { zoom: ScreenLook::ZOOM_CLICKS, ..look }), look.zoom == ScreenLook::ZOOM_CLICKS),
-                    ("Always", set(ScreenLook { zoom: ScreenLook::ZOOM_ALWAYS, ..look }), look.zoom == ScreenLook::ZOOM_ALWAYS),
-                    ("Toggle", set(ScreenLook { zoom: ScreenLook::ZOOM_TOGGLE, ..look }), look.zoom == ScreenLook::ZOOM_TOGGLE),
+                    ("Off", set(ScreenZoomPointer { zoom: ScreenZoomPointer::ZOOM_OFF, ..look }), look.zoom == ScreenZoomPointer::ZOOM_OFF),
+                    ("On clicks", set(ScreenZoomPointer { zoom: ScreenZoomPointer::ZOOM_CLICKS, ..look }), look.zoom == ScreenZoomPointer::ZOOM_CLICKS),
+                    ("Always", set(ScreenZoomPointer { zoom: ScreenZoomPointer::ZOOM_ALWAYS, ..look }), look.zoom == ScreenZoomPointer::ZOOM_ALWAYS),
+                    ("Toggle", set(ScreenZoomPointer { zoom: ScreenZoomPointer::ZOOM_TOGGLE, ..look }), look.zoom == ScreenZoomPointer::ZOOM_TOGGLE),
                 ],
                 cx,
             ));
-        if look.zoom != ScreenLook::ZOOM_OFF {
+        if look.zoom != ScreenZoomPointer::ZOOM_OFF {
             let scales: Vec<(&'static str, Command, bool)> = [("1.5×", 1.5f32), ("2×", 2.0), ("2.5×", 2.5), ("3×", 3.0)]
                 .into_iter()
-                .map(|(n, v)| (n, set(ScreenLook { zoom_scale: v, ..look }), (look.zoom_scale - v).abs() < 0.01))
+                .map(|(n, v)| (n, set(ScreenZoomPointer { zoom_scale: v, ..look }), (look.zoom_scale - v).abs() < 0.01))
                 .collect();
             body = body.child(row("How far", self.segmented("screen-zoom-scale", scales, cx)));
-            if look.zoom == ScreenLook::ZOOM_CLICKS {
-                let s = self.slider(format!("screen-hold:{sid}"), (0.5, 8.0, 0.25), look.zoom_hold_s, move |v| set(ScreenLook { zoom_hold_s: v, ..look }), cx);
+            if look.zoom == ScreenZoomPointer::ZOOM_CLICKS {
+                let s = self.slider(format!("screen-hold:{sid}"), (0.5, 8.0, 0.25), look.zoom_hold_s, move |v| set(ScreenZoomPointer { zoom_hold_s: v, ..look }), cx);
                 body = body.child(slider_row("Stays in", s, format!("{:.1} s", look.zoom_hold_s)));
             }
             body = body.child(row(
@@ -126,23 +126,23 @@ impl StudioWindow {
                 self.segmented(
                     "screen-zoom-motion",
                     vec![
-                        ("Focused", set(ScreenLook { zoom_motion: 0.15, ..look }), look.zoom_motion < 0.34),
-                        ("Balanced", set(ScreenLook { zoom_motion: 0.5, ..look }), (0.34..0.67).contains(&look.zoom_motion)),
-                        ("Smooth", set(ScreenLook { zoom_motion: 0.85, ..look }), look.zoom_motion >= 0.67),
+                        ("Focused", set(ScreenZoomPointer { zoom_motion: 0.15, ..look }), look.zoom_motion < 0.34),
+                        ("Balanced", set(ScreenZoomPointer { zoom_motion: 0.5, ..look }), (0.34..0.67).contains(&look.zoom_motion)),
+                        ("Smooth", set(ScreenZoomPointer { zoom_motion: 0.85, ..look }), look.zoom_motion >= 0.67),
                     ],
                     cx,
                 ),
             ));
             body = body.child(note(match look.zoom {
-                ScreenLook::ZOOM_CLICKS => "Zooms in where you click and follows the pointer, then back out once you stop clicking.",
-                ScreenLook::ZOOM_TOGGLE => "Press the key to zoom in and follow the pointer; press it again to zoom back out.",
+                ScreenZoomPointer::ZOOM_CLICKS => "Zooms in where you click and follows the pointer, then back out once you stop clicking.",
+                ScreenZoomPointer::ZOOM_TOGGLE => "Press the key to zoom in and follow the pointer; press it again to zoom back out.",
                 _ => "Always zoomed in, the view following the pointer.",
             }));
         }
         // ---- toggle: its key, and whether it's in now
-        if look.zoom == ScreenLook::ZOOM_TOGGLE {
-            let keys = self.prefs.global_hotkeys.iter().find(|h| h.action == crate::hotkeys::GlobalAction::FollowZoom).map(|h| crate::hotkeys::display(&h.keys));
-            let following = lightair_engine::cursor::following();
+        if look.zoom == ScreenZoomPointer::ZOOM_TOGGLE {
+            let keys = self.prefs.global_shortcuts.iter().find(|h| h.action == crate::shortcuts::GlobalAction::FollowZoom).map(|h| crate::shortcuts::display(&h.keys));
+            let following = lightair_engine::pointer::following();
             let control = div()
                 .flex()
                 .items_center()
@@ -174,7 +174,7 @@ impl StudioWindow {
                             .xsmall()
                             .outline()
                             .on_click(cx.listener(|_, _, _, cx| {
-                                lightair_engine::cursor::toggle_follow();
+                                lightair_engine::pointer::toggle_follow();
                                 cx.notify();
                             })),
                     )
@@ -187,33 +187,33 @@ impl StudioWindow {
             .child(self.segmented(
                 "screen-cursor",
                 vec![
-                    ("As captured", set(ScreenLook { cursor: false, cursor_hidden: false, ..look }), !look.cursor && !look.cursor_hidden),
-                    ("Drawn", set(ScreenLook { cursor: true, cursor_hidden: false, ..look }), look.cursor && !look.cursor_hidden),
-                    ("Hidden", set(ScreenLook { cursor_hidden: true, ..look }), look.cursor_hidden),
+                    ("As captured", set(ScreenZoomPointer { pointer_drawn: false, pointer_hidden: false, ..look }), !look.pointer_drawn && !look.pointer_hidden),
+                    ("Drawn", set(ScreenZoomPointer { pointer_drawn: true, pointer_hidden: false, ..look }), look.pointer_drawn && !look.pointer_hidden),
+                    ("Hidden", set(ScreenZoomPointer { pointer_hidden: true, ..look }), look.pointer_hidden),
                 ],
                 cx,
             ));
-        if look.cursor_hidden {
+        if look.pointer_hidden {
             body = body.child(note("No pointer on the screen (and no clicks drawn)."));
         }
-        if look.cursor && !look.cursor_hidden {
+        if look.pointer_drawn && !look.pointer_hidden {
             let style = self.segmented(
                 "screen-cursor-style",
                 vec![
-                    ("Pointer", set(ScreenLook { cursor_style: 0, ..look }), look.cursor_style == 0),
-                    ("Dot", set(ScreenLook { cursor_style: 1, ..look }), look.cursor_style == 1),
-                    ("Ring", set(ScreenLook { cursor_style: 2, ..look }), look.cursor_style == 2),
+                    ("Pointer", set(ScreenZoomPointer { pointer_style: 0, ..look }), look.pointer_style == 0),
+                    ("Dot", set(ScreenZoomPointer { pointer_style: 1, ..look }), look.pointer_style == 1),
+                    ("Ring", set(ScreenZoomPointer { pointer_style: 2, ..look }), look.pointer_style == 2),
                 ],
                 cx,
             );
-            let size = self.slider(format!("screen-size:{sid}"), (0.5, 4.0, 0.1), look.cursor_size, move |v| set(ScreenLook { cursor_size: v, ..look }), cx);
-            let smooth = self.slider(format!("screen-smooth:{sid}"), (0.0, 1.0, 0.05), look.cursor_smoothing, move |v| set(ScreenLook { cursor_smoothing: v, ..look }), cx);
-            let idle = self.slider(format!("screen-idle:{sid}"), (0.0, 10.0, 0.5), look.cursor_idle_s, move |v| set(ScreenLook { cursor_idle_s: v, ..look }), cx);
-            let tilt = super::settings::switch("screen-tilt", look.cursor_tilt).on_click(cx.listener(move |this, _, _, cx| this.exec(set(ScreenLook { cursor_tilt: !look.cursor_tilt, ..look }), cx)));
-            let current = super::object_props::rgb_of(look.cursor_color);
+            let size = self.slider(format!("screen-size:{sid}"), (0.5, 4.0, 0.1), look.pointer_size, move |v| set(ScreenZoomPointer { pointer_size: v, ..look }), cx);
+            let smooth = self.slider(format!("screen-smooth:{sid}"), (0.0, 1.0, 0.05), look.pointer_smoothing, move |v| set(ScreenZoomPointer { pointer_smoothing: v, ..look }), cx);
+            let idle = self.slider(format!("screen-idle:{sid}"), (0.0, 10.0, 0.5), look.pointer_idle_s, move |v| set(ScreenZoomPointer { pointer_idle_s: v, ..look }), cx);
+            let tilt = super::settings::switch("screen-tilt", look.pointer_tilt).on_click(cx.listener(move |this, _, _, cx| this.exec(set(ScreenZoomPointer { pointer_tilt: !look.pointer_tilt, ..look }), cx)));
+            let current = super::object_props::rgb_of(look.pointer_color);
             let mut swatches = div().flex().flex_wrap().gap_1p5();
             for (i, &rgb) in super::object_props::PALETTE.iter().enumerate() {
-                let cmd = set(ScreenLook { cursor_color: super::object_props::abgr(rgb), ..look });
+                let cmd = set(ScreenZoomPointer { pointer_color: super::object_props::abgr(rgb), ..look });
                 swatches = swatches.child(
                     div()
                         .id(("screen-colour", i))
@@ -228,9 +228,9 @@ impl StudioWindow {
             }
             body = body
                 .child(row("Look", style))
-                .child(slider_row("Size", size, format!("{:.1}×", look.cursor_size)))
-                .child(slider_row("Smoothing", smooth, format!("{:.0}%", look.cursor_smoothing * 100.0)))
-                .child(slider_row("Hide when still", idle, if look.cursor_idle_s <= 0.0 { "never".into() } else { format!("{:.1} s", look.cursor_idle_s) }))
+                .child(slider_row("Size", size, format!("{:.1}×", look.pointer_size)))
+                .child(slider_row("Smoothing", smooth, format!("{:.0}%", look.pointer_smoothing * 100.0)))
+                .child(slider_row("Hide when still", idle, if look.pointer_idle_s <= 0.0 { "never".into() } else { format!("{:.1} s", look.pointer_idle_s) }))
                 .child(row("Tilt moving", div().flex().child(tilt)))
                 .child(row("Colour", swatches))
                 // ---- clicks
@@ -238,9 +238,9 @@ impl StudioWindow {
                 .child(self.segmented(
                     "screen-clicks",
                     vec![
-                        ("None", set(ScreenLook { clicks: 0, ..look }), look.clicks == 0),
-                        ("Circle", set(ScreenLook { clicks: 1, ..look }), look.clicks == 1),
-                        ("Ripple", set(ScreenLook { clicks: 2, ..look }), look.clicks == 2),
+                        ("None", set(ScreenZoomPointer { clicks: 0, ..look }), look.clicks == 0),
+                        ("Circle", set(ScreenZoomPointer { clicks: 1, ..look }), look.clicks == 1),
+                        ("Ripple", set(ScreenZoomPointer { clicks: 2, ..look }), look.clicks == 2),
                     ],
                     cx,
                 ));

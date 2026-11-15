@@ -13,7 +13,7 @@ use crate::ui::{self, tok};
 pub(super) enum PaletteAction {
     Scene(Id),
     Take,
-    StudioMode,
+    CueScenes,
     Record,
     PauseRecording,
     Marker,
@@ -79,21 +79,21 @@ pub(super) fn score(query: &str, label: &str) -> Option<u32> {
     Some(first * 4 + spread * 2 + (q.len() as u32).saturating_sub(word_starts))
 }
 
-fn entries(workspace: &Workspace, studio_mode: bool) -> Vec<Entry> {
+fn entries(workspace: &Workspace, cue_scenes: bool) -> Vec<Entry> {
     use PaletteAction::*;
     let mut out: Vec<Entry> = workspace
         .scenes
         .iter()
         .map(|s| Entry {
             label: s.name.clone(),
-            hint: if studio_mode { "Select scene" } else { "Go to scene" },
+            hint: if cue_scenes { "Select scene" } else { "Go to scene" },
             icon: "layout-dashboard",
             action: Scene(s.id),
         })
         .collect();
     let fixed: &[(&str, &'static str, &'static str, PaletteAction)] = &[
         ("Take", "⌘↩", "play", Take),
-        (if studio_mode { "Cue scenes: turn off" } else { "Cue scenes" }, "", "lightair-cue", StudioMode),
+        (if cue_scenes { "Cue scenes: turn off" } else { "Cue scenes" }, "", "lightair-cue", CueScenes),
         ("Start or stop recording", "", "circle", Record),
         ("Pause or resume recording", "", "pause", PauseRecording),
         ("Add marker", "⌘M", "bookmark", Marker),
@@ -132,8 +132,8 @@ fn entries(workspace: &Workspace, studio_mode: bool) -> Vec<Entry> {
 }
 
 /// Entries matching `query`, best first.
-pub(super) fn matches(workspace: &Workspace, studio_mode: bool, query: &str) -> Vec<Entry> {
-    let mut scored: Vec<(u32, usize, Entry)> = entries(workspace, studio_mode)
+pub(super) fn matches(workspace: &Workspace, cue_scenes: bool, query: &str) -> Vec<Entry> {
+    let mut scored: Vec<(u32, usize, Entry)> = entries(workspace, cue_scenes)
         .into_iter()
         .enumerate()
         .filter_map(|(i, e)| score(query, &e.label).map(|s| (s, i, e)))
@@ -174,7 +174,7 @@ impl StudioWindow {
     fn palette_matches(&self, cx: &App) -> Vec<Entry> {
         let Some(p) = &self.palette else { return vec![] };
         let query = p.input.read(cx).value().to_string();
-        matches(self.studio.read(cx).workspace(), self.studio_mode, &query)
+        matches(self.studio.read(cx).workspace(), self.cue_scenes, &query)
     }
 
     fn run_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -188,10 +188,10 @@ impl StudioWindow {
         use PaletteAction::*;
         match action {
             Scene(id) => {
-                let studio_mode = self.studio_mode;
+                let cue_scenes = self.cue_scenes;
                 self.studio.update(cx, |s, cx| {
                     s.select_scene(id);
-                    if studio_mode {
+                    if cue_scenes {
                         cx.notify();
                     } else {
                         let _ = s.execute(Command::SetProgram { scene: Some(id) }, cx);
@@ -199,7 +199,7 @@ impl StudioWindow {
                 });
             }
             Take => self.take(cx),
-            StudioMode => self.set_studio_mode(!self.studio_mode, cx),
+            CueScenes => self.set_cue_scenes(!self.cue_scenes, cx),
             Record => self.studio.update(cx, |s, cx| s.toggle_recording(cx)),
             PauseRecording => self.studio.update(cx, |s, cx| s.pause_recording(cx)),
             Marker => self.studio.update(cx, |s, cx| s.add_marker(cx)),

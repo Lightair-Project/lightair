@@ -184,10 +184,10 @@ impl StudioWindow {
     }
 
     /// The keys pressed for the global shortcut being set.
-    pub(super) fn capture_hotkey(&mut self, k: &Keystroke, cx: &mut Context<Self>) {
-        let Some(action) = self.hotkey_capture else { return };
+    pub(super) fn capture_shortcut(&mut self, k: &Keystroke, cx: &mut Context<Self>) {
+        let Some(action) = self.shortcut_capture else { return };
         if k.key == "escape" {
-            self.hotkey_capture = None;
+            self.shortcut_capture = None;
             cx.notify();
             return;
         }
@@ -208,31 +208,31 @@ impl StudioWindow {
         }
         parts.push(k.key.to_lowercase());
         let keys = parts.join("-");
-        if crate::hotkeys::parse(&keys).is_none() {
-            self.hotkey_note = Some("Use ⌘, ⌃ or ⌥ with a letter or number, or an F key.".into());
+        if crate::shortcuts::parse(&keys).is_none() {
+            self.shortcut_note = Some("Use ⌘, ⌃ or ⌥ with a letter or number, or an F key.".into());
             cx.notify();
             return;
         }
-        self.hotkey_capture = None;
-        let mut list = self.prefs.global_hotkeys.clone();
+        self.shortcut_capture = None;
+        let mut list = self.prefs.global_shortcuts.clone();
         list.retain(|h| h.action != action && h.keys != keys);
-        list.push(crate::prefs::GlobalHotkey { action, keys: keys.clone() });
-        let refused = crate::hotkeys::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+        list.push(crate::prefs::GlobalShortcut { action, keys: keys.clone() });
+        let refused = crate::shortcuts::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
         if refused.contains(&action) {
             list.retain(|h| h.action != action);
-            crate::hotkeys::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
-            self.hotkey_note = Some(format!("{} is taken by {} or another app.", crate::hotkeys::display(&keys), ui::OS));
+            crate::shortcuts::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+            self.shortcut_note = Some(format!("{} is taken by {} or another app.", crate::shortcuts::display(&keys), ui::OS));
         } else {
-            self.hotkey_note = None;
+            self.shortcut_note = None;
         }
-        self.set_pref(|p| p.global_hotkeys = list, cx);
+        self.set_pref(|p| p.global_shortcuts = list, cx);
     }
 
-    fn clear_hotkey(&mut self, action: crate::hotkeys::GlobalAction, cx: &mut Context<Self>) {
-        let mut list = self.prefs.global_hotkeys.clone();
+    fn clear_shortcut(&mut self, action: crate::shortcuts::GlobalAction, cx: &mut Context<Self>) {
+        let mut list = self.prefs.global_shortcuts.clone();
         list.retain(|h| h.action != action);
-        crate::hotkeys::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
-        self.set_pref(|p| p.global_hotkeys = list, cx);
+        crate::shortcuts::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+        self.set_pref(|p| p.global_shortcuts = list, cx);
     }
 
     /// The audio engine's buffer (frames), now and from now on.
@@ -261,11 +261,11 @@ impl StudioWindow {
     }
 
     /// Tells the audio engine where and what to monitor, from the preferences.
-    fn apply_monitor(&self, cx: &mut Context<Self>) {
+    fn apply_headphones(&self, cx: &mut Context<Self>) {
         let p = &self.prefs;
-        let device = p.direct_monitor.then(|| p.monitor_device.clone().map_or(String::new(), |(name, _)| name));
-        let program = p.monitor_program;
-        self.studio.read(cx).engine().call(move |s| s.reconciler.set_monitor(device, program));
+        let device = p.low_latency_headphones.then(|| p.headphones_device.clone().map_or(String::new(), |(name, _)| name));
+        let program = p.headphones_hear_program;
+        self.studio.read(cx).engine().call(move |s| s.reconciler.set_headphones(device, program));
     }
 
     fn set_pref(&mut self, f: impl FnOnce(&mut crate::prefs::Preferences), cx: &mut Context<Self>) {
@@ -303,9 +303,9 @@ impl StudioWindow {
                     .child(*label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.settings_page = p;
-                        this.hotkey_capture = None;
+                        this.shortcut_capture = None;
                         if p == Page::Audio {
-                            this.monitor_devices =
+                            this.headphones_devices =
                                 this.studio.read(cx).engine().call(|_| lightair_engine::monitoring::devices());
                         }
                         cx.notify();
@@ -352,9 +352,9 @@ impl StudioWindow {
                         .shadow_lg()
                         .track_focus(&self.settings_focus)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        // (a shortcut being set takes its keys first: `StudioWindow::_hotkey_keys`)
+                        // (a shortcut being set takes its keys first: `StudioWindow::_shortcut_keys`)
                         .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                            if this.hotkey_capture.is_none() && ev.keystroke.key == "escape" {
+                            if this.shortcut_capture.is_none() && ev.keystroke.key == "escape" {
                                 this.toggle_settings(cx);
                                 window.focus(&this.focus, cx);
                             }
@@ -454,10 +454,10 @@ impl StudioWindow {
 
     fn audio_page(&self, cx: &mut Context<Self>) -> Div {
         let prefs = &self.prefs;
-        let current = prefs.monitor_device.clone().unwrap_or(("System default".into(), "default".into()));
-        let devices = self.monitor_devices.clone();
+        let current = prefs.headphones_device.clone().unwrap_or(("System default".into(), "default".into()));
+        let devices = self.headphones_devices.clone();
         let me = cx.entity().downgrade();
-        let device = Button::new("monitor-device").label(current.0.clone()).small().outline().dropdown_menu(
+        let device = Button::new("headphones-device").label(current.0.clone()).small().outline().dropdown_menu(
             move |mut menu, _, _| {
                 for (name, id) in devices.iter().cloned() {
                     let me = me.clone();
@@ -472,8 +472,8 @@ impl StudioWindow {
                                         .read(cx)
                                         .engine()
                                         .call(move |_| lightair_engine::monitoring::set(&n2, &i2));
-                                    this.set_pref(|p| p.monitor_device = (i != "default").then_some((n, i)), cx);
-                                    this.apply_monitor(cx);
+                                    this.set_pref(|p| p.headphones_device = (i != "default").then_some((n, i)), cx);
+                                    this.apply_headphones(cx);
                                 });
                             }
                         },
@@ -482,13 +482,13 @@ impl StudioWindow {
                 menu
             },
         );
-        let (direct, program) = (prefs.direct_monitor, prefs.monitor_program);
+        let (direct, program) = (prefs.low_latency_headphones, prefs.headphones_hear_program);
         let mut hear = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
         for (i, (p, label)) in [(false, "Cued tracks"), (true, "The stream")].into_iter().enumerate() {
-            hear = hear.child(pref_chip(("monitor-hear", i), label.to_string(), program == p).on_click(cx.listener(
+            hear = hear.child(pref_chip(("headphones-hear", i), label.to_string(), program == p).on_click(cx.listener(
                 move |this, _, _, cx| {
-                    this.set_pref(|pr| pr.monitor_program = p, cx);
-                    this.apply_monitor(cx);
+                    this.set_pref(|pr| pr.headphones_hear_program = p, cx);
+                    this.apply_headphones(cx);
                 },
             )));
         }
@@ -545,11 +545,11 @@ impl StudioWindow {
                 group("Listening")
                     .child(row("Headphones", Some("Where Listen in headphones plays."), device))
                     .child(row(
-                        "Low-latency monitoring",
+                        "Low-latency headphones",
                         Some("Straight from the mixer: a few milliseconds, for singing and playing along."),
-                        switch("direct-monitor", direct).on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_pref(|p| p.direct_monitor = !direct, cx);
-                            this.apply_monitor(cx);
+                        switch("low-latency-headphones", direct).on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_pref(|p| p.low_latency_headphones = !direct, cx);
+                            this.apply_headphones(cx);
                         })),
                     ))
                     .child(row("Hear", Some("The tracks you cue, or exactly what viewers hear."), hear)),
@@ -566,9 +566,9 @@ impl StudioWindow {
                     .child(row(
                         "Buffer",
                         Some(if cfg!(windows) {
-                            "Smaller: less delay when you monitor yourself. Larger: lighter on the PC."
+                            "Smaller: less delay when you hear yourself. Larger: lighter on the PC."
                         } else {
-                            "Smaller: less delay when you monitor yourself. Larger: lighter on the Mac."
+                            "Smaller: less delay when you hear yourself. Larger: lighter on the Mac."
                         }),
                         blocks,
                     ))
@@ -612,11 +612,11 @@ impl StudioWindow {
     }
 
     fn shortcuts_page(&self, cx: &mut Context<Self>) -> Div {
-        use crate::hotkeys::{GlobalAction, display};
+        use crate::shortcuts::{GlobalAction, display};
         let mut global = group("Anywhere on your Mac");
         for (i, action) in GlobalAction::ALL.iter().copied().enumerate() {
-            let keys = self.prefs.global_hotkeys.iter().find(|h| h.action == action).map(|h| h.keys.clone());
-            let capturing = self.hotkey_capture == Some(action);
+            let keys = self.prefs.global_shortcuts.iter().find(|h| h.action == action).map(|h| h.keys.clone());
+            let capturing = self.shortcut_capture == Some(action);
             let control = div()
                 .flex()
                 .items_center()
@@ -627,13 +627,13 @@ impl StudioWindow {
                     value(&keys.as_deref().map(display).unwrap_or_else(|| "—".into()))
                 })
                 .child(
-                    Button::new(("set-hotkey", i))
+                    Button::new(("set-shortcut", i))
                         .label(if keys.is_some() { "Change" } else { "Set" })
                         .xsmall()
                         .outline()
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.hotkey_capture = Some(action);
-                            this.hotkey_note = None;
+                            this.shortcut_capture = Some(action);
+                            this.shortcut_note = None;
                             // the keys pressed next come here
                             window.focus(&this.settings_focus, cx);
                             cx.notify();
@@ -641,16 +641,16 @@ impl StudioWindow {
                 )
                 .when(keys.is_some(), |d| {
                     d.child(
-                        Button::new(("clear-hotkey", i))
+                        Button::new(("clear-shortcut", i))
                             .icon(ui::icon("x"))
                             .xsmall()
                             .ghost()
-                            .on_click(cx.listener(move |this, _, _, cx| this.clear_hotkey(action, cx))),
+                            .on_click(cx.listener(move |this, _, _, cx| this.clear_shortcut(action, cx))),
                     )
                 });
             global = global.child(row(&action.label(), None, control));
         }
-        if let Some(n) = &self.hotkey_note {
+        if let Some(n) = &self.shortcut_note {
             global = global.child(div().px_1().text_size(px(11.)).text_color(tok::warn()).child(n.clone()));
         }
         let mut page = pages().child(global.child(note(
@@ -807,18 +807,18 @@ impl StudioWindow {
 
     /// Multitrack audio: each track (or those marked Record) to its own file.
     fn multitrack_group(&self, rec: &RecordingSettings, cx: &mut Context<Self>) -> Div {
-        use lightair_core::{StemFormat, StemPoint};
+        use lightair_core::{MultitrackFormat, MultitrackPoint};
         let set = |r: RecordingSettings| Command::SetRecordingSettings { settings: r };
         let (multi, only) = (rec.multitrack, rec.audio_only);
         let (m, o) = (set(RecordingSettings { multitrack: !multi, ..rec.clone() }), set(RecordingSettings { audio_only: !only, ..rec.clone() }));
-        let formats: Vec<(String, bool, bool, Command)> = [(StemFormat::Pcm24, "24-bit"), (StemFormat::Float32, "32-bit float")]
+        let formats: Vec<(String, bool, bool, Command)> = [(MultitrackFormat::Pcm24, "24-bit"), (MultitrackFormat::Float32, "32-bit float")]
             .into_iter()
-            .map(|(f, l)| (l.to_string(), rec.stem_format == f, multi || only, set(RecordingSettings { stem_format: f, ..rec.clone() })))
+            .map(|(f, l)| (l.to_string(), rec.multitrack_format == f, multi || only, set(RecordingSettings { multitrack_format: f, ..rec.clone() })))
             .collect();
         let points: Vec<(String, bool, bool, Command)> =
-            [(StemPoint::Raw, "Before effects"), (StemPoint::PreFader, "After effects"), (StemPoint::PostFader, "As mixed")]
+            [(MultitrackPoint::Raw, "Before effects"), (MultitrackPoint::PreFader, "After effects"), (MultitrackPoint::PostFader, "As mixed")]
                 .into_iter()
-                .map(|(p, l)| (l.to_string(), rec.stem_point == p, multi || only, set(RecordingSettings { stem_point: p, ..rec.clone() })))
+                .map(|(p, l)| (l.to_string(), rec.multitrack_point == p, multi || only, set(RecordingSettings { multitrack_point: p, ..rec.clone() })))
                 .collect();
         let workspace = self.studio.read(cx).workspace().clone();
         let mixes: Vec<(String, bool, bool, Command)> = workspace
@@ -857,20 +857,20 @@ impl StudioWindow {
             ))
             .child(row(
                 "Format",
-                Some(match rec.stem_format {
-                    StemFormat::Pcm24 => "Opens in every editor and DAW.",
-                    StemFormat::Float32 => "Can't clip: for music.",
+                Some(match rec.multitrack_format {
+                    MultitrackFormat::Pcm24 => "Opens in every editor and DAW.",
+                    MultitrackFormat::Float32 => "Can't clip: for music.",
                 }),
-                chips("rec-stem-format", formats, cx),
+                chips("rec-multitrack-format", formats, cx),
             ))
             .child(row(
                 "Record",
-                Some(match rec.stem_point {
-                    StemPoint::Raw => "The clean sources, to process later.",
-                    StemPoint::PreFader => "With each track's effects, at full level.",
-                    StemPoint::PostFader => "As the mix has them: faders and pan.",
+                Some(match rec.multitrack_point {
+                    MultitrackPoint::Raw => "The clean sources, to process later.",
+                    MultitrackPoint::PreFader => "With each track's effects, at full level.",
+                    MultitrackPoint::PostFader => "As the mix has them: faders and pan.",
                 }),
-                chips("rec-stem-point", points, cx),
+                chips("rec-multitrack-point", points, cx),
             ))
     }
 

@@ -56,7 +56,7 @@ impl Editor {
                     width: 1920,
                     height: 1080,
                     audio: Vec::new(),
-                    take: None,
+                    studio_take: None,
                     item: Some(item.id),
                     look: None,
                     transcript: None,
@@ -193,13 +193,13 @@ impl Editor {
 }
 
 impl Editor {
-    /// For the screenshot hook: the newest take opened in the media panel.
-    pub fn hook_open_take(&mut self, cx: &mut Context<Self>) {
+    /// For the screenshot hook: the newest studio_take opened in the media panel.
+    pub fn hook_open_studio_take(&mut self, cx: &mut Context<Self>) {
         self.show(cx);
         self.library = self.workspace.as_ref().map(|ws| Index::load(ws).newest_first().into_iter().cloned().collect()).unwrap_or_default();
-        if let Some(item) = self.library.iter().find(|i| i.kind == Kind::Take).cloned() {
+        if let Some(item) = self.library.iter().find(|i| i.kind == Kind::StudioTake).cloned() {
             self.left = LeftTab::Media;
-            self.open_take(item, cx);
+            self.open_studio_take(item, cx);
         }
     }
 }

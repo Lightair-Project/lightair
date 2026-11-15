@@ -15,11 +15,14 @@ pub struct Preferences {
     /// Audio sample rate (Hz); used when Lightair starts.
     pub sample_rate: u32,
     /// "Listen in headphones" device: (name, id); `None`: the system default.
-    pub monitor_device: Option<(String, String)>,
+    #[serde(alias = "monitor_device")]
+    pub headphones_device: Option<(String, String)>,
     /// Monitor straight from the audio engine (a few ms) rather than through libobs (~100 ms).
-    pub direct_monitor: bool,
+    #[serde(alias = "direct_monitor")]
+    pub low_latency_headphones: bool,
     /// The monitor plays the stream mix rather than the cued tracks.
-    pub monitor_program: bool,
+    #[serde(alias = "monitor_program")]
+    pub headphones_hear_program: bool,
     /// The loudness the LUFS readout aims for.
     pub loudness_target: i32,
     /// Frames the audio engine processes at a time (128: low latency for music; 512: lighter).
@@ -27,7 +30,8 @@ pub struct Preferences {
     /// Defaults for newly added cameras.
     pub camera: CameraDefaults,
     /// Shortcuts that work while Lightair isn't in front.
-    pub global_hotkeys: Vec<GlobalHotkey>,
+    #[serde(alias = "global_hotkeys")]
+    pub global_shortcuts: Vec<GlobalShortcut>,
     /// What the record button records.
     pub record_mode: RecordMode,
     /// The workspace open last: the one Lightair opens next.
@@ -69,13 +73,14 @@ pub enum RecordMode {
     #[default]
     Program,
     /// A Studio take: each source on its own, for the Editor.
-    Take,
+    #[serde(alias = "take")]
+    StudioTake,
 }
 
 /// A shortcut that works in any app: what it does and its keys ("cmd-shift-r").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GlobalHotkey {
-    pub action: crate::hotkeys::GlobalAction,
+pub struct GlobalShortcut {
+    pub action: crate::shortcuts::GlobalAction,
     pub keys: String,
 }
 
@@ -85,13 +90,13 @@ impl Default for Preferences {
             review_before_live: true,
             confirm_end_stream: true,
             sample_rate: 48_000,
-            monitor_device: None,
-            direct_monitor: true,
-            monitor_program: false,
+            headphones_device: None,
+            low_latency_headphones: true,
+            headphones_hear_program: false,
             loudness_target: -14,
             audio_block: 256,
             camera: CameraDefaults::default(),
-            global_hotkeys: Vec::new(),
+            global_shortcuts: Vec::new(),
             last_workspace: None,
             record_mode: RecordMode::Program,
         }

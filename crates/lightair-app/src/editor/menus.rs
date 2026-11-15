@@ -216,9 +216,9 @@ pub(super) fn media_menu(menu: PopupMenu, ed: &Ed, source: MediaSource, cx: &mut
         }));
     let path = match &source {
         MediaSource::Item(item) => {
-            if item.kind == Kind::Take {
-                let take = item.clone();
-                menu = menu.item(entry(ed, "Open parts", "layers", "", false, move |e, _, cx| e.open_take(take.clone(), cx)));
+            if item.kind == Kind::StudioTake {
+                let studio_take = item.clone();
+                menu = menu.item(entry(ed, "Open parts", "layers", "", false, move |e, _, cx| e.open_studio_take(studio_take.clone(), cx)));
             }
             item.files.first().map(|f| f.path.clone())
         }

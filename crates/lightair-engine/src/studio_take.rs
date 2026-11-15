@@ -1,13 +1,13 @@
-//! A Studio take's video (docs/plans/screen-studio.md, 4.2): each screen and camera in the
-//! program recorded to a file of its own, at its own size, as fragmented MP4 (a take that stops
+//! A Studio studio_take's video (docs/plans/screen-studio.md, 4.2): each screen and camera in the
+//! program recorded to a file of its own, at its own size, as fragmented MP4 (a studio_take that stops
 //! abruptly keeps what was written).
 //!
 //! - **Screens** are recorded from a capture of their own, with the cursor off and no effects:
-//!   the Editor draws the pointer again from the take's source log.
+//!   the Editor draws the pointer again from the studio_take's source log.
 //! - **Cameras** are recorded as they look (their effects on).
 //!
 //! Each file comes from a private canvas the size of its source, holding just that source.
-//! Audio goes to the take's multitrack files (the audio engine's stems), started beside this.
+//! Audio goes to the studio_take's multitrack files (the audio engine's track_files), started beside this.
 
 use std::path::{Path, PathBuf};
 
@@ -39,19 +39,19 @@ struct Part {
     _canvas: ObsCanvas,
 }
 
-pub struct Take {
+pub struct StudioTake {
     parts: Vec<Part>,
     pub tracks: Vec<Track>,
 }
 
 // SAFETY: libobs objects used on the engine thread only.
-unsafe impl Send for Take {}
+unsafe impl Send for StudioTake {}
 
 fn even(v: u32) -> u32 {
     (v.max(2)) & !1
 }
 
-impl Take {
+impl StudioTake {
     /// Starts recording `sources` (sources and their live sources) into `folder`.
     pub fn start(
         sources: Vec<(Source, *mut sys::obs_source_t)>,
@@ -59,7 +59,7 @@ impl Take {
         fps: (u32, u32),
         outputs: &mut Outputs,
         encoders: &[String],
-    ) -> Result<Take, String> {
+    ) -> Result<StudioTake, String> {
         std::fs::create_dir_all(folder).map_err(|e| format!("Can't create the take's folder: {e}"))?;
         let mut parts = Vec::new();
         let mut tracks = Vec::new();
@@ -117,10 +117,10 @@ impl Take {
         if parts.is_empty() {
             return Err("The program has no screen or camera to record.".into());
         }
-        Ok(Take { parts, tracks })
+        Ok(StudioTake { parts, tracks })
     }
 
-    /// Whether every file has stopped (the take can be let go).
+    /// Whether every file has stopped (the studio_take can be let go).
     pub fn finished(&self) -> bool {
         self.parts.iter().all(|p| !runtime().get(OutputKey::Recording(p.key)).state.is_running())
     }

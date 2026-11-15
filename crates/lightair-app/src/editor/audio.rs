@@ -13,7 +13,7 @@ impl Editor {
     pub(super) fn want_peaks(&mut self) {
         let Some(seq) = self.seq() else { return };
         // a file and which of its audio tracks
-        // everything each sound clip plays (a take's stems, a file's tracks)
+        // everything each sound clip plays (a studio_take's track files, a file's tracks)
         let mut wanted: Vec<(PathBuf, Option<u32>)> = seq
             .tracks
             .iter()

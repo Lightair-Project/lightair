@@ -1,4 +1,4 @@
-//! A Studio take records each source to its own file, at its own size, and lets its canvases go
+//! A Studio studio_take records each source to its own file, at its own size, and lets its canvases go
 //! once they've stopped. (Colour sources stand in for the screen and camera: the same path.)
 
 use std::path::Path;
@@ -61,14 +61,14 @@ fn each_source_records_at_its_own_size() {
                 .values()
                 .filter_map(|i| s.reconciler.source_type(i.id).map(|_| ((**i).clone(), i.id)))
                 .collect();
-            // the live sources, as take_sources gives them (colour sources aren't screens or cameras)
+            // the live sources, as studio_take_sources gives them (colour sources aren't screens or cameras)
             let sources = sources
                 .into_iter()
                 .filter_map(|(i, id)| s.reconciler.source_source(id).map(|p| (i, p)))
                 .collect();
-            let take = lightair_engine::take::Take::start(sources, &folder, (30, 1), &mut s.outputs, &caps)?;
-            let tracks = take.tracks.clone();
-            s.take = Some(take);
+            let studio_take = lightair_engine::studio_take::StudioTake::start(sources, &folder, (30, 1), &mut s.outputs, &caps)?;
+            let tracks = studio_take.tracks.clone();
+            s.studio_take = Some(studio_take);
             Ok::<_, String>(tracks)
         })
         .expect("take starts");
@@ -76,11 +76,11 @@ fn each_source_records_at_its_own_size() {
     std::thread::sleep(Duration::from_secs(2));
     engine.post(|s| s.outputs.stop_recording());
     let start = Instant::now();
-    while !engine.call(|s| s.take.as_ref().is_none_or(|t| t.finished())) {
+    while !engine.call(|s| s.studio_take.as_ref().is_none_or(|t| t.finished())) {
         assert!(start.elapsed() < Duration::from_secs(10), "the take's files stop");
         std::thread::sleep(Duration::from_millis(50));
     }
-    engine.call(|s| s.take = None);
+    engine.call(|s| s.studio_take = None);
     let mut sizes: Vec<(u64, u64)> = tracks
         .iter()
         .map(|t| {

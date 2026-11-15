@@ -31,9 +31,9 @@ pub struct Reconciler {
     sources: HashMap<Id, ObsSource>,
     /// Source effect chains (Camera Studio, colour correction, …).
     source_effects: HashMap<Id, Chain>,
-    /// Screen captures zoomed and given a drawn pointer by their scene's `ScreenLook` (the
+    /// Screen captures zoomed and given a drawn pointer by their scene's `ScreenZoomPointer` (the
     /// pointer filter, last on the source, and the settings it was given).
-    screen_looks: HashMap<Id, (ObsSource, serde_json::Value)>,
+    screen_zoom_pointers: HashMap<Id, (ObsSource, serde_json::Value)>,
     /// Canvases for additional canvases. The primary canvas uses libobs's main canvas.
     obs_canvases: HashMap<Id, ObsCanvas>,
     /// (scene, canvas) → libobs scene.
@@ -142,7 +142,7 @@ impl Reconciler {
                         recreated = true;
                     } else if let Some(src) = self.sources.get(&after.id) {
                         if before.settings != after.settings || draws_pointer(before) != draws_pointer(after) {
-                            let drawn = self.screen_looks.get(&after.id).is_some_and(|(_, s)| s["hide_capture"] == true);
+                            let drawn = self.screen_zoom_pointers.get(&after.id).is_some_and(|(_, s)| s["hide_capture"] == true);
                             src.update(&data_from_json(&source_settings(after, drawn)));
                             if after.kind == TIMER_KIND {
                                 self.timers.configure(after.id, &after.settings);
@@ -226,15 +226,15 @@ impl Reconciler {
             )
         });
         if screens_changed || recreated {
-            self.sync_screen_looks(workspace);
+            self.sync_screen_zoom_pointers(workspace);
         }
     }
 
-    /// Puts each scene's `ScreenLook` on its screen captures: a pointer filter (zoom, drawn
+    /// Puts each scene's `ScreenZoomPointer` on its screen captures: a pointer filter (zoom, drawn
     /// pointer, clicks) last on each, the capture's own pointer hidden while Lightair draws one.
     /// A capture in several scenes takes the look of the scene on air, else the first one's.
-    fn sync_screen_looks(&mut self, workspace: &Workspace) {
-        let mut want: HashMap<Id, lightair_core::ScreenLook> = HashMap::new();
+    fn sync_screen_zoom_pointers(&mut self, workspace: &Workspace) {
+        let mut want: HashMap<Id, lightair_core::ScreenZoomPointer> = HashMap::new();
         let on_air = workspace.program.and_then(|p| workspace.scene(p));
         for scene in on_air.into_iter().chain(workspace.scenes.iter()) {
             let Some(look) = scene.screen else { continue };
@@ -246,9 +246,9 @@ impl Reconciler {
             }
         }
         // gone: the filter off, the capture's own pointer back
-        let gone: Vec<Id> = self.screen_looks.keys().copied().filter(|id| !want.contains_key(id)).collect();
+        let gone: Vec<Id> = self.screen_zoom_pointers.keys().copied().filter(|id| !want.contains_key(id)).collect();
         for id in gone {
-            if let (Some((filter, was)), Some(src)) = (self.screen_looks.remove(&id), self.sources.get(&id)) {
+            if let (Some((filter, was)), Some(src)) = (self.screen_zoom_pointers.remove(&id), self.sources.get(&id)) {
                 unsafe { sys::obs_source_filter_remove(src.as_ptr(), filter.as_ptr()) };
                 if let Some(source) = workspace.sources.get(&id).filter(|i| !draws_pointer(i))
                     && was["hide_capture"] == true
@@ -259,32 +259,32 @@ impl Reconciler {
         }
         for (id, look) in want {
             let (Some(src), Some(source)) = (self.sources.get(&id), workspace.sources.get(&id)) else { continue };
-            let settings = screen_look_settings(&look);
+            let settings = screen_zoom_pointer_settings(&look);
             // drawn before (a new filter: as the capture was made, with its own pointer)
-            let hid = self.screen_looks.get(&id).map_or(draws_pointer(source), |(_, s)| s["hide_capture"] == true || draws_pointer(source));
-            match self.screen_looks.get_mut(&id) {
+            let hid = self.screen_zoom_pointers.get(&id).map_or(draws_pointer(source), |(_, s)| s["hide_capture"] == true || draws_pointer(source));
+            match self.screen_zoom_pointers.get_mut(&id) {
                 Some((_, was)) if *was == settings => {}
                 Some((filter, was)) => {
                     filter.update(&data_from_json(&settings));
                     *was = settings;
                 }
                 None => {
-                    let Some(filter) = ObsSource::create_private(crate::cursor::KIND, &format!("screen-look:{id}"), Some(&data_from_json(&settings))) else {
+                    let Some(filter) = ObsSource::create_private(crate::pointer::KIND, &format!("screen-zoom-pointer:{id}"), Some(&data_from_json(&settings))) else {
                         tracing::warn!("could not create the screen look");
                         continue;
                     };
                     unsafe { sys::obs_source_filter_add(src.as_ptr(), filter.as_ptr()) };
-                    self.screen_looks.insert(id, (filter, settings));
+                    self.screen_zoom_pointers.insert(id, (filter, settings));
                 }
             }
             // the capture's own pointer, hidden while Lightair draws one (only when that changes:
             // a capture given new settings may start again)
-            let hide = look.cursor || look.cursor_hidden;
+            let hide = look.pointer_drawn || look.pointer_hidden;
             if hid != (hide || draws_pointer(source)) {
                 src.update(&data_from_json(&source_settings(source, hide)));
             }
             // last, so it zooms what the source's effects made
-            if let Some((filter, _)) = self.screen_looks.get(&id) {
+            if let Some((filter, _)) = self.screen_zoom_pointers.get(&id) {
                 unsafe { sys::obs_source_filter_set_order(src.as_ptr(), filter.as_ptr(), sys::OBS_ORDER_MOVE_BOTTOM) };
             }
         }
@@ -310,7 +310,7 @@ impl Reconciler {
         }
         let Some(host) = self.audio.as_mut() else { return };
         let monitor = self.monitor.clone().map(|(d, program)| (d, if program { lightair_audio::PROGRAM } else { crate::audio::CUE }));
-        if let Err(e) = host.set_monitor(monitor) {
+        if let Err(e) = host.set_headphones(monitor) {
             tracing::warn!(%e, "direct monitoring unavailable; libobs monitors the cue");
         }
         let wanted: HashSet<Id> = workspace.tracks.iter().map(|t| t.source).collect();
@@ -377,7 +377,7 @@ impl Reconciler {
         self.sync_audio(workspace);
     }
 
-    pub fn start_stems(
+    pub fn start_multitrack(
         &mut self,
         workspace: &Workspace,
         folder: &std::path::Path,
@@ -386,12 +386,12 @@ impl Reconciler {
     ) -> Result<Vec<(std::path::PathBuf, String)>, String> {
         let settings = &workspace.outputs.recording;
         let host = self.audio.as_mut().ok_or("the audio engine isn't running")?;
-        let tap = match settings.stem_point {
-            lightair_core::StemPoint::Raw => lightair_audio::Tap::Input,
-            lightair_core::StemPoint::PreFader => lightair_audio::Tap::PreFader,
-            lightair_core::StemPoint::PostFader => lightair_audio::Tap::PostFader,
+        let tap = match settings.multitrack_point {
+            lightair_core::MultitrackPoint::Raw => lightair_audio::Tap::Input,
+            lightair_core::MultitrackPoint::PreFader => lightair_audio::Tap::PreFader,
+            lightair_core::MultitrackPoint::PostFader => lightair_audio::Tap::PostFader,
         };
-        let float = settings.stem_format == lightair_core::StemFormat::Float32;
+        let float = settings.multitrack_format == lightair_core::MultitrackFormat::Float32;
         let marked = workspace.tracks.iter().any(|t| t.record) || workspace.audio.buses.iter().any(|b| b.record);
         let mut strips: Vec<(lightair_audio::NodeId, String, u16)> = workspace
             .tracks
@@ -429,20 +429,20 @@ impl Reconciler {
                 }
                 // the file, and whose sound it is (its name as it was, not read back from the file's)
                 files.push((folder.join(&file), name));
-                crate::audio_host::StemSpec { id, path: folder.join(file), channels, tap, float }
+                crate::audio_host::TrackFileSpec { id, path: folder.join(file), channels, tap, float }
             })
             .collect::<Vec<_>>();
-        host.start_stems(specs)?;
+        host.start_multitrack(specs)?;
         Ok(files)
     }
 
     /// Monitoring straight from the audio engine to an output device (`None`: libobs's own,
     /// slower monitoring of the cue). `program`: hear the stream mix rather than the cue.
-    pub fn set_monitor(&mut self, device: Option<String>, program: bool) {
+    pub fn set_headphones(&mut self, device: Option<String>, program: bool) {
         self.monitor = device.map(|d| (if d == "default" { String::new() } else { d }, program));
         if let Some(host) = self.audio.as_mut() {
             let m = self.monitor.clone().map(|(d, p)| (d, if p { lightair_audio::PROGRAM } else { crate::audio::CUE }));
-            if let Err(e) = host.set_monitor(m) {
+            if let Err(e) = host.set_headphones(m) {
                 tracing::warn!(%e, "direct monitoring unavailable; libobs monitors the cue");
             }
         }
@@ -460,13 +460,13 @@ impl Reconciler {
     }
 
     /// Stops the multitrack files; what they hold.
-    pub fn stop_stems(&mut self) -> Option<crate::audio_host::StemReport> {
-        self.audio.as_mut()?.stop_stems()
+    pub fn stop_multitrack(&mut self) -> Option<crate::audio_host::MultitrackReport> {
+        self.audio.as_mut()?.stop_multitrack()
     }
 
-    pub fn pause_stems(&mut self, pause: bool) {
+    pub fn pause_multitrack(&mut self, pause: bool) {
         if let Some(h) = self.audio.as_mut() {
-            h.pause_stems(pause);
+            h.pause_multitrack(pause);
         }
     }
 
@@ -586,7 +586,7 @@ impl Reconciler {
         if let (Some(src), Some(mut chain)) = (self.sources.get(&id), self.source_effects.remove(&id)) {
             unsafe { chain_remove(src.as_ptr(), &mut chain) };
         }
-        if let (Some(src), Some((filter, _))) = (self.sources.get(&id), self.screen_looks.remove(&id)) {
+        if let (Some(src), Some((filter, _))) = (self.sources.get(&id), self.screen_zoom_pointers.remove(&id)) {
             unsafe { sys::obs_source_filter_remove(src.as_ptr(), filter.as_ptr()) };
         }
         self.sources.remove(&id);
@@ -1143,7 +1143,7 @@ impl Reconciler {
     /// Used to check that incremental reconciliation and a full rebuild produce identical state.
     /// What a Studio take records: the screens and cameras in the program (visible in the
     /// primary canvas), each once, with its live source.
-    pub fn take_sources(&self, workspace: &Workspace) -> Vec<(lightair_core::Source, *mut sys::obs_source_t)> {
+    pub fn studio_take_sources(&self, workspace: &Workspace) -> Vec<(lightair_core::Source, *mut sys::obs_source_t)> {
         let Some(scene) = workspace.program.and_then(|p| workspace.scene(p)) else { return Vec::new() };
         let canvas = workspace.primary_canvas().id;
         let mut out: Vec<(lightair_core::Source, *mut sys::obs_source_t)> = Vec::new();
@@ -1694,21 +1694,21 @@ fn is_screen(source: &lightair_core::Source) -> bool {
         || matches!(source.kind.as_str(), "screen_capture" | "display_capture" | "monitor_capture" | "window_capture" | "game_capture")
 }
 
-/// A `ScreenLook` as the pointer filter's settings.
-fn screen_look_settings(l: &lightair_core::ScreenLook) -> serde_json::Value {
+/// A `ScreenZoomPointer` as the pointer filter's settings.
+fn screen_zoom_pointer_settings(l: &lightair_core::ScreenZoomPointer) -> serde_json::Value {
     serde_json::json!({
-        "draw": l.cursor && !l.cursor_hidden,
+        "draw": l.pointer_drawn && !l.pointer_hidden,
         // the capture's own pointer goes when Lightair draws one, or when there's to be none
-        "hide_capture": l.cursor || l.cursor_hidden,
-        "style": l.cursor_style,
-        "size": l.cursor_size,
-        "smoothing": l.cursor_smoothing,
-        "tilt": l.cursor_tilt,
-        "idle_s": l.cursor_idle_s,
+        "hide_capture": l.pointer_drawn || l.pointer_hidden,
+        "style": l.pointer_style,
+        "size": l.pointer_size,
+        "smoothing": l.pointer_smoothing,
+        "tilt": l.pointer_tilt,
+        "idle_s": l.pointer_idle_s,
         // clicks are drawn with the pointer
-        "clicks": if l.cursor && !l.cursor_hidden { l.clicks } else { 0 },
+        "clicks": if l.pointer_drawn && !l.pointer_hidden { l.clicks } else { 0 },
         "arrow_only": false,
-        "color": l.cursor_color,
+        "color": l.pointer_color,
         "zoom": l.zoom,
         "zoom_scale": l.zoom_scale,
         "zoom_hold_s": l.zoom_hold_s,
@@ -1718,7 +1718,7 @@ fn screen_look_settings(l: &lightair_core::ScreenLook) -> serde_json::Value {
 
 /// Whether a source has the drawn pointer on.
 fn draws_pointer(source: &lightair_core::Source) -> bool {
-    source.effects.iter().any(|e| e.enabled && e.kind == crate::cursor::KIND)
+    source.effects.iter().any(|e| e.enabled && (e.kind == crate::pointer::KIND || e.kind == lightair_core::catalog::OLD_POINTER_KIND))
 }
 
 fn data_from_json(value: &serde_json::Value) -> Data {

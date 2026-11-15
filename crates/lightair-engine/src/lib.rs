@@ -7,7 +7,7 @@
 pub mod audio;
 pub mod audio_host;
 pub mod backdrop;
-pub mod cursor;
+pub mod pointer;
 pub mod devices;
 pub mod displays;
 pub mod kinds;
@@ -23,7 +23,7 @@ pub mod player;
 pub mod plugins;
 mod reconcile;
 mod runtime;
-pub mod take;
+pub mod studio_take;
 pub mod timers;
 mod transition;
 

@@ -214,21 +214,21 @@ impl StudioWindow {
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
             Ok("add-object") => self.open_add_object(window, cx),
             Ok("settings") => self.toggle_settings(cx),
-            Ok("hotkey-capture") => {
+            Ok("shortcut-capture") => {
                 // Settings › Shortcuts listening for a key, then Esc sent through the window (no
                 // shortcut saved): whether it reached Settings, logged
                 self.open_settings(super::settings::Page::Shortcuts, cx);
-                self.hotkey_capture = Some(crate::hotkeys::GlobalAction::FollowZoom);
+                self.shortcut_capture = Some(crate::shortcuts::GlobalAction::FollowZoom);
                 window.focus(&self.settings_focus, cx);
                 cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(std::time::Duration::from_millis(800)).await;
-                    let before = this.update(cx, |this, _| this.hotkey_capture.is_some()).unwrap_or(false);
+                    let before = this.update(cx, |this, _| this.shortcut_capture.is_some()).unwrap_or(false);
                     let _ = this.update_in(cx, |this, window, cx| {
                         tracing::info!(settings_focused = this.settings_focus.is_focused(window), root = this.focus.is_focused(window), within = this.settings_focus.contains_focused(window, cx), "CHECK focus before");
                     });
                     let _ = cx.update(|window, cx| window.dispatch_keystroke(Keystroke::parse("escape").unwrap(), cx));
                     let _ = this.update_in(cx, |this, window, _| {
-                        tracing::info!(listening = before, after_escape = this.hotkey_capture.is_some(), back_to_window = this.focus.is_focused(window), "CHECK settings key");
+                        tracing::info!(listening = before, after_escape = this.shortcut_capture.is_some(), back_to_window = this.focus.is_focused(window), "CHECK settings key");
                     });
                 })
                 .detach();
@@ -247,7 +247,7 @@ impl StudioWindow {
                     _ => Page::General,
                 };
                 if page == Page::Audio {
-                    self.monitor_devices =
+                    self.headphones_devices =
                         self.studio.read(cx).engine().call(|_| lightair_engine::monitoring::devices());
                 }
                 if hook == "settings-canvases-edit" {
@@ -262,8 +262,8 @@ impl StudioWindow {
                 self.show_place(super::Place::Live, cx);
                 let scene = self.studio.read(cx).selected_scene;
                 if let Some(scene) = scene {
-                    let look = lightair_core::ScreenLook { zoom: lightair_core::ScreenLook::ZOOM_TOGGLE, ..Default::default() };
-                    self.exec(lightair_core::Command::SetSceneScreen { scene, screen: Some(look) }, cx);
+                    let look = lightair_core::ScreenZoomPointer { zoom: lightair_core::ScreenZoomPointer::ZOOM_TOGGLE, ..Default::default() };
+                    self.exec(lightair_core::Command::SetScreenZoomPointer { scene, screen: Some(look) }, cx);
                     self.select_object(None, cx);
                 }
             }
@@ -328,7 +328,7 @@ impl StudioWindow {
                 // one's screen in the picture)
                 let p = self.studio.read(cx).workspace().clone();
                 if let Some(bg) = p.sources.values().find(|i| i.name == "Background") {
-                    let mut e = lightair_core::catalog::def(lightair_core::catalog::CURSOR_KIND).unwrap().create();
+                    let mut e = lightair_core::catalog::def(lightair_core::catalog::POINTER_KIND).unwrap().create();
                     e.settings["size"] = serde_json::json!(4.0);
                     e.settings["idle_s"] = serde_json::json!(0.0);
                     self.exec(lightair_core::Command::AddSourceEffect { source: bg.id, effect: e, index: None }, cx);
@@ -357,7 +357,7 @@ impl StudioWindow {
             }
             Ok("editor-take-open") => {
                 self.show_place(super::Place::Editor, cx);
-                self.editor.update(cx, |e, cx| e.hook_open_take(cx));
+                self.editor.update(cx, |e, cx| e.hook_open_studio_take(cx));
             }
             Ok("editor-trim") => {
                 self.show_place(super::Place::Editor, cx);

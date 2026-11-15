@@ -1,4 +1,4 @@
-//! The live follow-zoom (a scene's `ScreenLook`, drawn by the pointer filter): zoomed in, the
+//! The live follow-zoom (a scene's `ScreenZoomPointer`, drawn by the pointer filter): zoomed in, the
 //! picture is magnified; off, it's as it was. Shown on a picture, not a screen capture (a capture
 //! would ask for the screen-recording permission).
 
@@ -80,7 +80,7 @@ fn the_follow_zoom_magnifies_and_lets_go() {
 
     // the pointer filter as a scene's look puts it, always zoomed (the pointer not drawn)
     let look = |zoom: i64| json!({"draw": false, "clicks": 0, "zoom": zoom, "zoom_scale": 3.0, "zoom_motion": 0.0});
-    let fx = Effect::new("Screen look", lightair_engine::cursor::KIND, look(2));
+    let fx = Effect::new("Screen look", lightair_engine::pointer::KIND, look(2));
     let fid = fx.id;
     apply(&engine, &mut doc, Command::AddSourceEffect { source: iid, effect: fx, index: None });
     let zoomed = grid(&preview, Duration::from_millis(900));

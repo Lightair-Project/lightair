@@ -10,9 +10,9 @@ use serde_json::json;
 #[test]
 fn tracks_record_to_aligned_files() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
-    let dir = std::env::temp_dir().join(format!("lightair-stems-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lightair-track_files-{}", std::process::id()));
     let engine = Engine::start(EngineConfig { canvas: (320, 180), output: (320, 180), ..Default::default() }).unwrap();
-    let mut doc = Document::new(Workspace::new("Stems"));
+    let mut doc = Document::new(Workspace::new("Multitrack"));
     let apply = |doc: &mut Document, cmd: Command| {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
@@ -32,10 +32,10 @@ fn tracks_record_to_aligned_files() {
 
     let workspace = doc.workspace().clone();
     let d = dir.clone();
-    let files = engine.call(move |s| s.reconciler.start_stems(&workspace, &d, "Show", true)).unwrap();
+    let files = engine.call(move |s| s.reconciler.start_multitrack(&workspace, &d, "Show", true)).unwrap();
     assert_eq!(files.len(), 3, "two tracks and the program");
     std::thread::sleep(Duration::from_millis(1000));
-    let report = engine.call(|s| s.reconciler.stop_stems()).expect("finished");
+    let report = engine.call(|s| s.reconciler.stop_multitrack()).expect("finished");
     eprintln!("{} frames, start {}", report.frames, report.start_ns);
     assert!((40_000..60_000).contains(&report.frames), "about a second ({})", report.frames);
     assert!(report.start_ns > 0);

@@ -13,7 +13,7 @@
 //!   centre move on critically damped springs; the view keeps the pointer inside it and never
 //!   leaves the capture. The pointer and clicks are drawn zoomed too.
 //!
-//! A scene's [`lightair_core::ScreenLook`] puts one of these on each of its screen captures
+//! A scene's [`lightair_core::ScreenZoomPointer`] puts one of these on each of its screen captures
 //! (`reconcile`); the effect catalog's "Drawn pointer" is the same filter without the zoom.
 //!
 //! Positions map from display points to the capture's pixels through the main display's frame:
@@ -29,7 +29,7 @@ use lightair_platform::input::{self, Event, Recorder, Shape};
 
 use crate::sys;
 
-pub const KIND: &str = lightair_core::catalog::CURSOR_KIND;
+pub const KIND: &str = lightair_core::catalog::POINTER_KIND;
 
 use lightair_render::shapes::{Bitmap, RES, arrow, crosshair, disc, dot, ibeam, ring};
 /// The pointer's size in display points at size 1.
@@ -146,7 +146,7 @@ technique Draw { pass { vertex_shader = VSDefault(vert_in); pixel_shader = PSDra
 "#;
 
 #[derive(Clone, Copy, PartialEq)]
-struct Look {
+struct Style {
     style: i64,
     size: f32,
     smoothing: f32,
@@ -158,7 +158,7 @@ struct Look {
     color: u32,
     /// Draws the pointer (off: only zooms, the capture keeps its own).
     draw: bool,
-    /// 0 off, 1 on clicks, 2 always (`ScreenLook`'s).
+    /// 0 off, 1 on clicks, 2 always (`ScreenZoomPointer`'s).
     zoom: i64,
     zoom_scale: f32,
     zoom_hold: f32,
@@ -236,7 +236,7 @@ struct Textures {
 
 struct Filter {
     context: *mut sys::obs_source_t,
-    look: Look,
+    look: Style,
     /// Followed position (display points), its velocity, the tilt.
     pos: Option<(f32, f32)>,
     vel: (f32, f32),
@@ -316,11 +316,11 @@ unsafe fn free_textures(t: Textures) {
     }
 }
 
-unsafe fn read_look(settings: *mut sys::obs_data_t) -> Look {
+unsafe fn read_look(settings: *mut sys::obs_data_t) -> Style {
     let int = |k: &std::ffi::CStr| unsafe { sys::obs_data_get_int(settings, k.as_ptr()) };
     let float = |k: &std::ffi::CStr| unsafe { sys::obs_data_get_double(settings, k.as_ptr()) } as f32;
     let flag = |k: &std::ffi::CStr| unsafe { sys::obs_data_get_bool(settings, k.as_ptr()) };
-    Look {
+    Style {
         style: int(c"style"),
         size: float(c"size").clamp(0.25, 6.0),
         smoothing: float(c"smoothing").clamp(0.0, 1.0),
@@ -563,7 +563,7 @@ pub fn register() {
     static DONE: std::sync::Once = std::sync::Once::new();
     DONE.call_once(|| unsafe {
         let mut info: sys::obs_source_info = std::mem::zeroed();
-        info.id = c"lightair_cursor".as_ptr();
+        info.id = c"lightair_pointer".as_ptr();
         info.type_ = sys::OBS_SOURCE_TYPE_FILTER;
         info.output_flags = sys::OBS_SOURCE_VIDEO;
         info.get_name = Some(get_name);
