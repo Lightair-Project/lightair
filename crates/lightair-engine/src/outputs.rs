@@ -98,6 +98,9 @@ pub enum OutputKey {
     Stream(Id),
     /// The replay buffer behind the Clip button.
     Clips,
+    /// The virtual camera: a canvas as a camera other apps can pick (macOS: through the OBS
+    /// Virtual Camera extension, lightair-camera-fx's `lightair_virtualcam` output).
+    VirtualCamera,
 }
 
 #[derive(Default)]
@@ -329,6 +332,7 @@ fn signals_for(key: OutputKey) -> &'static [(&'static str, SignalCb)] {
             &[("start", on_start), ("stop", on_stop), ("reconnect", on_reconnect), ("reconnect_success", on_start)]
         }
         OutputKey::Clips => &[("start", on_start), ("stop", on_stop), ("saved", on_saved)],
+        OutputKey::VirtualCamera => &[("start", on_start), ("stop", on_stop)],
     }
 }
 
@@ -461,6 +465,7 @@ pub struct Outputs {
     recordings: HashMap<Id, Running>,
     streams: HashMap<Id, Running>,
     clips: Option<Running>,
+    virtual_camera: Option<Running>,
 }
 
 fn c(s: &str) -> CString {
@@ -545,6 +550,7 @@ unsafe fn start(
         OutputKey::Recording(canvas) => format!("Recording {canvas}"),
         OutputKey::Stream(id) => format!("Stream {id}"),
         OutputKey::Clips => "Clips".to_string(),
+        OutputKey::VirtualCamera => "Virtual camera".to_string(),
     };
     unsafe {
         let release_service = || {
@@ -830,6 +836,80 @@ impl Outputs {
         }
     }
 
+    /// Starts the virtual camera on a canvas (`video`: its canvas video; `None` the primary).
+    /// Raw frames, no encoders. Its status is `OutputKey::VirtualCamera`'s.
+    pub fn start_virtual_camera(&mut self, video: Option<VideoOutput>) -> Result<(), String> {
+        if self.virtual_camera.as_ref().is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
+            return Ok(());
+        }
+        self.drop_virtual_camera();
+        let key = OutputKey::VirtualCamera;
+        unsafe {
+            let output = sys::obs_output_create(c"lightair_virtualcam".as_ptr(), c"Virtual camera".as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
+            if output.is_null() {
+                let err = "The virtual camera isn't available on this system.".to_string();
+                runtime().update(key, |s| s.state = OutputState::Failed(err.clone()));
+                return Err(err);
+            }
+            let video_output = video.map_or_else(|| sys::obs_get_video(), |v| v.0);
+            sys::obs_output_set_media(output, video_output, sys::obs_get_audio());
+            let signal_param = Box::into_raw(Box::new(key));
+            let handler = sys::obs_output_get_signal_handler(output);
+            let signals = signals_for(key);
+            for (sig, cb) in signals {
+                sys::signal_handler_connect(handler, c(sig).as_ptr(), Some(*cb), signal_param as *mut c_void);
+            }
+            let running = Running {
+                output,
+                video: std::ptr::null_mut(),
+                audio: std::ptr::null_mut(),
+                service: std::ptr::null_mut(),
+                signal_param,
+                signals,
+                share: (
+                    video_output as usize,
+                    EncoderConfig {
+                        video_encoder: String::new(),
+                        video_bitrate_kbps: 0,
+                        audio_encoder: String::new(),
+                        audio_bitrate_kbps: 0,
+                        constant_bitrate: false,
+                        bframes: false,
+                        keyint_sec: 0,
+                        scaled: None,
+                    },
+                ),
+                extra: Vec::new(),
+            };
+            runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
+            if !sys::obs_output_start(output) {
+                let err = last_error(output).unwrap_or_else(|| "The virtual camera didn't start.".into());
+                running.release();
+                runtime().update(key, |s| s.state = OutputState::Failed(err.clone()));
+                return Err(err);
+            }
+            self.virtual_camera = Some(running);
+        }
+        Ok(())
+    }
+
+    pub fn stop_virtual_camera(&mut self) {
+        if let Some(r) = &self.virtual_camera {
+            runtime().update(OutputKey::VirtualCamera, |s| {
+                if s.state.is_running() {
+                    s.state = OutputState::Stopping
+                }
+            });
+            unsafe { sys::obs_output_stop(r.output) };
+        }
+    }
+
+    fn drop_virtual_camera(&mut self) {
+        if let Some(old) = self.virtual_camera.take() {
+            unsafe { old.release() };
+        }
+    }
+
     /// Starts the replay buffer (docs/11-outputs-streaming-recording.md, "Clips").
     pub fn start_clips(&mut self, cfg: &ClipsConfig, video: Option<VideoOutput>) -> Result<(), String> {
         let video_output = video.map_or(std::ptr::null_mut(), |v| v.0);
@@ -922,6 +1002,10 @@ impl Outputs {
             unsafe { sys::obs_output_stop(r.output) };
         }
         self.drop_clips();
+        if let Some(r) = &self.virtual_camera {
+            unsafe { sys::obs_output_stop(r.output) };
+        }
+        self.drop_virtual_camera();
         for (_, r) in self.recordings.drain() {
             unsafe {
                 sys::obs_output_stop(r.output);

@@ -2244,6 +2244,135 @@ impl StudioWindow {
             .into_any_element()
     }
 
+    /// [Clip | Replay]: saving the last seconds, and playing the last clip on air, in one
+    /// container like Record's.
+    fn clip_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        let studio = self.studio.read(cx);
+        let ready = studio.clips_ready();
+        let replay = studio.last_clip.is_some();
+        let clip = ui::icon_button("clip", "clapperboard", if ready { tok::text() } else { tok::text_tertiary() })
+            .size(px(28.))
+            .rounded(px(6.))
+            .tooltip(ui::tip(if ready { "Save the last seconds as a clip" } else { "Clip: turn on Clips in Outputs to save the last seconds" }))
+            .when(ready, |d| d.on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.save_clip(cx)))));
+        div()
+            .flex()
+            .items_center()
+            .h(px(30.))
+            .px_0p5()
+            .gap_0p5()
+            .rounded(px(8.))
+            .bg(tok::bg_panel())
+            .border_1()
+            .border_color(tok::border())
+            .child(clip)
+            .when(replay, |d| {
+                d.child(div().w(px(1.)).h(px(16.)).bg(tok::border())).child(
+                    ui::icon_button("replay", "rewind", tok::text())
+                        .size(px(28.))
+                        .rounded(px(6.))
+                        .tooltip(ui::tip("Play the last clip on the live scene"))
+                        .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.replay_last_clip(cx)))),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// [camera | ⌄]: the virtual camera (Lightair as a camera in other apps). Off: the icon;
+    /// on: lit, with a pulse dot; failed: the reason on hover, a click tries again. The menu
+    /// picks which canvas it shows.
+    fn virtual_camera_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+        let studio = self.studio.read(cx);
+        let state = studio.virtual_camera();
+        let workspace = studio.workspace();
+        let shown = studio.virtual_camera_canvas.and_then(|c| workspace.canvas(c)).unwrap_or_else(|| workspace.primary_canvas());
+        let shown_name = shown.name.clone();
+        let canvases: Vec<(Id, String, bool)> = workspace.canvases.iter().map(|c| (c.id, c.name.clone(), c.id == shown.id)).collect();
+        let several = canvases.len() > 1;
+        let on = matches!(state, OutputState::Active { .. });
+        let busy = matches!(state, OutputState::Starting | OutputState::Stopping);
+        let failed = match &state {
+            OutputState::Failed(e) => Some(e.clone()),
+            _ => None,
+        };
+        let tip: SharedString = if on {
+            format!("Virtual camera on, showing {shown_name}. Apps list it as “OBS Virtual Camera”. Click to stop.").into()
+        } else if busy {
+            "Virtual camera starting…".into()
+        } else if let Some(e) = &failed {
+            format!("Virtual camera: {e} Click to try again.").into()
+        } else {
+            "Start the virtual camera: Lightair as a camera in Zoom, Meet, FaceTime and other apps".into()
+        };
+        let colour = if on {
+            rgb(0xFFFFFF).into()
+        } else if failed.is_some() {
+            tok::warn()
+        } else if busy {
+            tok::text_tertiary()
+        } else {
+            tok::text()
+        };
+        let main = div()
+            .id("virtual-camera")
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .h_full()
+            .w(px(32.))
+            .rounded_l(px(7.))
+            .cursor_pointer()
+            .when(on, |d| d.bg(tok::ok()))
+            .when(!on, |d| d.hover(|d| d.bg(tok::bg_selected())))
+            .child(ui::icon("lightair-virtual-camera").size(px(16.)).text_color(colour))
+            // on: a small dot, like a camera's light
+            .when(on, |d| d.child(div().absolute().top(px(5.)).right(px(5.)).size(px(5.)).rounded_full().bg(rgb(0xFFFFFF))))
+            .tooltip(ui::tip(tip))
+            .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.toggle_virtual_camera(cx))));
+        let me = cx.entity().downgrade();
+        let chevron = Button::new("virtual-camera-menu").icon(ui::icon("chevron-down")).xsmall().ghost().dropdown_menu(move |mut menu, _, _| {
+            let act = |f: fn(&mut Studio, &mut Context<Studio>)| {
+                let me = me.clone();
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    if let Some(me) = me.upgrade() {
+                        me.update(cx, |this, cx| this.studio.update(cx, f));
+                    }
+                }
+            };
+            menu = menu.item(PopupMenuItem::label("Virtual camera")).item(
+                PopupMenuItem::new(if on || busy { "Stop" } else { "Start" })
+                    .icon(ui::icon(if on || busy { "square" } else { "play" }))
+                    .on_click(act(|s, cx| s.toggle_virtual_camera(cx))),
+            );
+            if several {
+                menu = menu.separator().item(PopupMenuItem::label("Shows"));
+                for (id, name, chosen) in canvases.clone() {
+                    let me = me.clone();
+                    menu = menu.item(PopupMenuItem::new(name).checked(chosen).on_click(move |_, _, cx| {
+                        if let Some(me) = me.upgrade() {
+                            me.update(cx, |this, cx| this.studio.update(cx, |s, cx| s.set_virtual_camera_canvas(Some(id), cx)));
+                        }
+                    }));
+                }
+            }
+            menu.separator().item(PopupMenuItem::label("Apps list it as “OBS Virtual Camera”"))
+        });
+        div()
+            .flex()
+            .items_center()
+            .h(px(30.))
+            .rounded(px(8.))
+            .bg(tok::bg_panel())
+            .border_1()
+            .border_color(if on { tok::ok() } else { tok::border() })
+            .child(main)
+            .child(div().w(px(1.)).h(px(16.)).bg(tok::border()))
+            .child(div().px_0p5().child(chevron))
+            .into_any_element()
+    }
+
     /// The workspace's name, as a menu of the workspaces to open, and New Workspace.
     fn workspace_picker(&self, workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
         use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
@@ -2344,8 +2473,9 @@ impl StudioWindow {
             let live = if streaming_now { 130.0 } else { 76.0 };
             let tools = if recording && !taking { 84.0 } else { 0.0 };
             let record = if compact && !recording && !taking { 58.0 } else { 160.0 };
-            let clips = if self.studio.read(cx).last_clip.is_some() { 64.0 } else { 32.0 };
-            12.0 + perf + live + tools + record + clips + 28.0 + 12.0 * 6.0
+            // [Clip | Replay] and [virtual camera | ⌄]
+            let clips = if self.studio.read(cx).last_clip.is_some() { 66.0 } else { 36.0 };
+            12.0 + perf + live + tools + record + clips + 64.0 + 28.0 + 12.0 * 7.0
         };
         let compact = left > half || right(false) > half;
         let narrow = left > half || right(true) > half;
@@ -2444,26 +2574,7 @@ impl StudioWindow {
             .when(!editor || streaming, |d| d.child(go_live))
             .children(recording_tools.filter(|_| !taking))
             .when(!editor || recording || taking, |d| d.child(record))
-            .when(!editor, |d| d.child({
-                let ready = self.studio.read(cx).clips_ready();
-                Button::new("clip")
-                    .icon(ui::icon("clapperboard"))
-                    .small()
-                    .ghost()
-                    .disabled(!ready)
-                    .tooltip(if ready { "Save the last seconds as a clip" } else { "Clip: turn on Clips in Outputs" })
-                    .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.save_clip(cx))))
-            }))
-            .when(!editor && self.studio.read(cx).last_clip.is_some(), |d| {
-                d.child(
-                    Button::new("replay")
-                        .icon(ui::icon("rewind"))
-                        .small()
-                        .ghost()
-                        .tooltip("Play the last clip on the live scene")
-                        .on_click(cx.listener(|this, _, _, cx| this.studio.update(cx, |s, cx| s.replay_last_clip(cx)))),
-                )
-            })
+            .when(!editor, |d| d.child(self.clip_control(cx)).child(self.virtual_camera_control(cx)))
             .child(
                 ui::icon_button("open-settings", "settings", tok::text_secondary())
                     .tooltip(|w, cx| Tooltip::new("Settings (⌘,)").build(w, cx))

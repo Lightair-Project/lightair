@@ -49,16 +49,18 @@ add_library(lightair-camera-fx MODULE
   src/tracker/coreml-common.mm
   src/tracker/segmenter-coreml.mm
   src/tracker/person-vision.mm
+  src/virtualcam.m
 )
 set_source_files_properties(src/tracker/backend-coreml.mm src/tracker/coreml-common.mm src/tracker/segmenter-coreml.mm
-  src/tracker/person-vision.mm
+  src/tracker/person-vision.mm src/virtualcam.m
   PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 target_compile_definitions(lightair-camera-fx PRIVATE BEAUTY_TRACKER_COREML BEAUTY_HAVE_LIBOBS PLUGIN_VERSION="${PROJECT_VERSION}")
 target_include_directories(lightair-camera-fx PRIVATE "${OBS_SRC}/libobs" "${GEN}" "${SIMDE_DIR}" src src/tracker)
 target_compile_options(lightair-camera-fx PRIVATE -Wall -Wno-unused-parameter -Wno-missing-field-initializers)
 target_link_options(lightair-camera-fx PRIVATE "-F${OBS_APP}/Contents/Frameworks" "-Wl,-rpath,@executable_path/../Frameworks")
 target_link_libraries(lightair-camera-fx PRIVATE "-framework libobs" "-framework Foundation" "-framework CoreVideo"
-  "-framework CoreGraphics" "-framework Vision" "-framework CoreML" "-framework Accelerate")
+  "-framework CoreGraphics" "-framework Vision" "-framework CoreML" "-framework Accelerate"
+  "-framework CoreMedia" "-framework CoreMediaIO")
 
 file(GLOB_RECURSE MODULE_DATA RELATIVE "${CMAKE_SOURCE_DIR}/data" CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/data/*")
 list(FILTER MODULE_DATA EXCLUDE REGEX "^models/")

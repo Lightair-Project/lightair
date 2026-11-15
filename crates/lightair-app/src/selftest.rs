@@ -14,6 +14,7 @@ pub fn run(engine: &Engine, what: &str) {
     match what {
         "camera" => camera(engine),
         "green-key" => green_key(engine),
+        "virtual-camera" => virtual_camera(engine),
         // puts Lightair's Backgrounds back: LIGHTAIR_BG_PICTURE and LIGHTAIR_BG_ON (0/1)
         "restore-backgrounds" => {
             use crate::system_effects as sys;
@@ -194,4 +195,70 @@ fn green_key(engine: &Engine) {
         sys::set_backgrounds_on(false);
         println!("SELFTEST backgrounds back off: {:?}", sys::backgrounds_on());
     }
+}
+
+/// `LIGHTAIR_SELFTEST=virtual-camera`: the virtual camera started on a magenta canvas, then
+/// the OBS Virtual Camera opened as a camera here: what comes back should be that magenta.
+fn virtual_camera(engine: &Engine) {
+    let started = engine.call(|s| {
+        let magenta = Data::from_json(&serde_json::json!({"color": 0xFFFF00FFu32, "width": 1920, "height": 1080}));
+        let back = ObsSource::create("color_source_v3", "Self-test magenta", Some(&magenta)).unwrap();
+        let scene = ObsScene::create("Self-test").unwrap();
+        scene.add(&back);
+        s.sources.insert("back".into(), back);
+        s.scenes.insert("selftest".into(), scene);
+        s.set_program("selftest");
+        s.outputs.start_virtual_camera(None)
+    });
+    println!("SELFTEST start: {started:?}");
+    std::thread::sleep(Duration::from_secs(1));
+    println!("SELFTEST state: {:?}", lightair_engine::outputs::runtime().get(lightair_engine::outputs::OutputKey::VirtualCamera).state);
+    // the virtual camera's device, by the UUID OBS's plugin declares
+    let uuid = std::process::Command::new("defaults")
+        .args(["read", "/Applications/OBS.app/Contents/PlugIns/mac-virtualcam.plugin/Contents/Info", "OBSCameraDeviceUUID"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let found = engine.call(move |s| {
+        let devices = lightair_engine::kinds::cameras();
+        let Some((name, uid)) = devices.into_iter().find(|(_, u)| u.eq_ignore_ascii_case(&uuid)) else {
+            return format!("no camera with uid {uuid}");
+        };
+        let (kind, settings) = lightair_engine::kinds::resolve(lightair_core::kinds::CAMERA, &serde_json::json!({ "device": uid })).unwrap();
+        let cam = ObsSource::create(kind, "Self-test virtual camera in", Some(&Data::from_json(&settings))).unwrap();
+        // read back on a canvas of its own (on the program it would loop into itself)
+        let canvas = lightair_engine::obs::ObsCanvas::create("Self-test readback", 640, 360, 30, 1).unwrap();
+        let scene = canvas.create_scene("Self-test in").unwrap();
+        scene.add(&cam);
+        unsafe { lightair_engine::sys::obs_canvas_set_channel(canvas.as_ptr(), 0, scene.source_ptr()) };
+        s.sources.insert("cam".into(), cam);
+        s.scenes.insert("selftest-in".into(), scene);
+        let ptr = canvas.as_ptr() as usize;
+        std::mem::forget(canvas);
+        format!("{name}\u{1f}{ptr}")
+    });
+    let (found, canvas) = found.split_once('\u{1f}').map_or((found.clone(), 0usize), |(a, b)| (a.to_string(), b.parse().unwrap_or(0)));
+    println!("SELFTEST reading back from: {found}");
+    std::thread::sleep(Duration::from_secs(4));
+    let (w, h) = engine.call(|s| s.sources.get("cam").map_or((0, 0), |c| (c.width(), c.height())));
+    println!("SELFTEST frames back: {w}x{h}");
+    if canvas != 0 {
+        let preview = engine.call(move |_| lightair_preview::Preview::attach_canvas(canvas as *mut lightair_engine::sys::obs_canvas_t));
+        std::thread::sleep(Duration::from_secs(1));
+        match preview.latest_frame() {
+            Some(f) => {
+                let at = |x: f32, y: f32| lightair_preview::sample_ycbcr(&f, x, y);
+                println!("SELFTEST colour back (YCbCr, magenta is about 73/227/244): centre {:?} corner {:?}", at(0.5, 0.5), at(0.1, 0.1));
+            }
+            None => println!("SELFTEST colour back: no frame"),
+        }
+        drop(preview);
+    }
+    engine.call(|s| {
+        s.outputs.stop_virtual_camera();
+        s.sources.remove("cam");
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    println!("SELFTEST stopped: {:?}", lightair_engine::outputs::runtime().get(lightair_engine::outputs::OutputKey::VirtualCamera).state);
 }
