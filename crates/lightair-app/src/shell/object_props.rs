@@ -732,7 +732,7 @@ impl StudioWindow {
         let custom = !SIZES.iter().any(|(_, _, wh)| *wh == (width, height));
         let label = |text: &'static str| div().text_size(px(11.)).text_color(tok::text_tertiary()).child(text);
         self.section(
-            "Web page",
+            "Browser",
             Some(
                 crate::ui::icon_button("web-reload", "refresh-cw", tok::text_secondary())
                     .tooltip(crate::ui::tip("Reload the page"))
@@ -842,7 +842,7 @@ impl StudioWindow {
             Some(Command::SetLayout { scene, object, canvas, layout: sc.local(object, canvas, &resized)? })
         });
         match layout {
-            Some(layout) => Command::Batch { label: "Resize web page".into(), commands: vec![page, layout] },
+            Some(layout) => Command::Batch { label: "Resize browser".into(), commands: vec![page, layout] },
             None => page,
         }
     }
