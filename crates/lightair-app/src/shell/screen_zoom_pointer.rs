@@ -120,6 +120,9 @@ impl StudioWindow {
             if look.zoom == ScreenZoomPointer::ZOOM_CLICKS {
                 let s = self.slider(format!("screen-hold:{sid}"), (0.5, 8.0, 0.25), look.zoom_hold_s, move |v| set(ScreenZoomPointer { zoom_hold_s: v, ..look }), cx);
                 body = body.child(slider_row("Stays in", s, format!("{:.1} s", look.zoom_hold_s)));
+                let typing = super::settings::switch("screen-zoom-typing", look.zoom_typing)
+                    .on_click(cx.listener(move |this, _, _, cx| this.exec(set(ScreenZoomPointer { zoom_typing: !look.zoom_typing, ..look }), cx)));
+                body = body.child(row("When typing", div().flex().child(typing)));
             }
             body = body.child(row(
                 "Motion",
@@ -134,7 +137,7 @@ impl StudioWindow {
                 ),
             ));
             body = body.child(note(match look.zoom {
-                ScreenZoomPointer::ZOOM_CLICKS => "Zooms in where you click and follows the pointer, then back out once you stop clicking.",
+                ScreenZoomPointer::ZOOM_CLICKS => "Zooms in where you click (and, when typing, where you clicked last) and follows the pointer, then back out once you stop.",
                 ScreenZoomPointer::ZOOM_TOGGLE => "Press the key to zoom in and follow the pointer; press it again to zoom back out.",
                 _ => "Always zoomed in, the view following the pointer.",
             }));

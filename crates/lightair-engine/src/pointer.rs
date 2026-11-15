@@ -5,7 +5,9 @@
 //! - The pointer comes from `lightair_platform::source` each frame and is followed by a critically
 //!   damped spring (smoothing), tilted by its speed, and faded out when it rests.
 //! - Shapes are Lightair's own, drawn here at a high resolution (an arrow, an I-beam, a
-//!   crosshair; a dot and a ring as styles), so they stay sharp at any size.
+//!   crosshair; a dot and a ring as styles), so they stay sharp at any size. Any other pointer
+//!   (a hand, a resize arrow, an app's own) is the system's own picture (macOS,
+//!   `lightair_platform::system_pointer`).
 //! - Clicks (when the OS lets Lightair see them) draw a circle or a ripple.
 //!
 //! - The follow-zoom (docs/plans/screen-studio.md, "Auto zoom", live): in to where a click was
@@ -16,9 +18,9 @@
 //! A scene's [`lightair_core::ScreenZoomPointer`] puts one of these on each of its screen captures
 //! (`reconcile`); the effect catalog's "Drawn pointer" is the same filter without the zoom.
 //!
-//! Positions map from display points to the capture's pixels through the main display's frame:
-//! a capture of another display places the pointer as if it were the main one (a later phase
-//! maps each display).
+//! Positions map from display points to the capture's pixels through the frame of what it
+//! captures: its display, or its window where the window is now (read a few times a second);
+//! the main display when that can't be told (`capture_frame`).
 
 use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_void};
@@ -26,6 +28,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use lightair_platform::input::{self, Event, Recorder, Shape};
+use lightair_platform::system_pointer;
 
 use crate::sys;
 
@@ -44,6 +47,10 @@ struct Clicks {
     recorder: Option<Recorder>,
     started: Instant,
     recent: VecDeque<(Instant, f32, f32)>,
+    /// The last key typed (not a shortcut: ⌘ or Ctrl held), and the last click (where typing
+    /// most likely goes).
+    typed: Option<Instant>,
+    last_click: Option<(f32, f32)>,
     users: usize,
 }
 
@@ -51,7 +58,7 @@ static CLICKS: Mutex<Option<Clicks>> = Mutex::new(None);
 
 fn clicks_join() {
     let mut c = CLICKS.lock().unwrap();
-    let c = c.get_or_insert_with(|| Clicks { recorder: None, started: Instant::now(), recent: VecDeque::new(), users: 0 });
+    let c = c.get_or_insert_with(|| Clicks { recorder: None, started: Instant::now(), recent: VecDeque::new(), typed: None, last_click: None, users: 0 });
     c.users += 1;
     if c.recorder.is_none() && input::can_listen() {
         c.started = Instant::now();
@@ -75,8 +82,15 @@ fn recent_clicks() -> Vec<(Instant, f32, f32)> {
     let Some(c) = guard.as_mut() else { return Vec::new() };
     if let Some(r) = &c.recorder {
         for s in r.take() {
-            if let Event::Down { x, y, .. } = s.event {
-                c.recent.push_back((c.started + s.at, x, y));
+            match s.event {
+                Event::Down { x, y, .. } => {
+                    c.recent.push_back((c.started + s.at, x, y));
+                    c.last_click = Some((x, y));
+                }
+                Event::KeyDown { modifiers, .. } if modifiers & (input::modifiers::COMMAND | input::modifiers::CONTROL) == 0 => {
+                    c.typed = Some(c.started + s.at);
+                }
+                _ => {}
             }
         }
     }
@@ -85,6 +99,13 @@ fn recent_clicks() -> Vec<(Instant, f32, f32)> {
         c.recent.pop_front();
     }
     c.recent.iter().copied().collect()
+}
+
+/// When a key was last typed, and where the last click was (display points).
+fn typing() -> (Option<Instant>, Option<(f32, f32)>) {
+    recent_clicks();
+    let guard = CLICKS.lock().unwrap();
+    guard.as_ref().map_or((None, None), |c| (c.typed, c.last_click))
 }
 
 // ------------------------------------------------------------------ following, on a key
@@ -163,6 +184,8 @@ struct Style {
     zoom_scale: f32,
     zoom_hold: f32,
     zoom_motion: f32,
+    /// On clicks: typing zooms in too, looking where the last click was.
+    zoom_typing: bool,
 }
 
 /// The follow-zoom's camera (capture pixels).
@@ -251,6 +274,47 @@ struct Filter {
     cam: Option<Cam>,
     zoom_until: Option<Instant>,
     last_click: Option<Instant>,
+    /// The newest key seen (typing zooms in too).
+    last_typed: Option<Instant>,
+    /// What the capture shows, in global display points (its display, or its window where it
+    /// is now), and when that was last read.
+    frame: Option<(f32, f32, f32, f32)>,
+    frame_read: Option<Instant>,
+    /// The system pointer's own picture, when it's a shape Lightair has no art for (a hand, a
+    /// resize arrow, an app's own pointer), and its texture (made from the picture `serial`).
+    picture: Option<system_pointer::Picture>,
+    picture_tex: Option<(*mut sys::gs_texture_t, u64)>,
+}
+
+/// What a screen capture shows, in global display points: its display (by the display it's
+/// set to), or its window (where it is now). `None`: the main display.
+fn capture_frame(context: *mut sys::obs_source_t) -> Option<(f32, f32, f32, f32)> {
+    let parent = unsafe { sys::obs_filter_get_parent(context) };
+    if parent.is_null() {
+        return None;
+    }
+    let id = unsafe { std::ffi::CStr::from_ptr(sys::obs_source_get_id(parent)) }.to_string_lossy().into_owned();
+    let settings = unsafe { sys::obs_source_get_settings(parent) };
+    if settings.is_null() {
+        return None;
+    }
+    let text = |k: &std::ffi::CStr| {
+        let p = unsafe { sys::obs_data_get_string(settings, k.as_ptr()) };
+        if p.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned() }
+    };
+    let int = |k: &std::ffi::CStr| unsafe { sys::obs_data_get_int(settings, k.as_ptr()) };
+    let frame = match id.as_str() {
+        // macOS: a display (0), a window (1) or an app's windows on its display (2)
+        "screen_capture" => match int(c"type") {
+            1 => input::window_frame(&int(c"window").to_string()),
+            _ => input::display_frame(&text(c"display_uuid")),
+        },
+        // Windows
+        "window_capture" | "game_capture" => input::window_frame(&text(c"window")),
+        _ => None,
+    };
+    unsafe { sys::obs_data_release(settings) };
+    frame
 }
 
 fn rgb_of(c: u32) -> [f32; 3] {
@@ -334,6 +398,7 @@ unsafe fn read_look(settings: *mut sys::obs_data_t) -> Style {
         zoom_scale: float(c"zoom_scale").clamp(1.0, 6.0),
         zoom_hold: float(c"zoom_hold_s").max(0.2),
         zoom_motion: float(c"zoom_motion").clamp(0.0, 1.0),
+        zoom_typing: flag(c"zoom_typing"),
     }
 }
 
@@ -353,6 +418,7 @@ unsafe extern "C" fn get_defaults(settings: *mut sys::obs_data_t) {
         sys::obs_data_set_default_double(settings, c"zoom_scale".as_ptr(), 2.0);
         sys::obs_data_set_default_double(settings, c"zoom_hold_s".as_ptr(), 2.0);
         sys::obs_data_set_default_double(settings, c"zoom_motion".as_ptr(), 0.5);
+        sys::obs_data_set_default_bool(settings, c"zoom_typing".as_ptr(), true);
     }
 }
 
@@ -372,16 +438,26 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, context: *mut sys::o
         cam: None,
         zoom_until: None,
         last_click: None,
+        last_typed: None,
+        frame: None,
+        frame_read: None,
+        picture: None,
+        picture_tex: None,
     };
     Box::into_raw(Box::new(f)) as *mut c_void
 }
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let f = unsafe { Box::from_raw(data as *mut Filter) };
-    if let Some(t) = f.textures {
+    if f.textures.is_some() || f.picture_tex.is_some() {
         unsafe {
             sys::obs_enter_graphics();
-            free_textures(t);
+            if let Some(t) = f.textures {
+                free_textures(t);
+            }
+            if let Some((tex, _)) = f.picture_tex {
+                sys::gs_texture_destroy(tex);
+            }
             sys::obs_leave_graphics();
         }
     }
@@ -423,6 +499,16 @@ unsafe extern "C" fn tick(data: *mut c_void, seconds: f32) {
     let want = if idle { 0.0 } else { 1.0 };
     f.opacity += (want - f.opacity) * (dt * 8.0).min(1.0);
     f.shape = if f.look.arrow_only { Shape::Arrow } else { input::shape() };
+    f.picture = if f.look.arrow_only {
+        None
+    } else {
+        system_pointer::now().filter(|p| !matches!(p.shape, Some(Shape::Arrow | Shape::IBeam | Shape::Crosshair)))
+    };
+    // where the capture is (a window moves): read a few times a second
+    if f.frame_read.is_none_or(|t| t.elapsed() > Duration::from_millis(250)) {
+        f.frame = capture_frame(f.context);
+        f.frame_read = Some(Instant::now());
+    }
     zoom_tick(f, dt);
 }
 
@@ -442,7 +528,7 @@ fn zoom_tick(f: &mut Filter, dt: f32) {
         return;
     }
     let size = (size.0 as f32, size.1 as f32);
-    let (dx, dy, dw, _) = input::main_display();
+    let (dx, dy, dw, _) = f.frame.unwrap_or_else(input::main_display);
     let k = if dw > 0.0 { size.0 / dw } else { 1.0 };
     let Some((px, py)) = f.pos else { return };
     let pointer = ((px - dx) * k, (py - dy) * k);
@@ -457,6 +543,19 @@ fn zoom_tick(f: &mut Filter, dt: f32) {
     if clicked {
         f.zoom_until = Some(now + Duration::from_secs_f32(f.look.zoom_hold));
     }
+    // typing (on clicks): in as well, looking where the last click went (the text field), and
+    // staying there while the keys keep coming
+    let (typed, click_at) = if mode == 1 && f.look.zoom_typing { typing() } else { (None, None) };
+    let new_key = typed.is_some_and(|t| f.last_typed.is_none_or(|l| t > l));
+    if new_key {
+        f.last_typed = typed;
+        f.zoom_until = Some(now + Duration::from_secs_f32(f.look.zoom_hold));
+    }
+    let typing_now = typed.is_some_and(|t| now.duration_since(t) < Duration::from_secs_f32(f.look.zoom_hold));
+    let focus = match click_at.filter(|_| typing_now && !clicked) {
+        Some((cx_, cy_)) => ((cx_ - dx) * k, (cy_ - dy) * k),
+        None => pointer,
+    };
     let zoomed = match (mode, f.look.zoom) {
         (2, _) => true,
         // toggled out: clicks don't zoom
@@ -465,7 +564,7 @@ fn zoom_tick(f: &mut Filter, dt: f32) {
     };
     let want = if zoomed { f.look.zoom_scale } else { 1.0 };
     let cam = f.cam.get_or_insert_with(|| Cam::new(size));
-    cam_step(cam, want, pointer, size, f.look.zoom_motion, dt, clicked && !was_in && mode == 1);
+    cam_step(cam, want, focus, size, f.look.zoom_motion, dt, (clicked || new_key) && !was_in && mode == 1);
 }
 
 
@@ -516,9 +615,25 @@ unsafe extern "C" fn render(data: *mut c_void, _: *mut sys::gs_effect_t) {
     if tw == 0 || th == 0 || !f.look.draw {
         return;
     }
+    // the system pointer's picture, as a texture when it changes
+    if let Some(p) = &f.picture
+        && f.picture_tex.is_none_or(|(_, serial)| serial != p.serial)
+    {
+        unsafe {
+            if let Some((old, _)) = f.picture_tex.take() {
+                sys::gs_texture_destroy(old);
+            }
+            let side = system_pointer::SIDE as u32;
+            let mut data = p.rgba.as_ptr();
+            let tex = sys::gs_texture_create(side, side, sys::GS_RGBA, 1, &mut data, 0);
+            if !tex.is_null() {
+                f.picture_tex = Some((tex, p.serial));
+            }
+        }
+    }
     let Some(t) = &f.textures else { return };
     // display points → the capture's pixels → the view's
-    let (dx, dy, dw, _) = input::main_display();
+    let (dx, dy, dw, _) = f.frame.unwrap_or_else(input::main_display);
     let scale = if dw > 0.0 { tw as f32 / dw } else { 1.0 };
     let (vx, vy, vk) = match view {
         Some((vx, vy, vw, _)) => (vx, vy, size_px.0 / vw),
@@ -544,9 +659,11 @@ unsafe extern "C" fn render(data: *mut c_void, _: *mut sys::gs_effect_t) {
                 draw(t, tex, (cx, cy), size * 1.6 * grow, (0.5, 0.5), 0.0, fade * (1.0 - k) * f.opacity);
             }
         }
+        let system = f.picture.as_ref().zip(f.picture_tex).filter(|(p, (_, serial))| p.serial == *serial);
         let (tex, hot, angle) = match (f.look.style, f.shape) {
             (1, _) => (t.dot, (0.5, 0.5), 0.0),
             (2, _) => (t.ring, (0.5, 0.5), 0.0),
+            (_, _) if let Some((p, (tex, _))) = system => (tex, p.hot, 0.0),
             (_, Shape::IBeam) => (t.ibeam.0, t.ibeam.1, 0.0),
             (_, Shape::Crosshair) => (t.cross.0, t.cross.1, 0.0),
             _ => (t.arrow.0, t.arrow.1, f.tilt),

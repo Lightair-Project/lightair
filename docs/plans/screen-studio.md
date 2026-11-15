@@ -387,11 +387,15 @@ Each phase ships with tests and screenshots, like the audio plan.
    Split, Camera; Move between them); Voice Clarity's Podcast character; the Studio take button
    with a countdown, a global shortcut and a card when it's saved.
 
-   Still open from this phase: pointer shapes on macOS (the arrow and I-beam are drawn; reading
-   the system's current shape needs a private API, so macOS shows the arrow); placing the pointer
-   on a display other than the main one; pause in takes; the "Camera cutout" layout (it needs
-   background removal per layer, not per input); and the alignment test against a real screen
-   (the CI machines have no display).
+   Since done: pointer shapes on macOS (`lightair_platform::system_pointer` reads the system
+   pointer's picture through the public NSCursor API and tells the standard shapes; the arrow,
+   I-beam and crosshair are drawn as Lightair's own, any other shape is the system's picture);
+   the pointer and follow-zoom on any display and on window captures (each capture's frame);
+   zooming in while typing; pause in takes (the input log leaves the pauses out, as the files
+   do; take.json lists them as `pauses_ms`).
+
+   Still open from this phase: the alignment test against a real screen (the CI machines have no
+   display). Not planned: the "Camera cutout" layout.
 3. **Editor and zoom:**
    - `lightair-render`;
    - the Editor with cuts, speed, zoom track (auto and manual, frame and loupe, springs, motion
