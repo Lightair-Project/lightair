@@ -1228,6 +1228,9 @@ impl StudioWindow {
         let (cw, ch) = (f.width as f32, f.height as f32);
         let mut l = drag.layout;
         let mut guides = Guides::new();
+        // A web page's box is its window: resizing it resizes the page (any shape), so the
+        // picture stays one page pixel a canvas pixel instead of scaling.
+        let web = self.web_source_of(&workspace, drag.scene, drag.object);
         match drag.mode {
             DragMode::Rotate => {
                 let (cx_, cy_) = (l.x + l.width / 2.0, l.y + l.height / 2.0);
@@ -1280,7 +1283,7 @@ impl StudioWindow {
             }
             // In Fit the picture keeps its shape, so the frame does too (Stretch to distort).
             DragMode::Resize(corner) => {
-                let keep = ev.modifiers.shift || l.fit == lightair_core::Fit::Fit;
+                let keep = ev.modifiers.shift || (l.fit == lightair_core::Fit::Fit && web.is_none());
                 l = geo::resize(&l, corner, (dx, dy), keep);
                 if !ev.modifiers.platform {
                     // The dragged corner snaps to the canvas edges and centre lines (⌘: free).
@@ -1295,8 +1298,34 @@ impl StudioWindow {
         let (mx, my) = (l.x - drag.layout.x, l.y - drag.layout.y);
         let mut layouts = vec![(drag.object, l)];
         layouts.extend(drag.others.iter().map(|(id, o)| (*id, Layout { x: o.x + mx, y: o.y + my, ..*o })));
-        let (scene, canvas) = (drag.scene, drag.canvas);
+        let (scene, canvas, resizing) = (drag.scene, drag.canvas, matches!(drag.mode, DragMode::Resize(_)));
         self.set_layouts(scene, canvas, layouts, "Move objects", cx);
+        if resizing && let Some(source) = web {
+            self.size_web_page(source, &l, cx);
+        }
+    }
+
+    /// The web page source `object` shows, if it shows one.
+    fn web_source_of(&self, workspace: &Workspace, scene: Id, object: Id) -> Option<Id> {
+        let source = workspace.scene(scene)?.object(object)?.source?;
+        workspace.sources.get(&source).filter(|i| object_props::is_web(&i.kind)).map(|i| i.id)
+    }
+
+    /// Sizes a web page to show at one page pixel a canvas pixel in `frame` (its box on the
+    /// canvas, after cropping): the page is the box plus what's cropped away.
+    fn size_web_page(&mut self, source: Id, frame: &Layout, cx: &mut Context<Self>) {
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some(i) = workspace.sources.get(&source) else { return };
+        let c = frame.crop;
+        let w = (frame.width.round() as i64 + (c.left + c.right) as i64).clamp(16, 7680);
+        let h = (frame.height.round() as i64 + (c.top + c.bottom) as i64).clamp(16, 7680);
+        if i.settings["width"].as_i64() == Some(w) && i.settings["height"].as_i64() == Some(h) {
+            return;
+        }
+        let mut settings = if i.settings.is_object() { i.settings.clone() } else { serde_json::json!({}) };
+        settings["width"] = serde_json::json!(w);
+        settings["height"] = serde_json::json!(h);
+        self.exec(Command::SetSourceSettings { source, settings }, cx);
     }
 
     fn canvas_up(&mut self, _: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
