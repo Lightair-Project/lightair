@@ -146,7 +146,7 @@ technique GFCoef
 	}
 }
 
-// ---- green key: macOS's own Backgrounds paints pure green behind the person (Background
+// ---- green (or blue) key: macOS's own Backgrounds paints pure green behind the person (Background
 // removal's "macOS" model sets that picture), and this takes it out. macOS blends the person's
 // edge into the green, so an edge pixel is a * person + (1 - a) * green: its green dominance
 // (g - max(r, b)) tells a, and taking the green back out recovers the person's own colour. ----
@@ -154,6 +154,13 @@ technique GFCoef
 uniform texture2d key_src;   // GreenKeyPremul: the camera's frame, untouched (where a comes from)
 uniform float key_softness;  // 0..1: how far into the edge it stays partly see-through
 uniform float2 key_texel;    // one pixel, in uv
+uniform int key_blue;        // 1: the backdrop is blue, not green (worked on as if green)
+
+// The key colour's channel as g: blue swaps g and b (its own inverse).
+float3 keyed(float3 c)
+{
+	return key_blue == 1 ? c.rbg : c;
+}
 
 // The green's edge, from straight colour. An edge pixel is a * person + (1 - a) * green, so its
 // green dominance d = g - max(r, b) is a * d_person + (1 - a) * d_green, and
@@ -201,7 +208,7 @@ float2 around_image(float2 uv, float d0)
 	float dmax = -1.0;
 	float dmin = 1.0;
 	for (int i = 0; i < 8; i++) {
-		float d = dominance(image.Sample(linearClamp, uv + near_offset(i)).rgb);
+		float d = dominance(keyed(image.Sample(linearClamp, uv + near_offset(i)).rgb));
 		dmax = max(dmax, d);
 		dmin = min(dmin, d);
 	}
@@ -213,7 +220,7 @@ float2 around_src(float2 uv, float d0)
 	float dmax = -1.0;
 	float dmin = 1.0;
 	for (int i = 0; i < 8; i++) {
-		float d = dominance(key_src.Sample(linearClamp, uv + near_offset(i)).rgb);
+		float d = dominance(keyed(key_src.Sample(linearClamp, uv + near_offset(i)).rgb));
 		dmax = max(dmax, d);
 		dmin = min(dmin, d);
 	}
@@ -236,10 +243,11 @@ float3 unmix(float3 c, float a, float near)
 float4 PSGreenKey(VertData v_in) : TARGET
 {
 	float4 c = image.Sample(linearClamp, v_in.uv);
-	float d = dominance(c.rgb);
+	float3 k = keyed(c.rgb);
+	float d = dominance(k);
 	float2 n = around_image(v_in.uv, d);
 	float a = key_alpha_with(d, n.y);
-	return float4(unmix(c.rgb, a, n.x), a * c.a);
+	return float4(keyed(unmix(k, a, n.x)), a * c.a);
 }
 
 // After Camera Studio's other effects (premultiplied in and out): a from the untouched frame.
@@ -247,10 +255,10 @@ float4 PSGreenKeyPremul(VertData v_in) : TARGET
 {
 	float4 c = image.Sample(linearClamp, v_in.uv);
 	float3 s = c.a > 0.0001 ? c.rgb / c.a : c.rgb;
-	float d = dominance(key_src.Sample(linearClamp, v_in.uv).rgb);
+	float d = dominance(keyed(key_src.Sample(linearClamp, v_in.uv).rgb));
 	float2 n = around_src(v_in.uv, d);
 	float a = key_alpha_with(d, n.y);
-	return float4(unmix(s, a, n.x), 1.0) * (a * c.a);
+	return float4(keyed(unmix(keyed(s), a, n.x)), 1.0) * (a * c.a);
 }
 
 technique GreenKey

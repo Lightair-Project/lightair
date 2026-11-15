@@ -428,8 +428,8 @@ impl StudioWindow {
         // (macOS's own camera effect; Windows segments with MediaPipe whatever the workspace says)
         let system =
             !cfg!(windows) && e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM);
-        if system {
-            col = col.child(system_effect_panel(d.kind, cx));
+        if system && d.kind != "studio.bg_remove" {
+            col = col.child(system_effect_row(d.kind, cx));
         }
         for (j, c) in d.controls.iter().enumerate() {
             let key = c.key();
@@ -478,8 +478,12 @@ impl StudioWindow {
             }
             // (the green key's edge softness is Lightair's: Background removal keeps it)
             if model == catalog::BG_MODEL_SYSTEM
-                && key.is_some_and(|k| k != "bg_model" && !(d.kind == "studio.bg_remove" && k == "bg_feather"))
+                && key.is_some_and(|k| k != "bg_model" && !(d.kind == "studio.bg_remove" && matches!(k, "bg_feather" | "bg_key")))
             {
+                continue;
+            }
+            // the key colour is macOS's backdrop's
+            if key == Some("bg_key") && model != catalog::BG_MODEL_SYSTEM {
                 continue;
             }
             match *c {
@@ -546,12 +550,18 @@ impl StudioWindow {
                     } else {
                         self.segmented(key, opts, cx).flex_1()
                     };
+                    let control = match chosen.and_then(|n| choice_hint(key, n)) {
+                        Some(hint) => div()
+                            .flex()
+                            .flex_1()
+                            .items_center()
+                            .gap_1p5()
+                            .child(control)
+                            .child(ui::info(SharedString::from(format!("fx-hint-{key}")), hint))
+                            .into_any_element(),
+                        None => control.into_any_element(),
+                    };
                     col = col.child(control_row(label, control));
-                    if let Some(hint) = chosen.and_then(|n| choice_hint(key, n)) {
-                        col = col.child(
-                            div().pl(px(96.)).text_size(px(11.)).text_color(tok::text_tertiary()).child(hint),
-                        );
-                    }
                 }
                 Control::Colour { key, label, default } => {
                     let current = e.settings.get(key).and_then(Value::as_u64).map_or(default, |v| v as u32);
@@ -962,29 +972,48 @@ impl StudioWindow {
 
     // ------------------------------------------------------------ presence
 
-    /// macOS's Backgrounds picture for Lightair: green while a camera's Background removal uses
-    /// macOS (Camera Studio keys the green out), and back to what it was once none does.
-    fn sync_green_screen(&mut self, cx: &mut Context<Self>) {
-        let want = self.studio.read(cx).workspace().sources.values().any(|s| {
-            s.effects.iter().any(|e| {
-                e.enabled && e.kind == "studio.bg_remove" && e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM)
-            })
-        });
-        if self.green_screen == Some(want) {
+    /// macOS's Backgrounds, following what's on air: while the program shows a camera whose
+    /// Background removal or replace uses macOS, it's on, painting the key colour (removal) or
+    /// the user's picture (replace); off otherwise, and off whenever a camera is on air as it
+    /// is (the effect is the camera's, so it would show there too). Workspaces that don't use
+    /// it are left alone. (Portrait, for blur, stays the user's: macOS lets an app switch it
+    /// only when the app controls it, and throws otherwise.)
+    pub(super) fn sync_macos_effects(&mut self, cx: &mut Context<Self>) {
+        let want = macos_effects_wanted(self.studio.read(cx).workspace());
+        if self.macos_fx == Some(want) {
             return;
         }
-        self.green_screen = Some(want);
+        let was = self.macos_fx.replace(want);
+        if !want.managed && was.is_none_or(|w| !w.managed) {
+            return;
+        }
         use crate::system_effects as sys;
-        if want {
-            // the user's picture, kept once (a green set before has no picture: "" then)
-            if self.prefs.macos_background_before.is_none() {
-                self.prefs.macos_background_before = Some(sys::background_picture().unwrap_or_default());
-                let _ = crate::prefs::save_to(&crate::prefs::path(), &self.prefs);
+        match want.backgrounds {
+            Backdrop::Key(blue) => {
+                // the user's picture, kept once (none to keep after a key colour: "")
+                if self.prefs.macos_background_before.is_none() {
+                    self.prefs.macos_background_before = Some(sys::background_picture().unwrap_or_default());
+                    let _ = crate::prefs::save_to(&crate::prefs::path(), &self.prefs);
+                }
+                sys::set_background_colour(if blue { sys::BLUE } else { sys::GREEN });
+                sys::set_backgrounds_on(true);
             }
-            sys::set_background_colour(sys::GREEN);
-        } else if let Some(before) = self.prefs.macos_background_before.take() {
+            Backdrop::Picture => {
+                self.restore_background_picture();
+                sys::set_backgrounds_on(true);
+            }
+            Backdrop::Off => {
+                self.restore_background_picture();
+                sys::set_backgrounds_on(false);
+            }
+        }
+    }
+
+    /// The user's own Backgrounds picture, back in place of a key colour.
+    fn restore_background_picture(&mut self) {
+        if let Some(before) = self.prefs.macos_background_before.take() {
             if !before.is_empty() {
-                sys::set_background_picture(std::path::Path::new(&before));
+                crate::system_effects::set_background_picture(std::path::Path::new(&before));
             }
             let _ = crate::prefs::save_to(&crate::prefs::path(), &self.prefs);
         }
@@ -993,7 +1022,6 @@ impl StudioWindow {
     /// Asks Camera Studio whether the selected source shows a face and a person (for the
     /// cards' hints). Cheap; called on a timer while the Inspector shows face effects.
     pub(super) fn refresh_presence(&mut self, cx: &mut Context<Self>) {
-        self.sync_green_screen(cx);
         let studio = self.studio.read(cx);
         let Some(source) = studio
             .selected_object
@@ -1495,70 +1523,75 @@ fn choice_hint(key: &str, chosen: usize) -> Option<&'static str> {
     hints.get(chosen).copied()
 }
 
-/// macOS's own effect: whether it's on for Lightair, and the way to turn it on.
-fn system_effect_panel(kind: &str, cx: &mut Context<StudioWindow>) -> Div {
-    use crate::system_effects as sys;
-    let (name, state) = if kind == "studio.bg_blur" {
-        ("Portrait", sys::portrait_on())
+/// macOS's own effect where Video Effects has the say: Background replace's picture (Lightair
+/// switches Backgrounds itself), and Portrait for blur (which macOS lets only the user switch).
+fn system_effect_row(kind: &str, cx: &mut Context<StudioWindow>) -> Div {
+    let (label, action) = if kind == "studio.bg_blur" {
+        match crate::system_effects::portrait_on() {
+            Some(true) => ("Portrait is on", "Video Effects…"),
+            _ => ("Portrait is off", "Turn on in Video Effects…"),
+        }
     } else {
-        ("Backgrounds", sys::backgrounds_on())
-    };
-    let (dot, text) = match state {
-        Some(true) => (tok::ok(), format!("{name} is on in macOS")),
-        Some(false) => (tok::warn(), format!("{name} is off: turn it on in Video Effects")),
-        None => (tok::warn(), format!("{name} needs a newer macOS")),
-    };
-    // Backgrounds can be switched on from here (Video Effects' own switch, which is easy to miss)
-    let can_turn_on = state == Some(false) && kind != "studio.bg_blur";
-    let about = match kind {
-        "studio.bg_remove" => "macOS cuts you out inside the camera and paints green behind you (Lightair sets that, for Lightair only); Lightair takes the green out. Your own background picture comes back when you stop using it.",
-        _ => "macOS does this inside the camera, before Lightair gets the picture. Turn it on for Lightair and choose the blur or picture in Video Effects.",
+        ("Picture", "Choose in Video Effects…")
     };
     div()
         .flex()
-        .flex_col()
-        .gap_1p5()
-        .p_2()
-        .rounded(px(8.))
-        .bg(tok::bg_app())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(div().flex_none().size(px(8.)).rounded_full().bg(dot))
-                .child(div().flex_1().min_w_0().text_size(px(12.)).child(text))
-                .child(ui::info(("system-effect-info", kind.len()), about)),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_1p5()
-                .when(can_turn_on, |d| {
-                    d.child(
-                        Button::new("turn-on-backgrounds")
-                            .label("Turn on")
-                            .xsmall()
-                            .primary()
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                sys::set_backgrounds_on(true);
-                                cx.notify();
-                            })),
-                    )
-                })
-                .child(
-                    Button::new("open-video-effects")
-                        .label("Open Video Effects…")
-                        .icon(ui::icon("camera"))
-                        .xsmall()
-                        .outline()
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            sys::open_video_effects();
-                            cx.notify();
-                        })),
-                ),
-        )
+        .items_center()
+        .gap_2()
+        .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(tok::text_secondary()).child(label))
+        .child(Button::new("open-video-effects").label(action).xsmall().ghost().on_click(cx.listener(|_, _, _, cx| {
+            crate::system_effects::open_video_effects();
+            cx.notify();
+        })))
+}
+
+/// What macOS's Backgrounds paints behind the person.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Backdrop {
+    Off,
+    /// The user's own picture (Background replace).
+    Picture,
+    /// A colour to key out (Background removal): blue, or green.
+    Key(bool),
+}
+
+/// macOS's Backgrounds as the program needs it; `managed`: the workspace uses it at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct MacosEffects {
+    managed: bool,
+    backgrounds: Backdrop,
+}
+
+pub(super) fn macos_effects_wanted(workspace: &lightair_core::Workspace) -> MacosEffects {
+    let system = |e: &&Effect| {
+        e.enabled
+            && matches!(e.kind.as_str(), "studio.bg_remove" | "studio.bg_replace")
+            && e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM)
+    };
+    let managed = !cfg!(windows) && workspace.sources.values().any(|s| s.effects.iter().any(|e| system(&e)));
+    let mut out = MacosEffects { managed, backgrounds: Backdrop::Off };
+    let Some(scene) = workspace.program.and_then(|id| workspace.scene(id)).filter(|_| managed) else { return out };
+    let mut plain = false;
+    for o in &scene.objects {
+        let Some(source) = o.source.and_then(|i| workspace.sources.get(&i)) else { continue };
+        if source.kind != lightair_core::kinds::CAMERA || !workspace.canvases.iter().any(|c| scene.shown(o.id, c.id)) {
+            continue;
+        }
+        let mut uses = false;
+        for e in source.effects.iter().filter(system) {
+            uses = true;
+            match e.kind.as_str() {
+                "studio.bg_remove" => out.backgrounds = Backdrop::Key(e.settings.get("bg_key").and_then(Value::as_i64) == Some(1)),
+                "studio.bg_replace" if out.backgrounds == Backdrop::Off => out.backgrounds = Backdrop::Picture,
+                _ => {}
+            }
+        }
+        plain |= !uses;
+    }
+    if plain {
+        out.backgrounds = Backdrop::Off;
+    }
+    out
 }
 
 /// The EQ's response, drawn: 20 Hz to 20 kHz across, ±18 dB up and down, with the engine's
@@ -1767,4 +1800,56 @@ fn effect_menu(
             s.update(cx, |w, cx| w.exec(iid.remove(eid), cx));
         }
     }))
+}
+
+#[cfg(test)]
+mod macos_effects_tests {
+    use super::{Backdrop, macos_effects_wanted};
+    use lightair_core::{Effect, Layout, Object, Scene, Source, Workspace};
+    use serde_json::json;
+
+    /// A workspace: a camera keyed out on macOS's effect, a plain camera, and three scenes.
+    fn workspace(key: i64) -> (Workspace, [lightair_core::Id; 3]) {
+        let mut w = Workspace::new("t");
+        let canvas = w.primary_canvas().id;
+        let mut keyed = Source::new("Camera", lightair_core::kinds::CAMERA, json!({}));
+        keyed.effects.push(Effect::new("Background removal", "studio.bg_remove", json!({"bg_mode": 2, "bg_model": 2, "bg_key": key})));
+        let plain = Source::new("Camera 2", lightair_core::kinds::CAMERA, json!({}));
+        let colour = Source::new("Colour", "color_source_v3", json!({}));
+        let scene = |name: &str, src: &Source| {
+            let mut s = Scene::new(name);
+            s.objects = vec![Object::new(name, src.id, [(canvas, Layout::boxed(0.0, 0.0, 100.0, 100.0))])];
+            s
+        };
+        let (a, b, c) = (scene("Keyed", &keyed), scene("Plain", &plain), scene("Slides", &colour));
+        let ids = [a.id, b.id, c.id];
+        for s in [keyed, plain, colour] {
+            w.sources.insert(s.id, std::sync::Arc::new(s));
+        }
+        w.scenes = vec![std::sync::Arc::new(a), std::sync::Arc::new(b), std::sync::Arc::new(c)];
+        (w, ids)
+    }
+
+    #[test]
+    fn macos_backgrounds_follow_the_scene_on_air() {
+        let (mut w, [keyed, plain, slides]) = workspace(0);
+        w.program = Some(keyed);
+        let on = macos_effects_wanted(&w);
+        assert!(on.managed);
+        assert_eq!(on.backgrounds, Backdrop::Key(false), "on air: the camera keyed out on green");
+        w.program = Some(slides);
+        assert_eq!(macos_effects_wanted(&w).backgrounds, Backdrop::Off, "no camera on air: off");
+        w.program = Some(plain);
+        assert_eq!(macos_effects_wanted(&w).backgrounds, Backdrop::Off, "a camera shown as it is: off");
+        let (mut w, [keyed, ..]) = workspace(1);
+        w.program = Some(keyed);
+        assert_eq!(macos_effects_wanted(&w).backgrounds, Backdrop::Key(true), "blue screen");
+    }
+
+    #[test]
+    fn workspaces_without_macos_effects_are_left_alone() {
+        let mut w = Workspace::new("t");
+        w.sources.insert(lightair_core::Id::new(), std::sync::Arc::new(Source::new("Camera", lightair_core::kinds::CAMERA, json!({}))));
+        assert!(!macos_effects_wanted(&w).managed);
+    }
 }

@@ -19,12 +19,12 @@ fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
 }
 
 /// The test picture, as a 24-bit BMP: 640×360, the disc's centre at the middle, radius 120, its
-/// last 12 px blended into the green.
-fn picture(path: &std::path::Path) {
+/// last 12 px blended into the backdrop (pure green, or pure blue).
+fn picture(path: &std::path::Path, backdrop: [f32; 3]) {
     let (w, h) = (640i32, 360i32);
     let row = (w * 3 + 3) / 4 * 4;
     let mut px = vec![0u8; (row * h) as usize];
-    let (skin, green) = ([225.0, 172.0, 140.0], [0.0, 255.0, 0.0]);
+    let (skin, green) = ([225.0, 172.0, 140.0], backdrop);
     for y in 0..h {
         for x in 0..w {
             let d = (((x - w / 2).pow(2) + (y - h / 2).pow(2)) as f32).sqrt();
@@ -62,7 +62,7 @@ fn the_green_macos_paints_is_keyed_out() {
         return;
     }
     let file = std::env::temp_dir().join(format!("lightair-green-key-{}.bmp", std::process::id()));
-    picture(&file);
+    picture(&file, [0.0, 255.0, 0.0]);
     let engine = Engine::start(EngineConfig {
         canvas: (640, 360),
         output: (640, 360),
@@ -74,6 +74,7 @@ fn the_green_macos_paints_is_keyed_out() {
     let f = doc.workspace().primary_canvas().id;
     let backdrop = Source::new("Magenta", "color_source_v3", json!({"color": 0xFFFF00FFu32, "width": 640, "height": 360}));
     let mut person = Source::new("Person", "image_source", json!({"file": file.to_string_lossy()}));
+    let pid = person.id;
     person.effects.push(Effect::new(
         "Background removal",
         "studio.bg_remove",
@@ -120,7 +121,35 @@ fn the_green_macos_paints_is_keyed_out() {
         let share = (back.1 as f32 - p.1 as f32) / (back.1 as f32 - skin.1 as f32);
         assert!((0.3..=0.7).contains(&share), "half way through the edge, {share:.2} of it is the person: {p:?}");
     }
+
+    // a blue screen (for someone wearing green): the same, keyed on blue
+    let blue_file = std::env::temp_dir().join(format!("lightair-blue-key-{}.bmp", std::process::id()));
+    picture(&blue_file, [0.0, 0.0, 255.0]);
+    let eid = doc.workspace().sources[&pid].effects[0].id;
+    apply(&engine, &mut doc, Command::SetSourceSettings { source: pid, settings: json!({"file": blue_file.to_string_lossy()}) });
+    let settings = json!({"bg_mode": 2, "bg_model": lightair_core::catalog::BG_MODEL_SYSTEM, "bg_feather": 30, "bg_key": 1});
+    apply(&engine, &mut doc, Command::SetSourceEffectSettings { source: pid, effect: eid, settings });
+    std::thread::sleep(Duration::from_millis(1500));
+    let n = preview.frames();
+    while preview.frames() < n + 5 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let frame = preview.latest_frame().unwrap();
+    let at = |x: f32, y: f32| sample_ycbcr(&frame, x / 640.0, y / 360.0).unwrap();
+    // blue: Cb high, Cr low
+    let blue = |(_, cb, cr): (u8, u8, u8)| cb > 170 && cr < 110;
+    for (x, y) in [(20.0, 20.0), (620.0, 340.0), (100.0, 180.0)] {
+        assert!(magenta(at(x, y)), "the blue is gone at ({x}, {y}): {:?}", at(x, y));
+    }
+    let centre = at(320.0, 180.0);
+    assert!(!blue(centre) && !magenta(centre) && centre.2 > centre.1, "the person stays on blue: {centre:?}");
+    for k in 0..16 {
+        let t = k as f32 / 16.0 * std::f32::consts::TAU;
+        let p = at(320.0 + 114.0 * t.cos(), 180.0 + 114.0 * t.sin());
+        assert!(!blue(p), "blue spill, angle {k}/16: {p:?}");
+    }
     drop(preview);
     drop(engine);
     let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(&blue_file);
 }

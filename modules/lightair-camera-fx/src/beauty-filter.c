@@ -124,7 +124,8 @@ struct beauty_filter {
 
 	/* background (Lightair): 0 off, 1 blur, 2 remove, 3 colour, 4 image */
 	int bg_mode;
-	int bg_model;   /* person mask: 0 Apple Vision, 1 MediaPipe */
+	int bg_model;   /* person mask: 0 Apple Vision, 1 MediaPipe, 2 macOS's own */
+	int bg_key;     /* macOS's own, removed: 0 green, 1 blue backdrop */
 	int bg_quality; /* Apple Vision: 0 fast, 1 balanced, 2 accurate */
 	bool bg_show_mask; /* diagnostics: the person mask as grey */
 	float bg_blur, bg_feather, bg_shift, bg_wrap;
@@ -244,6 +245,7 @@ static void beauty_update(void *data, obs_data_t *settings)
 
 	f->bg_mode = (int)obs_data_get_int(settings, "bg_mode");
 	f->bg_model = (int)obs_data_get_int(settings, "bg_model");
+	f->bg_key = (int)obs_data_get_int(settings, "bg_key");
 #ifndef __APPLE__
 	/* Apple Vision and macOS's own effect are macOS's: elsewhere the mask is MediaPipe's */
 	f->bg_model = 1;
@@ -883,6 +885,7 @@ static gs_texture_t *render_green_key(struct beauty_filter *f, gs_texture_t *in,
 	gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), in);
 	gs_effect_set_texture(gs_effect_get_param_by_name(e, "key_src"), src);
 	gs_effect_set_float(gs_effect_get_param_by_name(e, "key_softness"), f->bg_feather);
+	gs_effect_set_int(gs_effect_get_param_by_name(e, "key_blue"), f->bg_key == 1 ? 1 : 0);
 	struct vec2 texel;
 	vec2_set(&texel, 1.0f / (float)w, 1.0f / (float)h);
 	gs_effect_set_vec2(gs_effect_get_param_by_name(e, "key_texel"), &texel);
@@ -1594,6 +1597,7 @@ static void beauty_render(void *data, gs_effect_t *unused)
 			vec2_set(&texel, 1.0f / (float)w, 1.0f / (float)h);
 			gs_effect_set_float(gs_effect_get_param_by_name(f->bg_effect, "key_softness"), f->bg_feather);
 			gs_effect_set_vec2(gs_effect_get_param_by_name(f->bg_effect, "key_texel"), &texel);
+			gs_effect_set_int(gs_effect_get_param_by_name(f->bg_effect, "key_blue"), f->bg_key == 1 ? 1 : 0);
 			obs_source_process_filter_tech_end(f->source, f->bg_effect, w, h, "GreenKey");
 		}
 		return;
