@@ -1722,8 +1722,9 @@ struct Channel {
 }
 
 /// How the strips are laid out: the same for all of them, so meters line up. A short panel
-/// keeps what matters most (name, meter, fader, Cue and Mute), then fits in turn the knobs, the
-/// source, the routing and the effects; what's left lengthens the meters.
+/// keeps what matters most (name, meter, fader, Cue and Mute), then the effects (a row and the
+/// +), then fits in turn the knobs, the source and the routing; what's left grows the effects
+/// list to its full height, then lengthens the meters.
 #[derive(Clone, Copy)]
 struct Layout {
     /// The effects list's height (0: hidden; the header shows how many are on).
@@ -1744,10 +1745,19 @@ impl Layout {
         if height < 1.0 {
             return full;
         }
-        // the panel's padding and the strip's border, and the header
-        let mut room = height - 18.0 - 30.0;
-        let knobs = room >= LEVELS_H;
-        room -= if knobs { LEVELS_H } else { LEVELS_MIN };
+        // the panel's padding and the strip's border, and the header; the meter's least
+        let mut room = height - 18.0 - 30.0 - LEVELS_MIN;
+        // the effects first (what's on a voice matters more than where it's sent)
+        // (and nothing else shows before them: a strip too short for them is meter and fader)
+        if room < FX_MIN {
+            return Self { fx_h: 0.0, routing: false, section, foot: false, knobs: false };
+        }
+        let mut fx_h = FX_MIN;
+        room -= FX_MIN;
+        let knobs = room >= LEVELS_H - LEVELS_MIN;
+        if knobs {
+            room -= LEVELS_H - LEVELS_MIN;
+        }
         let foot = room >= FOOT_H;
         if foot {
             room -= FOOT_H;
@@ -1756,7 +1766,8 @@ impl Layout {
         if routing {
             room -= section;
         }
-        let fx_h = if room >= FX_MIN { room.min(FX_H) } else { 0.0 };
+        // what's left: the effects list at its full height
+        fx_h += room.clamp(0.0, FX_H - FX_MIN);
         Self { fx_h, routing, section, foot, knobs }
     }
 }
@@ -2148,4 +2159,32 @@ fn mute_cmd(p: &Workspace, kind: MixerStrip, muted: bool) -> Option<Command> {
         MixerStrip::Mix(id) => Command::UpdateMix { mix: AudioMix { muted, ..p.audio.mix(id)?.clone() } },
         MixerStrip::Master => Command::UpdateMaster { master: Master { muted, ..p.audio.master.clone() } },
     })
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{FX_H, FX_MIN, Layout};
+
+    #[test]
+    fn effects_stay_in_view_before_the_rest() {
+        let section = 120.0;
+        // tall: everything
+        let tall = Layout::fit(900.0, section);
+        assert!(tall.knobs && tall.foot && tall.routing && tall.fx_h == FX_H);
+        // middling: the effects stay, routing gives way first
+        let mid = Layout::fit(420.0, section);
+        assert!(mid.fx_h >= FX_MIN, "effects shown at mid height");
+        assert!(!mid.routing, "routing gives way before the effects");
+        // too short for anything but the meter and fader
+        let short = Layout::fit(170.0, section);
+        assert_eq!(short.fx_h, 0.0);
+        assert!(!short.knobs && !short.routing && !short.foot);
+        // wherever the effects show, nothing else shows without them
+        for h in (150..1000).step_by(10) {
+            let l = Layout::fit(h as f32, section);
+            if l.knobs || l.foot || l.routing {
+                assert!(l.fx_h >= FX_MIN, "at {h}: something shown while the effects aren't");
+            }
+        }
+    }
 }

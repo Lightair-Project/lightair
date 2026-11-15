@@ -2286,10 +2286,10 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let state = studio.virtual_camera();
         let workspace = studio.workspace();
-        let shown = studio.virtual_camera_canvas.and_then(|c| workspace.canvas(c)).unwrap_or_else(|| workspace.primary_canvas());
+        let shown = workspace.outputs.virtual_camera.canvas.and_then(|c| workspace.canvas(c)).unwrap_or_else(|| workspace.primary_canvas());
         let canvas_name = shown.name.clone();
         let listed = studio.virtual_camera_name;
-        let chosen_scene = studio.virtual_camera_scene.and_then(|id| workspace.scene(id));
+        let chosen_scene = workspace.outputs.virtual_camera.scene.and_then(|id| workspace.scene(id));
         // what it shows, said plainly: a scene, or the one on air (and on which canvas, if several)
         let mut shown_name = chosen_scene.map_or_else(|| "the scene on air".to_string(), |s| format!("“{}”", s.name));
         let scenes: Vec<(Id, String, bool)> =
