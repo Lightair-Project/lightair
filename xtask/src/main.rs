@@ -3,6 +3,9 @@
 //!   cargo xtask modules    configure and build every in-tree libobs module (modules/*)
 //!   cargo xtask bundle     assemble target/debug/Lightair.app for development (macOS)
 //!   cargo xtask dev        link OBS's helper programs next to target/debug for `cargo run`
+//!   cargo xtask virtual-camera [--uninstall]  build "Lightair Virtual Camera" (the camera
+//!                          extension and its installer, modules/lightair-virtual-camera),
+//!                          put the installer in /Applications and open it (macOS)
 //!
 //! On Windows, OBS_DIR names the OBS build or install whose libobs Lightair links and runs
 //! (docs/plans/windows.md); the tests run with its `bin/64bit` on PATH.
@@ -182,6 +185,7 @@ fn main() -> anyhow::Result<()> {
         Some("modules") => modules(),
         Some("bundle") => bundle(),
         Some("dev") => dev(),
+        Some("virtual-camera") => virtual_camera(std::env::args().any(|a| a == "--uninstall")),
         Some("test") => test(std::env::args().skip(2).collect()),
         Some("check") => check(std::env::args().any(|a| a == "--changed")),
         Some("precommit") => precommit(),
@@ -193,7 +197,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask (modules | bundle | dev | test [--machine] [filter] | check [--changed] | precommit | prune)"
+                "usage: cargo xtask (modules | bundle | dev | virtual-camera [--uninstall] | test [--machine] [filter] | check [--changed] | precommit | prune)"
             );
             Ok(())
         }
@@ -430,6 +434,68 @@ fn prune(programs: Option<&[PathBuf]>) -> anyhow::Result<(usize, u64)> {
 }
 
 /// The SHA-1 of the first valid "Apple Development" code signing identity, if any.
+/// The team of the keychain's Apple Development certificate (its subject's OU).
+fn development_team() -> Option<String> {
+    let pem = Command::new("security").args(["find-certificate", "-c", "Apple Development", "-p"]).output().ok()?;
+    let mut x509 = Command::new("openssl")
+        .args(["x509", "-noout", "-subject"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    use std::io::Write;
+    x509.stdin.take()?.write_all(&pem.stdout).ok()?;
+    let out = x509.wait_with_output().ok()?;
+    let subject = String::from_utf8_lossy(&out.stdout).into_owned();
+    let ou = subject.split(['/', ',']).map(str::trim).find_map(|p| p.strip_prefix("OU=").or_else(|| p.strip_prefix("OU = ")))?;
+    let team: String = ou.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+    (team.len() == 10).then_some(team)
+}
+
+/// "Lightair Virtual Camera" (modules/lightair-virtual-camera): XcodeGen makes the Xcode project
+/// in target/virtual-camera, xcodebuild builds and signs it for the team (automatic signing makes
+/// the provisioning profiles the extension needs), and the installer goes to /Applications, the
+/// only place macOS installs camera extensions from, then opens (with `--uninstall`, to remove
+/// the camera). macOS asks the user to allow the extension in System Settings the first time.
+fn virtual_camera(uninstall: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(cfg!(target_os = "macos"), "the virtual camera extension is for macOS");
+    let root = root();
+    let team = std::env::var("LIGHTAIR_TEAM").ok().or_else(development_team).ok_or_else(|| {
+        anyhow::anyhow!("no Apple Development certificate in the keychain (or set LIGHTAIR_TEAM)")
+    })?;
+    let out = root.join("target/virtual-camera");
+    std::fs::create_dir_all(&out)?;
+    run(Command::new("xcodegen")
+        .args(["generate", "--quiet", "--spec"])
+        .arg(root.join("modules/lightair-virtual-camera/project.yml"))
+        .arg("--project")
+        .arg(&out)
+        .arg("--project-root")
+        .arg(root.join("modules/lightair-virtual-camera")))?;
+    run(Command::new("xcodebuild")
+        .arg("-project")
+        .arg(out.join("LightairVirtualCamera.xcodeproj"))
+        .args(["-scheme", "Installer", "-configuration", "Release", "-quiet", "-allowProvisioningUpdates", "-derivedDataPath"])
+        .arg(out.join("build"))
+        .arg(format!("DEVELOPMENT_TEAM={team}"))
+        .arg(format!("LIGHTAIR_VC_SRC={}", root.join("modules/lightair-virtual-camera").display()))
+        .arg("build"))?;
+    let built = out.join("build/Build/Products/Release/Lightair Virtual Camera.app");
+    let installed = PathBuf::from("/Applications/Lightair Virtual Camera.app");
+    if installed.exists() {
+        std::fs::remove_dir_all(&installed)?;
+    }
+    run(Command::new("ditto").arg(&built).arg(&installed))?;
+    let mut open = Command::new("open");
+    open.arg("-n").arg(&installed);
+    if uninstall {
+        open.args(["--args", "--uninstall"]);
+    }
+    run(&mut open)?;
+    eprintln!("opened {}", installed.display());
+    Ok(())
+}
+
 fn apple_development_identity() -> Option<String> {
     let out = Command::new("security").args(["find-identity", "-v", "-p", "codesigning"]).output().ok()?;
     String::from_utf8_lossy(&out.stdout)
