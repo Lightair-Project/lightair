@@ -30,6 +30,17 @@ pub struct PageOptions {
     pub height: u32,
     /// Frames a second at most (Chromium paints only what changes).
     pub fps: u32,
+    /// Page zoom, as a browser's (1.0: 100%): the page lays out `width / zoom` CSS pixels
+    /// wide, drawn sharp at `zoom` pixels each, so the frame stays `width × height`.
+    pub zoom: f32,
+}
+
+impl PageOptions {
+    /// The page's view in CSS pixels (what it lays out in).
+    pub fn view(&self) -> (u32, u32) {
+        let z = self.zoom.clamp(0.25, 5.0);
+        (((self.width as f32 / z).round() as u32).max(1), ((self.height as f32 / z).round() as u32).max(1))
+    }
 }
 
 /// A web page rendering off-screen; closed when dropped.
@@ -292,11 +303,16 @@ mod imp {
 
     // ------------------------------------------------------------ pages
 
-    /// A page on the main thread: its browser (once made), its size (read by the renderer).
+    /// A page on the main thread: its browser (once made), its view (CSS size and zoom, read by
+    /// the renderer).
     struct Live {
         browser: Option<Browser>,
-        size: Arc<Mutex<(u32, u32)>>,
+        view: Arc<Mutex<((u32, u32), f32)>>,
         options: PageOptions,
+    }
+
+    fn view_of(o: &PageOptions) -> ((u32, u32), f32) {
+        (o.view(), o.zoom.clamp(0.25, 5.0))
     }
 
     thread_local! {
@@ -305,20 +321,20 @@ mod imp {
 
     wrap_render_handler! {
         struct PageRender {
-            size: Arc<Mutex<(u32, u32)>>,
+            view: Arc<Mutex<((u32, u32), f32)>>,
             sink: FrameSink,
         }
         impl RenderHandler {
             fn view_rect(&self, _browser: Option<&mut Browser>, rect: Option<&mut Rect>) {
                 if let Some(rect) = rect {
-                    let (w, h) = *self.size.lock();
+                    let ((w, h), _) = *self.view.lock();
                     *rect = Rect { x: 0, y: 0, width: w.max(1) as i32, height: h.max(1) as i32 };
                 }
             }
             fn screen_info(&self, _browser: Option<&mut Browser>, info: Option<&mut ScreenInfo>) -> ::std::os::raw::c_int {
-                // one CSS pixel a pixel, whatever display Lightair is on
+                // pixels a CSS pixel: the page's zoom, whatever display Lightair is on
                 if let Some(info) = info {
-                    info.device_scale_factor = 1.0;
+                    info.device_scale_factor = self.view.lock().1;
                     return 1;
                 }
                 0
@@ -415,9 +431,9 @@ mod imp {
     }
 
     fn open(id: u64, options: PageOptions, sink: FrameSink, audio: AudioSink) {
-        let size = Arc::new(Mutex::new((options.width, options.height)));
+        let view = Arc::new(Mutex::new(view_of(&options)));
         let format = Arc::new(Mutex::new((48_000, 2)));
-        let mut client = PageClient::new(PageRender::new(size.clone(), sink), PageLife::new(id), PageAudio::new(format, audio));
+        let mut client = PageClient::new(PageRender::new(view.clone(), sink), PageLife::new(id), PageAudio::new(format, audio));
         let window = WindowInfo { windowless_rendering_enabled: 1, ..Default::default() };
         let browser_settings = BrowserSettings {
             windowless_frame_rate: options.fps.clamp(1, 60) as i32,
@@ -425,7 +441,7 @@ mod imp {
             ..Default::default()
         };
         let url = CefString::from(options.url.as_str());
-        PAGES.with(|pages| pages.borrow_mut().insert(id, Live { browser: None, size, options }));
+        PAGES.with(|pages| pages.borrow_mut().insert(id, Live { browser: None, view, options }));
         if browser_host_create_browser(Some(&window), Some(&mut client), Some(&url), Some(&browser_settings), None, None) != 1 {
             tracing::warn!("Chromium didn't open a page");
         }
@@ -436,10 +452,13 @@ mod imp {
             let mut pages = pages.borrow_mut();
             let Some(live) = pages.get_mut(&id) else { return };
             let before = std::mem::replace(&mut live.options, options.clone());
-            *live.size.lock() = (options.width, options.height);
+            *live.view.lock() = view_of(&options);
             let Some(browser) = &live.browser else { return };
             if let Some(host) = browser.host() {
-                if (before.width, before.height) != (options.width, options.height) {
+                if before.zoom != options.zoom {
+                    host.notify_screen_info_changed();
+                }
+                if (before.width, before.height, before.zoom) != (options.width, options.height, options.zoom) {
                     host.was_resized();
                 }
                 if before.fps != options.fps {

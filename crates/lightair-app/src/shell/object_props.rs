@@ -641,6 +641,11 @@ impl StudioWindow {
         let width = settings["width"].as_i64().unwrap_or(1920);
         let height = settings["height"].as_i64().unwrap_or(1080);
         let fps = settings["fps"].as_i64().unwrap_or(30);
+        // a browser's zoom steps
+        const ZOOMS: &[i64] = &[25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500];
+        let zoom = settings["zoom"].as_i64().unwrap_or(100);
+        let zoom_out = ZOOMS.iter().rev().copied().find(|z| *z < zoom).unwrap_or(ZOOMS[0]);
+        let zoom_in = ZOOMS.iter().copied().find(|z| *z > zoom).unwrap_or(ZOOMS[ZOOMS.len() - 1]);
         let set = |pairs: &[(&str, Value)]| {
             let mut s = settings.clone();
             for (key, value) in pairs {
@@ -681,6 +686,34 @@ impl StudioWindow {
         })
         .child(label("Frame rate"))
         .child(self.segmented("web-fps", rates, cx))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(label("Zoom"))
+                .when(zoom != 100, |d| {
+                    let reset = set(&[("zoom", json!(100))]);
+                    d.child(
+                        div()
+                            .id("web-zoom-reset")
+                            .text_size(px(11.))
+                            .text_color(tok::text_tertiary())
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(tok::text()))
+                            .child("Reset")
+                            .on_click(cx.listener(move |this, _, _, cx| this.exec(reset.clone(), cx))),
+                    )
+                }),
+        )
+        .child(self.field(
+            "web-zoom",
+            "",
+            format!("{zoom}%"),
+            set(&[("zoom", json!(zoom_out))]),
+            set(&[("zoom", json!(zoom_in))]),
+            cx,
+        ))
     }
 
     /// `page` (a web page's new size, `w × h`) with the selected object's box resized to match
