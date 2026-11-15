@@ -145,3 +145,128 @@ technique GFCoef
 		pixel_shader  = PSGFCoef(v_in);
 	}
 }
+
+// ---- green key: macOS's own Backgrounds paints pure green behind the person (Background
+// removal's "macOS" model sets that picture), and this takes it out. macOS blends the person's
+// edge into the green, so an edge pixel is a * person + (1 - a) * green: its green dominance
+// (g - max(r, b)) tells a, and taking the green back out recovers the person's own colour. ----
+
+uniform texture2d key_src;   // GreenKeyPremul: the camera's frame, untouched (where a comes from)
+uniform float key_softness;  // 0..1: how far into the edge it stays partly see-through
+uniform float2 key_texel;    // one pixel, in uv
+
+// The green's edge, from straight colour. An edge pixel is a * person + (1 - a) * green, so its
+// green dominance d = g - max(r, b) is a * d_person + (1 - a) * d_green, and
+// a = (d_green - d) / (d_green - d_person). d_green: the camera's green is d ~ 0.8-1 (softness
+// lowers the point where it counts as all green). d_person: about 0 (lo) away from the green;
+// next to it, the person's own from a few pixels inward (skin is below 0, so a slight green
+// mix in it would otherwise not show), which takes the faint green cast out of the inner rim.
+float key_hi()
+{
+	return 0.88 - 0.2 * (1.0 - key_softness);
+}
+
+float dominance(float3 c)
+{
+	return c.g - max(c.r, c.b);
+}
+
+float key_alpha_with(float d, float d_person)
+{
+	return saturate((key_hi() - d) / (key_hi() - min(0.03, d_person)));
+}
+
+float key_alpha(float3 c)
+{
+	return key_alpha_with(dominance(c), 0.03);
+}
+
+// Around uv, from eight pixels 4 px away: how much green (x, 0 none .. 1 all) and the most
+// person-like dominance (y). Two copies (the frame, the untouched frame): OBS's shader
+// converter takes no texture arguments.
+float2 near_offset(int i)
+{
+	float ang = float(i) * 0.785398;
+	return float2(cos(ang), sin(ang)) * key_texel * 4.0;
+}
+
+float2 around(float d0, float dmax, float dmin)
+{
+	float near = smoothstep(0.02, 0.3, 1.0 - key_alpha_with(dmax, 0.03));
+	return float2(near, lerp(0.03, min(dmin, d0), near));
+}
+
+float2 around_image(float2 uv, float d0)
+{
+	float dmax = -1.0;
+	float dmin = 1.0;
+	for (int i = 0; i < 8; i++) {
+		float d = dominance(image.Sample(linearClamp, uv + near_offset(i)).rgb);
+		dmax = max(dmax, d);
+		dmin = min(dmin, d);
+	}
+	return around(d0, dmax, dmin);
+}
+
+float2 around_src(float2 uv, float d0)
+{
+	float dmax = -1.0;
+	float dmin = 1.0;
+	for (int i = 0; i < 8; i++) {
+		float d = dominance(key_src.Sample(linearClamp, uv + near_offset(i)).rgb);
+		dmax = max(dmax, d);
+		dmin = min(dmin, d);
+	}
+	return around(d0, dmax, dmin);
+}
+
+// The person's own colour at an edge: the green's share taken out, and what green is left
+// (spill) brought down: next to the green, to between the other two channels; elsewhere only to
+// the larger of them, so a yellow or green shirt keeps its colour.
+float3 unmix(float3 c, float a, float near)
+{
+	float3 f = (c - (1.0 - a) * float3(0.0, 0.9, 0.0)) / max(a, 0.02);
+	float hi = max(f.r, f.b);
+	float mid = 0.5 * (f.r + f.b) + 0.25 * abs(f.r - f.b);
+	f.g = min(f.g, lerp(hi, mid, near));
+	return saturate(f);
+}
+
+// The frame on its own (straight alpha out, as libobs filters draw).
+float4 PSGreenKey(VertData v_in) : TARGET
+{
+	float4 c = image.Sample(linearClamp, v_in.uv);
+	float d = dominance(c.rgb);
+	float2 n = around_image(v_in.uv, d);
+	float a = key_alpha_with(d, n.y);
+	return float4(unmix(c.rgb, a, n.x), a * c.a);
+}
+
+// After Camera Studio's other effects (premultiplied in and out): a from the untouched frame.
+float4 PSGreenKeyPremul(VertData v_in) : TARGET
+{
+	float4 c = image.Sample(linearClamp, v_in.uv);
+	float3 s = c.a > 0.0001 ? c.rgb / c.a : c.rgb;
+	float d = dominance(key_src.Sample(linearClamp, v_in.uv).rgb);
+	float2 n = around_src(v_in.uv, d);
+	float a = key_alpha_with(d, n.y);
+	return float4(unmix(s, a, n.x), 1.0) * (a * c.a);
+}
+
+technique GreenKey
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSGreenKey(v_in);
+	}
+}
+
+technique GreenKeyPremul
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSGreenKeyPremul(v_in);
+	}
+}

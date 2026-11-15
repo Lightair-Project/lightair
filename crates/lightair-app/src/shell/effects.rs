@@ -476,7 +476,10 @@ impl StudioWindow {
             if key == Some("bg_quality") && model != 0 {
                 continue;
             }
-            if model == catalog::BG_MODEL_SYSTEM && key.is_some_and(|k| k != "bg_model") {
+            // (the green key's edge softness is Lightair's: Background removal keeps it)
+            if model == catalog::BG_MODEL_SYSTEM
+                && key.is_some_and(|k| k != "bg_model" && !(d.kind == "studio.bg_remove" && k == "bg_feather"))
+            {
                 continue;
             }
             match *c {
@@ -959,9 +962,38 @@ impl StudioWindow {
 
     // ------------------------------------------------------------ presence
 
+    /// macOS's Backgrounds picture for Lightair: green while a camera's Background removal uses
+    /// macOS (Camera Studio keys the green out), and back to what it was once none does.
+    fn sync_green_screen(&mut self, cx: &mut Context<Self>) {
+        let want = self.studio.read(cx).workspace().sources.values().any(|s| {
+            s.effects.iter().any(|e| {
+                e.enabled && e.kind == "studio.bg_remove" && e.settings.get("bg_model").and_then(Value::as_i64) == Some(catalog::BG_MODEL_SYSTEM)
+            })
+        });
+        if self.green_screen == Some(want) {
+            return;
+        }
+        self.green_screen = Some(want);
+        use crate::system_effects as sys;
+        if want {
+            // the user's picture, kept once (a green set before has no picture: "" then)
+            if self.prefs.macos_background_before.is_none() {
+                self.prefs.macos_background_before = Some(sys::background_picture().unwrap_or_default());
+                let _ = crate::prefs::save_to(&crate::prefs::path(), &self.prefs);
+            }
+            sys::set_background_colour(sys::GREEN);
+        } else if let Some(before) = self.prefs.macos_background_before.take() {
+            if !before.is_empty() {
+                sys::set_background_picture(std::path::Path::new(&before));
+            }
+            let _ = crate::prefs::save_to(&crate::prefs::path(), &self.prefs);
+        }
+    }
+
     /// Asks Camera Studio whether the selected source shows a face and a person (for the
     /// cards' hints). Cheap; called on a timer while the Inspector shows face effects.
     pub(super) fn refresh_presence(&mut self, cx: &mut Context<Self>) {
+        self.sync_green_screen(cx);
         let studio = self.studio.read(cx);
         let Some(source) = studio
             .selected_object
@@ -1476,6 +1508,12 @@ fn system_effect_panel(kind: &str, cx: &mut Context<StudioWindow>) -> Div {
         Some(false) => (tok::warn(), format!("{name} is off: turn it on in Video Effects")),
         None => (tok::warn(), format!("{name} needs a newer macOS")),
     };
+    // Backgrounds can be switched on from here (Video Effects' own switch, which is easy to miss)
+    let can_turn_on = state == Some(false) && kind != "studio.bg_blur";
+    let about = match kind {
+        "studio.bg_remove" => "macOS cuts you out inside the camera and paints green behind you (Lightair sets that, for Lightair only); Lightair takes the green out. Your own background picture comes back when you stop using it.",
+        _ => "macOS does this inside the camera, before Lightair gets the picture. Turn it on for Lightair and choose the blur or picture in Video Effects.",
+    };
     div()
         .flex()
         .flex_col()
@@ -1489,24 +1527,37 @@ fn system_effect_panel(kind: &str, cx: &mut Context<StudioWindow>) -> Div {
                 .items_center()
                 .gap_2()
                 .child(div().flex_none().size(px(8.)).rounded_full().bg(dot))
-                .child(div().flex_1().text_size(px(12.)).child(text)),
+                .child(div().flex_1().min_w_0().text_size(px(12.)).child(text))
+                .child(ui::info(("system-effect-info", kind.len()), about)),
         )
         .child(
             div()
-                .text_size(px(11.))
-                .text_color(tok::text_tertiary())
-                .child("macOS does this inside the camera, before Lightair gets the picture. Turn it on for Lightair and choose the blur or picture in Video Effects."),
-        )
-        .child(
-            Button::new("open-video-effects")
-                .label("Open Video Effects…")
-                .icon(ui::icon("camera"))
-                .xsmall()
-                .outline()
-                .on_click(cx.listener(|_, _, _, cx| {
-                    sys::open_video_effects();
-                    cx.notify();
-                })),
+                .flex()
+                .flex_wrap()
+                .gap_1p5()
+                .when(can_turn_on, |d| {
+                    d.child(
+                        Button::new("turn-on-backgrounds")
+                            .label("Turn on")
+                            .xsmall()
+                            .primary()
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                sys::set_backgrounds_on(true);
+                                cx.notify();
+                            })),
+                    )
+                })
+                .child(
+                    Button::new("open-video-effects")
+                        .label("Open Video Effects…")
+                        .icon(ui::icon("camera"))
+                        .xsmall()
+                        .outline()
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            sys::open_video_effects();
+                            cx.notify();
+                        })),
+                ),
         )
 }
 

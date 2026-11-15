@@ -868,6 +868,37 @@ static bool background_active(const struct beauty_filter *f)
 	return f->bg_mode != BG_OFF && f->bg_model != 2;
 }
 
+/* Remove with macOS's own effect: macOS paints green behind the person (Lightair sets that as
+ * its Backgrounds picture) and the green key takes it out. */
+static bool key_active(const struct beauty_filter *f)
+{
+	return f->bg_mode == BG_REMOVE && f->bg_model == 2 && f->bg_effect;
+}
+
+/* The green key after the other effects (premultiplied): see background.effect. */
+static gs_texture_t *render_green_key(struct beauty_filter *f, gs_texture_t *in, gs_texture_t *src, uint32_t w,
+				      uint32_t h)
+{
+	gs_effect_t *e = f->bg_effect;
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "image"), in);
+	gs_effect_set_texture(gs_effect_get_param_by_name(e, "key_src"), src);
+	gs_effect_set_float(gs_effect_get_param_by_name(e, "key_softness"), f->bg_feather);
+	struct vec2 texel;
+	vec2_set(&texel, 1.0f / (float)w, 1.0f / (float)h);
+	gs_effect_set_vec2(gs_effect_get_param_by_name(e, "key_texel"), &texel);
+	gs_texrender_reset(f->tr_bg_out);
+	if (!gs_texrender_begin(f->tr_bg_out, w, h))
+		return in;
+	struct vec4 clear;
+	vec4_zero(&clear);
+	gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
+	gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
+	while (gs_effect_loop(e, "GreenKeyPremul"))
+		gs_draw_sprite(in, 0, w, h);
+	gs_texrender_end(f->tr_bg_out);
+	return gs_texrender_get_texture(f->tr_bg_out);
+}
+
 static bool face_effects_active(const struct beauty_filter *f)
 {
 	if (makeup_active(f) || fx_layers_active(f->fx) || background_active(f))
@@ -1486,6 +1517,8 @@ static void process_frame(struct beauty_filter *f, gs_texture_t *src, uint32_t w
 	gs_texture_t *person_mask = vseg ? vseg : seg;
 	if (out && person_mask && background_active(f) && !f->debug_view)
 		out = render_background(f, out, person_mask, w, h);
+	if (out && key_active(f) && !f->debug_view)
+		out = render_green_key(f, out, src, w, h);
 
 	/* stickers, motion and atmosphere */
 	float t = (float)fmod((double)(os_gettime_ns() - f->start_ns) / 1e9, 3600.0);
@@ -1550,8 +1583,22 @@ static void beauty_render(void *data, gs_effect_t *unused)
 	uint32_t w = target ? obs_source_get_base_width(target) : 0;
 	uint32_t h = target ? obs_source_get_base_height(target) : 0;
 
-	if (!target || !parent || !w || !h || !f->blur_effect || !f->final_effect || !f->data_tex ||
-	    !face_effects_active(f)) {
+	if (!target || !parent || !w || !h) {
+		obs_source_skip_video_filter(f->source);
+		return;
+	}
+	/* only the green key: one pass over the frame, nothing tracked */
+	if (key_active(f) && !face_effects_active(f)) {
+		if (obs_source_process_filter_begin(f->source, GS_RGBA, OBS_ALLOW_DIRECT_RENDERING)) {
+			struct vec2 texel;
+			vec2_set(&texel, 1.0f / (float)w, 1.0f / (float)h);
+			gs_effect_set_float(gs_effect_get_param_by_name(f->bg_effect, "key_softness"), f->bg_feather);
+			gs_effect_set_vec2(gs_effect_get_param_by_name(f->bg_effect, "key_texel"), &texel);
+			obs_source_process_filter_tech_end(f->source, f->bg_effect, w, h, "GreenKey");
+		}
+		return;
+	}
+	if (!f->blur_effect || !f->final_effect || !f->data_tex || !face_effects_active(f)) {
 		obs_source_skip_video_filter(f->source);
 		return;
 	}
