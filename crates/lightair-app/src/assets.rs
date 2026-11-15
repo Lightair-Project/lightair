@@ -8,6 +8,7 @@ use gpui_kit::*;
 const OWN: &[(&str, &[u8])] = &[
     ("icons/lightair-cue.svg", include_bytes!("../assets/icons/lightair-cue.svg")),
     ("icons/lightair-safe-areas.svg", include_bytes!("../assets/icons/lightair-safe-areas.svg")),
+    ("icons/lightair-virtual-camera.svg", include_bytes!("../assets/icons/lightair-virtual-camera.svg")),
     ("icons/platforms/youtube.svg", include_bytes!("../assets/icons/platforms/youtube.svg")),
     ("icons/platforms/youtubeshorts.svg", include_bytes!("../assets/icons/platforms/youtubeshorts.svg")),
     ("icons/platforms/twitch.svg", include_bytes!("../assets/icons/platforms/twitch.svg")),

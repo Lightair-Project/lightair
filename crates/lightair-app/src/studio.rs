@@ -134,6 +134,8 @@ pub struct Studio {
     pub recent_lagged: u32,
     /// The newest saved clip, and replays playing on the canvas (scene, object, source).
     pub last_clip: Option<PathBuf>,
+    /// The canvas the virtual camera shows (`None`: the primary one).
+    pub virtual_camera_canvas: Option<Id>,
     replays: Vec<(Id, Id, Id)>,
     /// Microphone tracks' loudest peak (dBFS) for each of the last ten seconds.
     mic_history: std::collections::HashMap<Id, std::collections::VecDeque<f32>>,
@@ -192,6 +194,7 @@ impl Studio {
             multitrack_files: None,
             mic_history: Default::default(),
             last_clip: None,
+            virtual_camera_canvas: None,
             replays: Vec::new(),
             starter,
         };
@@ -570,6 +573,43 @@ impl Studio {
         } else if !settings.enabled && running {
             self.engine.post(|s| s.outputs.stop_clips());
         }
+    }
+
+    // ------------------------------------------------------------ virtual camera
+
+    /// The virtual camera's state now.
+    pub fn virtual_camera(&self) -> OutputState {
+        runtime().get(OutputKey::VirtualCamera).state
+    }
+
+    /// Starts the virtual camera, or stops it.
+    pub fn toggle_virtual_camera(&mut self, cx: &mut Context<Self>) {
+        if self.virtual_camera().is_running() || matches!(self.virtual_camera(), OutputState::Starting) {
+            self.engine.post(|s| s.outputs.stop_virtual_camera());
+        } else {
+            self.start_virtual_camera();
+        }
+        cx.notify();
+    }
+
+    fn start_virtual_camera(&mut self) {
+        let canvas = self.virtual_camera_canvas.filter(|c| self.workspace().canvas(*c).is_some());
+        self.engine.post(move |s| {
+            let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
+            if let Err(e) = s.outputs.start_virtual_camera(video) {
+                tracing::warn!(%e, "virtual camera didn't start");
+            }
+        });
+    }
+
+    /// What the virtual camera shows: a canvas (`None`: the primary); restarted on it if running.
+    pub fn set_virtual_camera_canvas(&mut self, canvas: Option<Id>, cx: &mut Context<Self>) {
+        self.virtual_camera_canvas = canvas;
+        if self.virtual_camera().is_running() {
+            self.engine.post(|s| s.outputs.stop_virtual_camera());
+            self.start_virtual_camera();
+        }
+        cx.notify();
     }
 
     pub fn clips_ready(&self) -> bool {
@@ -1112,7 +1152,7 @@ impl Studio {
 
     /// Surfaces output failures as issues (called on the stats tick).
     fn check_outputs(&mut self) {
-        let mut keys = vec![OutputKey::Clips];
+        let mut keys = vec![OutputKey::Clips, OutputKey::VirtualCamera];
         keys.extend(self.workspace().canvases.iter().map(|f| OutputKey::Recording(f.id)));
         keys.extend(self.workspace().outputs.destinations.iter().map(|d| OutputKey::Stream(d.id)));
         for key in keys {
@@ -1123,6 +1163,7 @@ impl Studio {
                         _ => "Recording".to_string(),
                     },
                     OutputKey::Clips => "Clips".to_string(),
+                    OutputKey::VirtualCamera => "Virtual camera".to_string(),
                     OutputKey::Stream(id) => self
                         .workspace()
                         .outputs
