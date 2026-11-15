@@ -1,11 +1,11 @@
-//! Crop view: while a layer is being cropped, the cut-away picture fades in around the crop as a
+//! Crop view: while a object is being cropped, the cut-away picture fades in around the crop as a
 //! ghost, and fades out again before the crop is applied, with the kept part unchanged
 //! throughout. Skipped when Lightair's module isn't built (`cargo xtask modules`).
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Crop, Document, Fit, Id, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Crop, Document, Fit, Id, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -59,11 +59,11 @@ fn the_cut_away_part_fades_in_and_out() {
         crop: Crop { left: 0, top: 0, right: 320, bottom: 0 },
         ..Layout::boxed(0.0, 0.0, 160.0, 180.0)
     };
-    let a = Layer::new("A", rid, [(f, layout)]);
+    let a = Object::new("A", rid, [(f, layout)]);
     let (aid, sid) = (a.id, Id::new());
     let mut scene = Scene::new("Main");
     scene.id = sid;
-    scene.layers = vec![a];
+    scene.objects = vec![a];
     apply(&engine, &mut doc, Command::AddSource { source: r });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
@@ -82,7 +82,7 @@ fn the_cut_away_part_fades_in_and_out() {
 
     // Cropping further while in crop view moves the window, not the picture.
     let tighter = Layout { crop: Crop { right: 480, ..layout.crop }, width: 80.0, ..layout };
-    apply(&engine, &mut doc, Command::SetLayout { scene: sid, layer: aid, canvas: f, layout: tighter });
+    apply(&engine, &mut doc, Command::SetLayout { scene: sid, object: aid, canvas: f, layout: tighter });
     std::thread::sleep(Duration::from_millis(300));
     let (kept, ghost) = (at(&preview, 40.0, 90.0), at(&preview, 120.0, 90.0));
     eprintln!("tighter: kept {kept:?}, now cut {ghost:?}");

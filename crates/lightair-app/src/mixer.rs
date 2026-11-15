@@ -695,11 +695,11 @@ impl MixerPanel {
 
         // output
         let route_name = match ch.route {
-            Route::Program => "Program".to_string(),
+            Route::Master => "Master".to_string(),
             Route::Bus(b) => workspace.audio.bus(b).map_or("Bus".into(), |b| b.name.clone()),
             Route::None => "Sends only".into(),
         };
-        let mut routes = vec![(Route::Program, "Program".to_string())];
+        let mut routes = vec![(Route::Master, "Master".to_string())];
         routes.extend(workspace.audio.buses.iter().filter(|b| b.id != id).map(|b| (Route::Bus(b.id), b.name.clone())));
         routes.push((Route::None, "Sends only".into()));
         let (me, current) = (cx.entity().downgrade(), ch.route);
@@ -1347,7 +1347,7 @@ impl MixerPanel {
             .border_color(if selected { tok::accent_primary() } else { tok::border() })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.studio.update(cx, |s, cx| {
-                    s.selected_layer = None;
+                    s.selected_object = None;
                     s.select_track(Some(id));
                     cx.notify();
                 })
@@ -1877,7 +1877,7 @@ enum TrackSource {
     Desktop,
     /// One app (its bundle id; "" until one is chosen).
     App(String),
-    /// Something else (a media layer, an older capture): kept until another is chosen.
+    /// Something else (a media object, an older capture): kept until another is chosen.
     Other,
 }
 
@@ -1969,7 +1969,7 @@ fn source_cmd(p: &Workspace, track: Id, to: &TrackSource, app_name: &str) -> Opt
     }
     let switched = new_track.source != t.source;
     commands.push(Command::UpdateTrack { track: new_track });
-    let shown = p.scenes.iter().any(|s| s.layers.iter().any(|l| l.source == Some(old.id)));
+    let shown = p.scenes.iter().any(|s| s.objects.iter().any(|l| l.source == Some(old.id)));
     let shared = p.tracks.iter().any(|o| o.id != track && o.source == old.id);
     if switched && !shown && !shared {
         commands.push(Command::RemoveSource { source: old.id });
@@ -2067,17 +2067,17 @@ fn strip_views(p: &Workspace) -> Vec<StripView> {
         trim: Some(x.trim_db),
         color: x.color,
     }));
-    // Program last: always the right-most strip
+    // the master last: always the right-most strip
     let m = &p.audio.master;
     v.push(StripView {
         id: lightair_core::MASTER_ID,
         kind: MixerStrip::Master,
-        name: "Program".into(),
+        name: "Master".into(),
         volume_db: m.volume_db,
         muted: m.muted,
         cue: Some(m.cue),
         effects: on(&m.effects),
-        badge: None, // "Program" says it
+        badge: None, // "Master" says it
         source: None,
         channel: None,
         mix_to_program: None,

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Fit, Id, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Fit, Id, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -36,15 +36,15 @@ fn pictures_follow_their_empty() {
     let r = Source::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 40, "height": 40}));
     let rid = r.id;
     // An empty at (60, 60) holding a 40×40 red square centred on it.
-    let group = Layer::empty("Group", [(f, (60.0, 60.0))]);
+    let group = Object::empty("Group", [(f, (60.0, 60.0))]);
     let gid = group.id;
     let square =
-        Layer::new("Square", rid, [(f, Layout { fit: Fit::Stretch, ..Layout::boxed(-20.0, -20.0, 40.0, 40.0) })])
+        Object::new("Square", rid, [(f, Layout { fit: Fit::Stretch, ..Layout::boxed(-20.0, -20.0, 40.0, 40.0) })])
             .under(gid);
     let sid = Id::new();
     let mut scene = Scene::new("Main");
     scene.id = sid;
-    scene.layers = vec![group, square];
+    scene.objects = vec![group, square];
     apply(&engine, &mut doc, Command::AddSource { source: r });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
@@ -53,9 +53,9 @@ fn pictures_follow_their_empty() {
 
     // Move the empty: the square goes with it.
     let set = |doc: &mut Document, f_: &dyn Fn(&mut Layout)| {
-        let mut layout = doc.workspace().scene(sid).unwrap().layer(gid).unwrap().layouts[&f];
+        let mut layout = doc.workspace().scene(sid).unwrap().object(gid).unwrap().layouts[&f];
         f_(&mut layout);
-        Command::SetLayout { scene: sid, layer: gid, canvas: f, layout }
+        Command::SetLayout { scene: sid, object: gid, canvas: f, layout }
     };
     let cmd = set(&mut doc, &|l| {
         l.x = 200.0;

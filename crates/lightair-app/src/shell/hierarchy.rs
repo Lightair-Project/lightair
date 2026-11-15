@@ -1,6 +1,6 @@
-//! The Hierarchy (docs/07-scenes-layers-canvas.md, "Hierarchy"): the scene's layers as a tree.
-//! Empties hold other layers, any layer can hold more, and rows drag above, below or into one
-//! another. The list shows the front first, a parent above the layers it holds.
+//! The Hierarchy (docs/07-scenes-objects-canvas.md, "Hierarchy"): the scene's objects as a tree.
+//! Empties hold other objects, any object can hold more, and rows drag above, below or into one
+//! another. The list shows the front first, a parent above the objects it holds.
 
 use std::collections::HashSet;
 
@@ -9,7 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Clip, Command, Id, Layer, Layout, Workspace, Scene};
+use lightair_core::{Clip, Command, Id, Object, Layout, Workspace, Scene};
 
 use super::StudioWindow;
 use super::assets::DraggedAsset;
@@ -30,16 +30,16 @@ pub(super) enum TreeDrop {
 const ROW: f32 = 30.0;
 const INDENT: f32 = 14.0;
 
-/// The rows to show, front first: (layer, depth, holds layers).
-fn rows<'a>(scene: &'a Scene, collapsed: &HashSet<Id>) -> Vec<(&'a Layer, usize, bool)> {
+/// The rows to show, front first: (object, depth, holds objects).
+fn rows<'a>(scene: &'a Scene, collapsed: &HashSet<Id>) -> Vec<(&'a Object, usize, bool)> {
     fn visit<'a>(
         scene: &'a Scene,
         parent: Option<Id>,
         depth: usize,
         collapsed: &HashSet<Id>,
-        out: &mut Vec<(&'a Layer, usize, bool)>,
+        out: &mut Vec<(&'a Object, usize, bool)>,
     ) {
-        let kids: Vec<&Layer> = scene.children(parent).collect();
+        let kids: Vec<&Object> = scene.children(parent).collect();
         for k in kids.into_iter().rev() {
             let holds = scene.children(Some(k.id)).next().is_some();
             out.push((k, depth, holds));
@@ -53,35 +53,35 @@ fn rows<'a>(scene: &'a Scene, collapsed: &HashSet<Id>) -> Vec<(&'a Layer, usize,
     out
 }
 
-/// The command for dropping `layer` at `zone` of `target` (`None`: below everything, at the
+/// The command for dropping `object` at `zone` of `target` (`None`: below everything, at the
 /// top level, behind the rest). `None` when it would go nowhere or inside itself.
 pub(super) fn drop_command(
     scene: &Scene,
-    layer: Id,
+    object: Id,
     target: Option<(Id, TreeDrop)>,
     collapsed: &HashSet<Id>,
 ) -> Option<Command> {
     let (parent, index) = match target {
         None => (None, Some(0)),
         Some((t, zone)) => {
-            if t == layer || scene.is_under(t, layer) {
+            if t == object || scene.is_under(t, object) {
                 return None;
             }
-            let t_layer = scene.layer(t)?;
-            // Siblings without the dragged layer: indices as they'll be once it's lifted out.
-            let siblings: Vec<Id> = scene.children(t_layer.parent).map(|l| l.id).filter(|id| *id != layer).collect();
+            let t_object = scene.object(t)?;
+            // Siblings without the dragged object: indices as they'll be once it's lifted out.
+            let siblings: Vec<Id> = scene.children(t_object.parent).map(|l| l.id).filter(|id| *id != object).collect();
             let at = siblings.iter().position(|id| *id == t)?;
             let open_parent = scene.children(Some(t)).next().is_some() && !collapsed.contains(&t);
             match zone {
                 TreeDrop::Into => (Some(t), None),
                 // Right under an open parent's row: its first (frontmost) child.
                 TreeDrop::Below if open_parent => (Some(t), None),
-                TreeDrop::Above => (t_layer.parent, Some(at + 1)),
-                TreeDrop::Below => (t_layer.parent, Some(at)),
+                TreeDrop::Above => (t_object.parent, Some(at + 1)),
+                TreeDrop::Below => (t_object.parent, Some(at)),
             }
         }
     };
-    Some(Command::ReparentLayer { scene: scene.id, layer, parent, index })
+    Some(Command::ReparentObject { scene: scene.id, object, parent, index })
 }
 
 impl StudioWindow {
@@ -97,31 +97,31 @@ impl StudioWindow {
         let scene_id = scene.id;
         let dragging = cx.has_active_drag();
         let hint = self.tree_drop.filter(|_| dragging);
-        let list = rows(&scene, &self.collapsed_layers);
+        let list = rows(&scene, &self.collapsed_objects);
         // the rows' order, for ⇧-click runs
         let order: std::sync::Arc<Vec<Id>> = std::sync::Arc::new(list.iter().map(|(l, _, _)| l.id).collect());
         let shell = cx.entity().downgrade();
         let mut items = Vec::new();
-        for (i, (layer, depth, holds)) in list.into_iter().enumerate() {
-            let id = layer.id;
-            let kind = layer.source.and_then(|i| workspace.sources.get(&i)).map(|i| i.kind.clone()).unwrap_or_default();
-            let prefab = layer.prefab.is_some();
+        for (i, (object, depth, holds)) in list.into_iter().enumerate() {
+            let id = object.id;
+            let kind = object.source.and_then(|i| workspace.sources.get(&i)).map(|i| i.kind.clone()).unwrap_or_default();
+            let prefab = object.prefab.is_some();
             let icon = if prefab {
                 "package"
-            } else if layer.is_empty() {
+            } else if object.is_empty() {
                 "box"
             } else {
                 ui::source_icon(&kind)
             };
-            let own_visible = layer.layouts.get(&canvas).is_some_and(|l| l.visible);
+            let own_visible = object.layouts.get(&canvas).is_some_and(|l| l.visible);
             let shown = scene.shown(id, canvas);
-            let locked = layer.locked;
+            let locked = object.locked;
             let inherited_lock = !locked && scene.locked(id);
             let is_sel = selection.contains(&id);
-            let target = RowTarget::Layer { scene: scene_id, layer: id };
-            let dragged = DraggedRow { target, name: layer.name.clone().into(), icon };
-            let name = layer.name.clone();
-            let collapsed = self.collapsed_layers.contains(&id);
+            let target = RowTarget::Object { scene: scene_id, object: id };
+            let dragged = DraggedRow { target, name: object.name.clone().into(), icon };
+            let name = object.name.clone();
+            let collapsed = self.collapsed_objects.contains(&id);
             let zone = hint.filter(|(t, _)| *t == id).map(|(_, z)| z);
             // Prefab instances' names in the accent colour, as in Unity.
             let text = match (shown, prefab) {
@@ -154,7 +154,7 @@ impl StudioWindow {
                         return;
                     }
                     if m.shift {
-                        let anchor = this.studio.read(cx).selected_layer;
+                        let anchor = this.studio.read(cx).selected_object;
                         match anchor.and_then(|a| order.iter().position(|x| *x == a)).zip(order.iter().position(|x| *x == id)) {
                             Some((a, b)) => {
                                 let run: Vec<Id> = order[a.min(b)..=a.max(b)].to_vec();
@@ -169,7 +169,7 @@ impl StudioWindow {
                         }
                         return;
                     }
-                    this.select_layer(Some(id), cx);
+                    this.select_object(Some(id), cx);
                     if ev.click_count() == 2 {
                         this.start_rename(target, &name, window, cx);
                     }
@@ -231,8 +231,8 @@ impl StudioWindow {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        if !this.collapsed_layers.remove(&id) {
-                            this.collapsed_layers.insert(id);
+                        if !this.collapsed_objects.remove(&id) {
+                            this.collapsed_objects.insert(id);
                         }
                         cx.notify();
                     }))
@@ -242,7 +242,7 @@ impl StudioWindow {
                     (true, true) => tok::prefab(),
                     (true, false) => tok::text_secondary(),
                 }))
-                .child(self.row_label(target, &layer.name, text))
+                .child(self.row_label(target, &object.name, text))
                 .child(
                     ui::icon_button(
                         ("lock", i),
@@ -252,7 +252,7 @@ impl StudioWindow {
                     .when(!locked && !is_sel, |d| d.opacity(if inherited_lock { 0.5 } else { 0.0 }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.exec(Command::SetLayerLocked { scene: scene_id, layer: id, locked: !locked }, cx)
+                        this.exec(Command::SetObjectLocked { scene: scene_id, object: id, locked: !locked }, cx)
                     })),
                 )
                 .child(
@@ -264,12 +264,12 @@ impl StudioWindow {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.exec(
-                            Command::SetLayerVisible { scene: scene_id, layer: id, canvas, visible: !own_visible },
+                            Command::SetObjectVisible { scene: scene_id, object: id, canvas, visible: !own_visible },
                             cx,
                         )
                     })),
                 )
-                // Drop line: above or below this row, indented to where the layer would land.
+                // Drop line: above or below this row, indented to where the object would land.
                 .when_some(zone.filter(|z| *z != TreeDrop::Into), |d, z| {
                     let line = div()
                         .absolute()
@@ -282,11 +282,11 @@ impl StudioWindow {
                 })
                 .context_menu({
                     let shell = shell.clone();
-                    move |m, window, cx| super::menus::layer_menu(m, &shell, window, cx)
+                    move |m, window, cx| super::menus::object_menu(m, &shell, window, cx)
                 });
             items.push(row);
         }
-        let empty_scene = scene.layers.is_empty();
+        let empty_scene = scene.objects.is_empty();
         col.child(
             div()
                 .id("hierarchy-scroll")
@@ -312,7 +312,7 @@ impl StudioWindow {
                         .flex_1()
                         .min_h(px(24.))
                         .drag_over::<DraggedRow>(|s, _, _, _| s.bg(tok::bg_raised()))
-                        .on_click(cx.listener(|this, _, _, cx| this.select_layer(None, cx)))
+                        .on_click(cx.listener(|this, _, _, cx| this.select_object(None, cx)))
                         .on_drop(cx.listener(move |this, row: &DraggedRow, _, cx| {
                             this.tree_drop = None;
                             this.drop_on_tree(row, None, cx);
@@ -322,7 +322,7 @@ impl StudioWindow {
                             this.tree_drop = None;
                             this.drop_asset_on_tree(&a.0, None, cx);
                         }))
-                        .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.select_layer(None, cx)))
+                        .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.select_object(None, cx)))
                         .context_menu({
                             let shell = shell.clone();
                             move |m, _, cx| super::menus::blank_menu(m, &shell, cx)
@@ -332,13 +332,13 @@ impl StudioWindow {
     }
 
     fn drop_on_tree(&mut self, row: &DraggedRow, target: Option<(Id, TreeDrop)>, cx: &mut Context<Self>) {
-        let RowTarget::Layer { scene, layer } = row.target else { return };
+        let RowTarget::Object { scene, object } = row.target else { return };
         let workspace = self.studio.read(cx).workspace().clone();
         let Some(sc) = workspace.scene(scene) else { return };
-        if let Some(cmd) = drop_command(sc, layer, target, &self.collapsed_layers) {
+        if let Some(cmd) = drop_command(sc, object, target, &self.collapsed_objects) {
             // Show where it went.
             if let Some((parent, TreeDrop::Into)) = target {
-                self.collapsed_layers.remove(&parent);
+                self.collapsed_objects.remove(&parent);
             }
             self.exec(cmd, cx);
         }
@@ -348,19 +348,19 @@ impl StudioWindow {
     pub(super) fn empty_inspector(
         &self,
         scene: &Scene,
-        layer: &Layer,
+        object: &Object,
         canvas: &lightair_core::Canvas,
         body: Div,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let lo = layer.layouts.get(&canvas.id).copied().unwrap_or(Layout::boxed(0., 0., 0., 0.));
-        let (sid, lid, fid) = (scene.id, layer.id, canvas.id);
+        let lo = object.layouts.get(&canvas.id).copied().unwrap_or(Layout::boxed(0., 0., 0., 0.));
+        let (sid, lid, fid) = (scene.id, object.id, canvas.id);
         let set = move |f: &dyn Fn(&mut Layout)| {
             let mut l = lo;
             f(&mut l);
-            Command::SetLayout { scene: sid, layer: lid, canvas: fid, layout: l }
+            Command::SetLayout { scene: sid, object: lid, canvas: fid, layout: l }
         };
-        let count = scene.layers.iter().filter(|l| scene.is_under(l.id, lid)).count();
+        let count = scene.objects.iter().filter(|l| scene.is_under(l.id, lid)).count();
         let header = div()
             .flex()
             .items_center()
@@ -374,10 +374,10 @@ impl StudioWindow {
                     .overflow_hidden()
                     .text_ellipsis()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(layer.name.clone()),
+                    .child(object.name.clone()),
             )
             .child(ui::icon_button("delete-empty", "trash", tok::text_secondary()).on_click(
-                cx.listener(move |this, _, _, cx| this.exec(Command::RemoveLayer { scene: sid, layer: lid }, cx)),
+                cx.listener(move |this, _, _, cx| this.exec(Command::RemoveObject { scene: sid, object: lid }, cx)),
             ));
         let scale = |l: &mut Layout, by: f32| {
             l.scale_x = (l.scale_x * by).clamp(0.05, 20.0);
@@ -456,7 +456,7 @@ impl StudioWindow {
 
     // ------------------------------------------------------------ copy, paste, duplicate
 
-    /// The selected layers (with what's under them) as a clip, also put on the clipboard.
+    /// The selected objects (with what's under them) as a clip, also put on the clipboard.
     pub(super) fn copy_selection(&mut self, cx: &mut Context<Self>) -> Option<Clip> {
         let studio = self.studio.read(cx);
         let clip = Clip::copy(studio.workspace(), studio.selected_scene?, &studio.selection())?;
@@ -470,9 +470,9 @@ impl StudioWindow {
         }
     }
 
-    /// Pastes the clipboard's layers next to the selection (in front of it, beside it), or at
+    /// Pastes the clipboard's objects next to the selection (in front of it, beside it), or at
     /// the front of the scene.
-    pub(super) fn paste_layers(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn paste_objects(&mut self, cx: &mut Context<Self>) {
         let Some(clip) = cx.read_from_clipboard().and_then(|c| c.text()).and_then(|t| Clip::from_text(&t)) else {
             return;
         };
@@ -491,9 +491,9 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
         let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
-        // Beside the frontmost selected layer, in front of it.
+        // Beside the frontmost selected object, in front of it.
         let selection = studio.selection();
-        let anchor = scene.layers.iter().rev().find(|l| selection.contains(&l.id));
+        let anchor = scene.objects.iter().rev().find(|l| selection.contains(&l.id));
         let (parent, index) = match anchor {
             Some(a) => {
                 let siblings: Vec<Id> = scene.children(a.parent).map(|l| l.id).collect();
@@ -509,7 +509,7 @@ impl StudioWindow {
         let label = if n == 1 { label.to_string() } else { format!("{label} {n} objects") };
         self.exec(Command::Batch { label, commands }, cx);
         self.studio.update(cx, |s, cx| {
-            s.selected_layer = roots.first().copied();
+            s.selected_object = roots.first().copied();
             s.also_selected = roots.iter().skip(1).copied().collect();
             cx.notify();
         });
@@ -527,26 +527,26 @@ impl StudioWindow {
             .iter()
             .map(|f| (f.id, if parent.is_some() { (0.0, 0.0) } else { (f.width as f32 / 2.0, f.height as f32 / 2.0) }))
             .collect();
-        let mut layer = Layer::empty("Empty", at);
-        layer.parent = parent;
-        let (id, scene_id) = (layer.id, scene.id);
+        let mut object = Object::empty("Empty", at);
+        object.parent = parent;
+        let (id, scene_id) = (object.id, scene.id);
         if let Some(p) = parent {
-            self.collapsed_layers.remove(&p);
+            self.collapsed_objects.remove(&p);
         }
-        self.exec(Command::AddLayer { scene: scene_id, layer, index: None }, cx);
-        self.select_layer(Some(id), cx);
-        self.start_rename(RowTarget::Layer { scene: scene_id, layer: id }, "Empty", window, cx);
+        self.exec(Command::AddObject { scene: scene_id, object, index: None }, cx);
+        self.select_object(Some(id), cx);
+        self.start_rename(RowTarget::Object { scene: scene_id, object: id }, "Empty", window, cx);
     }
 
-    /// Puts the selected layers in a new empty at the middle of their box (⌘G).
+    /// Puts the selected objects in a new empty at the middle of their box (⌘G).
     pub(super) fn group_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
         let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
-        // Outermost selected layers, back to front as they're stored.
+        // Outermost selected objects, back to front as they're stored.
         let selection = studio.selection();
-        let picked: Vec<&Layer> = scene
-            .layers
+        let picked: Vec<&Object> = scene
+            .objects
             .iter()
             .filter(|l| selection.contains(&l.id) && !selection.iter().any(|a| scene.is_under(l.id, *a)))
             .collect();
@@ -570,26 +570,26 @@ impl StudioWindow {
             let (px_, py_) = frame.unapply(((x0 + x1) / 2.0, (y0 + y1) / 2.0));
             layouts.push((f.id, (px_, py_)));
         }
-        let mut group = Layer::empty("Group", layouts);
+        let mut group = Object::empty("Group", layouts);
         group.parent = parent;
         let gid = group.id;
-        // In front of the frontmost picked layer, among the parent's children.
+        // In front of the frontmost picked object, among the parent's children.
         let siblings: Vec<Id> = scene.children(parent).map(|l| l.id).collect();
         let front = picked.iter().filter_map(|l| siblings.iter().position(|s| *s == l.id)).max();
-        let mut commands = vec![Command::AddLayer { scene: scene.id, layer: group, index: front.map(|i| i + 1) }];
-        commands.extend(picked.iter().map(|l| Command::ReparentLayer {
+        let mut commands = vec![Command::AddObject { scene: scene.id, object: group, index: front.map(|i| i + 1) }];
+        commands.extend(picked.iter().map(|l| Command::ReparentObject {
             scene: scene.id,
-            layer: l.id,
+            object: l.id,
             parent: Some(gid),
             index: None,
         }));
         let scene_id = scene.id;
         self.exec(Command::Batch { label: "Group objects".into(), commands }, cx);
-        self.select_layer(Some(gid), cx);
-        self.start_rename(RowTarget::Layer { scene: scene_id, layer: gid }, "Group", window, cx);
+        self.select_object(Some(gid), cx);
+        self.start_rename(RowTarget::Object { scene: scene_id, object: gid }, "Group", window, cx);
     }
 
-    /// Takes the layers out of the selected empty and removes it (⇧⌘G). Layers that aren't
+    /// Takes the objects out of the selected empty and removes it (⇧⌘G). Objects that aren't
     /// empties keep what they hold.
     pub(super) fn ungroup_selection(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
@@ -598,27 +598,27 @@ impl StudioWindow {
         let mut commands = Vec::new();
         let mut freed = Vec::new();
         for id in studio.selection() {
-            let Some(group) = scene.layer(id).filter(|l| l.is_empty()) else { continue };
+            let Some(group) = scene.object(id).filter(|l| l.is_empty()) else { continue };
             let siblings: Vec<Id> = scene.children(group.parent).map(|l| l.id).collect();
             let at = siblings.iter().position(|s| *s == id).unwrap_or(0);
             // Back to front, each in turn in front of the last, where the empty was.
             for (k, child) in scene.children(Some(id)).enumerate() {
-                commands.push(Command::ReparentLayer {
+                commands.push(Command::ReparentObject {
                     scene: scene.id,
-                    layer: child.id,
+                    object: child.id,
                     parent: group.parent,
                     index: Some(at + 1 + k),
                 });
                 freed.push(child.id);
             }
-            commands.push(Command::RemoveLayer { scene: scene.id, layer: id });
+            commands.push(Command::RemoveObject { scene: scene.id, object: id });
         }
         if commands.is_empty() {
             return;
         }
         self.exec(Command::Batch { label: "Ungroup".into(), commands }, cx);
         self.studio.update(cx, |s, cx| {
-            s.selected_layer = freed.first().copied();
+            s.selected_object = freed.first().copied();
             s.also_selected = freed.iter().skip(1).copied().collect();
             cx.notify();
         });
@@ -630,7 +630,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{TreeDrop, drop_command, rows};
-    use lightair_core::{Command, Document, Id, Source, Layer, Layout, Workspace, Scene};
+    use lightair_core::{Command, Document, Id, Source, Object, Layout, Workspace, Scene};
 
     /// Back, Group{A, B}, Front — built through commands like the app does.
     fn scene() -> (Document, Id, [Id; 5]) {
@@ -642,21 +642,21 @@ mod tests {
         let sc = Scene::new("S");
         let sid = sc.id;
         doc.apply(&Command::AddScene { scene: sc, index: None }).unwrap();
-        let pic = |n: &str| Layer::new(n, iid, [(f, Layout::boxed(0., 0., 10., 10.))]);
+        let pic = |n: &str| Object::new(n, iid, [(f, Layout::boxed(0., 0., 10., 10.))]);
         let back = pic("Back");
-        let group = Layer::empty("Group", [(f, (0., 0.))]);
+        let group = Object::empty("Group", [(f, (0., 0.))]);
         let a = pic("A").under(group.id);
         let b = pic("B").under(group.id);
         let front = pic("Front");
         let ids = [back.id, group.id, a.id, b.id, front.id];
         for l in [back, group, a, b, front] {
-            doc.apply(&Command::AddLayer { scene: sid, layer: l, index: None }).unwrap();
+            doc.apply(&Command::AddObject { scene: sid, object: l, index: None }).unwrap();
         }
         (doc, sid, ids)
     }
 
     fn names(doc: &Document, sid: Id) -> Vec<String> {
-        doc.workspace().scene(sid).unwrap().layers.iter().map(|l| l.name.clone()).collect()
+        doc.workspace().scene(sid).unwrap().objects.iter().map(|l| l.name.clone()).collect()
     }
 
     #[test]
@@ -674,16 +674,16 @@ mod tests {
     fn drops_land_above_below_and_into() {
         let (mut doc, sid, [back, group, a, b, front]) = scene();
         let none = HashSet::new();
-        let drop = |doc: &mut Document, layer: Id, target: Option<(Id, TreeDrop)>| {
+        let drop = |doc: &mut Document, object: Id, target: Option<(Id, TreeDrop)>| {
             let sc = doc.workspace().scene(sid).unwrap().clone();
-            let cmd = drop_command(&sc, layer, target, &none).expect("a move");
+            let cmd = drop_command(&sc, object, target, &none).expect("a move");
             doc.apply(&cmd).unwrap();
             assert!(doc.workspace().scene(sid).unwrap().is_well_formed());
         };
         // Front above B (in front of B, inside the group).
         drop(&mut doc, front, Some((b, TreeDrop::Above)));
         assert_eq!(names(&doc, sid), ["Back", "Group", "A", "B", "Front"]);
-        assert_eq!(doc.workspace().scene(sid).unwrap().layer(front).unwrap().parent, Some(group));
+        assert_eq!(doc.workspace().scene(sid).unwrap().object(front).unwrap().parent, Some(group));
         // Back below A (behind A, inside the group).
         drop(&mut doc, back, Some((a, TreeDrop::Below)));
         assert_eq!(names(&doc, sid), ["Group", "Back", "A", "B", "Front"]);
@@ -699,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn a_layer_cant_be_dropped_into_itself() {
+    fn a_object_cant_be_dropped_into_itself() {
         let (doc, sid, [_, group, a, ..]) = scene();
         let sc = doc.workspace().scene(sid).unwrap();
         assert!(drop_command(sc, group, Some((a, TreeDrop::Into)), &HashSet::new()).is_none());

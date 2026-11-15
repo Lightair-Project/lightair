@@ -1,4 +1,4 @@
-//! Renaming and drag-reordering rows in the Layers and Scenes lists (docs/05-interface-shell.md).
+//! Renaming and drag-reordering rows in the Objects and Scenes lists (docs/05-interface-shell.md).
 
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
@@ -10,7 +10,7 @@ use crate::ui::{self, tok};
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum RowTarget {
     Scene(Id),
-    Layer { scene: Id, layer: Id },
+    Object { scene: Id, object: Id },
     /// A mixer strip (track, bus or mix).
     Strip(lightair_core::MixerStrip),
 }
@@ -19,7 +19,7 @@ impl RowTarget {
     pub fn rename(self, name: String) -> Command {
         match self {
             RowTarget::Scene(scene) => Command::RenameScene { scene, name },
-            RowTarget::Layer { scene, layer } => Command::RenameLayer { scene, layer, name },
+            RowTarget::Object { scene, object } => Command::RenameObject { scene, object, name },
             RowTarget::Strip(strip) => Command::RenameStrip { strip, name },
         }
     }

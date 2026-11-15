@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Fit, Id, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Effect, Fit, Id, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -58,8 +58,8 @@ fn the_tracker_finds_the_face() {
     let mut scene = Scene::new("Main");
     scene.id = Id::new();
     let sid = scene.id;
-    scene.layers =
-        vec![Layer::new("Face", iid, [(f, Layout { fit: Fit::Fit, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
+    scene.objects =
+        vec![Object::new("Face", iid, [(f, Layout { fit: Fit::Fit, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
     apply(&engine, &mut doc, Command::AddSource { source });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
@@ -127,8 +127,8 @@ fn the_background_is_replaced_around_the_person() {
     source.effects.push(studio);
     let iid = source.id;
     let mut scene = Scene::new("Main");
-    scene.layers =
-        vec![Layer::new("Person", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
+    scene.objects =
+        vec![Object::new("Person", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
     apply(&engine, &mut doc, Command::AddSource { source });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
@@ -217,8 +217,8 @@ fn background_edges_hold_still() {
     source.effects.push(studio);
     let iid = source.id;
     let mut scene = Scene::new("Main");
-    scene.layers =
-        vec![Layer::new("Person", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
+    scene.objects =
+        vec![Object::new("Person", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
     apply(&engine, &mut doc, Command::AddSource { source });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
@@ -310,8 +310,8 @@ fn background_edges_steady_in_motion() {
     source.effects.push(studio);
     let iid = source.id;
     let mut scene = Scene::new("Main");
-    scene.layers =
-        vec![Layer::new("Person", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
+    scene.objects =
+        vec![Object::new("Person", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 1280.0, 720.0) })])];
     apply(&engine, &mut doc, Command::AddSource { source });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());

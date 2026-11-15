@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Id, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Id, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::outputs::{OutputKey, OutputState, StreamConfig, StreamProtocol, default_encoders, runtime};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -56,7 +56,7 @@ fn srt_udp_and_whip() {
     let f = doc.workspace().primary_canvas().id;
     let colour = Source::new("Colour", "color_source_v3", json!({"color": 0xFF3B4AFFu32, "width": 640, "height": 360}));
     let mut scene = Scene::new("Main");
-    scene.layers.push(Layer::new("Colour", colour.id, [(f, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));
+    scene.objects.push(Object::new("Colour", colour.id, [(f, Layout::boxed(0.0, 0.0, 640.0, 360.0))]));
     apply(&engine, &mut doc, Command::AddSource { source: colour });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let caps = engine.capabilities.encoders.clone();

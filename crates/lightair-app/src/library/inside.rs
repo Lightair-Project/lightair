@@ -1,5 +1,5 @@
 //! What's inside a Studio take, on its Library card: its parts (the screen or camera, each
-//! layer of its scene, each recorded mixer track), each sent to the Editor on its own or
+//! object of its scene, each recorded mixer track), each sent to the Editor on its own or
 //! exported as a file.
 
 use super::*;

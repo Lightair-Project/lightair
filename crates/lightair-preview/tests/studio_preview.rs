@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Frame, Preview, sample_ycbcr};
 use serde_json::json;
@@ -37,9 +37,9 @@ fn preview_shows_an_off_air_scene() {
     let red = Source::new("Red", "color_source_v3", json!({"color": 0xFF0000FFu32, "width": 320, "height": 180}));
     let blue = Source::new("Blue", "color_source_v3", json!({"color": 0xFFFF0000u32, "width": 320, "height": 180}));
     let mut live = Scene::new("Live");
-    live.layers.push(Layer::new("Red", red.id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
+    live.objects.push(Object::new("Red", red.id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let mut next = Scene::new("Next");
-    next.layers.push(Layer::new("Blue", blue.id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
+    next.objects.push(Object::new("Blue", blue.id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let (live_id, next_id) = (live.id, next.id);
     for cmd in [
         Command::AddSource { source: red },

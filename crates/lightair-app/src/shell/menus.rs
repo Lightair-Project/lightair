@@ -1,4 +1,4 @@
-//! Right-click menus (docs/05-interface-shell.md, "Context menus"). Right-clicking a layer, a
+//! Right-click menus (docs/05-interface-shell.md, "Context menus"). Right-clicking a object, a
 //! scene or empty space selects what's under the pointer first, then offers what can be done to
 //! it. Items run the same actions as the keyboard, so each menu shows its shortcuts.
 
@@ -10,7 +10,7 @@ use crate::rows::RowTarget;
 use crate::ui;
 
 /// What a menu needs to know about the selection when it opens.
-struct LayerFacts {
+struct ObjectFacts {
     count: usize,
     empty: bool,
     has_parent: bool,
@@ -25,40 +25,40 @@ fn clip_on_clipboard(cx: &App) -> bool {
 }
 
 impl StudioWindow {
-    fn layer_facts(&self, cx: &App) -> Option<LayerFacts> {
+    fn object_facts(&self, cx: &App) -> Option<ObjectFacts> {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace();
         let scene = studio.selected_scene.and_then(|id| workspace.scene(id))?;
-        let layer = studio.selected_layer.and_then(|id| scene.layer(id))?;
+        let object = studio.selected_object.and_then(|id| scene.object(id))?;
         let canvas = self.canvas_id(workspace);
-        let device = layer
+        let device = object
             .source
             .and_then(|i| workspace.sources.get(&i))
             .filter(|i| super::source::device_key(&i.kind, &i.settings).is_some())
             .map(|i| i.id);
-        Some(LayerFacts {
+        Some(ObjectFacts {
             count: studio.selection().len(),
-            empty: layer.is_empty(),
-            has_parent: layer.parent.is_some(),
-            visible: layer.layouts.get(&canvas).is_some_and(|l| l.visible),
-            locked: layer.locked,
+            empty: object.is_empty(),
+            has_parent: object.parent.is_some(),
+            visible: object.layouts.get(&canvas).is_some_and(|l| l.visible),
+            locked: object.locked,
             device,
         })
     }
 
     // ------------------------------------------------------------ what the menus do
 
-    /// A copy of a scene right after it: the same sources, new layers.
+    /// A copy of a scene right after it: the same sources, new objects.
     pub(super) fn duplicate_scene(&mut self, scene: Id, cx: &mut Context<Self>) {
         let workspace = self.studio.read(cx).workspace().clone();
         let Some(index) = workspace.scene_index(scene) else { return };
         let original = &workspace.scenes[index];
         let mut copy = Scene::new(format!("{} copy", original.name));
-        let ids: std::collections::HashMap<Id, Id> = original.layers.iter().map(|l| (l.id, Id::new())).collect();
-        copy.layers = original
-            .layers
+        let ids: std::collections::HashMap<Id, Id> = original.objects.iter().map(|l| (l.id, Id::new())).collect();
+        copy.objects = original
+            .objects
             .iter()
-            .map(|l| lightair_core::Layer { id: ids[&l.id], parent: l.parent.map(|p| ids[&p]), ..l.clone() })
+            .map(|l| lightair_core::Object { id: ids[&l.id], parent: l.parent.map(|p| ids[&p]), ..l.clone() })
             .collect();
         let id = copy.id;
         self.exec(Command::AddScene { scene: copy, index: Some(index + 1) }, cx);
@@ -68,7 +68,7 @@ impl StudioWindow {
         });
     }
 
-    /// Moves each selected layer among its siblings: `to` maps (index, sibling count) to the
+    /// Moves each selected object among its siblings: `to` maps (index, sibling count) to the
     /// new index.
     pub(super) fn arrange(&mut self, label: &str, to: impl Fn(usize, usize) -> usize, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
@@ -76,14 +76,14 @@ impl StudioWindow {
         let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
         let selection = studio.selection();
         let commands: Vec<Command> = scene
-            .layers
+            .objects
             .iter()
             .filter(|l| selection.contains(&l.id) && !selection.iter().any(|a| scene.is_under(l.id, *a)))
             .filter_map(|l| {
                 let siblings: Vec<Id> = scene.children(l.parent).map(|s| s.id).collect();
                 let at = siblings.iter().position(|s| *s == l.id)?;
                 let new = to(at, siblings.len()).min(siblings.len() - 1);
-                (new != at).then_some(Command::MoveLayer { scene: scene.id, layer: l.id, to: new })
+                (new != at).then_some(Command::MoveObject { scene: scene.id, object: l.id, to: new })
             })
             .collect();
         if !commands.is_empty() {
@@ -91,7 +91,7 @@ impl StudioWindow {
         }
     }
 
-    /// Shows or hides the selection (by the first layer's state).
+    /// Shows or hides the selection (by the first object's state).
     pub(super) fn toggle_selection_visible(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
@@ -100,11 +100,11 @@ impl StudioWindow {
         let selection = studio.selection();
         let visible = !selection
             .first()
-            .and_then(|id| scene.layer(*id))
+            .and_then(|id| scene.object(*id))
             .is_some_and(|l| l.layouts.get(&canvas).is_some_and(|lo| lo.visible));
         let commands: Vec<Command> = selection
             .iter()
-            .map(|layer| Command::SetLayerVisible { scene: scene.id, layer: *layer, canvas, visible })
+            .map(|object| Command::SetObjectVisible { scene: scene.id, object: *object, canvas, visible })
             .collect();
         if !commands.is_empty() {
             let label = if visible { "Show objects" } else { "Hide objects" };
@@ -117,16 +117,16 @@ impl StudioWindow {
         let workspace = studio.workspace().clone();
         let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
         let selection = studio.selection();
-        let locked = !selection.first().and_then(|id| scene.layer(*id)).is_some_and(|l| l.locked);
+        let locked = !selection.first().and_then(|id| scene.object(*id)).is_some_and(|l| l.locked);
         let commands: Vec<Command> =
-            selection.iter().map(|layer| Command::SetLayerLocked { scene: scene.id, layer: *layer, locked }).collect();
+            selection.iter().map(|object| Command::SetObjectLocked { scene: scene.id, object: *object, locked }).collect();
         if !commands.is_empty() {
             let label = if locked { "Lock objects" } else { "Unlock objects" };
             self.exec(Command::Batch { label: label.into(), commands }, cx);
         }
     }
 
-    /// Each selected layer out of its parent, in front of it, staying put on the canvas.
+    /// Each selected object out of its parent, in front of it, staying put on the canvas.
     pub(super) fn move_out_of_parent(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
@@ -135,10 +135,10 @@ impl StudioWindow {
             .selection()
             .iter()
             .filter_map(|id| {
-                let parent = scene.layer(scene.layer(*id)?.parent?)?;
+                let parent = scene.object(scene.object(*id)?.parent?)?;
                 let siblings: Vec<Id> = scene.children(parent.parent).map(|l| l.id).collect();
                 let at = siblings.iter().position(|s| *s == parent.id)?;
-                Some(Command::ReparentLayer { scene: scene.id, layer: *id, parent: parent.parent, index: Some(at + 1) })
+                Some(Command::ReparentObject { scene: scene.id, object: *id, parent: parent.parent, index: Some(at + 1) })
             })
             .collect();
         if !commands.is_empty() {
@@ -156,7 +156,7 @@ impl StudioWindow {
         let layouts: Vec<(Id, Layout)> = studio
             .selection()
             .iter()
-            .filter_map(|id| sc.layer(*id).filter(|l| !l.is_empty()))
+            .filter_map(|id| sc.object(*id).filter(|l| !l.is_empty()))
             .filter_map(|l| {
                 let world = sc.world(l.id, canvas.id)?;
                 Some((
@@ -184,7 +184,7 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)) else { return };
         let hit = scene
-            .layers
+            .objects
             .iter()
             .rev()
             .filter(|l| !l.is_empty())
@@ -193,21 +193,21 @@ impl StudioWindow {
         let selection = studio.selection();
         match hit {
             Some(id) if selection.contains(&id) => {}
-            Some(id) => self.select_layer(Some(id), cx),
-            None => self.select_layer(None, cx),
+            Some(id) => self.select_object(Some(id), cx),
+            None => self.select_object(None, cx),
         }
     }
 
     /// Before a row's menu opens: select the row unless it's already in the selection.
-    pub(super) fn row_right_down(&mut self, layer: Id, cx: &mut Context<Self>) {
-        if !self.studio.read(cx).selection().contains(&layer) {
-            self.select_layer(Some(layer), cx);
+    pub(super) fn row_right_down(&mut self, object: Id, cx: &mut Context<Self>) {
+        if !self.studio.read(cx).selection().contains(&object) {
+            self.select_object(Some(object), cx);
         }
     }
 }
 
-/// The menu for the selected layers (right-clicked in the Hierarchy or on the canvas).
-pub(super) fn layer_menu(
+/// The menu for the selected objects (right-clicked in the Hierarchy or on the canvas).
+pub(super) fn object_menu(
     menu: PopupMenu,
     shell: &WeakEntity<StudioWindow>,
     window: &mut Window,
@@ -216,7 +216,7 @@ pub(super) fn layer_menu(
     let Some(w) = shell.upgrade() else { return menu };
     let (facts, focus) = {
         let w = w.read(cx);
-        (w.layer_facts(cx), w.focus.clone())
+        (w.object_facts(cx), w.focus.clone())
     };
     let Some(f) = facts else { return blank_menu(menu, shell, cx) };
     let shell = shell.clone();
@@ -225,7 +225,7 @@ pub(super) fn layer_menu(
         .action_context(focus)
         .menu_with_icon("Cut", ui::icon("scissors"), Box::new(CutSelection))
         .menu_with_icon("Copy", ui::icon("copy"), Box::new(CopySelection))
-        .menu_with_icon_and_disabled("Paste", ui::icon("clipboard-paste"), Box::new(PasteLayers), !paste)
+        .menu_with_icon_and_disabled("Paste", ui::icon("clipboard-paste"), Box::new(PasteObjects), !paste)
         .menu_with_icon("Duplicate", ui::icon("copy-plus"), Box::new(DuplicateSelection))
         .menu_with_icon("Delete", ui::icon("trash"), Box::new(DeleteSelection))
         .separator();
@@ -264,12 +264,12 @@ pub(super) fn layer_menu(
         .menu_with_icon(
             if f.visible { "Hide" } else { "Show" },
             ui::icon(if f.visible { "eye-off" } else { "eye" }),
-            Box::new(ToggleLayerVisible),
+            Box::new(ToggleObjectVisible),
         )
         .menu_with_icon(
             if f.locked { "Unlock" } else { "Lock" },
             ui::icon(if f.locked { "lock-open" } else { "lock" }),
-            Box::new(ToggleLayerLocked),
+            Box::new(ToggleObjectLocked),
         );
     if !f.empty {
         menu = menu.separator().menu_with_icon("Fill canvas", ui::icon("maximize"), Box::new(FillCanvas));
@@ -287,11 +287,11 @@ pub(super) fn blank_menu(menu: PopupMenu, shell: &WeakEntity<StudioWindow>, cx: 
     let paste = clip_on_clipboard(cx);
     let s = shell.clone();
     menu.action_context(focus)
-        .menu_with_icon_and_disabled("Paste", ui::icon("clipboard-paste"), Box::new(PasteLayers), !paste)
+        .menu_with_icon_and_disabled("Paste", ui::icon("clipboard-paste"), Box::new(PasteObjects), !paste)
         .separator()
         .item(PopupMenuItem::new("Add object…").icon(ui::icon("plus")).on_click(move |_, window, cx| {
             if let Some(s) = s.upgrade() {
-                s.update(cx, |w, cx| w.open_add_layer(window, cx));
+                s.update(cx, |w, cx| w.open_add_object(window, cx));
             }
         }))
         .menu_with_icon("Create empty", ui::icon("box"), Box::new(CreateEmpty))

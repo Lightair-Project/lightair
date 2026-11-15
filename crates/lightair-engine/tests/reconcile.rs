@@ -1,7 +1,7 @@
 //! Reconciler idempotence (docs/04-engine-libobs.md, "Reconciler"): applying the edits one by
 //! one must leave libobs in exactly the same state as rebuilding from the final document.
 
-use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -19,9 +19,9 @@ fn incremental_reconcile_matches_full_rebuild() {
     let main = Scene::new("Main");
     let brb = Scene::new("BRB");
     let (main_id, brb_id) = (main.id, brb.id);
-    let l1 = Layer::new("Red", red_id, [(canvas, Layout::boxed(0.0, 0.0, 640.0, 360.0))]);
-    let l2 = Layer::new("Blue", blue_id, [(canvas, Layout::boxed(320.0, 180.0, 640.0, 360.0))]);
-    let l3 = Layer::new("Red again", red_id, [(canvas, Layout::boxed(10.0, 10.0, 100.0, 100.0))]);
+    let l1 = Object::new("Red", red_id, [(canvas, Layout::boxed(0.0, 0.0, 640.0, 360.0))]);
+    let l2 = Object::new("Blue", blue_id, [(canvas, Layout::boxed(320.0, 180.0, 640.0, 360.0))]);
+    let l3 = Object::new("Red again", red_id, [(canvas, Layout::boxed(10.0, 10.0, 100.0, 100.0))]);
     let (l1_id, l2_id) = (l1.id, l2.id);
 
     let edits = vec![
@@ -29,23 +29,23 @@ fn incremental_reconcile_matches_full_rebuild() {
         Command::AddSource { source: blue },
         Command::AddScene { scene: main, index: None },
         Command::AddScene { scene: brb, index: None },
-        Command::AddLayer { scene: main_id, layer: l1, index: None },
-        Command::AddLayer { scene: main_id, layer: l2, index: None },
-        Command::AddLayer { scene: brb_id, layer: l3, index: None },
+        Command::AddObject { scene: main_id, object: l1, index: None },
+        Command::AddObject { scene: main_id, object: l2, index: None },
+        Command::AddObject { scene: brb_id, object: l3, index: None },
         Command::SetLayout {
             scene: main_id,
-            layer: l1_id,
+            object: l1_id,
             canvas,
             layout: Layout { rotation: 15.0, ..Layout::boxed(50.0, 60.0, 300.0, 200.0) },
         },
-        Command::MoveLayer { scene: main_id, layer: l2_id, to: 0 },
-        Command::SetLayerVisible { scene: main_id, layer: l1_id, canvas, visible: false },
+        Command::MoveObject { scene: main_id, object: l2_id, to: 0 },
+        Command::SetObjectVisible { scene: main_id, object: l1_id, canvas, visible: false },
         Command::SetSourceSettings {
             source: blue_id,
             settings: json!({"color": 0xFF00FF00u32, "width": 800, "height": 600}),
         },
         Command::SetProgram { scene: Some(brb_id) },
-        Command::RemoveLayer { scene: brb_id, layer: doc_layer_placeholder() },
+        Command::RemoveObject { scene: brb_id, object: doc_object_placeholder() },
     ];
 
     let mut applied = 0;
@@ -83,10 +83,10 @@ fn incremental_reconcile_matches_full_rebuild() {
     let vid = vertical.id;
     let mut commands = vec![Command::AddCanvas { canvas: vertical }];
     for scene in &doc.workspace().scenes {
-        for layer in &scene.layers {
+        for object in &scene.objects {
             commands.push(Command::SetLayout {
                 scene: scene.id,
-                layer: layer.id,
+                object: object.id,
                 canvas: vid,
                 layout: Layout::boxed(0.0, 420.0, 1080.0, 1080.0),
             });
@@ -120,7 +120,7 @@ fn incremental_reconcile_matches_full_rebuild() {
     assert!(canvas_ok, "vertical canvas is 1080x1920");
 }
 
-/// A layer id that doesn't exist: the last edit must fail validation and change nothing.
-fn doc_layer_placeholder() -> lightair_core::Id {
+/// A object id that doesn't exist: the last edit must fail validation and change nothing.
+fn doc_object_placeholder() -> lightair_core::Id {
     lightair_core::Id::new()
 }

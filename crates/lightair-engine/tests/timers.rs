@@ -1,8 +1,8 @@
-//! Countdown and stopwatch layers: start on air, pause, add time, end with an event.
+//! Countdown and stopwatch objects: start on air, pause, add time, end with an event.
 
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::timers::{TIMER_KIND, TimerAction};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -35,8 +35,8 @@ fn countdown_and_stopwatch() {
     let watch = Source::new("Stopwatch", TIMER_KIND, json!({"mode": "stopwatch", "autostart": false}));
     let (cd, sw) = (countdown.id, watch.id);
     let mut on_air = Scene::new("Soon");
-    on_air.layers.push(Layer::new("Countdown", cd, [(f, Layout::boxed(0.0, 0.0, 320.0, 90.0))]));
-    on_air.layers.push(Layer::new("Stopwatch", sw, [(f, Layout::boxed(0.0, 90.0, 320.0, 90.0))]));
+    on_air.objects.push(Object::new("Countdown", cd, [(f, Layout::boxed(0.0, 0.0, 320.0, 90.0))]));
+    on_air.objects.push(Object::new("Stopwatch", sw, [(f, Layout::boxed(0.0, 90.0, 320.0, 90.0))]));
     let scene = on_air.id;
     // The first scene goes on air by itself; the timers' scene comes second.
     apply(&engine, &mut doc, Command::AddScene { scene: Scene::new("Live"), index: None });

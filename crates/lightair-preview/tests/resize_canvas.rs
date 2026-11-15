@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Fit, Canvas, Id, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Fit, Canvas, Id, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, frame_size, sample_ycbcr};
 use serde_json::json;
@@ -40,8 +40,8 @@ fn the_main_canvas_resizes_live() {
     let mut scene = Scene::new("Main");
     let sid = Id::new();
     scene.id = sid;
-    scene.layers =
-        vec![Layer::new("Red", rid, [(f, Layout { fit: Fit::Stretch, ..Layout::boxed(0.0, 0.0, 320.0, 180.0) })])];
+    scene.objects =
+        vec![Object::new("Red", rid, [(f, Layout { fit: Fit::Stretch, ..Layout::boxed(0.0, 0.0, 320.0, 180.0) })])];
     apply(&engine, &mut doc, Command::AddSource { source: r });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
@@ -53,7 +53,7 @@ fn the_main_canvas_resizes_live() {
     let frame = settled(&preview);
     eprintln!("after resize: {:?}", frame_size(&frame));
     assert_eq!(frame_size(&frame), (640, 360), "the main canvas is bigger now");
-    // The red layer still covers its old box (top-left quarter), and the scene is still there.
+    // The red object still covers its old box (top-left quarter), and the scene is still there.
     assert!(red(sample_ycbcr(&frame, 0.2, 0.2).unwrap()), "the scene survives the reset");
     drop(preview);
     drop(engine);

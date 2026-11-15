@@ -1,6 +1,6 @@
-//! Assets and prefabs (docs/07-scenes-layers-canvas.md, "Assets"): the workspace's `assets` folder
+//! Assets and prefabs (docs/07-scenes-objects-canvas.md, "Assets"): the workspace's `assets` folder
 //! as a panel. Files dropped from Finder are copied in; images, video and sound drag onto the
-//! canvas or into the Hierarchy as layers. A layer dragged here (or "Save as prefab") becomes a
+//! canvas or into the Hierarchy as objects. A object dragged here (or "Save as prefab") becomes a
 //! prefab: it and everything under it, reusable. Placed prefabs stay linked: an instance can
 //! send its changes to the prefab (and every other instance), or go back to it.
 
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_core::{Clip, Command, Id, Source, Layer, Layout, Workspace};
+use lightair_core::{Clip, Command, Id, Source, Object, Layout, Workspace};
 use serde_json::json;
 
 use super::StudioWindow;
@@ -238,10 +238,10 @@ impl StudioWindow {
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.import_files(paths.paths(), cx);
             }))
-            // A layer from the Hierarchy: saved as a prefab.
+            // A object from the Hierarchy: saved as a prefab.
             .drag_over::<DraggedRow>(|s, _, _, _| s.bg(tok::bg_raised()))
             .on_drop(cx.listener(|this, row: &DraggedRow, _, cx| match row.target {
-                RowTarget::Layer { layer, .. } => this.save_prefab(layer, cx),
+                RowTarget::Object { object, .. } => this.save_prefab(object, cx),
                 RowTarget::Scene(scene) => this.save_scene_asset(scene, cx),
                 RowTarget::Strip(_) => {}
             }))
@@ -304,14 +304,14 @@ impl StudioWindow {
         }
     }
 
-    /// Saves `layer` and everything under it as `<name>.prefab`, and links it to the prefab.
-    pub(super) fn save_prefab(&mut self, layer: Id, cx: &mut Context<Self>) {
+    /// Saves `object` and everything under it as `<name>.prefab`, and links it to the prefab.
+    pub(super) fn save_prefab(&mut self, object: Id, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let Some(dir) = studio.assets_dir() else { return };
         let Some(scene) = studio.selected_scene else { return };
-        let Some(mut clip) = Clip::copy(studio.workspace(), scene, &[layer]) else { return };
-        let name = clip.layers[0].name.clone();
-        clip.layers[0].prefab = None;
+        let Some(mut clip) = Clip::copy(studio.workspace(), scene, &[object]) else { return };
+        let name = clip.objects[0].name.clone();
+        clip.objects[0].prefab = None;
         let path = free_name(&dir, &name, "prefab");
         let Ok(text) = serde_json::to_string_pretty(&clip) else { return };
         if let Err(e) = std::fs::write(&path, text) {
@@ -319,12 +319,12 @@ impl StudioWindow {
             return;
         }
         let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        self.exec(Command::SetLayerPrefab { scene, layer, prefab: Some(file) }, cx);
+        self.exec(Command::SetObjectPrefab { scene, object, prefab: Some(file) }, cx);
         self.selected_asset = Some(path);
         self.refresh_assets();
     }
 
-    /// Saves a whole scene as `<name>.scene`: its layers and sources, to add again later or in
+    /// Saves a whole scene as `<name>.scene`: its objects and sources, to add again later or in
     /// another workspace.
     pub(super) fn save_scene_asset(&mut self, scene: Id, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
@@ -366,7 +366,7 @@ impl StudioWindow {
         serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
     }
 
-    /// Adds an asset to the scene: a prefab instance, or a layer for an image, video or sound.
+    /// Adds an asset to the scene: a prefab instance, or a object for an image, video or sound.
     pub(super) fn place_asset(&mut self, asset: &Asset, at: Placement, cx: &mut Context<Self>) {
         if asset.kind == AssetKind::Scene {
             return self.add_scene_asset(asset, cx);
@@ -388,7 +388,7 @@ impl StudioWindow {
                 let file = asset.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let Some(mut clip) = self.read_prefab(&file, cx) else { return };
                 // Move the prefab's root so its frame is centred where it's going.
-                if let Some(root) = clip.layers.first_mut() {
+                if let Some(root) = clip.objects.first_mut() {
                     for f in &workspace.canvases {
                         if let Some(lo) = root.layouts.get_mut(&f.id)
                             && matches!(at, Placement::At(..))
@@ -426,11 +426,11 @@ impl StudioWindow {
                         Some((f.id, world.to_local(&scene.frame_of(parent, f.id)?)))
                     })
                     .collect();
-                let mut layer = Layer::new(&name, source.id, layouts);
-                layer.parent = parent;
-                let id = layer.id;
+                let mut object = Object::new(&name, source.id, layouts);
+                object.parent = parent;
+                let id = object.id;
                 (
-                    vec![Command::AddSource { source }, Command::AddLayer { scene: scene.id, layer, index }],
+                    vec![Command::AddSource { source }, Command::AddObject { scene: scene.id, object, index }],
                     Some(id),
                     format!("Add {name}"),
                 )
@@ -441,10 +441,10 @@ impl StudioWindow {
             return;
         }
         if let Some(p) = parent {
-            self.collapsed_layers.remove(&p);
+            self.collapsed_objects.remove(&p);
         }
         self.exec(Command::Batch { label, commands }, cx);
-        self.select_layer(root, cx);
+        self.select_object(root, cx);
     }
 
     /// Drops onto the canvas: assets and files from Finder land where they're dropped.
@@ -473,7 +473,7 @@ impl StudioWindow {
             None => Placement::Into(None, Some(0)),
             Some((t, TreeDrop::Into)) => Placement::Into(Some(t), None),
             Some((t, zone)) => {
-                let Some(l) = scene.layer(t) else { return };
+                let Some(l) = scene.object(t) else { return };
                 let siblings: Vec<Id> = scene.children(l.parent).map(|s| s.id).collect();
                 let at = siblings.iter().position(|s| *s == t).unwrap_or(0);
                 Placement::Into(l.parent, Some(if zone == TreeDrop::Above { at + 1 } else { at }))
@@ -485,11 +485,11 @@ impl StudioWindow {
     // ------------------------------------------------------------ prefab instances
 
     /// The bar on an instance's Inspector: which prefab, and what to do with the link.
-    pub(super) fn prefab_bar(&self, scene: Id, layer: &Layer, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let file = layer.prefab.clone()?;
+    pub(super) fn prefab_bar(&self, scene: Id, object: &Object, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let file = object.prefab.clone()?;
         let name = Path::new(&file).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(file.clone());
         let missing = self.read_prefab(&file, cx).is_none();
-        let id = layer.id;
+        let id = object.id;
         let button = |key: &'static str, label: &'static str, tip: &'static str| {
             gpui_kit::component::button::Button::new(key).label(label).tooltip(tip)
         };
@@ -537,7 +537,7 @@ impl StudioWindow {
                                 .xsmall()
                                 .ghost()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.exec(Command::SetLayerPrefab { scene, layer: id, prefab: None }, cx)
+                                    this.exec(Command::SetObjectPrefab { scene, object: id, prefab: None }, cx)
                                 })),
                         ),
                 )
@@ -548,7 +548,7 @@ impl StudioWindow {
     /// Back to the prefab: the instance is rebuilt from the file.
     pub(super) fn revert_prefab(&mut self, scene: Id, root: Id, cx: &mut Context<Self>) {
         let workspace = self.studio.read(cx).workspace().clone();
-        let Some(file) = workspace.scene(scene).and_then(|s| s.layer(root)).and_then(|l| l.prefab.clone()) else {
+        let Some(file) = workspace.scene(scene).and_then(|s| s.object(root)).and_then(|l| l.prefab.clone()) else {
             return;
         };
         let Some(clip) = self.read_prefab(&file, cx) else { return };
@@ -557,7 +557,7 @@ impl StudioWindow {
             return;
         }
         self.exec(Command::Batch { label: "Revert to prefab".into(), commands }, cx);
-        self.select_layer(new_root, cx);
+        self.select_object(new_root, cx);
     }
 
     /// Saves this instance into its prefab, then rebuilds every other instance from it.
@@ -565,11 +565,11 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
         let Some(dir) = studio.assets_dir() else { return };
-        let Some(file) = workspace.scene(scene).and_then(|s| s.layer(root)).and_then(|l| l.prefab.clone()) else {
+        let Some(file) = workspace.scene(scene).and_then(|s| s.object(root)).and_then(|l| l.prefab.clone()) else {
             return;
         };
         let Some(mut clip) = Clip::copy(&workspace, scene, &[root]) else { return };
-        clip.layers[0].prefab = None;
+        clip.objects[0].prefab = None;
         let Ok(text) = serde_json::to_string_pretty(&clip) else { return };
         if let Err(e) = std::fs::write(dir.join(&file), text) {
             tracing::warn!(%e, "could not save the prefab");
@@ -579,7 +579,7 @@ impl StudioWindow {
         let mut scratch = (*workspace).clone();
         let mut commands = Vec::new();
         for sc in &workspace.scenes {
-            for l in sc.layers.iter().filter(|l| l.prefab.as_deref() == Some(file.as_str()) && l.id != root) {
+            for l in sc.objects.iter().filter(|l| l.prefab.as_deref() == Some(file.as_str()) && l.id != root) {
                 let (cmds, _) = clip.replace_instance(&scratch, sc.id, l.id);
                 for c in &cmds {
                     let _ = c.apply(&mut scratch);

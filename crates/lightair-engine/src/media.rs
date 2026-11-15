@@ -1,5 +1,5 @@
 //! Media playback control for media sources (video files): runtime state, not document state
-//! (docs/07-scenes-layers-canvas.md, "Media layer"). Looping and the file live in settings.
+//! (docs/07-scenes-objects-canvas.md, "Media layer"). Looping and the file live in settings.
 
 use libobs_sys as sys;
 use lightair_core::Id;

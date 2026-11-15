@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Effect, Fit, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Effect, Fit, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::{Value, json};
@@ -52,8 +52,8 @@ fn every_shader_effect_renders() {
     let source = Source::new("Picture", "image_source", json!({"file": picture.to_string_lossy()}));
     let iid = source.id;
     let mut scene = Scene::new("Main");
-    scene.layers =
-        vec![Layer::new("Picture", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 640.0, 360.0) })])];
+    scene.objects =
+        vec![Object::new("Picture", iid, [(f, Layout { fit: Fit::Fill, ..Layout::boxed(0.0, 0.0, 640.0, 360.0) })])];
     apply(&engine, &mut doc, Command::AddSource { source });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());

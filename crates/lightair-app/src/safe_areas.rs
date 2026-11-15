@@ -1,4 +1,4 @@
-//! Safe-area overlays (docs/07-scenes-layers-canvas.md, "Formats"): where each platform draws
+//! Safe-area overlays (docs/07-scenes-objects-canvas.md, "Formats"): where each platform draws
 //! its own UI over the stream, so text and faces stay clear. Zones are fractions of the canvas
 //! and approximate: platforms move their buttons now and then.
 

@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_core::{Command, Document, Fit, Id, Source, Layer, Layout, Workspace, Scene, Shape, ShapeKind, diff};
+use lightair_core::{Command, Document, Fit, Id, Source, Object, Layout, Workspace, Scene, Shape, ShapeKind, diff};
 use lightair_engine::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
@@ -69,16 +69,16 @@ fn flip_and_tilt() {
     let f = doc.workspace().primary_canvas().id;
     let image = Source::new("Halves", "image_source", json!({"file": png.to_string_lossy()}));
     let full = Layout { fit: Fit::Stretch, ..Layout::boxed(0.0, 0.0, 320.0, 180.0) };
-    let layer = Layer::new("Halves", image.id, [(f, full)]);
-    let (lid, sid) = (layer.id, Id::new());
+    let object = Object::new("Halves", image.id, [(f, full)]);
+    let (lid, sid) = (object.id, Id::new());
     let mut scene = Scene::new("Main");
     scene.id = sid;
-    scene.layers.push(layer);
+    scene.objects.push(object);
     apply(&engine, &mut doc, Command::AddSource { source: image });
     apply(&engine, &mut doc, Command::AddScene { scene, index: None });
     let preview = engine.call(|_| Preview::attach());
     let set = |doc: &mut Document, layout: Layout| {
-        apply(&engine, doc, Command::SetLayout { scene: sid, layer: lid, canvas: f, layout })
+        apply(&engine, doc, Command::SetLayout { scene: sid, object: lid, canvas: f, layout })
     };
     std::thread::sleep(Duration::from_millis(300));
     assert!(red(at(&preview, 80.0, 90.0)) && blue(at(&preview, 240.0, 90.0)), "red left, blue right");

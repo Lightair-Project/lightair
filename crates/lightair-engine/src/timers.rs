@@ -1,4 +1,4 @@
-//! Countdown, stopwatch and clock layers (docs/07-scenes-layers-canvas.md, "Timer"). The
+//! Countdown, stopwatch and clock objects (docs/07-scenes-objects-canvas.md, "Timer"). The
 //! document holds a `lightair_timer` source whose settings are text style plus timer settings;
 //! libobs shows it with a text source whose text a tick callback rewrites once a second. Where
 //! a timer is (running, paused, ended) is runtime state, never in the document or undo history.
@@ -32,7 +32,7 @@ pub struct TimerConfig {
     pub seconds: i64,
     /// Shown when a countdown ends (empty: 0:00).
     pub end_text: String,
-    /// Start when the layer first goes on air.
+    /// Start when the object first goes on air.
     pub autostart: bool,
     /// Clock: show seconds.
     pub show_seconds: bool,

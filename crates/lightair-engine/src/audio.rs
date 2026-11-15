@@ -155,7 +155,7 @@ fn inserts(effects: &[Effect]) -> Vec<la::EffectSpec> {
 
 fn dest(r: Route) -> la::Dest {
     match r {
-        Route::Program => la::Dest::Program,
+        Route::Master => la::Dest::Program,
         Route::Bus(b) => la::Dest::Bus(node(b)),
         Route::None => la::Dest::Nowhere,
     }
@@ -176,7 +176,7 @@ pub fn spec(workspace: &Workspace) -> la::GraphSpec {
         .iter()
         .map(|t| {
             let channels = match t.channels {
-                // the input layer delivers mono inputs on both channels
+                // the input object delivers mono inputs on both channels
                 TrackChannels::All => la::Channels::Stereo(0, 1),
                 TrackChannels::Mono(c) => la::Channels::Mono(c),
                 TrackChannels::Stereo(a, b) => la::Channels::Stereo(a, b),

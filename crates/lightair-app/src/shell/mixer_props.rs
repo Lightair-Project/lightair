@@ -67,7 +67,7 @@ impl StudioWindow {
         set: impl Fn(Route) -> Command,
         cx: &mut Context<Self>,
     ) -> Div {
-        let mut options = vec![("Program".to_string(), current == Route::Program, set(Route::Program))];
+        let mut options = vec![("Master".to_string(), current == Route::Master, set(Route::Master))];
         for b in &workspace.audio.buses {
             if Some(b.id) == own {
                 continue;
@@ -326,7 +326,7 @@ impl StudioWindow {
                     .into_any_element()
             }
             MixerStrip::Master => body
-                .child(header("radio", "Program".into(), "MASTER"))
+                .child(header("radio", "Master".into(), "MASTER"))
                 .child(
                     div()
                         .text_size(px(12.))

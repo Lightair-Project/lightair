@@ -1,7 +1,7 @@
 //! The workspace a first launch starts with (until onboarding generates one from the user's
 //! devices; docs/05-interface-shell.md, "Onboarding").
 
-use lightair_core::{Command, Source, Layer, Layout, Workspace, Scene, Track};
+use lightair_core::{Command, Source, Object, Layout, Workspace, Scene, Track};
 use serde_json::json;
 
 pub fn starter_workspace() -> Workspace {
@@ -19,20 +19,20 @@ pub fn starter_workspace() -> Workspace {
     let logo = Source::new("Lightair logo", "image_source", json!({"file": icon_path.to_string_lossy()}));
 
     let mut main = Scene::new("Main");
-    main.layers = vec![
-        Layer::new("Background", background.id, [(canvas.id, Layout::boxed(0.0, 0.0, w, h))]),
-        Layer::new("Main display", display.id, [(canvas.id, Layout::boxed(w * 0.05, h * 0.08, w * 0.9, h * 0.84))]),
-        Layer::new("Logo", logo.id, [(canvas.id, Layout::boxed(w - 200.0, h - 200.0, 160.0, 160.0))]),
+    main.objects = vec![
+        Object::new("Background", background.id, [(canvas.id, Layout::boxed(0.0, 0.0, w, h))]),
+        Object::new("Main display", display.id, [(canvas.id, Layout::boxed(w * 0.05, h * 0.08, w * 0.9, h * 0.84))]),
+        Object::new("Logo", logo.id, [(canvas.id, Layout::boxed(w - 200.0, h - 200.0, 160.0, 160.0))]),
     ];
     let mut soon = Scene::new("Starting Soon");
-    soon.layers = vec![
-        Layer::new("Background", background.id, [(canvas.id, Layout::boxed(0.0, 0.0, w, h))]),
-        Layer::new("Logo", logo.id, [(canvas.id, Layout::boxed(w / 2.0 - 160.0, h / 2.0 - 160.0, 320.0, 320.0))]),
+    soon.objects = vec![
+        Object::new("Background", background.id, [(canvas.id, Layout::boxed(0.0, 0.0, w, h))]),
+        Object::new("Logo", logo.id, [(canvas.id, Layout::boxed(w / 2.0 - 160.0, h / 2.0 - 160.0, 320.0, 320.0))]),
     ];
     let mut brb = Scene::new("Be Right Back");
-    brb.layers = vec![
-        Layer::new("Background", background.id, [(canvas.id, Layout::boxed(0.0, 0.0, w, h))]),
-        Layer::new("Logo", logo.id, [(canvas.id, Layout::boxed(80.0, h - 240.0, 160.0, 160.0))]),
+    brb.objects = vec![
+        Object::new("Background", background.id, [(canvas.id, Layout::boxed(0.0, 0.0, w, h))]),
+        Object::new("Logo", logo.id, [(canvas.id, Layout::boxed(80.0, h - 240.0, 160.0, 160.0))]),
     ];
 
     let mic = Source::new(crate::mixer::SYSTEM_DEFAULT, lightair_core::kinds::MIC, json!({"device": "default"}));
@@ -81,19 +81,19 @@ pub fn plain_workspace() -> Workspace {
     let logo = Source::new("Logo", "image_source", json!({"file": icon.to_string_lossy()}));
     let f = canvas.id;
     let mut main = Scene::new("Main");
-    main.layers.push(Layer::new("Background", bg.id, [(f, Layout::boxed(0.0, 0.0, w, h))]));
-    main.layers.push(Layer::new("Card", card.id, [(f, Layout::boxed(480.0, 270.0, 960.0, 540.0))]));
-    main.layers.push(Layer::new("Title", title.id, [(f, Layout::boxed(660.0, 440.0, 600.0, 200.0))]));
+    main.objects.push(Object::new("Background", bg.id, [(f, Layout::boxed(0.0, 0.0, w, h))]));
+    main.objects.push(Object::new("Card", card.id, [(f, Layout::boxed(480.0, 270.0, 960.0, 540.0))]));
+    main.objects.push(Object::new("Title", title.id, [(f, Layout::boxed(660.0, 440.0, 600.0, 200.0))]));
     let mut soon = Scene::new("Starting Soon");
-    soon.layers.push(Layer::new("Background", bg.id, [(f, Layout::boxed(0.0, 0.0, w, h))]));
-    soon.layers.push(Layer::new("Countdown", timer.id, [(f, Layout::boxed(760.0, 470.0, 400.0, 140.0))]));
+    soon.objects.push(Object::new("Background", bg.id, [(f, Layout::boxed(0.0, 0.0, w, h))]));
+    soon.objects.push(Object::new("Countdown", timer.id, [(f, Layout::boxed(760.0, 470.0, 400.0, 140.0))]));
     let logo_box = Layout {
         shape: Some(lightair_core::Shape::new(lightair_core::ShapeKind::Circle)),
         crop: lightair_core::Crop { left: 64, top: 64, right: 64, bottom: 64 },
         tilt_y: 20.0,
         ..Layout::boxed(1500.0, 640.0, 360.0, 360.0)
     };
-    soon.layers.push(Layer::new("Logo", logo.id, [(f, logo_box)]));
+    soon.objects.push(Object::new("Logo", logo.id, [(f, logo_box)]));
     let tone = |name: &str| Source::new(name, "color_source_v3", json!({}));
     let (a, b) = (tone("Mic (demo)"), tone("Music (demo)"));
     let tracks = [Track::new("Mic", a.id), Track::new("Music", b.id)];

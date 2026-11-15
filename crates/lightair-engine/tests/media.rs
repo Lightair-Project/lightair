@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff};
+use lightair_core::{Command, Document, Source, Object, Layout, Workspace, Scene, diff};
 use lightair_engine::media::{MediaAction, MediaState, MediaStatus};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
@@ -59,7 +59,7 @@ fn media_transport() {
     let colour = Source::new("Colour", "color_source_v3", json!({"color": 0xFF000000u32}));
     let (media_id, colour_id) = (media.id, colour.id);
     let mut scene = Scene::new("Main");
-    scene.layers.push(Layer::new("Clip", media_id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
+    scene.objects.push(Object::new("Clip", media_id, [(f, Layout::boxed(0.0, 0.0, 320.0, 180.0))]));
     let scene_id = scene.id;
     for cmd in [
         Command::AddSource { source: media },

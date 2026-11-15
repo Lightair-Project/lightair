@@ -5,7 +5,7 @@
 //! desktop audio to a loopback device, needs the screen recording permission in the test.)
 #![cfg(windows)]
 
-use lightair_core::{Command, Document, Source, Layer, Layout, Workspace, Scene, diff, kinds};
+use lightair_core::{Command, Document, Source, Object, Layout, Workspace, Scene, diff, kinds};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -20,7 +20,7 @@ fn a_screen_source_changing_mode_is_recreated_in_place() {
     let id = screen.id;
     let scene = Scene::new("Main");
     let sid = scene.id;
-    let layer = Layer::new("Screen", id, [(canvas, Layout::boxed(0.0, 0.0, 1280.0, 720.0))]);
+    let object = Object::new("Screen", id, [(canvas, Layout::boxed(0.0, 0.0, 1280.0, 720.0))]);
     let mut apply = |cmd: Command| {
         let change = doc.apply(&cmd).unwrap();
         let patches = diff(&change.before, &change.after);
@@ -29,7 +29,7 @@ fn a_screen_source_changing_mode_is_recreated_in_place() {
     };
     apply(Command::AddSource { source: screen });
     apply(Command::AddScene { scene, index: None });
-    apply(Command::AddLayer { scene: sid, layer, index: None });
+    apply(Command::AddObject { scene: sid, object, index: None });
     assert_eq!(engine.call(move |s| s.reconciler.source_type(id)).as_deref(), Some("monitor_capture"));
 
     apply(Command::SetSourceSettings { source: id, settings: json!({"mode": kinds::WINDOW}) });
