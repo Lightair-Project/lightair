@@ -849,11 +849,13 @@ impl Reconciler {
     fn set_program(&mut self, program: Option<Id>, workspace: &Workspace) {
         let previous = self.program;
         self.finish_move();
+        // the incoming scene's own transition, else the workspace's
+        let settings = program.and_then(|b| workspace.scene(b)).and_then(|s| s.transition).unwrap_or(self.transition_settings);
         let kind = match (previous, program) {
-            (Some(a), Some(b)) if a != b => self.transition_settings.kind,
+            (Some(a), Some(b)) if a != b => settings.kind,
             _ => TransitionKind::Cut,
         };
-        let ms = self.transition_settings.duration_ms;
+        let ms = settings.duration_ms;
         match kind {
             TransitionKind::Cut => self.land(program),
             TransitionKind::Fade
@@ -861,9 +863,9 @@ impl Reconciler {
             | TransitionKind::Wipe
             | TransitionKind::Dip
             | TransitionKind::Stinger => {
-                let (type_id, settings) = transition_source(&self.transition_settings, self.stinger.as_ref());
+                let (type_id, source_settings) = transition_source(&settings, self.stinger.as_ref());
                 for canvas in self.canvases.clone() {
-                    self.ensure_transition(canvas, type_id, &settings);
+                    self.ensure_transition(canvas, type_id, &source_settings);
                     if let Some(tr) = self.transitions.get(&canvas) {
                         unsafe {
                             sys::obs_transition_start(
@@ -878,7 +880,7 @@ impl Reconciler {
             }
             TransitionKind::Move => {
                 let (Some(a), Some(b)) = (previous, program) else { unreachable!() };
-                if !self.start_move(a, b, workspace) {
+                if !self.start_move(a, b, ms, workspace) {
                     self.land(program);
                 }
             }
@@ -922,14 +924,14 @@ impl Reconciler {
     }
 
     /// Builds the temporary scenes for a Move from `a` to `b` and starts the animation.
-    fn start_move(&mut self, a: Id, b: Id, workspace: &Workspace) -> bool {
+    fn start_move(&mut self, a: Id, b: Id, ms: u32, workspace: &Workspace) -> bool {
         let (Some(scene_a), Some(scene_b)) =
             (workspace.scene(a).map(|s| s.flatten()), workspace.scene(b).map(|s| s.flatten()))
         else {
             return false;
         };
         let (scene_a, scene_b) = (&scene_a, &scene_b);
-        let ms = self.transition_settings.duration_ms;
+        // (ms: the transition's, the incoming scene's own or the workspace's)
         let mut canvases = Vec::new();
         for canvas in self.canvases.clone() {
             let (Some(tr), dest) = (self.transitions.get(&canvas), self.dest(Some(b), canvas)) else { continue };
