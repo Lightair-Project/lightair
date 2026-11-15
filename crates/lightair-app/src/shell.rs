@@ -460,6 +460,25 @@ impl StudioWindow {
             }
         })
         .detach();
+        // What changes on its own (clocks, thumbnails coming in, a countdown) is redrawn at a
+        // pace, not at every display refresh: live pictures redraw their own panels when they
+        // have a frame (docking), meters theirs (mixer).
+        cx.spawn(async move |this, cx| {
+            let mut n = 0u32;
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(33)).await;
+                n = n.wrapping_add(1);
+                let alive = this.update(cx, |this, cx| {
+                    if this.moving() || n.is_multiple_of(15) {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         // Chromium for web page sources: driven from this (the main) thread, often while pages
         // are open, and now and then to pick up the first one asked for.
         cx.spawn(async move |this, cx| {
@@ -1717,6 +1736,22 @@ impl StudioWindow {
         }
     }
 
+    /// Something on screen moves without input: redrawn 30 times a second.
+    fn moving(&self) -> bool {
+        self.studio_take_countdown.is_some()
+            || self.thumbnail_shot.is_some()
+            || self.add_object.as_ref().is_some_and(|a| a.screens.is_some())
+    }
+
+    /// Frames drawn so far by the live pictures a region shows (it redraws when this changes).
+    fn live_frames(&self, region: docking::Region) -> u64 {
+        match region {
+            docking::Region::Canvas => self.previews.values().map(|p| p.frames()).sum(),
+            docking::Region::Inspector => self.program_monitor.as_ref().map_or(0, |p| p.frames()),
+            _ => 0,
+        }
+    }
+
     fn add_scene(&mut self, cx: &mut Context<Self>) {
         let n = self.studio.read(cx).workspace().scenes.len() + 1;
         let scene = Scene::new(format!("Scene {n}"));
@@ -1732,7 +1767,6 @@ impl StudioWindow {
 // ================================================================= render
 impl Render for StudioWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        window.request_animation_frame();
         self.tick_add_object();
         self.ensure_dock(window, cx);
         self.sync_crop_preview(cx);

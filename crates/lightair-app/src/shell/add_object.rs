@@ -27,7 +27,7 @@ pub(super) struct AddObject {
     /// A web page's address, and its size (CSS pixels).
     web_url: Entity<InputState>,
     web_size: (u32, u32),
-    screens: Option<super::screen_pick::ScreenPick>,
+    pub(super) screens: Option<super::screen_pick::ScreenPick>,
     _events: Subscription,
 }
 

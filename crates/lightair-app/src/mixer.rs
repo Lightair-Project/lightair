@@ -100,6 +100,17 @@ pub struct MixerPanel {
 impl MixerPanel {
     pub fn new(studio: Entity<Studio>, cx: &mut Context<Self>) -> Self {
         cx.observe(&studio, |_, _, cx| cx.notify()).detach();
+        // meters move at 30 frames a second: smooth to the eye, a quarter of a 120 Hz display's
+        // redraws (docs/16, "Performance budgets")
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(33)).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         Self {
             studio,
             faders: Rc::default(),
@@ -164,8 +175,7 @@ impl MixerPanel {
 }
 
 impl Render for MixerPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        window.request_animation_frame();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;

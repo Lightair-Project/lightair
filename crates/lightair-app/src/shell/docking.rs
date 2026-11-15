@@ -28,6 +28,26 @@ pub(super) struct ShellPanel {
 impl ShellPanel {
     fn new(shell: Entity<StudioWindow>, region: Region, cx: &mut Context<Self>) -> Self {
         cx.observe(&shell, |_, _, cx| cx.notify()).detach();
+        // a live picture is redrawn when it has a new frame (the canvas's rate), not at every
+        // display refresh, and only its own panel
+        if matches!(region, Region::Canvas | Region::Inspector) {
+            cx.spawn(async move |this, cx| {
+                let mut seen = 0;
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(8)).await;
+                    let frames = this.update(cx, |p, cx| p.shell.upgrade().map(|s| s.read(cx).live_frames(p.region)));
+                    match frames {
+                        Ok(Some(n)) if n != seen => {
+                            seen = n;
+                            let _ = this.update(cx, |_, cx| cx.notify());
+                        }
+                        Ok(Some(_)) => {}
+                        _ => break,
+                    }
+                }
+            })
+            .detach();
+        }
         Self { shell: shell.downgrade(), region, focus: cx.focus_handle() }
     }
 }
@@ -139,9 +159,6 @@ impl Focusable for ShellPanel {
 impl Render for ShellPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(shell) = self.shell.upgrade() else { return div().into_any_element() };
-        if self.region == Region::Canvas {
-            window.request_animation_frame();
-        }
         let region = self.region;
         shell.update(cx, |w, cx| {
             let workspace = w.studio.read(cx).workspace().clone();

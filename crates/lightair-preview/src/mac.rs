@@ -1,11 +1,14 @@
 //! macOS preview path (OpenGL libobs backend):
 //!
 //! 1. libobs renders the program canvas, scaled to the preview size, into its own BGRA render
-//!    target (libobs can't render into IOSurface textures directly).
-//! 2. A GL framebuffer blit copies that into a BGRA IOSurface (GPU only).
-//! 3. VideoToolbox converts the BGRA IOSurface into full-range BT.601 NV12 (`420f`), the only
-//!    format GPUI's `surface()` element draws, into a ring of three buffers.
-//! 4. The UI picks up the newest NV12 buffer each frame.
+//!    target (libobs can't render into IOSurface textures directly). The program at canvas size
+//!    is read straight from libobs's main texture instead.
+//! 2. A libobs shader converts it to full-range BT.601 NV12 (`420f`), the only format GPUI's
+//!    `surface()` element draws: luma into one target, chroma at half size into another.
+//! 3. GL framebuffer blits copy the two planes into an NV12 IOSurface from a ring of four.
+//! 4. A GPU fence says when that's done; the frame goes to the UI at the next render once it is,
+//!    so the graphics thread never waits for the GPU (it used to stop for `glFinish` and a
+//!    VideoToolbox conversion every frame: most of the render time).
 //!
 //! No pixel ever crosses to the CPU.
 
@@ -14,20 +17,47 @@ use std::ffi::c_void;
 use crate::render::{draw_scaled, draw_with};
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use lightair_engine::sys;
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType};
 use objc2_core_video::{
     CVAttachmentMode, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetIOSurface,
     kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVImageBufferYCbCrMatrixKey, kCVPixelBufferIOSurfacePropertiesKey,
-    kCVPixelBufferMetalCompatibilityKey, kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelBufferMetalCompatibilityKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
     kCVReturnSuccess,
 };
-use objc2_video_toolbox::VTPixelTransferSession;
 use parking_lot::Mutex;
 
-const RING: usize = 3;
+/// NV12 buffers: the one on screen, up to two the GPU is still filling, one free.
+const RING: usize = 4;
+
+/// The conversion to what GPUI draws (full-range BT.601, as `pixel_buffer` tags the buffers).
+const NV12_EFFECT: &str = r#"
+uniform float4x4 ViewProj;
+uniform texture2d image;
+sampler_state def_sampler { Filter = Linear; AddressU = Clamp; AddressV = Clamp; };
+struct VertInOut { float4 pos : POSITION; float2 uv : TEXCOORD0; };
+VertInOut VSDefault(VertInOut vert_in)
+{
+    VertInOut vert_out;
+    vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
+    vert_out.uv = vert_in.uv;
+    return vert_out;
+}
+float4 PSLuma(VertInOut vert_in) : TARGET
+{
+    float3 c = image.Sample(def_sampler, vert_in.uv).rgb;
+    return float4(dot(c, float3(0.299, 0.587, 0.114)), 0.0, 0.0, 1.0);
+}
+float4 PSChroma(VertInOut vert_in) : TARGET
+{
+    float3 c = image.Sample(def_sampler, vert_in.uv).rgb;
+    return float4(dot(c, float3(-0.168736, -0.331264, 0.5)) + 0.5, dot(c, float3(0.5, -0.418688, -0.081312)) + 0.5, 0.0, 1.0);
+}
+technique Luma { pass { vertex_shader = VSDefault(vert_in); pixel_shader = PSLuma(vert_in); } }
+technique Chroma { pass { vertex_shader = VSDefault(vert_in); pixel_shader = PSChroma(vert_in); } }
+"#;
 
 /// A finished preview frame (NV12 full range), ready for GPUI's `surface()` element.
 pub type Frame = CFRetained<CVPixelBuffer>;
@@ -48,9 +78,15 @@ mod gl {
     pub const TEXTURE_2D: GLenum = 0x0DE1;
     pub const TEXTURE_RECTANGLE: GLenum = 0x84F5;
     pub const TEXTURE_BINDING_RECTANGLE: GLenum = 0x84F6;
-    pub const RGBA8: GLenum = 0x8058;
-    pub const BGRA: GLenum = 0x80E1;
-    pub const UNSIGNED_INT_8_8_8_8_REV: GLenum = 0x8367;
+    pub const R8: GLenum = 0x8229;
+    pub const RG8: GLenum = 0x822B;
+    pub const RED: GLenum = 0x1903;
+    pub const RG: GLenum = 0x8227;
+    pub const UNSIGNED_BYTE: GLenum = 0x1401;
+    pub const SYNC_GPU_COMMANDS_COMPLETE: GLenum = 0x9117;
+    pub const ALREADY_SIGNALED: GLenum = 0x911A;
+    pub const CONDITION_SATISFIED: GLenum = 0x911C;
+    pub type GLsync = *mut c_void;
     pub const COLOR_BUFFER_BIT: u32 = 0x4000;
     pub const NEAREST: GLenum = 0x2600;
 
@@ -77,7 +113,10 @@ mod gl {
         pub fn glDeleteTextures(n: i32, ids: *const GLuint);
         pub fn glBindTexture(target: GLenum, tex: GLuint);
         pub fn glGetIntegerv(pname: GLenum, out: *mut GLint);
-        pub fn glFinish();
+        pub fn glFlush();
+        pub fn glFenceSync(condition: GLenum, flags: u32) -> GLsync;
+        pub fn glClientWaitSync(sync: GLsync, flags: u32, timeout: u64) -> GLenum;
+        pub fn glDeleteSync(sync: GLsync);
         pub fn CGLGetCurrentContext() -> *mut c_void;
         pub fn CGLTexImageIOSurface2D(
             ctx: *mut c_void,
@@ -128,21 +167,34 @@ fn pixel_buffer(width: u32, height: u32, format: u32) -> Option<CFRetained<CVPix
     Some(buf)
 }
 
-/// Everything sized to one preview resolution. Owned by the graphics thread except `ring`,
-/// whose buffers the UI also retains.
+/// One NV12 buffer and its planes as GL textures.
+struct Slot {
+    buffer: CFRetained<CVPixelBuffer>,
+    luma: gl::GLuint,
+    chroma: gl::GLuint,
+    /// Set while the GPU is still filling it.
+    fence: Option<gl::GLsync>,
+}
+
+/// Everything sized to one preview resolution. Owned by the graphics thread except the slots'
+/// buffers, which the UI also retains.
 struct Pool {
     width: u32,
     height: u32,
-    /// libobs render target the canvas is drawn into.
+    /// libobs render target the canvas is drawn into (when it isn't the main texture as it is).
     target: *mut sys::gs_texture_t,
-    /// BGRA IOSurface the target is blitted into, and its GL texture + framebuffers.
-    bgra: CFRetained<CVPixelBuffer>,
-    bgra_tex: gl::GLuint,
+    /// The planes as libobs draws them, before the blit into an IOSurface.
+    luma: *mut sys::gs_texture_t,
+    chroma: *mut sys::gs_texture_t,
+    effect: *mut sys::gs_effect_t,
     read_fbo: gl::GLuint,
     draw_fbo: gl::GLuint,
-    ring: Vec<CFRetained<CVPixelBuffer>>,
+    slots: Vec<Slot>,
+    /// Slots the GPU is filling, oldest first.
+    pending: std::collections::VecDeque<usize>,
+    /// The slot the UI has.
+    shown: Option<usize>,
     next: usize,
-    latest: AtomicIsize,
 }
 
 // SAFETY: GL/libobs handles are only used on libobs's graphics thread; the CoreVideo buffers
@@ -150,52 +202,90 @@ struct Pool {
 unsafe impl Send for Pool {}
 unsafe impl Sync for Pool {}
 
+/// A GL rectangle texture over one plane of an IOSurface.
+unsafe fn plane_texture(surface: *const c_void, plane: u32, w: u32, h: u32, internal: gl::GLenum, format: gl::GLenum) -> Option<gl::GLuint> {
+    unsafe {
+        let mut prev: gl::GLint = 0;
+        gl::glGetIntegerv(gl::TEXTURE_BINDING_RECTANGLE, &mut prev);
+        let mut tex = 0;
+        gl::glGenTextures(1, &mut tex);
+        gl::glBindTexture(gl::TEXTURE_RECTANGLE, tex);
+        let err = gl::CGLTexImageIOSurface2D(
+            gl::CGLGetCurrentContext(),
+            gl::TEXTURE_RECTANGLE,
+            internal,
+            w as i32,
+            h as i32,
+            format,
+            gl::UNSIGNED_BYTE,
+            surface,
+            plane,
+        );
+        gl::glBindTexture(gl::TEXTURE_RECTANGLE, prev as gl::GLuint);
+        if err != 0 {
+            tracing::error!(err, plane, "CGLTexImageIOSurface2D failed");
+            gl::glDeleteTextures(1, &tex);
+            return None;
+        }
+        Some(tex)
+    }
+}
+
 impl Pool {
     /// Must run inside the libobs graphics context (GL context current).
     unsafe fn new(width: u32, height: u32) -> Option<Self> {
-        let bgra = pixel_buffer(width, height, kCVPixelFormatType_32BGRA)?;
-        let ring = (0..RING)
-            .map(|_| pixel_buffer(width, height, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))
-            .collect::<Option<Vec<_>>>()?;
-        let target =
-            unsafe { sys::gs_texture_create(width, height, sys::GS_BGRA, 1, ptr::null_mut(), sys::GS_RENDER_TARGET) };
-        if target.is_null() {
-            return None;
-        }
-        let surface = CVPixelBufferGetIOSurface(Some(&bgra))?;
         let mut pool = Self {
             width,
             height,
-            target,
-            bgra,
-            bgra_tex: 0,
+            target: ptr::null_mut(),
+            luma: ptr::null_mut(),
+            chroma: ptr::null_mut(),
+            effect: ptr::null_mut(),
             read_fbo: 0,
             draw_fbo: 0,
-            ring,
+            slots: Vec::new(),
+            pending: Default::default(),
+            shown: None,
             next: 0,
-            latest: AtomicIsize::new(-1),
         };
         unsafe {
-            let mut prev_rect: gl::GLint = 0;
-            gl::glGetIntegerv(gl::TEXTURE_BINDING_RECTANGLE, &mut prev_rect);
-            gl::glGenTextures(1, &mut pool.bgra_tex);
-            gl::glBindTexture(gl::TEXTURE_RECTANGLE, pool.bgra_tex);
-            let err = gl::CGLTexImageIOSurface2D(
-                gl::CGLGetCurrentContext(),
-                gl::TEXTURE_RECTANGLE,
-                gl::RGBA8,
-                width as i32,
-                height as i32,
-                gl::BGRA,
-                gl::UNSIGNED_INT_8_8_8_8_REV,
-                CFRetained::as_ptr(&surface).as_ptr() as *const c_void,
-                0,
-            );
-            gl::glBindTexture(gl::TEXTURE_RECTANGLE, prev_rect as gl::GLuint);
-            if err != 0 {
-                tracing::error!(err, "CGLTexImageIOSurface2D failed");
+            pool.target = sys::gs_texture_create(width, height, sys::GS_BGRA, 1, ptr::null_mut(), sys::GS_RENDER_TARGET);
+            pool.luma = sys::gs_texture_create(width, height, sys::GS_R8, 1, ptr::null_mut(), sys::GS_RENDER_TARGET);
+            pool.chroma = sys::gs_texture_create(width / 2, height / 2, sys::GS_R8G8, 1, ptr::null_mut(), sys::GS_RENDER_TARGET);
+            let code = std::ffi::CString::new(NV12_EFFECT).unwrap();
+            let name = c"lightair-preview-nv12";
+            let mut error: *mut std::ffi::c_char = ptr::null_mut();
+            pool.effect = sys::gs_effect_create(code.as_ptr(), name.as_ptr(), &mut error);
+            if !error.is_null() {
+                tracing::error!(error = %std::ffi::CStr::from_ptr(error).to_string_lossy(), "preview shader");
+                sys::bfree(error as *mut c_void);
+            }
+            if pool.target.is_null() || pool.luma.is_null() || pool.chroma.is_null() || pool.effect.is_null() {
                 pool.destroy();
                 return None;
+            }
+            for _ in 0..RING {
+                let Some(buffer) = pixel_buffer(width, height, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) else {
+                    pool.destroy();
+                    return None;
+                };
+                let Some(surface) = CVPixelBufferGetIOSurface(Some(&buffer)) else {
+                    pool.destroy();
+                    return None;
+                };
+                let raw = CFRetained::as_ptr(&surface).as_ptr() as *const c_void;
+                let luma = plane_texture(raw, 0, width, height, gl::R8, gl::RED);
+                let chroma = plane_texture(raw, 1, width / 2, height / 2, gl::RG8, gl::RG);
+                match (luma, chroma) {
+                    (Some(luma), Some(chroma)) => pool.slots.push(Slot { buffer, luma, chroma, fence: None }),
+                    (l, c) => {
+                        for t in [l, c].into_iter().flatten() {
+                            gl::glDeleteTextures(1, &t);
+                        }
+                        pool.destroy();
+                        return None;
+                    }
+                }
             }
             gl::glGenFramebuffers(1, &mut pool.read_fbo);
             gl::glGenFramebuffers(1, &mut pool.draw_fbo);
@@ -206,52 +296,126 @@ impl Pool {
     /// Must run inside the libobs graphics context.
     unsafe fn destroy(&mut self) {
         unsafe {
+            for slot in self.slots.drain(..) {
+                if let Some(f) = slot.fence {
+                    gl::glDeleteSync(f);
+                }
+                gl::glDeleteTextures(1, &slot.luma);
+                gl::glDeleteTextures(1, &slot.chroma);
+            }
             if self.read_fbo != 0 {
                 gl::glDeleteFramebuffers(1, &self.read_fbo);
             }
             if self.draw_fbo != 0 {
                 gl::glDeleteFramebuffers(1, &self.draw_fbo);
             }
-            if self.bgra_tex != 0 {
-                gl::glDeleteTextures(1, &self.bgra_tex);
+            for t in [&mut self.target, &mut self.luma, &mut self.chroma] {
+                if !t.is_null() {
+                    sys::gs_texture_destroy(*t);
+                    *t = ptr::null_mut();
+                }
             }
-            if !self.target.is_null() {
-                sys::gs_texture_destroy(self.target);
+            if !self.effect.is_null() {
+                sys::gs_effect_destroy(self.effect);
+                self.effect = ptr::null_mut();
             }
         }
         self.read_fbo = 0;
         self.draw_fbo = 0;
-        self.bgra_tex = 0;
-        self.target = ptr::null_mut();
+        self.pending.clear();
+        self.shown = None;
     }
 
-    /// Copies the libobs render target into the BGRA IOSurface with a GL blit.
-    unsafe fn blit_to_surface(&self) -> bool {
+    /// The newest slot the GPU has finished, if any finished since last asked.
+    unsafe fn finished(&mut self) -> Option<usize> {
+        let mut done = None;
+        while let Some(&i) = self.pending.front() {
+            let Some(fence) = self.slots[i].fence else {
+                self.pending.pop_front();
+                continue;
+            };
+            let r = unsafe { gl::glClientWaitSync(fence, 0, 0) };
+            if r != gl::ALREADY_SIGNALED && r != gl::CONDITION_SATISFIED {
+                break;
+            }
+            unsafe { gl::glDeleteSync(fence) };
+            self.slots[i].fence = None;
+            self.pending.pop_front();
+            done = Some(i);
+        }
+        if done.is_some() {
+            self.shown = done;
+        }
+        done
+    }
+
+    /// A slot neither on screen nor being filled (the one shown longest ago), if any.
+    fn free_slot(&mut self) -> Option<usize> {
+        for k in 0..RING {
+            let i = (self.next + k) % RING;
+            if Some(i) != self.shown && !self.pending.contains(&i) {
+                self.next = (i + 1) % RING;
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Converts `src` (`sw`×`sh`) into NV12 in `slot`, and starts its fence.
+    unsafe fn convert(&mut self, src: *mut sys::gs_texture_t, slot: usize) -> bool {
+        thread_local! {
+            static IMAGE: std::ffi::CString = std::ffi::CString::new("image").unwrap();
+            static LUMA: std::ffi::CString = std::ffi::CString::new("Luma").unwrap();
+            static CHROMA: std::ffi::CString = std::ffi::CString::new("Chroma").unwrap();
+        }
+        let (w, h) = (self.width, self.height);
         unsafe {
-            let src = *(sys::gs_texture_get_obj(self.target) as *const gl::GLuint);
+            let image = IMAGE.with(|n| sys::gs_effect_get_param_by_name(self.effect, n.as_ptr()));
+            let sw = sys::gs_texture_get_width(src);
+            let sh = sys::gs_texture_get_height(src);
+            for (dst, dw, dh, technique) in [(self.luma, w, h, &LUMA), (self.chroma, w / 2, h / 2, &CHROMA)] {
+                draw_with(sw, sh, dst, dw, dh, || {
+                    sys::gs_blend_state_push();
+                    sys::gs_enable_blending(false);
+                    sys::gs_effect_set_texture(image, src);
+                    technique.with(|t| {
+                        while sys::gs_effect_loop(self.effect, t.as_ptr()) {
+                            sys::gs_draw_sprite(src, 0, sw, sh);
+                        }
+                    });
+                    sys::gs_blend_state_pop();
+                });
+            }
+            let ok = self.blit(self.luma, self.slots[slot].luma, w, h) && self.blit(self.chroma, self.slots[slot].chroma, w / 2, h / 2);
+            if ok {
+                self.slots[slot].fence = Some(gl::glFenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0));
+                // sent to the GPU now, not when libobs next flushes
+                gl::glFlush();
+                self.pending.push_back(slot);
+            }
+            ok
+        }
+    }
+
+    /// Copies a libobs texture into an IOSurface plane's texture with a GL blit.
+    unsafe fn blit(&self, from: *mut sys::gs_texture_t, to: gl::GLuint, w: u32, h: u32) -> bool {
+        unsafe {
+            let src = *(sys::gs_texture_get_obj(from) as *const gl::GLuint);
             let (mut prev_read, mut prev_draw) = (0, 0);
             gl::glGetIntegerv(gl::READ_FRAMEBUFFER_BINDING, &mut prev_read);
             gl::glGetIntegerv(gl::DRAW_FRAMEBUFFER_BINDING, &mut prev_draw);
             gl::glBindFramebuffer(gl::READ_FRAMEBUFFER, self.read_fbo);
             gl::glFramebufferTexture2D(gl::READ_FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, src, 0);
             gl::glBindFramebuffer(gl::DRAW_FRAMEBUFFER, self.draw_fbo);
-            gl::glFramebufferTexture2D(
-                gl::DRAW_FRAMEBUFFER,
-                gl::COLOR_ATTACHMENT0,
-                gl::TEXTURE_RECTANGLE,
-                self.bgra_tex,
-                0,
-            );
+            gl::glFramebufferTexture2D(gl::DRAW_FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_RECTANGLE, to, 0);
             let ok = gl::glCheckFramebufferStatus(gl::READ_FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE
                 && gl::glCheckFramebufferStatus(gl::DRAW_FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE;
             if ok {
-                let (w, h) = (self.width as i32, self.height as i32);
+                let (w, h) = (w as i32, h as i32);
                 gl::glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, gl::COLOR_BUFFER_BIT, gl::NEAREST);
             }
             gl::glBindFramebuffer(gl::READ_FRAMEBUFFER, prev_read as gl::GLuint);
             gl::glBindFramebuffer(gl::DRAW_FRAMEBUFFER, prev_draw as gl::GLuint);
-            // VideoToolbox reads the IOSurface on another queue next: the blit must be finished.
-            gl::glFinish();
             ok
         }
     }
@@ -266,7 +430,6 @@ struct Shared {
     size: AtomicU64,
     active: AtomicBool,
     frames: AtomicU64,
-    transfer: Mutex<Option<CFRetained<VTPixelTransferSession>>>,
     /// `None`: the main canvas (program). `Some`: another canvas (an additional format); we
     /// own one strong reference.
     canvas: Option<CanvasRef>,
@@ -320,20 +483,12 @@ impl Preview {
     }
 
     fn attach_to(canvas: Option<CanvasRef>) -> Self {
-        let mut session: *mut VTPixelTransferSession = ptr::null_mut();
-        let rc = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut session)) };
-        let transfer =
-            (rc == 0 && !session.is_null()).then(|| unsafe { CFRetained::from_raw(NonNull::new_unchecked(session)) });
-        if transfer.is_none() {
-            tracing::error!(rc, "VTPixelTransferSessionCreate failed; preview disabled");
-        }
         let shared = Arc::new(Shared {
             pool: Mutex::new(None),
             latest: Mutex::new(None),
             size: AtomicU64::new(0),
             active: AtomicBool::new(true),
             frames: AtomicU64::new(0),
-            transfer: Mutex::new(transfer),
             canvas,
             source: Mutex::new(None),
             own_size: AtomicBool::new(false),
@@ -438,31 +593,36 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     }
     let Some(pool) = guard.as_mut() else { return };
 
+    // the newest finished conversion goes to the UI
+    if let Some(i) = unsafe { pool.finished() } {
+        *shared.latest.lock() = Some(pool.slots[i].buffer.clone());
+        shared.frames.fetch_add(1, Ordering::Relaxed);
+    }
+    // the GPU is behind: this frame is skipped rather than waited for
+    let Some(slot) = pool.free_slot() else { return };
+
     let source = shared.source.lock();
-    match (&*source, &shared.canvas) {
+    let src = match (&*source, &shared.canvas) {
         (Some(src), _) => unsafe {
             let (sw, sh) = (sys::obs_source_get_width(src.0), sys::obs_source_get_height(src.0));
             let (cw, ch) =
                 if shared.own_size.load(Ordering::Relaxed) && sw > 0 && sh > 0 { (sw, sh) } else { (base_w, base_h) };
-            draw_with(cw, ch, pool.target, w, h, || sys::obs_source_video_render(src.0))
+            draw_with(cw, ch, pool.target, w, h, || sys::obs_source_video_render(src.0));
+            pool.target
         },
-        (None, None) => unsafe { draw_scaled(main, base_w, base_h, pool.target, w, h) },
-        (None, Some(c)) => unsafe { draw_with(base_w, base_h, pool.target, w, h, || sys::obs_canvas_render(c.0)) },
-    }
+        // the program as it is: converted straight from libobs's own texture
+        (None, None) if (base_w, base_h) == (w, h) => main,
+        (None, None) => unsafe {
+            draw_scaled(main, base_w, base_h, pool.target, w, h);
+            pool.target
+        },
+        (None, Some(c)) => unsafe {
+            draw_with(base_w, base_h, pool.target, w, h, || sys::obs_canvas_render(c.0));
+            pool.target
+        },
+    };
     drop(source);
-    if !unsafe { pool.blit_to_surface() } {
-        return;
-    }
-    let idx = pool.next;
-    pool.next = (pool.next + 1) % RING;
-    let dst = &pool.ring[idx];
-    let ok = shared.transfer.lock().as_ref().is_some_and(|t| unsafe { t.transfer_image(&pool.bgra, dst) } == 0);
-    if !ok {
-        return;
-    }
-    pool.latest.store(idx as isize, Ordering::Release);
-    *shared.latest.lock() = Some(dst.clone());
-    shared.frames.fetch_add(1, Ordering::Relaxed);
+    unsafe { pool.convert(src, slot) };
 }
 
 /// Reads the (Y, Cb, Cr) values at a point of a frame, given as fractions of its size

@@ -2,6 +2,8 @@
 //!
 //!   cargo xtask modules    configure and build every in-tree libobs module (modules/*)
 //!   cargo xtask bundle     assemble target/debug/Lightair.app for development (macOS)
+//!   cargo xtask bundle --release   the same from an optimised build: target/release/Lightair.app
+//!                              (for measuring performance)
 //!   cargo xtask dev        link OBS's helper programs next to target/debug for `cargo run`
 //!   cargo xtask virtual-camera [--uninstall]  build "Lightair Virtual Camera" (the camera
 //!                          extension and its installer, modules/lightair-virtual-camera),
@@ -111,17 +113,23 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 /// Development bundle: the debug binary inside a real .app (so macOS asks Lightair, not the
 /// terminal, for camera and microphone access), with OBS's frameworks and plugins linked in
 /// from an installed OBS 33 (docs/15-platform-distribution-licensing.md, "Building").
-fn bundle() -> anyhow::Result<()> {
+fn bundle(release: bool) -> anyhow::Result<()> {
     anyhow::ensure!(cfg!(target_os = "macos"), "the .app bundle is for macOS; on Windows, `cargo xtask dev`");
     let root = root();
-    run(Command::new("cargo").current_dir(&root).args(["build", "-p", "lightair-app", "-p", "lightair-web-helper"]))?;
+    let profile = if release { "release" } else { "debug" };
+    let mut build = Command::new("cargo");
+    build.current_dir(&root).args(["build", "-p", "lightair-app", "-p", "lightair-web-helper"]);
+    if release {
+        build.arg("--release");
+    }
+    run(&mut build)?;
     let obs = PathBuf::from(std::env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into()));
-    let app = root.join("target/debug/Lightair.app/Contents");
+    let app = root.join(format!("target/{profile}/Lightair.app/Contents"));
     let _ = std::fs::remove_dir_all(app.parent().unwrap());
     for dir in ["MacOS", "Frameworks", "PlugIns", "Resources"] {
         std::fs::create_dir_all(app.join(dir))?;
     }
-    std::fs::copy(root.join("target/debug/lightair"), app.join("MacOS/lightair"))?;
+    std::fs::copy(root.join(format!("target/{profile}/lightair")), app.join("MacOS/lightair"))?;
     // libobs runs this helper (from next to the executable) to write clips and MKV recordings.
     link_file(&obs.join("Contents/MacOS/obs-ffmpeg-mux"), &app.join("MacOS/obs-ffmpeg-mux"))?;
     std::fs::write(app.join("Info.plist"), INFO_PLIST)?;
@@ -143,7 +151,7 @@ fn bundle() -> anyhow::Result<()> {
             link_file(&entry.path(), &to.join(&name))?;
         }
     }
-    bundle_chromium(&root, &app)?;
+    bundle_chromium(&root, &app, profile)?;
     // Sign the bundle itself so macOS privacy settings identify Lightair. Nested OBS code keeps
     // OBS's own signatures; nothing outside target/ is modified.
     //
@@ -171,7 +179,7 @@ fn bundle() -> anyhow::Result<()> {
 /// Lightair's Chromium for web page sources (lightair-web): the pinned CEF framework the cef
 /// crate fetched into target/cef, and Chromium's four helper apps, Lightair's own (each the
 /// lightair-web-helper binary under the name Chromium looks for).
-fn bundle_chromium(root: &Path, app: &Path) -> anyhow::Result<()> {
+fn bundle_chromium(root: &Path, app: &Path, profile: &str) -> anyhow::Result<()> {
     let framework = std::fs::read_dir(root.join("target/cef"))
         .into_iter()
         .flatten()
@@ -184,7 +192,7 @@ fn bundle_chromium(root: &Path, app: &Path) -> anyhow::Result<()> {
         return Ok(());
     };
     link_file(&framework, &app.join("Frameworks/Chromium Embedded Framework.framework"))?;
-    let helper = root.join("target/debug/lightair-web-helper");
+    let helper = root.join(format!("target/{profile}/lightair-web-helper"));
     for (suffix, id) in [("", ""), (" (GPU)", ".gpu"), (" (Renderer)", ".renderer"), (" (Plugin)", ".plugin")] {
         let name = format!("Lightair Helper{suffix}");
         let contents = app.join("Frameworks").join(format!("{name}.app")).join("Contents");
@@ -230,7 +238,7 @@ fn dev() -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("modules") => modules(),
-        Some("bundle") => bundle(),
+        Some("bundle") => bundle(std::env::args().any(|a| a == "--release")),
         Some("dev") => dev(),
         Some("virtual-camera") => virtual_camera(std::env::args().any(|a| a == "--uninstall")),
         Some("test") => test(std::env::args().skip(2).collect()),
