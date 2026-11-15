@@ -1,0 +1,10 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;background:rgba(0,0,0,.35);overflow:hidden;font:22px Helvetica,Arial,sans-serif;color:#fff}
+#c{position:absolute;bottom:0;left:0;right:0;padding:12px} .m{margin:6px 0;animation:in .3s ease-out} b{color:#7fd4ff}
+@keyframes in{from{opacity:0;transform:translateX(-30px)}}
+</style></head><body><div id="c"></div><script>
+const names=["ana","bo","cy","dee","eli","fox","gus","hal"],words="gg nice play lol wow pog that was clean hype let's go".split(" ");
+let n=0;setInterval(()=>{const c=document.getElementById("c"),d=document.createElement("div");d.className="m";
+d.innerHTML="<b>"+names[n%8]+"</b>: "+Array.from({length:3+n%5},(_, i)=>words[(n*7+i*3)%words.length]).join(" ");
+c.appendChild(d);if(c.children.length>30)c.removeChild(c.firstChild);n++;},500);
+</script></body></html>
