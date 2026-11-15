@@ -206,7 +206,7 @@ impl Editor {
         let target = self.picked_clips().into_iter().find_map(|id| {
             let c = seq.clip(id)?;
             let m = seq.media(c.media)?;
-            (c.content.is_none() && m.take.is_none() && m.kind != MediaKind::Image).then(|| (c.clone(), m.clone()))
+            (c.content.is_none() && m.studio_take.is_none() && m.kind != MediaKind::Image).then(|| (c.clone(), m.clone()))
         });
         let (Some((clip, media)), Some(ws)) = (target, self.workspace.clone()) else {
             self.note = Some("Pick a video or sound clip to reverse.".into());

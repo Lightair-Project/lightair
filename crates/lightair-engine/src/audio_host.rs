@@ -230,7 +230,7 @@ impl la::Inputs for RtInputs {
 }
 
 /// A multitrack file being recorded, on the audio thread: what to take and where it goes.
-struct StemRt {
+struct MultitrackRt {
     id: la::NodeId,
     tap: la::Tap,
     channels: u16,
@@ -241,9 +241,9 @@ enum ToRt {
     AddInput(RtInput),
     RemoveInput(la::NodeId),
     /// Start these files on the next block (all on the same one: sample-aligned).
-    StartStems(Vec<StemRt>),
-    StopStems,
-    PauseStems(bool),
+    StartMultitrack(Vec<MultitrackRt>),
+    StopMultitrack,
+    PauseMultitrack(bool),
     /// What the monitor plays (a mix, or the program), and its ring; `None`: no direct monitor.
     Monitor(Option<(la::NodeId, rtrb::Producer<f32>)>),
     /// Which mix each out source after Program carries, and the cue mix.
@@ -254,7 +254,7 @@ enum ToRt {
 #[allow(dead_code)] // held only so they're freed on the main side, never on the audio thread
 enum FromRt {
     Input(RtInput),
-    Stems(Vec<StemRt>),
+    Multitrack(Vec<MultitrackRt>),
     Monitor(rtrb::Producer<f32>),
 }
 
@@ -289,10 +289,10 @@ fn rt_loop(
     let mut inputs = RtInputs(Vec::with_capacity(128));
     let mut mixes: [Option<la::NodeId>; OUT_MIXES - 1] = [None; OUT_MIXES - 1];
     let mut cue: Option<la::NodeId> = None;
-    let mut stems: Vec<StemRt> = Vec::new();
+    let mut track_files: Vec<MultitrackRt> = Vec::new();
     let mut monitor: Option<(la::NodeId, rtrb::Producer<f32>)> = None;
-    let mut stems_paused = false;
-    let mut stems_started = false;
+    let mut multitrack_paused = false;
+    let mut multitrack_started = false;
     let period = Duration::from_secs_f64(block as f64 / sample_rate as f64);
     // real-time scheduling (Mach time constraint on macOS, MMCSS "Pro Audio" on Windows): without
     // it a busy computer can starve the mixer and the stream drops out
@@ -322,16 +322,16 @@ fn rt_loop(
                     }
                 }
                 ToRt::Mixes(m, c) => (mixes, cue) = (m, c),
-                ToRt::StartStems(new) => {
-                    let old = std::mem::replace(&mut stems, new);
-                    let _ = garbage.push(FromRt::Stems(old));
-                    (stems_paused, stems_started) = (false, false);
+                ToRt::StartMultitrack(new) => {
+                    let old = std::mem::replace(&mut track_files, new);
+                    let _ = garbage.push(FromRt::Multitrack(old));
+                    (multitrack_paused, multitrack_started) = (false, false);
                 }
-                ToRt::StopStems => {
-                    let old = std::mem::take(&mut stems);
-                    let _ = garbage.push(FromRt::Stems(old));
+                ToRt::StopMultitrack => {
+                    let old = std::mem::take(&mut track_files);
+                    let _ = garbage.push(FromRt::Multitrack(old));
                 }
-                ToRt::PauseStems(p) => stems_paused = p,
+                ToRt::PauseMultitrack(p) => multitrack_paused = p,
                 ToRt::Monitor(m) => {
                     if let Some((_, old)) = std::mem::replace(&mut monitor, m) {
                         let _ = garbage.push(FromRt::Monitor(old));
@@ -430,15 +430,15 @@ fn rt_loop(
             }
         }
         // multitrack files: this block of each, interleaved
-        if !stems.is_empty() && !stems_paused {
-            if !stems_started {
+        if !track_files.is_empty() && !multitrack_paused {
+            if !multitrack_started {
                 STEMS_START_NS.store(ts, Ordering::Relaxed);
-                stems_started = true;
+                multitrack_started = true;
             }
-            for stem in &mut stems {
-                let src = if stem.id == la::PROGRAM { Some(graph.program()) } else { graph.tap(stem.id, stem.tap) };
-                let n = block * stem.channels as usize;
-                let Ok(mut chunk) = stem.ring.write_chunk_uninit(n) else {
+            for track_file in &mut track_files {
+                let src = if track_file.id == la::PROGRAM { Some(graph.program()) } else { graph.tap(track_file.id, track_file.tap) };
+                let n = block * track_file.channels as usize;
+                let Ok(mut chunk) = track_file.ring.write_chunk_uninit(n) else {
                     STEM_OVERRUNS.fetch_add(block as u64, Ordering::Relaxed);
                     continue;
                 };
@@ -447,7 +447,7 @@ fn rt_loop(
                 for k in 0..block {
                     let (l, r) = src.map_or((0.0, 0.0), |(l, r)| (l[k], r[k]));
                     let frame = [l, r];
-                    for v in &frame[..stem.channels as usize] {
+                    for v in &frame[..track_file.channels as usize] {
                         if i < a.len() {
                             a[i].write(*v);
                         } else {
@@ -475,7 +475,7 @@ fn rt_loop(
 
 /// A multitrack file to record.
 #[derive(Debug, Clone)]
-pub struct StemSpec {
+pub struct TrackFileSpec {
     /// The strip (track or bus), or [`la::PROGRAM`] for the program mix.
     pub id: la::NodeId,
     pub path: std::path::PathBuf,
@@ -488,7 +488,7 @@ pub struct StemSpec {
 
 /// What a finished multitrack recording wrote.
 #[derive(Debug, Clone)]
-pub struct StemReport {
+pub struct MultitrackReport {
     pub files: Vec<std::path::PathBuf>,
     /// Frames in each file.
     pub frames: u64,
@@ -498,11 +498,11 @@ pub struct StemReport {
 }
 
 /// A multitrack file's writer, its ring from the audio thread, and whether it's float.
-type StemWriter = (hound::WavWriter<std::io::BufWriter<std::fs::File>>, rtrb::Consumer<f32>, bool);
+type TrackFileWriter = (hound::WavWriter<std::io::BufWriter<std::fs::File>>, rtrb::Consumer<f32>, bool);
 
 struct Recorder {
     stop: Arc<AtomicBool>,
-    thread: std::thread::JoinHandle<Result<StemReport, String>>,
+    thread: std::thread::JoinHandle<Result<MultitrackReport, String>>,
 }
 
 /// Engine meters paired with the mixer UI's meter cells they fill.
@@ -706,10 +706,10 @@ impl AudioHost {
         producer
     }
 
-    /// Starts recording these multitrack files, sample-aligned, until [`Self::stop_stems`].
-    pub fn start_stems(&mut self, specs: Vec<StemSpec>) -> Result<(), String> {
+    /// Starts recording these multitrack files, sample-aligned, until [`Self::stop_multitrack`].
+    pub fn start_multitrack(&mut self, specs: Vec<TrackFileSpec>) -> Result<(), String> {
         if self.recorder.is_some() {
-            self.stop_stems();
+            self.stop_multitrack();
         }
         let sample_rate = self.sample_rate;
         let mut writers = Vec::new();
@@ -726,21 +726,21 @@ impl AudioHost {
             // ten seconds of slack for the writer
             let (producer, consumer) = rtrb::RingBuffer::new(sample_rate as usize * 10 * spec.channels as usize);
             writers.push((writer, consumer, spec.float));
-            rts.push(StemRt { id: spec.id, tap: spec.tap, channels: spec.channels, ring: producer });
+            rts.push(MultitrackRt { id: spec.id, tap: spec.tap, channels: spec.channels, ring: producer });
             files.push(spec.path.clone());
         }
         STEMS_START_NS.store(0, Ordering::Relaxed);
-        if self.commands.push(ToRt::StartStems(rts)).is_err() {
+        if self.commands.push(ToRt::StartMultitrack(rts)).is_err() {
             return Err("the audio engine is busy".into());
         }
         STEMS_RUNNING.store(true, Ordering::Relaxed);
         let stop = Arc::new(AtomicBool::new(false));
         let s = stop.clone();
         let thread = std::thread::Builder::new()
-            .name("lightair-stems".into())
+            .name("lightair-track_files".into())
             .spawn(move || {
                 let mut frames = 0u64;
-                let drain = |writers: &mut Vec<StemWriter>, frames: &mut u64|
+                let drain = |writers: &mut Vec<TrackFileWriter>, frames: &mut u64|
                  -> Result<(), String> {
                     for (k, (w, ring, float)) in writers.iter_mut().enumerate() {
                         let n = ring.slots();
@@ -773,7 +773,7 @@ impl AudioHost {
                 for (w, _, _) in writers {
                     w.finalize().map_err(|e| e.to_string())?;
                 }
-                Ok(StemReport { files, frames, start_ns: STEMS_START_NS.load(Ordering::Relaxed), sample_rate })
+                Ok(MultitrackReport { files, frames, start_ns: STEMS_START_NS.load(Ordering::Relaxed), sample_rate })
             })
             .map_err(|e| e.to_string())?;
         self.recorder = Some(Recorder { stop, thread });
@@ -781,16 +781,16 @@ impl AudioHost {
     }
 
     /// Pauses or resumes the multitrack files (no gap: the files just don't get those blocks).
-    pub fn pause_stems(&mut self, pause: bool) {
+    pub fn pause_multitrack(&mut self, pause: bool) {
         if self.recorder.is_some() {
-            let _ = self.commands.push(ToRt::PauseStems(pause));
+            let _ = self.commands.push(ToRt::PauseMultitrack(pause));
         }
     }
 
     /// Stops the multitrack files and finishes writing them.
-    pub fn stop_stems(&mut self) -> Option<StemReport> {
+    pub fn stop_multitrack(&mut self) -> Option<MultitrackReport> {
         let rec = self.recorder.take()?;
-        let _ = self.commands.push(ToRt::StopStems);
+        let _ = self.commands.push(ToRt::StopMultitrack);
         // let the audio thread see it (two blocks), then the writer takes the rest
         std::thread::sleep(Duration::from_millis(15));
         rec.stop.store(true, Ordering::Relaxed);
@@ -809,7 +809,7 @@ impl AudioHost {
     /// Plays `source` (the cue mix, or [`la::PROGRAM`]) straight to output `device` ("" for
     /// the default), with a few milliseconds of buffering; `None` stops it. While it plays,
     /// libobs's own (slower) cue monitoring is off, so nothing is heard twice.
-    pub fn set_monitor(&mut self, monitor: Option<(String, la::NodeId)>) -> Result<(), String> {
+    pub fn set_headphones(&mut self, monitor: Option<(String, la::NodeId)>) -> Result<(), String> {
         if monitor == self.monitor {
             return Ok(());
         }
@@ -861,7 +861,7 @@ impl AudioHost {
 
 impl Drop for AudioHost {
     fn drop(&mut self) {
-        self.stop_stems();
+        self.stop_multitrack();
         self.device_thread = None; // closes the device streams
         let inputs: Vec<_> = self.captures.keys().copied().collect();
         for i in inputs {

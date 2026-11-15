@@ -47,33 +47,40 @@ These documents describe the **finished product**: what it does, how it looks an
 
 ## Glossary
 
-| Term | Meaning |
+| Term (in the app and the code) | Meaning |
 |---|---|
-| **Project** | A complete show setup: formats, scenes, inputs, audio, outputs, hotkeys, workspace |
-| **Format** | An output canvas shape (Landscape, Vertical, Square, custom); a libobs canvas |
-| **Scene** | An ordered stack of layers, with a layout per format |
-| **Layer** | An input or generated element placed in a scene, with per-format transform, crop, visibility and effects |
-| **Input** | A media source (camera, display, file, browser); opened once, used by many layers |
-| **Group** | A layer containing layers |
-| **Template** | Reusable scenes whose inputs are roles bound to real devices on use |
-| **Effect** | A video or audio processor attached to an input, layer, group, scene, track or mix |
-| **Input effect / layer effect** | An effect on the device everywhere vs. on one layer in one scene |
+| **Workspace** (`Workspace`) | A complete show setup: canvases, scenes, sources, audio, outputs; a `.lightair` package (`workspace.json`) |
+| **Canvas** (`Canvas`) | An output picture's shape and size (Landscape, Vertical, Square, custom); a libobs canvas (`ObsCanvas`) |
+| **Scene** (`Scene`) | An ordered stack of objects, laid out per canvas |
+| **Object** (`Object`) | A source or generated element placed in a scene, with per-canvas transform, crop, visibility and effects |
+| **Source** (`Source`) | What feeds objects and tracks (camera, screen, picture, mic, file); opened once, used by many objects |
+| **Group / Empty** | An object holding other objects |
+| **Template** | Reusable scenes whose sources are roles bound to real devices on use |
+| **Effect** | A video or audio processor on a source, track or mix |
 | **Camera Studio** | The built-in face-aware camera pipeline (beauty, shape, makeup, AR, atmosphere, light, background) |
 | **Look** | A saved Camera Studio configuration applied in one click |
-| **Track** | A channel strip in the mixer: one audio input, its effects, fader, mute, routing |
-| **Global track / scene track** | A track in every scene vs. one belonging to a layer in a scene |
-| **Mix** | A summed audio bus (Stream, Recording n, Cue, VOD) feeding outputs |
-| **Output / destination** | Anything leaving Lightair: stream destination, recording, clips, virtual camera, NDI |
-| **Program / preview** | The scene on air / the scene staged in studio mode |
-| **Take** | Transition the staged scene to program |
-| **Clip** | A saved slice of the replay buffer, per format |
-| **ISO recording** | Separate clean recordings of individual inputs and tracks |
+| **Track** | A channel strip in the mixer: one source, its effects, fader, mute, routing |
+| **Mix** | A summed audio bus (headphones, VOD, a mix-minus) |
+| **Master** (`MixerStrip::Master`) | The mixer's main strip: what the stream and the recording's main track carry |
+| **Output / destination** | Anything leaving Lightair: stream destination, recording, clips |
+| **Program** | The scene on air |
+| **Cue scenes** (`cue_scenes`) / **Take** | Editing the next scene off air / putting it on air |
+| **Studio take** (`StudioTake`) | A recording of each source on its own, for the Editor (a `.lightair-take` folder) |
+| **Multitrack audio** (`multitrack`) | Each mixer track recorded to its own file (track files) |
+| **Screen zoom & pointer** (`ScreenZoomPointer`) | A scene's live zoom, drawn pointer and clicks on its screen captures |
+| **Drawn pointer** (`pointer`) | Lightair's own pointer drawn on a screen capture |
+| **Headphones** | Where Lightair plays what you hear (`headphones_device`, low-latency headphones) |
+| **Shortcuts** (`shortcuts`) | Keys that work anywhere on the computer |
+| **Clip** | A saved slice of the replay buffer, per canvas |
+| **Project** (`Project`) | An Editor project: a timeline of clips |
 | **Command** | A data description of a change to the document; the unit of undo and remote control |
 | **Patch** | The minimal change set a command produces, applied to libobs by the reconciler |
 | **Reconciler** | The engine component that makes libobs match the document |
 | **Runtime state / telemetry** | Live state (is it streaming) / high-rate measurements (levels, FPS), never in undo |
-| **Workspace** | A named arrangement of panels and windows |
 | **Issue** | A user-facing problem with a plain-language cause and a fix action |
+
+Code uses the same words as the app. Saved files and the undo journal still read under the
+older names (Project, Format, Layer, Input, …) through serde aliases.
 
 ## Sources
 

@@ -55,7 +55,7 @@ impl Speaker {
 
     fn open(seq: &Sequence, from_ms: u64, limit_ms: Option<u64>) -> Option<Speaker> {
         let host = cpal::default_host();
-        let chosen = crate::prefs::load_from(&crate::prefs::path()).monitor_device.map(|(name, _)| name).filter(|n| !n.is_empty() && n != "default");
+        let chosen = crate::prefs::load_from(&crate::prefs::path()).headphones_device.map(|(name, _)| name).filter(|n| !n.is_empty() && n != "default");
         let device = chosen
             .and_then(|name| host.output_devices().ok()?.find(|d| d.name().is_ok_and(|n| n == name)))
             .or_else(|| host.default_output_device())?;

@@ -1,17 +1,17 @@
-//! What's inside a Studio take, on its Library card: its parts (the screen or camera, each
+//! What's inside a Studio studio_take, on its Library card: its parts (the screen or camera, each
 //! object of its scene, each recorded mixer track), each sent to the Editor on its own or
 //! exported as a file.
 
 use super::*;
-use lightair_render::sequence::{Media, TakePart};
+use lightair_render::sequence::{Media, Part};
 
-/// A take item's folder.
-pub(super) fn take_folder(item: &Item) -> Option<PathBuf> {
+/// A studio_take item's folder.
+pub(super) fn studio_take_folder(item: &Item) -> Option<PathBuf> {
     item.files.iter().find_map(|f| f.path.parent().filter(|p| p.extension().is_some_and(|e| e == "lightair-take")).map(Path::to_path_buf))
 }
 
 /// A part's icon.
-pub(crate) fn part_icon(p: &TakePart) -> &'static str {
+pub(crate) fn part_icon(p: &Part) -> &'static str {
     use lightair_render::sequence::PartKind as K;
     match p.kind() {
         Some(K::Screen) => "monitor",
@@ -25,14 +25,14 @@ pub(crate) fn part_icon(p: &TakePart) -> &'static str {
 }
 
 impl Library {
-    /// Opens or closes a take's parts (read on a thread the first time).
+    /// Opens or closes a studio_take's parts (read on a thread the first time).
     pub(super) fn toggle_inside(&mut self, item: &Item, cx: &mut Context<Self>) {
         let id = item.id;
         if !self.inside_open.remove(&id) {
             self.inside_open.insert(id);
         }
         if !self.inside.contains_key(&id)
-            && let Some(folder) = take_folder(item)
+            && let Some(folder) = studio_take_folder(item)
         {
             self.inside.insert(id, None);
             let title = item.title.clone();
@@ -40,11 +40,11 @@ impl Library {
                 let parts = cx
                     .background_executor()
                     .spawn(async move {
-                        let mut parts = Media::take_layout(&folder);
+                        let mut parts = Media::studio_take_layout(&folder);
                         for p in parts.iter_mut() {
                             if let Some(m) = &mut p.media {
                                 m.item = Some(id);
-                                m.name = if m.take.is_some() { title.clone() } else { format!("{title} · {}", p.name) };
+                                m.name = if m.studio_take.is_some() { title.clone() } else { format!("{title} · {}", p.name) };
                             }
                         }
                         parts
@@ -61,7 +61,7 @@ impl Library {
     }
 
     /// Copies a part's file into a folder the user picks.
-    fn export_part(&mut self, part: TakePart, cx: &mut Context<Self>) {
+    fn export_part(&mut self, part: Part, cx: &mut Context<Self>) {
         let Some(file) = part.file().map(Path::to_path_buf) else { return };
         let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Export here".into()) });
         cx.spawn(async move |this, cx| {
@@ -85,7 +85,7 @@ impl Library {
         .detach();
     }
 
-    /// The parts list under a take's card.
+    /// The parts list under a studio_take's card.
     pub(super) fn inside_list(&self, item: &Item, n: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.inside_open.contains(&item.id) {
             return None;
@@ -129,11 +129,11 @@ impl Library {
 }
 
 impl Library {
-    /// For the screenshot hook: the newest take's parts shown.
+    /// For the screenshot hook: the newest studio_take's parts shown.
     pub(crate) fn hook_inside(&mut self, cx: &mut Context<Self>) {
         self.reload(cx);
-        let take = self.indexes.values().flat_map(|i| i.newest_first().into_iter().cloned().collect::<Vec<_>>()).find(|i| i.kind == Kind::Take);
-        if let Some(item) = take {
+        let studio_take = self.indexes.values().flat_map(|i| i.newest_first().into_iter().cloned().collect::<Vec<_>>()).find(|i| i.kind == Kind::StudioTake);
+        if let Some(item) = studio_take {
             self.toggle_inside(&item, cx);
         }
     }

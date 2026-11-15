@@ -125,7 +125,7 @@ pub struct EngineState {
     /// Running recordings and streams.
     pub outputs: crate::outputs::Outputs,
     /// A Studio take's per-source recordings, until they've stopped.
-    pub take: Option<crate::take::Take>,
+    pub studio_take: Option<crate::studio_take::StudioTake>,
 }
 
 impl EngineState {
@@ -316,7 +316,7 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
     }
     // Lightair's own source types (the audio engine's mix outputs, a test tone)
     crate::audio_host::register_types();
-    crate::cursor::register();
+    crate::pointer::register();
     crate::backdrop::register();
 }
 
@@ -402,9 +402,9 @@ unsafe fn shutdown(state: EngineState) {
     // The render thread can hold a scene for one more frame after its channel is cleared, so
     // let a few frames pass and keep draining until nothing is left to destroy.
     crate::loudness::detach();
-    let EngineState { sources, scenes, mut reconciler, mut outputs, take } = state;
+    let EngineState { sources, scenes, mut reconciler, mut outputs, studio_take } = state;
     outputs.shutdown();
-    drop(take);
+    drop(studio_take);
     reconciler.clear();
     drop(scenes);
     drop(sources);

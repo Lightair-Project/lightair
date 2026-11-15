@@ -423,7 +423,7 @@ mod win {
                 let (tx, rx) = mpsc::channel();
                 let (started_tx, started_rx) = mpsc::channel();
                 if std::thread::Builder::new()
-                    .name("lightair-hotkeys".into())
+                    .name("lightair-shortcuts".into())
                     .spawn(move || run(rx, started_tx))
                     .is_err()
                 {

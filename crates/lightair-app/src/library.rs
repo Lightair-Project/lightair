@@ -75,11 +75,11 @@ pub struct Library {
     marquee: Option<pick::Marquee>,
     card_bounds: CardBounds,
     body_bounds: std::rc::Rc<std::cell::RefCell<Option<Bounds<Pixels>>>>,
-    /// Parts of a take asked for in the Editor (the window takes them there).
-    pub open_parts: Option<Vec<lightair_render::sequence::TakePart>>,
+    /// Parts of a studio_take asked for in the Editor (the window takes them there).
+    pub open_parts: Option<Vec<lightair_render::sequence::Part>>,
     /// Takes opened to show their parts, and their parts (`None`: being read).
     inside_open: std::collections::HashSet<Id>,
-    inside: HashMap<Id, Option<Vec<lightair_render::sequence::TakePart>>>,
+    inside: HashMap<Id, Option<Vec<lightair_render::sequence::Part>>>,
     /// Asked for: open this workspace / make one with this name (the window does it).
     pub open_workspace: Option<PathBuf>,
     pub new_workspace: Option<String>,
@@ -160,7 +160,7 @@ fn bytes_label(b: u64) -> String {
 fn kind_icon(kind: Kind) -> &'static str {
     match kind {
         Kind::Recording => "video",
-        Kind::Take => "mouse-pointer-2",
+        Kind::StudioTake => "mouse-pointer-2",
         Kind::Clip => "scissors",
         Kind::Multitrack => "audio-lines",
         Kind::Export => "film",
@@ -372,7 +372,7 @@ impl Library {
         .detach();
     }
 
-    /// A take, with its edit, copied into a folder the user picks, to give or keep.
+    /// A studio_take, with its edit, copied into a folder the user picks, to give or keep.
     fn export_package(&mut self, workspace: PathBuf, id: Id, window: &mut Window, cx: &mut Context<Self>) {
         let Some(item) = self.indexes.get(&workspace).and_then(|i| i.get(id)).cloned() else { return };
         let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Put the package here".into()) });
@@ -628,7 +628,7 @@ impl Library {
         let missing = !item.missing().is_empty();
         let thumbnail = item.thumbnail.clone().filter(|t| t.exists());
         let when = Local.timestamp_millis_opt(item.started_ms).single().map(|t| t.format("%H:%M").to_string()).unwrap_or_default();
-        // its canvases (a recording of several), or what a take recorded (screen, camera)
+        // its canvases (a recording of several), or what a studio_take recorded (screen, camera)
         let canvases: Vec<String> = item.files.iter().filter_map(|f| f.canvas.clone().or_else(|| f.track.clone())).collect();
         let mut detail = vec![when, item.kind.label().to_string()];
         if !canvases.is_empty() {
@@ -742,7 +742,7 @@ impl Library {
                         sub
                     });
                 }
-                if kind == Kind::Take {
+                if kind == Kind::StudioTake {
                     menu = menu.item(PopupMenuItem::new("Export package…").icon(ui::icon("package")).on_click(act(|t, d, i, w, cx| t.export_package(d, i, w, cx))));
                 }
                 if missing {
@@ -812,7 +812,7 @@ impl Library {
                         None => detail.join(" · "),
                     }),
             )
-            .when(item.kind == Kind::Take, |d| {
+            .when(item.kind == Kind::StudioTake, |d| {
                 let open = self.inside_open.contains(&item.id);
                 let it = item.clone();
                 d.child(

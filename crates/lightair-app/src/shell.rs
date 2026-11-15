@@ -30,7 +30,7 @@ mod object_props;
 mod menus;
 pub(crate) mod mixer_props;
 mod palette;
-mod screen_look;
+mod screen_zoom_pointer;
 mod settings;
 mod source;
 
@@ -278,8 +278,8 @@ pub struct StudioWindow {
     place: Place,
     library: Entity<crate::library::Library>,
     pub(crate) editor: Entity<crate::editor::Editor>,
-    /// A Studio take's countdown: when it began.
-    take_countdown: Option<Instant>,
+    /// A Studio studio_take's countdown: when it began.
+    studio_take_countdown: Option<Instant>,
     /// A program preview made for the Library's stills, and the stills it's for.
     thumbnail_shot: Option<(Preview, Vec<crate::studio::ThumbnailRequest>)>,
     /// Screen bounds of each visible canvas's stage, from the last frame.
@@ -292,7 +292,7 @@ pub struct StudioWindow {
     settings_focus: FocusHandle,
     /// Takes the keys pressed while a global shortcut is being set, before the window's own
     /// shortcuts would.
-    _hotkey_keys: Subscription,
+    _shortcut_keys: Subscription,
     drag: Option<Drag>,
     guides: Guides,
     add_menu: bool,
@@ -360,7 +360,7 @@ pub struct StudioWindow {
     renaming: Option<Renaming>,
     /// Studio mode (docs/07-scenes-objects-canvas.md): the stage shows the selected scene, a
     /// monitor shows Program, and Take puts the selected scene on air.
-    studio_mode: bool,
+    cue_scenes: bool,
     program_monitor: Option<Preview>,
     /// Inspector content sections (text field, media status).
     props: object_props::ObjectProps,
@@ -380,10 +380,10 @@ pub struct StudioWindow {
     /// A canvas being edited in Settings › Canvases.
     canvas_edit: Option<settings::CanvasEdit>,
     /// Settings › Shortcuts is waiting for the keys of this global shortcut.
-    hotkey_capture: Option<crate::hotkeys::GlobalAction>,
-    hotkey_note: Option<String>,
+    shortcut_capture: Option<crate::shortcuts::GlobalAction>,
+    shortcut_note: Option<String>,
     /// Monitoring devices, read when the Audio page opens.
-    monitor_devices: Vec<(String, String)>,
+    headphones_devices: Vec<(String, String)>,
     prefs: crate::prefs::Preferences,
     /// Resizable, collapsible, rearrangeable panels (built on first render).
     dock: Option<Entity<gpui_kit::component::dock::DockArea>>,
@@ -427,7 +427,7 @@ impl StudioWindow {
         window.focus(&focus, cx);
         // Shortcuts that work in any app: registered now, handled as they come.
         let saved = crate::prefs::load_from(&crate::prefs::path());
-        crate::hotkeys::register(&saved.global_hotkeys.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+        crate::shortcuts::register(&saved.global_shortcuts.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
         // Face effects' "no face in view" hints.
         cx.spawn(async move |this, cx| {
             loop {
@@ -448,7 +448,7 @@ impl StudioWindow {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(40)).await;
-                let pressed = crate::hotkeys::take_pressed();
+                let pressed = crate::shortcuts::take_pressed();
                 if pressed.is_empty() {
                     continue;
                 }
@@ -512,7 +512,7 @@ impl StudioWindow {
                 cx.new(|_| crate::editor::Editor::new(s))
             },
             thumbnail_shot: None,
-            take_countdown: None,
+            studio_take_countdown: None,
             stage_bounds: Rc::default(),
             active_canvas: Some(primary),
             side_by_side: false,
@@ -522,14 +522,14 @@ impl StudioWindow {
             studio,
             focus,
             settings_focus: cx.focus_handle(),
-            _hotkey_keys: {
+            _shortcut_keys: {
                 let me = cx.entity().downgrade();
                 cx.intercept_keystrokes(move |ev, window, cx| {
                     let Some(me) = me.upgrade() else { return };
                     let taken = me.update(cx, |this, cx| {
-                        this.hotkey_capture?;
-                        this.capture_hotkey(&ev.keystroke, cx);
-                        Some((this.hotkey_capture.is_none(), this.focus.clone()))
+                        this.shortcut_capture?;
+                        this.capture_shortcut(&ev.keystroke, cx);
+                        Some((this.shortcut_capture.is_none(), this.focus.clone()))
                     });
                     if let Some((done, focus)) = taken {
                         cx.stop_propagation();
@@ -577,7 +577,7 @@ impl StudioWindow {
             source_cache: RefCell::default(),
             camera_devices: vec![],
             renaming: None,
-            studio_mode: false,
+            cue_scenes: false,
             program_monitor: None,
             props: Default::default(),
             safe_landscape: None,
@@ -589,9 +589,9 @@ impl StudioWindow {
             settings_open: false,
             settings_page: settings::Page::General,
             canvas_edit: None,
-            hotkey_capture: None,
-            hotkey_note: None,
-            monitor_devices: Vec::new(),
+            shortcut_capture: None,
+            shortcut_note: None,
+            headphones_devices: Vec::new(),
             dock: None,
             prefs: crate::prefs::load_from(&crate::prefs::path()),
         }
@@ -839,8 +839,8 @@ impl StudioWindow {
             .find(|id| bounds.get(id).is_some_and(|b| b.contains(&p)))
     }
 
-    fn set_studio_mode(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.studio_mode = on;
+    fn set_cue_scenes(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.cue_scenes = on;
         self.program_monitor = on.then(Preview::attach);
         if let Some(m) = &self.program_monitor {
             let f = self.studio.read(cx).workspace().primary_canvas().clone();
@@ -855,13 +855,13 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let canvas = studio.workspace().primary_canvas().id;
         let Some(preview) = self.previews.get(&canvas) else { return };
-        let want = studio.selected_scene.filter(|_| self.studio_mode);
+        let want = studio.selected_scene.filter(|_| self.cue_scenes);
         let current = preview.source().map(|p| p as usize);
         let engine = studio.engine().clone();
         let next = match want {
             None => None,
             Some(scene) => {
-                // Only take a new reference when the libobs scene changed (rebuilds replace it).
+                // Only studio_take a new reference when the libobs scene changed (rebuilds replace it).
                 let ptr = engine.call(move |s| s.reconciler.scene_source(scene, canvas).map(|p| p as usize));
                 if ptr == current {
                     return;
@@ -876,8 +876,8 @@ impl StudioWindow {
 
     /// Studio mode's Take: the selected scene goes on air with the current transition.
     /// A global shortcut was pressed (in any app).
-    fn global_action(&mut self, action: crate::hotkeys::GlobalAction, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::hotkeys::GlobalAction as A;
+    fn global_action(&mut self, action: crate::shortcuts::GlobalAction, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::shortcuts::GlobalAction as A;
         match action {
             A::ToggleRecording => self.studio.update(cx, |s, cx| s.toggle_recording(cx)),
             A::ToggleLive => {
@@ -893,7 +893,7 @@ impl StudioWindow {
             A::SaveClip => self.studio.update(cx, |s, cx| s.save_clip(cx)),
             A::MuteMics => self.studio.update(cx, |s, cx| s.toggle_mics(cx)),
             A::FollowZoom => {
-                lightair_engine::cursor::toggle_follow();
+                lightair_engine::pointer::toggle_follow();
                 cx.notify();
             }
             A::Scene(n) => self.scene_shortcut(n.saturating_sub(1) as usize, window, cx),
@@ -1041,7 +1041,7 @@ impl StudioWindow {
             });
         let selection = studio.selection();
         match hit {
-            // ⇧ or ⌘: add or take away
+            // ⇧ or ⌘: add or studio_take away
             Some(object) if ev.modifiers.shift || ev.modifiers.platform => self.toggle_selected(object.id, cx),
             Some(object) => {
                 let id = object.id;
@@ -1857,7 +1857,7 @@ impl Render for StudioWindow {
                 }
             }))
             .on_action(cx.listener(|this, _: &Take, _, cx| {
-                if this.studio_mode {
+                if this.cue_scenes {
                     this.take(cx)
                 }
             }))
@@ -1884,8 +1884,8 @@ impl Render for StudioWindow {
             .children(self.go_live_overlay(cx))
             .children(self.settings_overlay(cx))
             .children(self.palette_overlay(cx))
-            .children(self.take_countdown_overlay())
-            .children(self.take_card(cx))
+            .children(self.studio_take_countdown_overlay())
+            .children(self.studio_take_card(cx))
     }
 }
 
@@ -2021,17 +2021,17 @@ impl StudioWindow {
         self.exec(Command::Batch { label: "Add screen recording scenes".into(), commands }, cx);
     }
 
-    /// Starts a Studio take after a 3-second countdown (again during it: cancels), or stops one.
+    /// Starts a Studio studio_take after a 3-second countdown (again during it: cancels), or stops one.
     pub(crate) fn studio_take(&mut self, cx: &mut Context<Self>) {
         if self.studio.read(cx).is_taking() {
-            self.studio.update(cx, |s, cx| s.toggle_take(cx));
-        } else if self.take_countdown.take().is_none() {
-            self.take_countdown = Some(Instant::now());
+            self.studio.update(cx, |s, cx| s.toggle_studio_take(cx));
+        } else if self.studio_take_countdown.take().is_none() {
+            self.studio_take_countdown = Some(Instant::now());
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
                 let _ = this.update(cx, |this, cx| {
-                    if this.take_countdown.take().is_some() {
-                        this.studio.update(cx, |s, cx| s.toggle_take(cx));
+                    if this.studio_take_countdown.take().is_some() {
+                        this.studio.update(cx, |s, cx| s.toggle_studio_take(cx));
                     }
                     cx.notify();
                 });
@@ -2042,8 +2042,8 @@ impl StudioWindow {
     }
 
     /// The countdown's number over the window.
-    fn take_countdown_overlay(&self) -> Option<AnyElement> {
-        let started = self.take_countdown?;
+    fn studio_take_countdown_overlay(&self) -> Option<AnyElement> {
+        let started = self.studio_take_countdown?;
         let left = 3u64.saturating_sub(started.elapsed().as_secs()).max(1);
         Some(
             div()
@@ -2070,8 +2070,8 @@ impl StudioWindow {
     }
 
     /// After a take: where it went.
-    fn take_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (_, id) = self.studio.read(cx).last_take.clone()?;
+    fn studio_take_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (_, id) = self.studio.read(cx).last_studio_take.clone()?;
         let _ = id;
         Some(
             div()
@@ -2092,15 +2092,15 @@ impl StudioWindow {
                     div()
                         .flex()
                         .flex_col()
-                        .child(div().font_weight(FontWeight::MEDIUM).child("Take saved"))
+                        .child(div().font_weight(FontWeight::MEDIUM).child("Studio take saved"))
                         .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("Screen, cameras, audio and pointer, in the Library")),
                 )
                 .child(Button::new("take-card-library").label("Show").small().outline().on_click(cx.listener(|this, _, _, cx| {
-                    this.studio.update(cx, |s, _| s.last_take = None);
+                    this.studio.update(cx, |s, _| s.last_studio_take = None);
                     this.show_place(Place::Library, cx);
                 })))
                 .child(ui::icon_button("take-card-close", "x", tok::text_tertiary()).on_click(cx.listener(|this, _, _, cx| {
-                    this.studio.update(cx, |s, _| s.last_take = None);
+                    this.studio.update(cx, |s, _| s.last_studio_take = None);
                     cx.notify();
                 })))
                 .into_any_element(),
@@ -2113,14 +2113,14 @@ impl StudioWindow {
             let s = self.studio.read(cx);
             s.is_taking() || s.is_recording()
         };
-        if self.take_countdown.is_some() || self.studio.read(cx).is_taking() {
+        if self.studio_take_countdown.is_some() || self.studio.read(cx).is_taking() {
             self.studio_take(cx);
         } else if busy {
             self.studio.update(cx, |s, cx| s.toggle_recording(cx));
         } else {
             match self.prefs.record_mode {
                 crate::prefs::RecordMode::Program => self.studio.update(cx, |s, cx| s.toggle_recording(cx)),
-                crate::prefs::RecordMode::Take => self.studio_take(cx),
+                crate::prefs::RecordMode::StudioTake => self.studio_take(cx),
             }
         }
     }
@@ -2133,9 +2133,9 @@ impl StudioWindow {
         let clock = |t: u64| format!("{:02}:{:02}:{:02}", t / 3600, (t / 60) % 60, t % 60);
         let mode = self.prefs.record_mode;
         // (symbol, label, tooltip)
-        let (stop, label, tip): (bool, String, &str) = if let Some(t) = studio.take_elapsed() {
+        let (stop, label, tip): (bool, String, &str) = if let Some(t) = studio.studio_take_elapsed() {
             (true, clock(t.as_secs()), "Stop the Studio take")
-        } else if let Some(started) = self.take_countdown {
+        } else if let Some(started) = self.studio_take_countdown {
             (true, format!("{}", 3u64.saturating_sub(started.elapsed().as_secs()).max(1)), "Cancel")
         } else {
             match rec.state {
@@ -2147,7 +2147,7 @@ impl StudioWindow {
                 _ if studio.is_recording() => (true, "Audio".into(), "Stop recording"),
                 _ => match mode {
                     RecordMode::Program => (false, "Record".into(), "Record the show as it's on air (⌘R)"),
-                    RecordMode::Take => (false, "Studio take".into(), "Record each screen, camera and the pointer, for the Editor (⌘R)"),
+                    RecordMode::StudioTake => (false, "Studio take".into(), "Record each screen, camera and the pointer, for the Editor (⌘R)"),
                 },
             }
         };
@@ -2197,8 +2197,8 @@ impl StudioWindow {
                     .item(
                         PopupMenuItem::new("Studio take (for the Editor)")
                             .icon(ui::icon("mouse-pointer-2"))
-                            .checked(mode == RecordMode::Take)
-                            .on_click(pick(RecordMode::Take)),
+                            .checked(mode == RecordMode::StudioTake)
+                            .on_click(pick(RecordMode::StudioTake)),
                     )
             });
         div()
@@ -2650,10 +2650,10 @@ impl StudioWindow {
                         this.start_rename(target, &name, window, cx);
                         return;
                     }
-                    let studio_mode = this.studio_mode;
+                    let cue_scenes = this.cue_scenes;
                     this.studio.update(cx, |s, cx| {
                         s.select_scene(id);
-                        if studio_mode {
+                        if cue_scenes {
                             cx.notify();
                         } else {
                             let _ = s.execute(Command::SetProgram { scene: Some(id) }, cx);
@@ -2936,14 +2936,14 @@ impl StudioWindow {
                 .rounded(px(6.))
                 .cursor_pointer()
                 .text_size(px(12.))
-                .when(self.studio_mode, |d| d.bg(tok::bg_selected()))
+                .when(self.cue_scenes, |d| d.bg(tok::bg_selected()))
                 .hover(|d| d.bg(tok::bg_raised()))
                 .child(ui::icon("lightair-cue").size(px(14.)).text_color(tok::text_secondary()))
                 .child("Cue scenes")
                 .tooltip(|w, cx| {
                     Tooltip::new("Edit the next scene without viewers seeing it, then Take it live (⌘↩)").build(w, cx)
                 })
-                .on_click(cx.listener(|this, _, _, cx| this.set_studio_mode(!this.studio_mode, cx))),
+                .on_click(cx.listener(|this, _, _, cx| this.set_cue_scenes(!this.cue_scenes, cx))),
         );
         let Some((w_in, h_in)) = &self.canvas_menu else { return div().w_full().child(bar) };
         let has = |w: u32, h: u32| workspace.canvases.iter().any(|f| f.width == w && f.height == h);
@@ -3522,7 +3522,7 @@ impl StudioWindow {
                         move |m, window, cx| menus::object_menu(m, &shell, window, cx)
                     }),
             );
-        let well = match self.studio_mode.then(|| self.program_column(workspace, cx)) {
+        let well = match self.cue_scenes.then(|| self.program_column(workspace, cx)) {
             Some(column) => well.child(column),
             None => well,
         };
@@ -3774,7 +3774,7 @@ impl StudioWindow {
                             .child("How every scene change looks on air."),
                     )
                     .child(self.transition_picker(workspace, cx));
-                let screen = self.screen_look_section(workspace, &scene, cx);
+                let screen = self.screen_zoom_pointer_section(workspace, &scene, cx);
                 body.child(header).child(info).child(screen).child(transition).into_any_element()
             }
             _ => body.child(div().text_color(tok::text_tertiary()).child("Nothing selected")).into_any_element(),

@@ -37,7 +37,7 @@ impl Editor {
         self.selected = clip;
     }
 
-    /// A click on a clip with ⌘ (add or take away) or ⇧ (the range from the last picked).
+    /// A click on a clip with ⌘ (add or studio_take away) or ⇧ (the range from the last picked).
     pub(super) fn pick_click(&mut self, clip: Id, range: bool, cx: &mut Context<Self>) {
         self.zoom_sel = None;
         let Some(seq) = self.seq().cloned() else { return };

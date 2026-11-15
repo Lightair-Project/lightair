@@ -1,5 +1,5 @@
-//! The zoom track, as Screen Studio has it: a lane under the tracks with each screen take's
-//! zooms as blocks where they play. A press on the lane over a take adds one there; a block
+//! The zoom track, as Screen Studio has it: a lane under the tracks with each screen studio_take's
+//! zooms as blocks where they play. A press on the lane over a studio_take adds one there; a block
 //! is picked with a click, moved by dragging it and lengthened by its edges; the inspector sets
 //! how far it zooms and where it looks (following the pointer, or a point). Zooms belong to the
 //! take (source time), kept in the project so they're undone like anything else.
@@ -23,7 +23,7 @@ pub(super) enum ZoomPart {
     End,
 }
 
-/// A zoom block on the lane: its take, its place in the take's zooms, the clip it's shown
+/// A zoom block on the lane: its studio_take, its place in the studio_take's zooms, the clip it's shown
 /// over, and where it is on the timeline.
 #[derive(Clone, Copy)]
 struct Block {
@@ -35,19 +35,19 @@ struct Block {
     to: u64,
 }
 
-/// A take's source time `s` on the timeline, through clip `c`.
+/// A studio_take's source time `s` on the timeline, through clip `c`.
 fn on_timeline(c: &Clip, s: u64) -> u64 {
     c.start_ms + ((s.saturating_sub(c.in_ms)) as f64 / c.speed.max(0.05) as f64) as u64
 }
 
-/// Timeline time `t` in the take's source time, through clip `c` (held to its ends).
+/// Timeline time `t` in the studio_take's source time, through clip `c` (held to its ends).
 fn in_source(c: &Clip, t: u64) -> u64 {
     let t = t.clamp(c.start_ms, c.end_ms());
     (c.in_ms + ((t - c.start_ms) as f64 * c.speed.max(0.05) as f64) as u64).min(c.out_ms)
 }
 
 impl Editor {
-    /// A take's zooms: as edited here, else its look's own (read once).
+    /// A studio_take's zooms: as edited here, else its look's own (read once).
     pub(super) fn zooms_of(&self, m: &Media) -> Vec<Zoom> {
         if let Some(z) = &m.zooms {
             return z.clone();
@@ -57,15 +57,15 @@ impl Editor {
 
     /// Where the tracks start, from the timeline's top: under the ruler and the zoom track.
     pub(super) fn tracks_top(&self) -> f32 {
-        RULER_H + if self.has_takes() { ZOOM_H } else { 0.0 }
+        RULER_H + if self.has_studio_takes() { ZOOM_H } else { 0.0 }
     }
 
-    fn has_takes(&self) -> bool {
-        self.seq().is_some_and(|s| s.tracks.iter().filter(|t| t.kind == TrackKind::Video).flat_map(|t| &t.clips).any(|c| c.content.is_none() && s.media(c.media).is_some_and(|m| m.take.is_some())))
+    fn has_studio_takes(&self) -> bool {
+        self.seq().is_some_and(|s| s.tracks.iter().filter(|t| t.kind == TrackKind::Video).flat_map(|t| &t.clips).any(|c| c.content.is_none() && s.media(c.media).is_some_and(|m| m.studio_take.is_some())))
     }
 
-    /// The take clips (on video tracks) with their media.
-    fn take_clips(&self) -> Vec<(Clip, Media)> {
+    /// The studio_take clips (on video tracks) with their media.
+    fn studio_take_clips(&self) -> Vec<(Clip, Media)> {
         let Some(seq) = self.seq() else { return Vec::new() };
         seq.tracks
             .iter()
@@ -73,14 +73,14 @@ impl Editor {
             .flat_map(|t| t.clips.iter())
             .filter_map(|c| {
                 let m = seq.media(c.media)?;
-                (m.take.is_some() && c.content.is_none()).then(|| (c.clone(), m.clone()))
+                (m.studio_take.is_some() && c.content.is_none()).then(|| (c.clone(), m.clone()))
             })
             .collect()
     }
 
     fn blocks(&self) -> Vec<Block> {
         let mut out = Vec::new();
-        for (c, m) in self.take_clips() {
+        for (c, m) in self.studio_take_clips() {
             for (index, z) in self.zooms_of(&m).into_iter().enumerate() {
                 let (s0, s1) = (z.start_ms.max(c.in_ms), z.end_ms.min(c.out_ms));
                 if s1 > s0 {
@@ -91,7 +91,7 @@ impl Editor {
         out
     }
 
-    /// Changes a take's zooms (as edited here from now on), one undo step.
+    /// Changes a studio_take's zooms (as edited here from now on), one undo step.
     fn set_zooms(&mut self, media: Id, f: impl FnOnce(&mut Vec<Zoom>), cx: &mut Context<Self>) {
         let Some(m) = self.seq().and_then(|s| s.media(media)).cloned() else { return };
         let mut zooms = self.zooms_of(&m);
@@ -114,9 +114,9 @@ impl Editor {
         cx.notify();
     }
 
-    /// A zoom added at timeline time `t` (over a take there), picked.
+    /// A zoom added at timeline time `t` (over a studio_take there), picked.
     pub(super) fn add_zoom_at(&mut self, t: u64, cx: &mut Context<Self>) {
-        let Some((c, m)) = self.take_clips().into_iter().find(|(c, _)| c.start_ms <= t && t < c.end_ms()) else {
+        let Some((c, m)) = self.studio_take_clips().into_iter().find(|(c, _)| c.start_ms <= t && t < c.end_ms()) else {
             self.note = Some("Zooms go on screen recordings: put the playhead over a Studio take.".into());
             cx.notify();
             return;
@@ -127,7 +127,7 @@ impl Editor {
             self.pick_zoom(Some((m.id, i)), cx);
             return;
         }
-        // up to the next zoom, the clip's end or the take's
+        // up to the next zoom, the clip's end or the studio_take's
         let next = zooms.iter().map(|z| z.start_ms).filter(|st| *st > s).min().unwrap_or(u64::MAX);
         let end = (s + NEW_LEN).min(next).min(c.out_ms).min(m.duration_ms);
         if end < s + SHORTEST {
@@ -212,7 +212,7 @@ impl Editor {
 
     /// The zoom lane, under the tracks.
     pub(super) fn zoom_lane(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let takes = self.take_clips();
+        let takes = self.studio_take_clips();
         if takes.is_empty() {
             return None;
         }
@@ -376,10 +376,10 @@ impl Editor {
 }
 
 impl Editor {
-    /// For the check hook: a zoom added at 2 s on the first take, looking at a spot; then
+    /// For the check hook: a zoom added at 2 s on the first studio_take, looking at a spot; then
     /// moved, lengthened, undone and deleted, each logged.
     pub fn hook_zooms(&mut self, cx: &mut Context<Self>) {
-        let count = |this: &Self| this.take_clips().first().map_or(0, |(_, m)| this.zooms_of(m).len());
+        let count = |this: &Self| this.studio_take_clips().first().map_or(0, |(_, m)| this.zooms_of(m).len());
         let n0 = count(self);
         self.add_zoom_at(2_000, cx);
         let Some((m, i, z)) = self.picked_zoom() else {
@@ -388,7 +388,7 @@ impl Editor {
         };
         tracing::info!(before = n0, after = count(self), start = z.start_ms, end = z.end_ms, lane = self.tracks_top() > RULER_H, "CHECK zoom added");
         self.change_zoom(|z| z.focus = Focus::Point { x: 0.3, y: 0.35 }, cx);
-        let Some(clip) = self.take_clips().first().map(|(c, _)| c.id) else { return };
+        let Some(clip) = self.studio_take_clips().first().map(|(c, _)| c.id) else { return };
         // dragged: held 500 ms in, to 3.5 s; then its end to 5.6 s
         self.begin_drag(Drag::Zoom { media: m.id, index: i, clip, part: ZoomPart::Body { grab: 500 } });
         self.drag_zoom(m.id, i, clip, ZoomPart::Body { grab: 500 }, 3_500);

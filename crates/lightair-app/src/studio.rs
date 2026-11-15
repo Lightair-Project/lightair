@@ -26,21 +26,21 @@ struct Pending {
     canvases: Vec<(Id, Option<String>)>,
     stopped: bool,
     /// Multitrack files still being written.
-    stems: bool,
+    multitrack: bool,
     thumbnail_due: Option<std::time::Instant>,
 }
 
-/// A Studio take in progress (docs/plans/screen-studio.md, 4.2): its folder, Library entry,
+/// A Studio studio_take in progress (docs/plans/screen-studio.md, 4.2): its folder, Library entry,
 /// and the source it logs.
-struct TakeRun {
+struct StudioTakeRun {
     workspace: Option<PathBuf>,
     folder: PathBuf,
     item: Item,
     started: std::time::Instant,
     recorder: Option<lightair_platform::input::Recorder>,
     log: Option<lightair_store::input_log::Writer>,
-    tracks: Vec<lightair_engine::take::Track>,
-    /// Its stems, and whose sound each is (the mixer track's name).
+    tracks: Vec<lightair_engine::studio_take::Track>,
+    /// Its track files, and whose sound each is (the mixer track's name).
     audio: Vec<(PathBuf, String)>,
     stopping: bool,
     thumbnail_due: Option<std::time::Instant>,
@@ -105,17 +105,17 @@ pub struct Studio {
     refit: Option<(Vec<lightair_store::EstimatedObject>, std::time::Instant)>,
     /// The recording on its way into the Library.
     pending: Option<Pending>,
-    /// The Studio take being recorded.
-    take: Option<TakeRun>,
-    /// The take just saved (workspace, item), for the window's card.
-    pub last_take: Option<(PathBuf, Id)>,
-    /// Stills the window should take for the Library.
+    /// The Studio studio_take being recorded.
+    studio_take: Option<StudioTakeRun>,
+    /// The studio_take just saved (workspace, item), for the window's card.
+    pub last_studio_take: Option<(PathBuf, Id)>,
+    /// Stills the window should studio_take for the Library.
     pub thumbnails: Vec<ThumbnailRequest>,
     /// Bumped when a workspace's recordings index changes (the Library reloads).
     pub library_version: u64,
     /// Multitrack audio files being recorded: their base name and paths.
     /// Multitrack audio being recorded: its files' base name, and each file with whose sound it is.
-    stems: Option<(String, Vec<(std::path::PathBuf, String)>)>,
+    multitrack_files: Option<(String, Vec<(std::path::PathBuf, String)>)>,
     /// What a new workspace starts as.
     starter: fn() -> Workspace,
 }
@@ -149,11 +149,11 @@ impl Studio {
             recent_lagged: 0,
             refit: None,
             pending: None,
-            take: None,
-            last_take: None,
+            studio_take: None,
+            last_studio_take: None,
             thumbnails: Vec::new(),
             library_version: 0,
-            stems: None,
+            multitrack_files: None,
             mic_history: Default::default(),
             last_clip: None,
             replays: Vec::new(),
@@ -426,7 +426,7 @@ impl Studio {
     /// Opens another workspace in place of this one: this one is saved, the engine is rebuilt from
     /// the other. Not while recording or live.
     pub fn switch_to(&mut self, dir: &std::path::Path, cx: &mut Context<Self>) -> Result<(), String> {
-        if self.is_recording() || self.take.is_some() || runtime().any_stream_running() {
+        if self.is_recording() || self.studio_take.is_some() || runtime().any_stream_running() {
             return Err("Stop recording and streaming first.".into());
         }
         if self.workspace_dir().as_deref() == Some(dir) {
@@ -577,8 +577,8 @@ impl Studio {
     }
 
     pub fn toggle_recording(&mut self, cx: &mut Context<Self>) {
-        if self.take.is_some() {
-            return self.toggle_take(cx);
+        if self.studio_take.is_some() {
+            return self.toggle_studio_take(cx);
         }
         if self.is_recording() {
             let status = runtime().recording();
@@ -589,7 +589,7 @@ impl Studio {
                 }
             }
             self.engine.post(|s| s.outputs.stop_recording());
-            self.finish_stems(cx);
+            self.finish_multitrack(cx);
             return;
         }
         let workspace = self.workspace().clone();
@@ -607,14 +607,14 @@ impl Studio {
         // Make the journal durable before outputs start (docs/14, "Saving, autosave & recovery").
         self.flush();
         // Multitrack audio files (and, audio only, the program) beside the video.
-        let mut stems = false;
+        let mut multitrack = false;
         if settings.multitrack || settings.audio_only {
             let (p, folder, base) = (workspace.clone(), self.recording_folder(), format!("Lightair {stamp}"));
             let program = settings.audio_only;
-            match self.engine.call(move |s| s.reconciler.start_stems(&p, &folder, &base, program)) {
+            match self.engine.call(move |s| s.reconciler.start_multitrack(&p, &folder, &base, program)) {
                 Ok(files) => {
-                    self.stems = Some((format!("Lightair {stamp}"), files));
-                    stems = true;
+                    self.multitrack_files = Some((format!("Lightair {stamp}"), files));
+                    multitrack = true;
                 }
                 Err(e) => self.issue = Some(format!("Multitrack audio didn't start: {e}").into()),
             }
@@ -637,7 +637,7 @@ impl Studio {
                     targets.iter().map(|c| (*c, several.then(|| workspace.canvas(*c).map(|f| f.name.clone()).unwrap_or_default()))).collect()
                 },
                 stopped: false,
-                stems,
+                multitrack,
                 thumbnail_due,
             });
         }
@@ -686,21 +686,21 @@ impl Studio {
         cx.notify();
     }
 
-    /// A Studio take is being recorded (and isn't stopping yet).
+    /// A Studio studio_take is being recorded (and isn't stopping yet).
     pub fn is_taking(&self) -> bool {
-        self.take.as_ref().is_some_and(|t| !t.stopping)
+        self.studio_take.as_ref().is_some_and(|t| !t.stopping)
     }
 
-    /// How long the take has run.
-    pub fn take_elapsed(&self) -> Option<std::time::Duration> {
-        self.take.as_ref().filter(|t| !t.stopping).map(|t| t.started.elapsed())
+    /// How long the studio_take has run.
+    pub fn studio_take_elapsed(&self) -> Option<std::time::Duration> {
+        self.studio_take.as_ref().filter(|t| !t.stopping).map(|t| t.started.elapsed())
     }
 
     /// Starts or stops a Studio take: each screen and camera in the program to its own file,
-    /// the multitrack audio, and the pointer, clicks and keys, in a take folder.
-    pub fn toggle_take(&mut self, cx: &mut Context<Self>) {
-        if self.take.is_some() {
-            self.stop_take(cx);
+    /// the multitrack audio, and the pointer, clicks and keys, in a studio_take folder.
+    pub fn toggle_studio_take(&mut self, cx: &mut Context<Self>) {
+        if self.studio_take.is_some() {
+            self.stop_studio_take(cx);
             return;
         }
         if self.is_recording() {
@@ -710,15 +710,15 @@ impl Studio {
         }
         let workspace = self.workspace().clone();
         let stamp = chrono::Local::now().format("%Y-%m-%d %H.%M.%S");
-        let folder = self.recording_folder().join(format!("Take {stamp}.lightair-take"));
+        let folder = self.recording_folder().join(format!("Studio take {stamp}.lightair-take"));
         let fps = (workspace.primary_canvas().fps_num, workspace.primary_canvas().fps_den);
         self.flush();
         let (f, p, caps) = (folder.clone(), workspace.clone(), self.engine.capabilities.encoders.clone());
         let started = self.engine.call(move |s| {
-            let sources = s.reconciler.take_sources(&p);
-            let take = lightair_engine::take::Take::start(sources, &f, fps, &mut s.outputs, &caps)?;
-            let tracks = take.tracks.clone();
-            s.take = Some(take);
+            let sources = s.reconciler.studio_take_sources(&p);
+            let studio_take = lightair_engine::studio_take::StudioTake::start(sources, &f, fps, &mut s.outputs, &caps)?;
+            let tracks = studio_take.tracks.clone();
+            s.studio_take = Some(studio_take);
             Ok::<_, String>(tracks)
         });
         let tracks = match started {
@@ -729,14 +729,14 @@ impl Studio {
                 return;
             }
         };
-        // the scene as it is: what the take doesn't record (images, text, colours) rebuilt in
+        // the scene as it is: what the studio_take doesn't record (images, text, colours) rebuilt in
         // the Editor, and where everything was
-        if let Some(scene) = lightair_store::take_scene::TakeScene::of(&workspace, &folder) {
+        if let Some(scene) = lightair_store::studio_take_scene::StudioTakeScene::of(&workspace, &folder) {
             let _ = scene.write(&folder);
         }
-        // the audio engine's stems, beside the video
+        // the audio engine's track files, beside the video
         let (p, f) = (workspace.clone(), folder.clone());
-        let audio = match self.engine.call(move |s| s.reconciler.start_stems(&p, &f, "Audio", false)) {
+        let audio = match self.engine.call(move |s| s.reconciler.start_multitrack(&p, &f, "Audio", false)) {
             Ok(files) => files,
             Err(e) => {
                 self.issue = Some(format!("The take's audio didn't start: {e}").into());
@@ -752,16 +752,16 @@ impl Studio {
             let _ = w.write(&[Record { at, entry: Entry::Display { x, y } }, Record { at, entry: Entry::DisplaySize { w: dw, h: dh } }]);
             w
         });
-        let title = format!("Take · {}", chrono::Local::now().format("%-d %b, %H:%M"));
-        let mut item = Item::new(Kind::Take, title, Vec::new(), chrono::Utc::now().timestamp_millis());
+        let title = format!("Studio take · {}", chrono::Local::now().format("%-d %b, %H:%M"));
+        let mut item = Item::new(Kind::StudioTake, title, Vec::new(), chrono::Utc::now().timestamp_millis());
         item.files = tracks.iter().map(|t| ItemFile { track: Some(t.name.clone()), ..ItemFile::new(t.file.clone()) }).collect();
         let workspace_dir = self.workspace_dir();
         if let Some(dir) = &workspace_dir {
             item.thumbnail = Some(recordings::thumbnails_dir(dir).join(format!("{}.png", item.id)));
-            // written now, so a take cut short is still in the Library
+            // written now, so a studio_take cut short is still in the Library
             self.index_add(dir, item.clone());
         }
-        self.take = Some(TakeRun {
+        self.studio_take = Some(StudioTakeRun {
             workspace: workspace_dir,
             folder,
             item,
@@ -776,16 +776,16 @@ impl Studio {
         cx.notify();
     }
 
-    fn stop_take(&mut self, cx: &mut Context<Self>) {
-        let Some(t) = &mut self.take else { return };
+    fn stop_studio_take(&mut self, cx: &mut Context<Self>) {
+        let Some(t) = &mut self.studio_take else { return };
         if t.stopping {
             return;
         }
         t.stopping = true;
         t.item.duration_ms = Some(t.started.elapsed().as_millis() as u64);
         self.engine.post(|s| s.outputs.stop_recording());
-        let report = self.engine.call(|s| s.reconciler.stop_stems());
-        let Some(t) = &mut self.take else { return };
+        let report = self.engine.call(|s| s.reconciler.stop_multitrack());
+        let Some(t) = &mut self.studio_take else { return };
         if let Some(r) = t.recorder.take() {
             let rest: Vec<_> = r
                 .stop()
@@ -814,7 +814,7 @@ impl Studio {
                 "height": k.height,
             })).collect::<Vec<_>>(),
             "audio": t.audio.iter().filter_map(|(f, _)| f.file_name().map(|n| n.to_string_lossy().into_owned())).collect::<Vec<_>>(),
-            // whose sound each stem is
+            // whose sound each track file is
             "audio_tracks": t.audio.iter().map(|(f, name)| serde_json::json!({
                 "file": f.file_name().map(|n| n.to_string_lossy().into_owned()),
                 "name": name,
@@ -824,20 +824,20 @@ impl Studio {
             "input": "input.bin",
             "markers": t.item.markers,
         });
-        let take_json = t.folder.join("take.json");
+        let studio_take_json = t.folder.join("take.json");
         if let Ok(text) = serde_json::to_string_pretty(&sidecar) {
-            let _ = std::fs::write(&take_json, text);
+            let _ = std::fs::write(&studio_take_json, text);
         }
         t.item.files.extend(t.audio.iter().map(|(f, _)| ItemFile::new(f.clone())));
         t.item.files.push(ItemFile::new(t.folder.join("input.bin")));
-        t.item.files.push(ItemFile::new(take_json));
+        t.item.files.push(ItemFile::new(studio_take_json));
         cx.notify();
     }
 
     /// Follows the take: its source log to disk every second, the still, and its Library entry
     /// once its files have stopped.
-    fn track_take(&mut self) {
-        let Some(t) = &mut self.take else { return };
+    fn track_studio_take(&mut self) {
+        let Some(t) = &mut self.studio_take else { return };
         if let (Some(r), Some(w)) = (&t.recorder, &mut t.log) {
             let records: Vec<_> =
                 r.take().into_iter().map(|s| lightair_store::input_log::Record { at: s.at, entry: log_entry(s.event) }).collect();
@@ -850,13 +850,13 @@ impl Studio {
                 self.thumbnails.push(ThumbnailRequest { path });
             }
         }
-        let Some(t) = &self.take else { return };
-        if !t.stopping || !self.engine.call(|s| s.take.as_ref().is_none_or(|t| t.finished())) {
+        let Some(t) = &self.studio_take else { return };
+        if !t.stopping || !self.engine.call(|s| s.studio_take.as_ref().is_none_or(|t| t.finished())) {
             return;
         }
         // the per-source canvases go once their files have stopped
-        self.engine.post(|s| s.take = None);
-        let Some(mut t) = self.take.take() else { return };
+        self.engine.post(|s| s.studio_take = None);
+        let Some(mut t) = self.studio_take.take() else { return };
         if t.thumbnail_due.is_some() {
             t.item.thumbnail = None;
         }
@@ -864,9 +864,9 @@ impl Studio {
         if let Some(dir) = t.workspace {
             let id = t.item.id;
             self.index_add(&dir, t.item);
-            self.last_take = Some((dir, id));
+            self.last_studio_take = Some((dir, id));
         }
-        self.issue = Some(format!("Take saved: {}", t.folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).into());
+        self.issue = Some(format!("Studio take saved: {}", t.folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).into());
     }
 
     /// Writes an item to a workspace's recordings index (and tells the Library).
@@ -896,7 +896,7 @@ impl Studio {
         }
         let Some(p) = &self.pending else { return };
         let running = p.canvases.iter().any(|(c, _)| runtime().get(OutputKey::Recording(*c)).state.is_running());
-        if !p.stopped || p.stems || running {
+        if !p.stopped || p.multitrack || running {
             return;
         }
         let Some(mut p) = self.pending.take() else { return };
@@ -924,16 +924,16 @@ impl Studio {
         let pause = !runtime().recording().paused;
         self.engine.post(move |s| {
             s.outputs.pause_recording(pause);
-            s.reconciler.pause_stems(pause);
+            s.reconciler.pause_multitrack(pause);
         });
         cx.notify();
     }
 
     /// Stops the multitrack audio files and writes what they hold beside them
     /// ("<name>.multitrack.json": the files, their rate and length, and when they started).
-    fn finish_stems(&mut self, cx: &mut Context<Self>) {
-        let Some((base, named)) = self.stems.take() else { return };
-        let Some(report) = self.engine.call(|s| s.reconciler.stop_stems()) else {
+    fn finish_multitrack(&mut self, cx: &mut Context<Self>) {
+        let Some((base, named)) = self.multitrack_files.take() else { return };
+        let Some(report) = self.engine.call(|s| s.reconciler.stop_multitrack()) else {
             self.issue = Some("Multitrack audio couldn't be finished.".into());
             cx.notify();
             return;
@@ -967,7 +967,7 @@ impl Studio {
             if p.item.kind == Kind::Multitrack {
                 p.item.duration_ms = Some(report.frames * 1000 / report.sample_rate.max(1) as u64);
             }
-            p.stems = false;
+            p.multitrack = false;
             p.stopped = true;
         }
         self.issue = Some(format!("Recorded {} audio files", report.files.len()).into());
@@ -985,7 +985,7 @@ impl Studio {
             let at_ms = status.recorded(since).as_millis() as u64;
             p.item.markers.push(Marker { at_ms, label: format!("Marker {n}") });
         }
-        if ok && let Some(t) = &mut self.take {
+        if ok && let Some(t) = &mut self.studio_take {
             let at_ms = t.started.elapsed().as_millis() as u64;
             t.item.markers.push(Marker { at_ms, label: format!("Marker {n}") });
         }
@@ -1083,7 +1083,7 @@ impl Studio {
         self.check_outputs();
         self.announce_clips();
         self.track_recording();
-        self.track_take();
+        self.track_studio_take();
         let stats = lightair_engine::read_stats();
         self.recent_lagged = stats.lagged_frames.saturating_sub(self.stats.lagged_frames);
         self.stats = stats;
@@ -1205,7 +1205,7 @@ impl Studio {
         }
     }
 
-    /// ⇧-click: add a object to the selection, or take it out.
+    /// ⇧-click: add a object to the selection, or studio_take it out.
     /// Adds a object to the selection (kept if it's there).
     pub fn add_selected(&mut self, object: Id) {
         if self.selected_object == Some(object) || self.also_selected.contains(&object) {
