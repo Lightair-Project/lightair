@@ -567,7 +567,7 @@ impl StudioWindow {
         let mixer = cx.new(|cx| MixerPanel::new(studio.clone(), native.clone(), cx));
         let mixer_dock = cx.new(|cx| MixerDock::new(mixer.clone(), cx));
         let outputs = cx.new(|cx| OutputsPanel::new(studio.clone(), cx));
-        let chat = cx.new(|cx| crate::chat_panel::ChatPanel::new(studio.clone(), cx));
+        let chat = cx.new(|cx| crate::chat_panel::ChatPanel::new(studio.clone(), window, cx));
         let activity = cx.new(|cx| crate::activity_panel::ActivityPanel::new(studio.clone(), cx));
         // Its Add destination dialog is drawn over the whole window.
         cx.observe(&outputs, |_, _, cx| cx.notify()).detach();
