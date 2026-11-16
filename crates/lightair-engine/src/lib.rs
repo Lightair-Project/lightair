@@ -9,6 +9,8 @@ pub mod audio;
 pub mod audio_host;
 pub mod backdrop;
 pub mod pointer;
+#[cfg(target_os = "macos")]
+pub mod screen_capture;
 pub mod devices;
 pub mod displays;
 pub mod kinds;

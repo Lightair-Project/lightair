@@ -3,15 +3,17 @@
 //!
 //! | Kind | macOS | Windows |
 //! |---|---|---|
-//! | screen: display | `screen_capture` (type 0) | `monitor_capture` |
-//! | screen: window | `screen_capture` (type 1) | `window_capture` |
-//! | screen: app | `screen_capture` (type 2) | `window_capture` (by executable) |
-//! | screen: game | `screen_capture` (type 1) | `game_capture` (a window, or any full-screen game) |
+//! | screen: display | `screen_capture` (type 0)* | `monitor_capture` |
+//! | screen: window | `screen_capture` (type 1)* | `window_capture` |
+//! | screen: app | `screen_capture` (type 2)* | `window_capture` (by executable) |
+//! | screen: game | `screen_capture` (type 1)* | `game_capture` (a window, or any full-screen game) |
 //! | camera | `macos-avcapture` | `dshow_source` |
 //! | mic | `coreaudio_source_capture` | `wasapi_source_capture` |
 //! | desktop audio | `sck_audio_capture` (type 0); a loopback device: `coreaudio_output_capture` | `wasapi_output_capture` |
 //! | app audio | `sck_audio_capture` (type 1) | `wasapi_process_output_capture` |
 //! | media file (`ffmpeg_source`) | MP4/QuickTime: `lightair_media`; others `ffmpeg_source` | `ffmpeg_source` |
+//!
+//! \* through `lightair_screen_capture`, which runs it only while shown.
 //!
 //! Settings that aren't Lightair's own (a camera's preset, say) pass through as they are.
 
@@ -103,7 +105,8 @@ pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
                 set("window", window);
                 set("application", app);
                 set("show_cursor", Some(cursor));
-                "screen_capture"
+                // OBS's screen_capture, run only while shown (crate::screen_capture)
+                "lightair_screen_capture"
             }
             CAMERA => {
                 set("device", device);
@@ -219,7 +222,7 @@ mod tests {
     #[test]
     fn portable_kinds_play_as_macos_sources() {
         let (id, s) = resolve(SCREEN, &json!({"mode": 1, "window": 7, "cursor": false, "hide_obs": true})).unwrap();
-        assert_eq!(id, "screen_capture");
+        assert_eq!(id, "lightair_screen_capture");
         assert_eq!((&s["type"], &s["window"], &s["show_cursor"], &s["hide_obs"]), (&json!(1), &json!(7), &json!(false), &json!(true)));
         assert!(s.get("mode").is_none() && s.get("cursor").is_none());
 

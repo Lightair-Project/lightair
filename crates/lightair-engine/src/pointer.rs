@@ -307,7 +307,7 @@ fn capture_frame(context: *mut sys::obs_source_t) -> Option<(f32, f32, f32, f32)
     let int = |k: &std::ffi::CStr| unsafe { sys::obs_data_get_int(settings, k.as_ptr()) };
     let frame = match id.as_str() {
         // macOS: a display (0), a window (1) or an app's windows on its display (2)
-        "screen_capture" => match int(c"type") {
+        "screen_capture" | "lightair_screen_capture" => match int(c"type") {
             1 => input::window_frame(&int(c"window").to_string()),
             _ => input::display_frame(&text(c"display_uuid")),
         },
