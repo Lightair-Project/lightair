@@ -337,8 +337,8 @@ def run(app, tag):
     if app == "lightair":
         # never a recording outside target/bench
         launch(app)
-        r = Rpc(port=PORT[app], password=password(app))
         connect(app)
+        r = Rpc(port=PORT[app], password=password(app))
         folder = r.call("workspace.get")["outputs"]["recording"].get("folder")
         quit_app(app, main_pid(app))
         assert folder == rec_dir, f"Lightair records to {folder}, not {rec_dir}: run setup first"
