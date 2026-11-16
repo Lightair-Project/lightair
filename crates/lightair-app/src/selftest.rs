@@ -21,6 +21,7 @@ pub fn run(engine: &Engine, what: &str) {
         "cookies" => cookies(),
         "cookie-set" => cookie_set(),
         "twitch-login" => twitch_login(),
+        "twitch-me" => twitch_me(),
         "displays" => displays(engine),
         // puts Lightair's Backgrounds back: LIGHTAIR_BG_PICTURE and LIGHTAIR_BG_ON (0/1)
         "restore-backgrounds" => {
@@ -312,6 +313,32 @@ unsafe extern "C" fn web_audio(_: *mut std::ffi::c_void, _: *mut lightair_engine
 
 /// `LIGHTAIR_SELFTEST=twitch-login`: signs in to Twitch's chat server with the profile's
 /// Twitch sign-in and joins LIGHTAIR_SELFTEST_CHANNEL, sending nothing.
+/// `LIGHTAIR_SELFTEST=twitch-me`: who Twitch's API says is signed in (what moderation acts as);
+/// reads only.
+fn twitch_me() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject};
+        let _app: *mut AnyObject = unsafe { msg_send![AnyClass::get(c"NSApplication").unwrap(), sharedApplication] };
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(lightair_live::moderate::twitch_me());
+    });
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(30) {
+        lightair_web::pump();
+        std::thread::sleep(Duration::from_millis(8));
+        if let Ok(r) = rx.try_recv() {
+            println!("SELFTEST twitch-me: {}", if r.is_ok() { "the API took the sign-in" } else { "refused" });
+            println!("SELFTEST twitch-me detail: {:?}", r.map(|(_, login)| login));
+            return;
+        }
+    }
+    println!("SELFTEST twitch-me: no answer");
+}
+
 fn twitch_login() {
     #[cfg(target_os = "macos")]
     {
