@@ -14,6 +14,7 @@ pub fn start(hub: &lightair_live::Hub) -> Option<Widgets> {
             let port = w.port();
             lightair_web::set_url_resolver(move |url| lightair_widgets::resolve(url, port));
             w.set_icons(Box::new(icon_svg));
+            crate::now_playing::start(w.clone());
             Some(w)
         }
         Err(e) => {

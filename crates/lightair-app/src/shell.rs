@@ -29,6 +29,7 @@ mod golive;
 mod hierarchy;
 mod inspector;
 mod object_props;
+mod connections;
 mod live_api;
 mod widget_props;
 mod menus;
@@ -612,7 +613,10 @@ impl StudioWindow {
             let a = automations.clone();
             cx.new(|cx| crate::automations_panel::AutomationsPanel::new(a, cx))
         };
-        cx.defer_in(window, |this, _, cx| this.sync_remote(cx));
+        cx.defer_in(window, |this, _, cx| {
+            this.sync_remote(cx);
+            this.load_connections(cx);
+        });
         Self {
             previews: HashMap::from([(primary, preview)]),
             place: Place::Live,

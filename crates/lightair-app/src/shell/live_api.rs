@@ -77,6 +77,7 @@ impl StudioWindow {
                 });
                 Ok(json!({"queued": true}))
             }
+            "music.now" => Ok(widgets.as_ref().map(|w| w.data("now_playing")).filter(|v| !v.is_null()).unwrap_or_else(crate::now_playing::now)),
             "widgets.list" => widgets.map(|w| json!({"widgets": w.list().into_iter().map(|(id, kind)| json!({"id": id, "kind": kind})).collect::<Vec<_>>(), "session": w.session()})).ok_or_else(no_widgets),
             "widgets.test" => {
                 let w = widgets.ok_or_else(no_widgets);

@@ -342,6 +342,7 @@ impl StudioWindow {
                     "canvases" | "canvases-edit" => Page::Canvases,
                     "shortcuts" => Page::Shortcuts,
                     "remote" => Page::Remote,
+                    "connections" => Page::Connections,
                     "about" => Page::About,
                     _ => Page::General,
                 };

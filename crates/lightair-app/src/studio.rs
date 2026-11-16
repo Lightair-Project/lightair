@@ -116,6 +116,8 @@ pub struct Studio {
     /// The chat of the destinations' channels (docs/plans/live-integrations.md), read while the
     /// workspace is open.
     pub chat: lightair_live::Hub,
+    /// Services read besides the destinations' chats (tips: Settings › Connections).
+    pub services: Vec<lightair_live::Channel>,
     /// The widgets' server (docs/plans/live-integrations.md, 2.5): `None` if it couldn't start.
     pub widgets: Option<lightair_widgets::Widgets>,
     doc: Document,
@@ -185,6 +187,7 @@ impl Studio {
         let widgets = crate::widgets::start(&chat);
         let mut studio = Self {
             chat,
+            services: Vec::new(),
             widgets,
             doc: Document::new(workspace),
             package,
@@ -586,6 +589,15 @@ impl Studio {
     /// Keeps the replay buffer running exactly when clips are on.
     /// Reads the chat of every destination with a chat channel set (and stops reading the ones
     /// no longer set).
+    /// Reads `service` (a tip service) or stops reading it.
+    pub fn set_service(&mut self, service: &str, on: bool) {
+        self.services.retain(|c| c.platform != service);
+        if on {
+            self.services.push(lightair_live::Channel { platform: service.into(), channel: "tips".into() });
+        }
+        self.sync_chat();
+    }
+
     fn sync_chat(&self) {
         let channels: Vec<lightair_live::Channel> = self
             .workspace()
@@ -596,6 +608,7 @@ impl Studio {
                 let channel = d.chat.as_ref().filter(|c| !c.trim().is_empty())?;
                 Some(lightair_live::Channel { platform: d.platform.clone()?, channel: channel.trim().to_string() })
             })
+            .chain(self.services.iter().cloned())
             .collect();
         self.chat.set_channels(&channels);
         if let Some(w) = &self.widgets {

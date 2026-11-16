@@ -17,6 +17,7 @@ mod library;
 mod mcp_bridge;
 mod mixer;
 mod native_preview;
+mod now_playing;
 #[cfg(target_os = "macos")]
 mod plugin_editor;
 #[cfg(windows)]

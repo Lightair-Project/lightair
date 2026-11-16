@@ -500,7 +500,32 @@ pub const PLATFORMS: &[Platform] = &[
 ];
 
 pub fn by_id(id: &str) -> Option<&'static Platform> {
-    PLATFORMS.iter().find(|p| p.id == id)
+    PLATFORMS.iter().chain(SERVICES).find(|p| p.id == id)
+}
+
+/// Services events come from that aren't destinations (tips): badges in Chat and Activity.
+pub const SERVICES: &[Platform] = &[
+    service("streamlabs", "Streamlabs", 0x80F5D2, "SL"),
+    service("streamelements", "StreamElements", 0x1B1F2A, "SE"),
+    service("kofi", "Ko-fi", 0xFF5E5B, "Ko"),
+];
+
+const fn service(id: &'static str, name: &'static str, color: u32, mark: &'static str) -> Platform {
+    Platform {
+        id,
+        name,
+        native: "",
+        aliases: &[],
+        region: Region::Other,
+        color,
+        mark,
+        logo: None,
+        servers: &[],
+        help: "",
+        key_link: None,
+        shape: Shape::Landscape,
+        max_kbps: None,
+    }
 }
 
 /// Whether a destination takes a second audio track for its VODs: Twitch's VOD track (OBS
