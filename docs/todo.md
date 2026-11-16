@@ -41,7 +41,7 @@ with what's known about each. Keep it current: strike items as they land.
   chosen platforms' cookies, decrypted with the browser's "Safe Storage" Keychain key (asks
   once). Native Touch ID passkeys can't be used (Apple's restricted browser entitlement; Chrome's
   own passkeys need Google's keychain group).
-- Chat panel: tabs per platform, reply to a message, moderation (delete, timeout, ban).
+- Chat panel: ~~tabs per platform, reply to a message~~ (done); moderation (delete, timeout, ban) left.
 
 ## Widgets
 

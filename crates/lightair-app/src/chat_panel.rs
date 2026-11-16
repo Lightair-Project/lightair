@@ -35,6 +35,10 @@ pub struct ChatPanel {
     target: String,
     /// Why the last message didn't go.
     send_error: Option<String>,
+    /// Only this platform's chat ("": every platform's).
+    filter: String,
+    /// The message being replied to.
+    reply: Option<ChatEvent>,
     _input_events: Subscription,
 }
 
@@ -74,13 +78,17 @@ impl ChatPanel {
                 this.send(text, cx);
             }
         });
-        ChatPanel { studio, focus: cx.focus_handle(), scroll: ScrollHandle::new(), images, last: 0, input, target: String::new(), send_error: None, _input_events }
+        ChatPanel { studio, focus: cx.focus_handle(), scroll: ScrollHandle::new(), images, last: 0, input, target: String::new(), send_error: None, filter: String::new(), reply: None, _input_events }
     }
 
     /// Sends `text` (as the person signed in on each platform), off the main thread.
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
         let hub = self.studio.read(cx).chat.clone();
-        let params = serde_json::json!({"text": text, "platform": self.target});
+        // a reply goes to its message's own chat
+        let params = match self.reply.take() {
+            Some(r) => serde_json::json!({"text": text, "platform": r.platform, "channel": r.channel, "reply_to": r.native_id}),
+            None => serde_json::json!({"text": text, "platform": self.target}),
+        };
         self.send_error = None;
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { crate::chat_send::send(&hub, &params) }).await;
@@ -124,17 +132,44 @@ impl ChatPanel {
             .border_t_1()
             .border_color(tok::border())
             .when_some(self.send_error.clone(), |d, e| d.child(div().text_size(px(11.)).text_color(tok::error()).child(e)))
+            .when_some(self.reply.as_ref(), |d, r| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_size(px(11.))
+                        .text_color(tok::text_secondary())
+                        .child(div().flex_1().truncate().child(format!("Replying to {}: {}", r.name(), r.text)))
+                        .child(ui::icon_button("chat-reply-cancel", "x", tok::text_tertiary()).on_click(cx.listener(|this, _, _, cx| {
+                            this.reply = None;
+                            cx.notify();
+                        }))),
+                )
+            })
             .child(div().flex().items_center().gap_1().child(menu).child(div().flex_1().child(TextInput::new(&self.input).small())))
     }
 
-    fn header(&self, cx: &App) -> Option<Div> {
-        let hub = &self.studio.read(cx).chat;
+    fn header(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let hub = self.studio.read(cx).chat.clone();
         let mut status: Vec<_> = hub.status().into_iter().collect();
         if status.is_empty() {
             return None;
         }
         status.sort_by(|a, b| (&a.0.platform, &a.0.channel).cmp(&(&b.0.platform, &b.0.channel)));
         let mut row = div().flex().flex_wrap().gap_2().px_3().py_2().border_b_1().border_color(tok::border());
+        // tabs: every platform's chat, or one platform's
+        let tab = |id: SharedString, on: bool| {
+            div().id(id).flex().items_center().gap_1().px_1p5().py(px(2.)).rounded(px(5.)).cursor_pointer().when(on, |d| d.bg(tok::bg_selected())).hover(|d| d.bg(tok::bg_selected()))
+        };
+        row = row.child(
+            tab("chat-tab-all".into(), self.filter.is_empty())
+                .child(div().text_size(px(11.)).text_color(tok::text_secondary()).child("All"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.filter.clear();
+                    cx.notify();
+                })),
+        );
         for (channel, s) in status {
             let (text, colour) = match &s {
                 Status::Connected => ("Live chat", tok::ok()),
@@ -153,12 +188,13 @@ impl ChatPanel {
                 _ => channel.channel.clone().into(),
             };
             let Some(p) = platforms::by_id(&channel.platform) else { continue };
+            let platform = channel.platform.clone();
             row = row.child(
-                div()
-                    .id(SharedString::from(format!("chat-status-{}-{}", channel.platform, channel.channel)))
-                    .flex()
-                    .items_center()
-                    .gap_1()
+                tab(SharedString::from(format!("chat-status-{}-{}", channel.platform, channel.channel)), self.filter == channel.platform)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.filter = platform.clone();
+                        cx.notify();
+                    }))
                     .child(badge(p, 14.))
                     .child(div().size(px(6.)).rounded_full().bg(colour))
                     .child(div().text_size(px(11.)).text_color(tok::text_secondary()).child(text))
@@ -189,7 +225,7 @@ impl ChatPanel {
     }
 
     /// One event as a row (deletions aren't shown: they grey what they deleted).
-    fn row(&self, e: &ChatEvent) -> Option<AnyElement> {
+    fn row(&self, e: &ChatEvent, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = platforms::by_id(&e.platform)?;
         let user = e.user.as_ref();
         let name = user.map_or("", |u| u.display_name.as_str()).to_string();
@@ -208,12 +244,31 @@ impl ChatPanel {
         let body = self.message(e);
         let el = match &e.kind {
             Kind::Deletion { .. } => return None,
-            Kind::Message => div()
+            Kind::Message => div().child(
+                div()
+                .id(SharedString::from(format!("chat-msg-{}", e.id)))
+                .group("chat-msg")
+                .relative()
                 .px_3()
                 .py(px(3.))
                 .flex()
                 .flex_col()
                 .gap(px(2.))
+                // reply (where Lightair can send, to a message the platform numbered)
+                .when(e.native_id.is_some() && lightair_live::accounts::account(&e.platform).is_some(), |d| {
+                    let target = e.clone();
+                    d.child(
+                        div().absolute().top(px(2.)).right(px(8.)).invisible().group_hover("chat-msg", |s| s.visible()).child(
+                            ui::icon_button(SharedString::from(format!("chat-reply-{}", e.id)), "reply", tok::text_secondary())
+                                .tooltip(ui::tip("Reply"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.reply = Some(target.clone());
+                                    this.input.update(cx, |i, cx| i.focus(window, cx));
+                                    cx.notify();
+                                })),
+                        ),
+                    )
+                })
                 .when_some(e.reply_to.as_ref(), |d, r| {
                     d.child(
                         div()
@@ -225,6 +280,7 @@ impl ChatPanel {
                 })
                 .child(head)
                 .child(body),
+            ),
             Kind::Paid => div()
                 .mx_2()
                 .my_1()
@@ -394,7 +450,8 @@ impl Render for ChatPanel {
         let events = hub.history();
         let header = self.header(cx);
         let start = events.len().saturating_sub(SHOWN);
-        let rows: Vec<AnyElement> = events[start..].iter().filter_map(|e| self.row(e)).collect();
+        let filter = self.filter.clone();
+        let rows: Vec<AnyElement> = events[start..].iter().filter(|e| filter.is_empty() || e.platform == filter).filter_map(|e| self.row(e, cx)).collect();
         // new messages: follow them down, unless the reader has scrolled up
         let newest = events.last().map_or(0, |e| e.id);
         if newest != self.last {
