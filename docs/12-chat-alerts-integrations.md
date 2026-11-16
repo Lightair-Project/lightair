@@ -1,5 +1,7 @@
 # 12 · Chat, Alerts, Creator Tools & Control
 
+(How it's built, platform by platform, and in what order: [plans/live-integrations](plans/live-integrations.md).)
+
 Streams are conversations. Lightair brings the audience's side into the app natively: chat, events, alerts and widgets are built-in features rendered by Lightair, not browser sources pointed at third-party services. The same section covers how Lightair is controlled from outside: hotkeys, Stream Deck, MIDI, the remote API.
 
 ## Unified chat
