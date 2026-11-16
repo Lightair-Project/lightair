@@ -18,6 +18,8 @@ pub fn run(engine: &Engine, what: &str) {
         "web" => web(engine),
         "agent-page" => agent_page(),
         "script" => script(),
+        "cookies" => cookies(),
+        "twitch-login" => twitch_login(),
         "displays" => displays(engine),
         // puts Lightair's Backgrounds back: LIGHTAIR_BG_PICTURE and LIGHTAIR_BG_ON (0/1)
         "restore-backgrounds" => {
@@ -305,6 +307,67 @@ unsafe extern "C" fn web_audio(_: *mut std::ffi::c_void, _: *mut lightair_engine
     let samples = unsafe { std::slice::from_raw_parts(plane, audio.frames as usize) };
     let loudest = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     WEB_PEAK.fetch_max(loudest.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `LIGHTAIR_SELFTEST=twitch-login`: signs in to Twitch's chat server with the profile's
+/// Twitch sign-in and joins LIGHTAIR_SELFTEST_CHANNEL, sending nothing.
+fn twitch_login() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject};
+        let _app: *mut AnyObject = unsafe { msg_send![AnyClass::get(c"NSApplication").unwrap(), sharedApplication] };
+    }
+    let channel = std::env::var("LIGHTAIR_SELFTEST_CHANNEL").unwrap_or_default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(lightair_live::send::check_twitch(&channel));
+    });
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(30) {
+        lightair_web::pump();
+        std::thread::sleep(Duration::from_millis(8));
+        if let Ok(r) = rx.try_recv() {
+            println!("SELFTEST twitch-login: {r:?}");
+            return;
+        }
+    }
+    println!("SELFTEST twitch-login: no answer");
+}
+
+/// `LIGHTAIR_SELFTEST=cookies`: a cookie a page sets, read back as sending reads sign-ins.
+fn cookies() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject};
+        let _app: *mut AnyObject = unsafe { msg_send![AnyClass::get(c"NSApplication").unwrap(), sharedApplication] };
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let tx = parking_lot::Mutex::new(tx);
+    let script = format!("{}document.cookie = 'lightair_test=yes; path=/; max-age=60'; lightair('set');", lightair_live::pages::PRELUDE);
+    let _page = lightair_web::Page::open_agent("https://example.com/", script, std::sync::Arc::new(move |m| {
+        let _ = tx.lock().send(m);
+    }));
+    let (got_tx, got_rx) = std::sync::mpsc::channel();
+    let start = std::time::Instant::now();
+    let mut asked = false;
+    while start.elapsed() < Duration::from_secs(30) {
+        lightair_web::pump();
+        std::thread::sleep(Duration::from_millis(8));
+        if !asked && rx.try_recv().is_ok() {
+            asked = true;
+            let got = got_tx.clone();
+            std::thread::spawn(move || {
+                let _ = got.send(lightair_live::pages::cookie("https://example.com", "lightair_test"));
+            });
+        }
+        if let Ok(v) = got_rx.try_recv() {
+            println!("SELFTEST cookies: {v:?} after {} ms", start.elapsed().as_millis());
+            return;
+        }
+    }
+    println!("SELFTEST cookies: no answer");
 }
 
 /// `LIGHTAIR_SELFTEST=script`: an automation's JavaScript step, run in its hidden page.
