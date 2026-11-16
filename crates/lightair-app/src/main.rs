@@ -2,6 +2,7 @@
 
 mod assets;
 mod camera_studio;
+mod chat_panel;
 mod editor;
 mod effect_drag;
 mod encoding;

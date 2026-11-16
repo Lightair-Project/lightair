@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 lightair-engine.workspace = true
+lightair-live.workspace = true
 lightair-preview.workspace = true
 lightair-web.workspace = true
 lightair-core.workspace = true
