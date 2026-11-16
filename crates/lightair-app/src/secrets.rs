@@ -46,3 +46,20 @@ pub fn new_remote_password() -> Option<String> {
     remote_entry()?.set_password(&p).ok()?;
     Some(p)
 }
+
+const CONNECTION: &str = "Lightair connection";
+
+/// A connected service's token ("streamlabs", "streamelements", …).
+pub fn connection_token(service: &str) -> Option<String> {
+    keyring::Entry::new(CONNECTION, service).ok()?.get_password().ok().filter(|t| !t.is_empty())
+}
+
+pub fn set_connection_token(service: &str, token: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(CONNECTION, service).map_err(|e| e.to_string())?;
+    if token.is_empty() {
+        let _ = entry.delete_credential();
+        Ok(())
+    } else {
+        entry.set_password(token).map_err(|e| e.to_string())
+    }
+}

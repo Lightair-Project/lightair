@@ -35,6 +35,7 @@ pub(crate) enum Page {
     Canvases,
     Shortcuts,
     Remote,
+    Connections,
     About,
 }
 
@@ -48,6 +49,7 @@ const PAGES: &[(Page, &str, &str)] = &[
     (Page::Camera, "Camera", "camera"),
     (Page::Shortcuts, "Shortcuts", "keyboard"),
     (Page::Remote, "Remote API", "radio-tower"),
+    (Page::Connections, "Connections", "plug"),
     (Page::About, "About", "info"),
 ];
 
@@ -325,6 +327,7 @@ impl StudioWindow {
             Page::Canvases => self.canvases_page(cx),
             Page::Shortcuts => self.shortcuts_page(cx),
             Page::Remote => self.remote_page(cx),
+            Page::Connections => self.connections_page(cx),
             Page::About => self.about_page(cx),
         };
         let title = PAGES.iter().find(|(p, ..)| *p == page).map_or("", |(_, l, _)| *l);
@@ -1137,6 +1140,45 @@ impl StudioWindow {
     fn set_remote(&mut self, f: impl FnOnce(&mut crate::prefs::RemoteApi), cx: &mut Context<Self>) {
         self.set_pref(|p| f(&mut p.remote), cx);
         self.sync_remote(cx);
+    }
+
+    fn connections_page(&self, cx: &mut Context<Self>) -> Div {
+        let status = self.studio.read(cx).chat.status();
+        let mut tips = group("Tips and donations");
+        for (service, name, hint) in super::connections::SERVICES {
+            let channel = lightair_live::Channel { platform: (*service).into(), channel: "tips".into() };
+            let connected = self.studio.read(cx).services.iter().any(|c| c.platform == *service);
+            let (text, colour) = match (connected, status.get(&channel)) {
+                (false, _) => ("Not connected".to_string(), tok::text_tertiary()),
+                (true, Some(lightair_live::Status::Connected)) => ("Connected: tips show in Activity and alerts".into(), tok::ok()),
+                (true, Some(lightair_live::Status::Error { message })) => (message.clone(), tok::error()),
+                (true, _) => ("Connecting…".into(), tok::warn()),
+            };
+            let s = *service;
+            let control = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(Button::new(SharedString::from(format!("connect-{s}"))).label(if connected { "Paste new token" } else { "Paste token" }).xsmall().outline().on_click(
+                    cx.listener(move |this, _, _, cx| this.paste_connection(s, cx)),
+                ))
+                .when(connected, |d| {
+                    d.child(Button::new(SharedString::from(format!("disconnect-{s}"))).label("Disconnect").xsmall().ghost().on_click(cx.listener(
+                        move |this, _, _, cx| this.disconnect(s, cx),
+                    )))
+                });
+            tips = tips.child(row(name, Some(&format!("{text}. {hint}")), control).text_color(colour));
+        }
+        pages().child(tips).child(
+            group("How it works").child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(12.))
+                    .text_color(tok::text_tertiary())
+                    .child("Copy the token from the service's own dashboard, then choose Paste token: Lightair keeps it in the Keychain and never shows it. Tips arrive like any other event, in Activity, alert boxes, goals and automations."),
+            ),
+        )
     }
 
     fn remote_page(&self, cx: &mut Context<Self>) -> Div {
