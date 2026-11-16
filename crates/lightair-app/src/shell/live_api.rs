@@ -1,0 +1,152 @@
+//! The remote API's live methods (docs/plans/live-integrations.md): chat, widgets and
+//! automations. Automations' steps come through here too (as the "Automation" client), so a
+//! step can do anything a remote client can.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use gpui_kit::*;
+use lightair_automation::{Automation, Automations, Host, recipes};
+use lightair_remote::{ApiError, Call, ErrorKind, Reply};
+use serde_json::{Value, json};
+
+use super::StudioWindow;
+
+fn text<'a>(p: &'a Value, key: &str) -> Option<&'a str> {
+    p.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
+/// Starts the automations; their steps call Lightair through `jobs` (the remote API's queue).
+pub(super) fn start_automations(hub: &lightair_live::Hub, jobs: super::remote::JobSender) -> Automations {
+    let host: Host = Arc::new(move |method: &str, params: Value| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let call = Call { method: method.to_string(), params, client: "Automation" };
+        jobs.unbounded_send((call, tx)).map_err(|_| "Lightair is closing".to_string())?;
+        match rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(e.message),
+            Err(_) => Err("Lightair didn't answer in time".into()),
+        }
+    });
+    Automations::start(hub.clone(), lightair_platform::paths::data_dir().join("automations"), host)
+}
+
+impl StudioWindow {
+    /// LIGHTAIR_TEST_EVENTS ("sub,paid,…"), sent 4 s apart (the screenshot hooks).
+    pub(super) fn send_test_events(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tests: Vec<String> = std::env::var("LIGHTAIR_TEST_EVENTS").unwrap_or_default().split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+        cx.spawn_in(window, async move |this, cx| {
+            for kind in tests {
+                cx.background_executor().timer(Duration::from_millis(4000)).await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(w) = &this.studio.read(cx).widgets {
+                        w.test(&kind, "twitch");
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// A live method's answer, or `None` (not one of these).
+    pub(super) fn live_call(&mut self, call: &Call, cx: &mut Context<Self>) -> Option<Reply> {
+        let p = &call.params;
+        let studio = self.studio.read(cx);
+        let widgets = studio.widgets.clone();
+        let hub = studio.chat.clone();
+        let no_widgets = || ApiError::failed("widgets aren't available");
+        Some(match call.method.as_str() {
+            "chat.history" => {
+                let limit = p.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+                let h = hub.history();
+                let start = h.len().saturating_sub(limit);
+                Ok(json!({"events": &h[start..], "channels": hub.status().into_iter().map(|(c, s)| json!({"platform": c.platform, "channel": c.channel, "status": s})).collect::<Vec<_>>()}))
+            }
+            "chat.send" => self.send_chat(p, cx),
+            "widgets.list" => widgets.map(|w| json!({"widgets": w.list().into_iter().map(|(id, kind)| json!({"id": id, "kind": kind})).collect::<Vec<_>>(), "session": w.session()})).ok_or_else(no_widgets),
+            "widgets.test" => {
+                let w = widgets.ok_or_else(no_widgets);
+                w.map(|w| {
+                    w.test(text(p, "kind").unwrap_or("follow"), text(p, "platform").unwrap_or("twitch"));
+                    json!({})
+                })
+            }
+            "widgets.button" => {
+                let (Some(w), Some(id), Some(button)) = (widgets, text(p, "widget"), text(p, "button")) else {
+                    return Some(Err(ApiError::invalid("widget and button are needed")));
+                };
+                w.button(id, button);
+                Ok(json!({}))
+            }
+            "widgets.speak" => match widgets {
+                Some(w) if w.speak(text(p, "text").unwrap_or("")) => Ok(json!({})),
+                Some(_) => Err(ApiError::new(ErrorKind::State, "there's no alert box on air to say it (add one in Add Object › Widgets)")),
+                None => Err(no_widgets()),
+            },
+            "widgets.sound" => match widgets {
+                Some(w) if w.sound(text(p, "file").unwrap_or(""), p.get("volume").and_then(Value::as_f64).unwrap_or(100.0)) => Ok(json!({})),
+                Some(_) => Err(ApiError::new(ErrorKind::State, "there's no alert box on air to play it (add one in Add Object › Widgets)")),
+                None => Err(no_widgets()),
+            },
+            "automation.list" => {
+                let a = &self.automations;
+                Ok(json!({
+                    "automations": a.list(),
+                    "recipes": recipes::RECIPES.iter().map(|r| json!({"key": r.key, "name": r.name, "about": r.about})).collect::<Vec<_>>(),
+                    "vars": a.vars(),
+                    "runs": a.history().into_iter().rev().take(30).collect::<Vec<_>>(),
+                }))
+            }
+            "automation.set" => {
+                let made = match (text(p, "recipe"), p.get("automation")) {
+                    (Some(key), _) => recipes::make(key).ok_or_else(|| ApiError::not_found(format!("no recipe {key}"))),
+                    (None, Some(v)) => {
+                        let mut v = v.clone();
+                        if v.get("id").and_then(Value::as_str).is_none_or(str::is_empty) {
+                            v["id"] = json!(lightair_automation::new_id());
+                        }
+                        serde_json::from_value::<Automation>(v).map_err(|e| ApiError::invalid(format!("that isn't an automation: {e}")))
+                    }
+                    _ => Err(ApiError::invalid("automation or recipe is needed")),
+                };
+                made.map(|a| {
+                    self.automations.set(a.clone());
+                    cx.notify();
+                    json!(a)
+                })
+            }
+            "automation.remove" => {
+                let key = text(p, "automation").unwrap_or("");
+                match self.automations.get(key) {
+                    Some(a) => {
+                        self.automations.remove(&a.id);
+                        cx.notify();
+                        Ok(json!({}))
+                    }
+                    None => Err(ApiError::not_found(format!("no automation {key}"))),
+                }
+            }
+            "automation.run" => {
+                let args: Vec<String> = p.get("args").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+                self.automations.run(text(p, "automation").unwrap_or(""), None, &args).map(|_| json!({})).map_err(ApiError::not_found)
+            }
+            "vars.set" => {
+                let Some(name) = text(p, "name") else { return Some(Err(ApiError::invalid("name is needed"))) };
+                self.automations.set_var(name, p.get("value").cloned().unwrap_or(Value::Null));
+                Ok(json!({}))
+            }
+            _ => return None,
+        })
+    }
+
+    /// Sends chat where it can be sent (accounts that can send are set up in Outputs).
+    fn send_chat(&mut self, p: &Value, cx: &mut Context<Self>) -> Reply {
+        let text = text(p, "text").unwrap_or("").trim().to_string();
+        if text.is_empty() {
+            return Err(ApiError::invalid("nothing to send"));
+        }
+        let platform = p.get("platform").and_then(Value::as_str).unwrap_or("").to_string();
+        let sent = crate::chat_send::send(&self.studio.read(cx).chat, &platform, &text);
+        sent.map(|n| json!({"sent": n})).map_err(|e| ApiError::new(ErrorKind::State, e))
+    }
+}

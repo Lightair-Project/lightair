@@ -4002,6 +4002,7 @@ dependencies = [
  "keyring",
  "libc",
  "lightair-audio",
+ "lightair-automation",
  "lightair-core",
  "lightair-engine",
  "lightair-live",
@@ -4031,6 +4032,20 @@ dependencies = [
  "ebur128",
  "nnnoiseless",
  "rtrb",
+]
+
+[[package]]
+name = "lightair-automation"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "getrandom 0.3.4",
+ "lightair-live",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tracing",
+ "ureq",
 ]
 
 [[package]]

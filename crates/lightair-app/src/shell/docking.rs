@@ -204,6 +204,7 @@ impl StudioWindow {
         let assets = panel(Region::Assets, cx);
         let (mixer, outputs, chat) = (self.mixer_dock.clone(), self.outputs.clone(), self.chat.clone());
         let activity = self.activity.clone();
+        let automations = self.automations_panel.clone();
         // Every group shows a tab bar, even with one panel, so any panel can be dropped onto
         // any header to join it as a tab (and the canvas gets a header like the rest).
         let (dock, skin) = DockSkin::dock_area("lightair-studio", Some(1), window, cx);
@@ -218,7 +219,12 @@ impl StudioWindow {
                 DockLayout::tabs()
                     .panel_view(panel_handle(mixer), cx)
                     .panel_view(panel_handle(assets), cx)
-                    .active_index(usize::from(std::env::var("LIGHTAIR_OPEN").is_ok_and(|h| h.starts_with("assets")))),
+                    .panel_view(panel_handle(automations), cx)
+                    .active_index(match std::env::var("LIGHTAIR_OPEN").as_deref() {
+                        Ok(h) if h.starts_with("assets") => 1,
+                        Ok(h) if h.starts_with("automations") => 2,
+                        _ => 0,
+                    }),
                 window,
                 cx,
             );
@@ -259,6 +265,16 @@ impl StudioWindow {
         // Development: open a dialog on launch for screenshots (no clicking needed).
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
             Ok("add-object") => self.open_add_object(window, cx),
+            // recipes added (and an alert box, for their voice), then the test events sent
+            Ok(hook) if hook.starts_with("automations-") => {
+                for key in hook[12..].split(',') {
+                    if let Some(a) = lightair_automation::recipes::make(key) {
+                        self.automations.set(a);
+                    }
+                }
+                self.add_widget("alert-box", None, window, cx);
+                self.send_test_events(window, cx);
+            }
             // a widget added and selected; LIGHTAIR_TEST_EVENTS ("sub,paid,…") then sent to it
             Ok(hook) if hook.trim_start_matches("activity-").starts_with("widget-") => {
                 for kind in hook.trim_start_matches("activity-")[7..].split(',') {
@@ -270,18 +286,7 @@ impl StudioWindow {
                         None => self.add_widget(kind, None, window, cx),
                     }
                 }
-                let tests: Vec<String> = std::env::var("LIGHTAIR_TEST_EVENTS").unwrap_or_default().split(',').filter(|s| !s.is_empty()).map(String::from).collect();
-                cx.spawn_in(window, async move |this, cx| {
-                    for kind in tests {
-                        cx.background_executor().timer(std::time::Duration::from_millis(4000)).await;
-                        let _ = this.update(cx, |this, cx| {
-                            if let Some(w) = &this.studio.read(cx).widgets {
-                                w.test(&kind, "twitch");
-                            }
-                        });
-                    }
-                })
-                .detach();
+                self.send_test_events(window, cx);
             }
             Ok(open @ ("add-display" | "add-window" | "add-app")) => {
                 self.open_add_object(window, cx);
