@@ -20,6 +20,8 @@ use crate::ui::{self, tok};
 
 pub struct AutomationsPanel {
     automations: Automations,
+    /// For each automation's web address.
+    widgets: Option<lightair_widgets::Widgets>,
     focus: FocusHandle,
     selected: Option<String>,
     /// The inputs of the automation they were made for (its id and step count).
@@ -42,7 +44,7 @@ fn fields(a: &Automation) -> Vec<(String, &'static str, bool)> {
             f.push(("trigger.min_messages".into(), "Only after this many chat messages", true));
         }
         Trigger::Event { .. } => f.push(("trigger.min_amount".into(), "At least (amount or raiders)", true)),
-        Trigger::Manual => {}
+        Trigger::Manual | Trigger::Output { .. } | Trigger::Start => {}
     }
     for (i, s) in a.steps.iter().enumerate() {
         let (key, label, num) = match s {
@@ -134,7 +136,7 @@ const STEP_KINDS: &[(&str, &str)] = &[
 ];
 
 impl AutomationsPanel {
-    pub fn new(automations: Automations, cx: &mut Context<Self>) -> Self {
+    pub fn new(automations: Automations, widgets: Option<lightair_widgets::Widgets>, cx: &mut Context<Self>) -> Self {
         let dirty = Arc::new(AtomicBool::new(true));
         {
             let dirty = dirty.clone();
@@ -153,7 +155,7 @@ impl AutomationsPanel {
         })
         .detach();
         let selected = automations.list().first().map(|a| a.id.clone());
-        AutomationsPanel { automations, focus: cx.focus_handle(), selected, built_for: None, inputs: Vec::new(), json: None, show_json: false, error: None, _events: Vec::new() }
+        AutomationsPanel { automations, widgets, focus: cx.focus_handle(), selected, built_for: None, inputs: Vec::new(), json: None, show_json: false, error: None, _events: Vec::new() }
     }
 
     fn current(&self) -> Option<Automation> {
@@ -317,6 +319,11 @@ impl AutomationsPanel {
                 ("A chat message", Trigger::Chat { contains: String::new(), first_time: false }),
                 ("A first-time chatter", Trigger::Chat { contains: String::new(), first_time: true }),
                 ("A timer", Trigger::Timer { minutes: 10.0, min_messages: 0 }),
+                ("The stream starts", Trigger::Output { what: "stream".into(), state: "start".into() }),
+                ("The stream stops", Trigger::Output { what: "stream".into(), state: "stop".into() }),
+                ("Recording starts", Trigger::Output { what: "record".into(), state: "start".into() }),
+                ("Recording stops", Trigger::Output { what: "record".into(), state: "stop".into() }),
+                ("Lightair starts", Trigger::Start),
                 ("Only by hand", Trigger::Manual),
             ];
             for (label, t) in options {
@@ -489,6 +496,13 @@ impl AutomationsPanel {
                         }
                         cx.notify();
                     })))
+                    .when_some(self.widgets.as_ref().and_then(|w| w.run_url(&a.id)), |d, url| {
+                        d.child(
+                            ui::icon_button("automation-url", "link", tok::text_secondary())
+                                .tooltip(ui::tip("Copy its web address: opening it runs this (Stream Deck's Website action, Touch Portal, a shortcut). This computer only."))
+                                .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(url.clone()))),
+                        )
+                    })
                     .child(ui::icon_button("automation-dup", "copy", tok::text_secondary()).tooltip(ui::tip("Duplicate")).on_click(cx.listener(move |this, _, _, cx| {
                         let mut a = dup.clone();
                         a.id = lightair_automation::new_id();

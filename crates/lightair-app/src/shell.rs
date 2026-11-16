@@ -626,7 +626,8 @@ impl StudioWindow {
         live_api::feed_widgets(automations.clone(), studio.read(cx).widgets.clone());
         let automations_panel = {
             let a = automations.clone();
-            cx.new(|cx| crate::automations_panel::AutomationsPanel::new(a, cx))
+            let w = studio.read(cx).widgets.clone();
+            cx.new(|cx| crate::automations_panel::AutomationsPanel::new(a, w, cx))
         };
         cx.defer_in(window, |this, _, cx| {
             this.sync_remote(cx);

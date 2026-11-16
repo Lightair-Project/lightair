@@ -46,7 +46,42 @@ pub(super) fn start_automations(hub: &lightair_live::Hub, jobs: super::remote::J
 /// The points leaderboard and the giveaway's entrants, for the widgets that show them (only
 /// while one exists).
 pub(super) fn feed_widgets(automations: Automations, widgets: Option<lightair_widgets::Widgets>) {
+    // automations: when streaming or recording starts or stops, and once at start
+    {
+        let a = automations.clone();
+        let _ = std::thread::Builder::new().name("lightair-automation-outputs".into()).spawn(move || {
+            use lightair_engine::outputs::runtime;
+            std::thread::sleep(Duration::from_secs(2));
+            a.started();
+            let (mut streaming, mut recording) = (runtime().any_stream_running(), runtime().any_recording_running());
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                let (s, r) = (runtime().any_stream_running(), runtime().any_recording_running());
+                if s != streaming {
+                    streaming = s;
+                    a.output_changed("stream", s);
+                }
+                if r != recording {
+                    recording = r;
+                    a.output_changed("record", r);
+                }
+            }
+        });
+    }
     let Some(widgets) = widgets else { return };
+    // an automation's web address (for Stream Deck's Website action and the like)
+    {
+        let file = lightair_platform::paths::data_dir().join("automations").join("run-key");
+        let key = std::fs::read_to_string(&file).ok().map(|k| k.trim().to_string()).filter(|k| k.len() >= 32).unwrap_or_else(|| {
+            let mut b = [0u8; 16];
+            let _ = getrandom::fill(&mut b);
+            let k: String = b.iter().map(|x| format!("{x:02x}")).collect();
+            let _ = std::fs::write(&file, &k);
+            k
+        });
+        let a = automations.clone();
+        widgets.set_run_hook(key, Box::new(move |name| a.run(name, None, &[])));
+    }
     let _ = std::thread::Builder::new().name("lightair-widget-feed".into()).spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(4));
