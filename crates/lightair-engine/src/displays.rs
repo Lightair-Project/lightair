@@ -40,7 +40,36 @@ pub fn main_display_uuid() -> Option<String> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: the primary monitor as OBS's display capture names it (its `monitor_id`): the
+/// display device's interface path, or the GDI device name where it has none.
+#[cfg(windows)]
+pub fn main_display_uuid() -> Option<String> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::{
+        DISPLAY_DEVICEW, EnumDisplayDevicesW, GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFOEXW, MonitorFromPoint,
+    };
+    const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 1;
+    let text = |w: &[u16]| String::from_utf16_lossy(&w[..w.iter().position(|&c| c == 0).unwrap_or(w.len())]);
+    unsafe {
+        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut info: MONITORINFOEXW = std::mem::zeroed();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if GetMonitorInfoW(monitor, &mut info as *mut MONITORINFOEXW as *mut _) == 0 {
+            return None;
+        }
+        let mut device: DISPLAY_DEVICEW = std::mem::zeroed();
+        device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+        if EnumDisplayDevicesW(info.szDevice.as_ptr(), 0, &mut device, EDD_GET_DEVICE_INTERFACE_NAME) != 0 {
+            let id = text(&device.DeviceID);
+            if !id.is_empty() {
+                return Some(id);
+            }
+        }
+        Some(text(&info.szDevice)).filter(|s| !s.is_empty())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn main_display_uuid() -> Option<String> {
     None
 }

@@ -47,6 +47,10 @@ pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
     let id = if cfg!(windows) {
         match kind {
             SCREEN if mode == DISPLAY => {
+                // none chosen (a new capture, a project from a Mac): the primary monitor
+                let display = display
+                    .filter(|d| d.as_str().is_some_and(|s| !s.is_empty() && s != "DUMMY"))
+                    .or_else(|| crate::displays::main_display_uuid().map(Value::from));
                 set("monitor_id", display);
                 set("capture_cursor", Some(cursor));
                 "monitor_capture"
