@@ -83,6 +83,10 @@ pub(super) fn feed_widgets(automations: Automations, widgets: Option<lightair_wi
         let a = automations.clone();
         widgets.set_run_hook(key, Box::new(move |name| a.run(name, None, &[])));
     }
+    {
+        let a = automations.clone();
+        widgets.set_points_hook(Box::new(move |platform, id, name, delta| a.change_points(platform, id, name, delta)));
+    }
     let _ = std::thread::Builder::new().name("lightair-widget-feed".into()).spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(4));

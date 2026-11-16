@@ -4,7 +4,7 @@
 //! change is a source settings change: undoable, and the open page gets it at once.
 
 use gpui_kit::component::button::Button;
-use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
+use gpui_kit::component::input::{Editor, EditorState, Input as TextInput, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::Sizable;
 use gpui_kit::*;
@@ -20,11 +20,13 @@ use crate::ui::{self, tok};
 pub(super) struct WidgetEdit {
     source: Id,
     inputs: Vec<(String, Entity<InputState>)>,
+    /// Multi-line fields ("textarea"): set when the widget is selected, saved on leaving them.
+    areas: Vec<(String, Entity<EditorState>)>,
     _events: Vec<Subscription>,
 }
 
 fn typed(kind: &str) -> bool {
-    !matches!(kind, "checkbox" | "dropdown" | "button" | "hidden")
+    !matches!(kind, "checkbox" | "dropdown" | "button" | "hidden" | "textarea")
 }
 
 fn numeric(kind: &str) -> bool {
@@ -67,7 +69,20 @@ impl StudioWindow {
                 }));
                 inputs.push((f.key.clone(), state));
             }
-            self.props.widget = Some(WidgetEdit { source: source.id, inputs, _events: events });
+            let mut areas = Vec::new();
+            for f in list.iter().filter(|f| f.kind == "textarea") {
+                let text = values.get(&f.key).map(shown).unwrap_or_default();
+                let state = cx.new(|cx| EditorState::new(window, cx).line_number(false).default_value(text));
+                let (id, key) = (source.id, f.key.clone());
+                events.push(cx.subscribe_in(&state, window, move |this, state, ev: &InputEvent, _, cx| {
+                    if matches!(ev, InputEvent::Blur) {
+                        let text = state.read(cx).value().to_string();
+                        this.set_widget_field(id, &key, json!(text), cx);
+                    }
+                }));
+                areas.push((f.key.clone(), state));
+            }
+            self.props.widget = Some(WidgetEdit { source: source.id, inputs, areas, _events: events });
         }
         // colour fields: a full picker each
         for f in list.iter().filter(|f| f.kind == "colorpicker") {
@@ -224,6 +239,15 @@ impl StudioWindow {
                     })
                     .into_any_element()
             }
+            "textarea" => match self.props.widget.as_ref().filter(|w| w.source == source).and_then(|w| w.areas.iter().find(|(k, _)| *k == f.key)) {
+                Some((_, state)) => div()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(tok::border())
+                    .child(Editor::new(state).h(px(96.)).bordered(false))
+                    .into_any_element(),
+                None => div().into_any_element(),
+            },
             kind => {
                 let Some(state) = self.props.widget.as_ref().filter(|w| w.source == source).and_then(|w| w.inputs.iter().find(|(k, _)| *k == f.key)).map(|(_, s)| s.clone())
                 else {
