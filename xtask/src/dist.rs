@@ -52,7 +52,27 @@ const HELPER_ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 /// tools (FFmpeg), transcription (whisper.cpp).
 const TOOLS: &[&str] = &["ffmpeg", "ffprobe", "whisper-cli"];
 
+/// Builds the app; a run that fails part way (a timestamp the network didn't give, a codesign
+/// refusal) leaves no `Lightair.app` behind to install by mistake: what it built is moved to
+/// `Lightair (failed).app`. That was the "sometimes an invalid signature" seen before: a run
+/// stopped mid-signing (helpers signed alone, their bundles not yet sealed), its half-signed app
+/// then installed and checked.
 pub fn dist() -> anyhow::Result<()> {
+    let result = build();
+    if result.is_err() {
+        let out = root().join("target/dist");
+        let app = out.join("Lightair.app");
+        if app.exists() {
+            let failed = out.join("Lightair (failed).app");
+            let _ = std::fs::remove_dir_all(&failed);
+            let _ = std::fs::rename(&app, &failed);
+            eprintln!("dist failed: what it built is in {} (not to be installed)", failed.display());
+        }
+    }
+    result
+}
+
+fn build() -> anyhow::Result<()> {
     anyhow::ensure!(cfg!(target_os = "macos"), "the shipped app is built on macOS");
     let root = root();
     let version = env!("CARGO_PKG_VERSION");
@@ -365,9 +385,20 @@ fn sign_all(app: &Path, identity: &str, out: &Path) -> anyhow::Result<()> {
         if let Some(e) = entitlements {
             cmd.arg("--entitlements").arg(e);
         }
-        let output = cmd.arg(path).output()?;
-        anyhow::ensure!(output.status.success(), "codesign {}: {}", path.display(), String::from_utf8_lossy(&output.stderr));
-        Ok(())
+        cmd.arg(path);
+        // the secure timestamp comes from Apple over the network: a moment's failure is retried
+        for attempt in 1.. {
+            let output = cmd.output()?;
+            if output.status.success() {
+                return Ok(());
+            }
+            let err = String::from_utf8_lossy(&output.stderr).into_owned();
+            let transient = ["timestamp", "network", "Internet", "not available", "timed out"].iter().any(|w| err.contains(w));
+            anyhow::ensure!(transient && attempt < 4, "codesign {}: {err}", path.display());
+            eprintln!("codesign {}: {} (trying again)", path.display(), err.trim());
+            std::thread::sleep(std::time::Duration::from_secs(3 * attempt));
+        }
+        unreachable!()
     };
     let is_bundle = |p: &Path| p.extension().is_some_and(|e| e == "framework" || e == "plugin" || e == "app" || e == "bundle");
     // bundles inside the app, deepest first
