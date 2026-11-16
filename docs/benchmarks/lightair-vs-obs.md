@@ -170,8 +170,8 @@ breaks a call to a function with no arguments that reads a uniform (`f()` become
 
 ## Hardware decoding of media files
 
-Media sources now decode on the video decoder (`hw_decode`, off by default in OBS). Measured
-on the Gameplay scene (two videos, 1080p60 and 720p30), 30 s each, on and off alternately:
+Tried: media sources decoding on the video decoder (`hw_decode`, off by default in OBS too).
+Measured on the Gameplay scene (two videos, 1080p60 and 720p30), 30 s each, on and off alternately:
 
 | | Software (before) | Hardware |
 |---|---|---|
@@ -183,8 +183,8 @@ on the Gameplay scene (two videos, 1080p60 and 720p30), 30 s each, on and off al
 The decoding leaves the main process (−6 points) but the total goes up: libobs's media source
 copies each decoded frame back from the decoder into memory and uploads it again, so the work
 moves rather than disappears, and the frames arrive slower to draw. Not a win on this Mac
-(Apple Silicon decodes 1080p H.264 in software cheaply); it may be one for 4K or HEVC, or on
-weaker machines.
+(Apple Silicon decodes 1080p H.264 in software cheaply), so it stays off by default, as in OBS;
+a source can still turn it on. It may pay off for 4K or HEVC, or on weaker machines.
 
 ## Reproduce
 
