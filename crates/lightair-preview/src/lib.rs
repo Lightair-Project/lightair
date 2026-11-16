@@ -16,6 +16,6 @@ mod mac;
 mod readback;
 
 #[cfg(target_os = "macos")]
-pub use mac::{Frame, Preview, frame_rgba, frame_size, sample_ycbcr};
+pub use mac::{Frame, Preview, frame_is_nv12, frame_rgba, frame_size, sample_ycbcr};
 #[cfg(not(target_os = "macos"))]
 pub use readback::{CpuFrame, Frame, Preview, frame_rgba, frame_size, sample_ycbcr};

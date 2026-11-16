@@ -147,7 +147,7 @@ def launch(app):
                "--disable-missing-files-check"]
     else:
         env = {"LIGHTAIR_PROJECT": LA_WS, "LIGHTAIR_REMOTE_PORT": str(PORT["lightair"]),
-               "LIGHTAIR_LOG": "info,libobs=info", "LIGHTAIR_STARTER": "plain", **{k: v for k, v in os.environ.items() if k.startswith(("LIGHTAIR_TEMP", "LIGHTAIR_GPUI_PREVIEW"))}}
+               "LIGHTAIR_LOG": "info,libobs=info", "LIGHTAIR_STARTER": "plain", **{k: v for k, v in os.environ.items() if k.startswith(("LIGHTAIR_TEMP", "LIGHTAIR_GPUI_PREVIEW", "LIGHTAIR_GRAPHICS"))}}
         cmd = ["open", "-n"]
         for k, v in env.items():
             cmd += ["--env", f"{k}={v}"]

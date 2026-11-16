@@ -167,13 +167,16 @@ fn pixel_buffer(width: u32, height: u32, format: u32) -> Option<CFRetained<CVPix
     Some(buf)
 }
 
-/// One NV12 buffer and its planes as GL textures.
+/// One NV12 buffer and its planes as GL textures (OpenGL), or one BGRA buffer as a libobs
+/// texture (Metal).
 struct Slot {
     buffer: CFRetained<CVPixelBuffer>,
     luma: gl::GLuint,
     chroma: gl::GLuint,
-    /// Set while the GPU is still filling it.
+    /// Set while the GPU is still filling it (OpenGL).
     fence: Option<gl::GLsync>,
+    /// Metal: the buffer's surface as a libobs texture, copied into on the GPU.
+    tex: *mut sys::gs_texture_t,
 }
 
 /// Everything sized to one preview resolution. Owned by the graphics thread except the slots'
@@ -195,6 +198,9 @@ struct Pool {
     /// The slot the UI has.
     shown: Option<usize>,
     next: usize,
+    /// libobs renders with Metal: frames are BGRA, copied by libobs itself (no GL here), and
+    /// handed on a frame later (Metal gives this no fence to wait on).
+    metal: bool,
 }
 
 // SAFETY: GL/libobs handles are only used on libobs's graphics thread; the CoreVideo buffers
@@ -247,7 +253,28 @@ impl Pool {
             pending: Default::default(),
             shown: None,
             next: 0,
+            metal: unsafe { sys::gs_get_device_type() } as u32 == sys::GS_DEVICE_METAL,
         };
+        if pool.metal {
+            unsafe {
+                pool.target = sys::gs_texture_create(width, height, sys::GS_BGRA, 1, ptr::null_mut(), sys::GS_RENDER_TARGET);
+                if pool.target.is_null() {
+                    return None;
+                }
+                for _ in 0..RING {
+                    let buffer = pixel_buffer(width, height, objc2_core_video::kCVPixelFormatType_32BGRA)?;
+                    let surface = CVPixelBufferGetIOSurface(Some(&buffer))?;
+                    let tex = sys::gs_texture_create_from_iosurface(CFRetained::as_ptr(&surface).as_ptr() as *mut c_void);
+                    if tex.is_null() {
+                        tracing::error!("Metal: no texture from the preview's IOSurface");
+                        pool.destroy();
+                        return None;
+                    }
+                    pool.slots.push(Slot { buffer, luma: 0, chroma: 0, fence: None, tex });
+                }
+            }
+            return Some(pool);
+        }
         unsafe {
             pool.target = sys::gs_texture_create(width, height, sys::GS_BGRA, 1, ptr::null_mut(), sys::GS_RENDER_TARGET);
             pool.luma = sys::gs_texture_create(width, height, sys::GS_R8, 1, ptr::null_mut(), sys::GS_RENDER_TARGET);
@@ -277,7 +304,7 @@ impl Pool {
                 let luma = plane_texture(raw, 0, width, height, gl::R8, gl::RED);
                 let chroma = plane_texture(raw, 1, width / 2, height / 2, gl::RG8, gl::RG);
                 match (luma, chroma) {
-                    (Some(luma), Some(chroma)) => pool.slots.push(Slot { buffer, luma, chroma, fence: None }),
+                    (Some(luma), Some(chroma)) => pool.slots.push(Slot { buffer, luma, chroma, fence: None, tex: ptr::null_mut() }),
                     (l, c) => {
                         for t in [l, c].into_iter().flatten() {
                             gl::glDeleteTextures(1, &t);
@@ -300,8 +327,13 @@ impl Pool {
                 if let Some(f) = slot.fence {
                     gl::glDeleteSync(f);
                 }
-                gl::glDeleteTextures(1, &slot.luma);
-                gl::glDeleteTextures(1, &slot.chroma);
+                if !slot.tex.is_null() {
+                    sys::gs_texture_destroy(slot.tex);
+                }
+                if slot.luma != 0 {
+                    gl::glDeleteTextures(1, &slot.luma);
+                    gl::glDeleteTextures(1, &slot.chroma);
+                }
             }
             if self.read_fbo != 0 {
                 gl::glDeleteFramebuffers(1, &self.read_fbo);
@@ -331,7 +363,11 @@ impl Pool {
         let mut done = None;
         while let Some(&i) = self.pending.front() {
             let Some(fence) = self.slots[i].fence else {
+                // Metal: queued last frame, done by now
                 self.pending.pop_front();
+                if self.metal {
+                    done = Some(i);
+                }
                 continue;
             };
             let r = unsafe { gl::glClientWaitSync(fence, 0, 0) };
@@ -363,8 +399,19 @@ impl Pool {
         None
     }
 
-    /// Converts `src` (`sw`×`sh`) into NV12 in `slot`, and starts its fence.
+    /// Converts `src` (`sw`×`sh`) into NV12 in `slot`, and starts its fence. (Metal: copies it,
+    /// BGRA, into the slot's surface.)
     unsafe fn convert(&mut self, src: *mut sys::gs_texture_t, slot: usize) -> bool {
+        if self.metal {
+            unsafe {
+                if src != self.target {
+                    draw_scaled(src, sys::gs_texture_get_width(src), sys::gs_texture_get_height(src), self.target, self.width, self.height);
+                }
+                sys::gs_copy_texture(self.slots[slot].tex, self.target);
+            }
+            self.pending.push_back(slot);
+            return true;
+        }
         thread_local! {
             static IMAGE: std::ffi::CString = std::ffi::CString::new("image").unwrap();
             static LUMA: std::ffi::CString = std::ffi::CString::new("Luma").unwrap();
@@ -716,6 +763,17 @@ pub fn frame_rgba(frame: &Frame, max_width: usize) -> Option<(usize, usize, Vec<
     }
     let step = w.div_ceil(max_width.max(1)).max(1);
     let (ow, oh) = (w / step, h / step);
+    if let Some(bgra) = bgra_pixels(frame) {
+        let (row, data) = bgra;
+        let mut rgba = Vec::with_capacity(ow * oh * 4);
+        for oy in 0..oh {
+            for ox in 0..ow {
+                let p = &data[oy * step * row + ox * step * 4..][..4];
+                rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
+            }
+        }
+        return Some((ow, oh, rgba));
+    }
     unsafe {
         if CVPixelBufferLockBaseAddress(frame, CVPixelBufferLockFlags::ReadOnly) != 0 {
             return None;
@@ -754,6 +812,17 @@ pub fn sample_ycbcr(frame: &Frame, fx: f32, fy: f32) -> Option<(u8, u8, u8)> {
     };
     let (w, h) = (CVPixelBufferGetWidth(frame), CVPixelBufferGetHeight(frame));
     let (x, y) = (((w as f32 * fx) as usize).min(w - 1), ((h as f32 * fy) as usize).min(h - 1));
+    if let Some((row, data)) = bgra_pixels(frame) {
+        // the same full-range BT.601 the NV12 frames carry
+        let p = &data[y * row + x * 4..][..4];
+        let (b, g, r) = (p[0] as f32, p[1] as f32, p[2] as f32);
+        let q = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+        return Some((
+            q(0.299 * r + 0.587 * g + 0.114 * b),
+            q(-0.168_736 * r - 0.331_264 * g + 0.5 * b + 128.0),
+            q(0.5 * r - 0.418_688 * g - 0.081_312 * b + 128.0),
+        ));
+    }
     unsafe {
         if CVPixelBufferLockBaseAddress(frame, CVPixelBufferLockFlags::ReadOnly) != 0 {
             return None;
@@ -768,4 +837,30 @@ pub fn sample_ycbcr(frame: &Frame, fx: f32, fy: f32) -> Option<(u8, u8, u8)> {
         CVPixelBufferUnlockBaseAddress(frame, CVPixelBufferLockFlags::ReadOnly);
         out
     }
+}
+
+/// A BGRA frame's rows (bytes per row, the pixels), copied out; `None` for NV12 frames.
+fn bgra_pixels(frame: &Frame) -> Option<(usize, Vec<u8>)> {
+    use objc2_core_video::{
+        CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType,
+        CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    };
+    if CVPixelBufferGetPixelFormatType(frame) != objc2_core_video::kCVPixelFormatType_32BGRA {
+        return None;
+    }
+    unsafe {
+        if CVPixelBufferLockBaseAddress(frame, CVPixelBufferLockFlags::ReadOnly) != 0 {
+            return None;
+        }
+        let base = CVPixelBufferGetBaseAddress(frame) as *const u8;
+        let row = CVPixelBufferGetBytesPerRow(frame);
+        let out = (!base.is_null()).then(|| (row, std::slice::from_raw_parts(base, row * CVPixelBufferGetHeight(frame)).to_vec()));
+        CVPixelBufferUnlockBaseAddress(frame, CVPixelBufferLockFlags::ReadOnly);
+        out
+    }
+}
+
+/// The frame is NV12 (what GPUI's `surface()` draws), not BGRA (libobs's Metal renderer).
+pub fn frame_is_nv12(frame: &Frame) -> bool {
+    objc2_core_video::CVPixelBufferGetPixelFormatType(frame) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
 }

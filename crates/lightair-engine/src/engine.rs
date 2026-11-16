@@ -53,7 +53,14 @@ impl Default for EngineConfig {
             output: (1920, 1080),
             fps: (60, 1),
             sample_rate: 48_000,
-            graphics: if cfg!(windows) { Graphics::D3D11 } else { Graphics::OpenGl },
+            graphics: if cfg!(windows) {
+                Graphics::D3D11
+            } else if std::env::var("LIGHTAIR_GRAPHICS").is_ok_and(|g| g.eq_ignore_ascii_case("metal")) {
+                // OBS's Metal renderer (experimental there), for trying it
+                Graphics::Metal
+            } else {
+                Graphics::OpenGl
+            },
             modules: Modules::Auto,
             allowed_modules: crate::DEFAULT_MODULES
                 .iter()
