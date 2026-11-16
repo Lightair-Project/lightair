@@ -263,6 +263,10 @@ fn list_items(src: *mut sys::obs_source_t, property: &str) -> Vec<(String, serde
                 if ptr.is_null() { None } else { Some(CStr::from_ptr(ptr).to_string_lossy().into_owned()) }
             };
             for i in 0..sys::obs_property_list_item_count(p) {
+                // a placeholder ("[Select a display to capture]"), not a choice
+                if sys::obs_property_list_item_disabled(p, i) {
+                    continue;
+                }
                 let label = text(sys::obs_property_list_item_name(p, i)).unwrap_or_default();
                 let value = if int {
                     serde_json::Value::from(sys::obs_property_list_item_int(p, i))
