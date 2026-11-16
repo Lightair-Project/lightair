@@ -280,6 +280,140 @@ fn dev(release: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The OBS modules the Windows app ships (lightair-engine's DEFAULT_MODULES for Windows, but
+/// Lightair's own Camera Studio, built here): keep the two lists alike.
+#[cfg(windows)]
+const WINDOWS_MODULES: &[&str] = &[
+    "aja", "decklink", "image-source", "obs-ffmpeg", "obs-filters", "obs-nvenc", "obs-outputs", "obs-qsv11",
+    "obs-transitions", "obs-webrtc", "obs-x264", "rtmp-services", "text-freetype2", "vlc-video", "win-capture",
+    "win-dshow", "win-wasapi",
+];
+
+/// Windows: the app to ship, `target\dist\Lightair` and `Lightair-<version>-windows-x64.zip`,
+/// self-contained, laid out as OBS lays itself out (what libobs and its modules expect):
+///
+/// ```text
+/// Lightair\bin\64bit\    lightair.exe, Chromium's helper and runtime, libobs and its DLLs,
+///                        OBS's helper programs, the MSVC runtime
+/// Lightair\core\<m>\     OBS's modules Lightair uses, each with its data
+/// Lightair\data\libobs\  libobs's effects
+/// Lightair\obs-plugins\64bit\, Lightair\data\obs-plugins\   Camera Studio
+/// ```
+///
+/// libobs and its modules come from the OBS install it's built against (OBS_DIR). Not signed:
+/// Authenticode needs a certificate (docs/15).
+#[cfg(windows)]
+fn dist_windows() -> anyhow::Result<()> {
+    let root = root();
+    run(cargo().current_dir(&root).args(["build", "--release", "-p", "lightair-app", "-p", "lightair-web-helper"]))?;
+    modules()?;
+    let obs = PathBuf::from(std::env::var("OBS_DIR").unwrap_or_else(|_| r"C:\Program Files\obs-studio".into()));
+    anyhow::ensure!(obs.join(r"bin\64bit\obs.dll").exists(), "no OBS at {} (set OBS_DIR)", obs.display());
+    let out = root.join(r"target\dist\Lightair");
+    let _ = std::fs::remove_dir_all(&out);
+    let bin = out.join(r"bin\64bit");
+    std::fs::create_dir_all(&bin)?;
+    let release = root.join(r"target\release");
+    for exe in ["lightair.exe", "lightair-web-helper.exe"] {
+        std::fs::copy(release.join(exe), bin.join(exe))?;
+    }
+    // libobs, its graphics backend, its DLLs and helper programs (not OBS's own UI: Qt, scripting)
+    let skip = |name: &str| {
+        let n = name.to_ascii_lowercase();
+        n.starts_with("qt6") || n.ends_with(".pdb") || n == "obs64.exe" || n == "obs-frontend-api.dll"
+            || n == "obs-scripting.dll" || n == "lua51.dll" || n == "libobs-opengl.dll"
+    };
+    for entry in std::fs::read_dir(obs.join(r"bin\64bit"))? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type()?.is_file() && !skip(&name) {
+            std::fs::copy(entry.path(), bin.join(&name))?;
+        }
+    }
+    chromium_runtime(&bin)?;
+    // the Stream Deck plugin, as the file Stream Deck installs when opened (a zip of the
+    // `.sdPlugin` folder; PowerShell makes only `.zip`s, so renamed)
+    let deck_zip = bin.join("Lightair.streamDeckPlugin.zip");
+    run(Command::new("powershell").args(["-NoProfile", "-Command"]).arg(format!(
+        "Compress-Archive -Path '{}' -DestinationPath '{}'",
+        root.join(r"streamdeck\app.lightair.sdPlugin").display(),
+        deck_zip.display()
+    )))?;
+    std::fs::rename(&deck_zip, bin.join("Lightair.streamDeckPlugin"))?;
+    // the MSVC runtime, beside the programs (Microsoft's redistributable files)
+    match msvc_runtime() {
+        Some(crt) => {
+            for entry in std::fs::read_dir(&crt)? {
+                let entry = entry?;
+                std::fs::copy(entry.path(), bin.join(entry.file_name()))?;
+            }
+        }
+        None => eprintln!("no MSVC redistributable found: the app needs the Visual C++ runtime installed"),
+    }
+    // OBS's modules, each with its data
+    fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let (src, dst) = (entry.path(), to.join(entry.file_name()));
+            if entry.file_type()?.is_dir() {
+                copy_tree(&src, &dst)?;
+            } else if !src.extension().is_some_and(|e| e == "pdb") {
+                std::fs::copy(&src, &dst)?;
+            }
+        }
+        Ok(())
+    }
+    for m in WINDOWS_MODULES {
+        let dir = obs.join("core").join(m);
+        if dir.exists() {
+            copy_tree(&dir, &out.join("core").join(m))?;
+        }
+    }
+    copy_tree(&obs.join(r"data\libobs"), &out.join(r"data\libobs"))?;
+    // Camera Studio (cargo xtask modules)
+    let fx = root.join(r"target\modules\lightair-camera-fx");
+    if fx.join(r"obs-plugins\64bit\lightair-camera-fx.dll").exists() {
+        std::fs::create_dir_all(out.join(r"obs-plugins\64bit"))?;
+        std::fs::copy(fx.join(r"obs-plugins\64bit\lightair-camera-fx.dll"), out.join(r"obs-plugins\64bit\lightair-camera-fx.dll"))?;
+        copy_tree(&fx.join(r"data\obs-plugins\lightair-camera-fx"), &out.join(r"data\obs-plugins\lightair-camera-fx"))?;
+    } else {
+        eprintln!("Camera Studio isn't built (cargo xtask modules): left out");
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let zip = root.join(format!(r"target\dist\Lightair-{version}-windows-x64.zip"));
+    let _ = std::fs::remove_file(&zip);
+    run(Command::new("powershell")
+        .args(["-NoProfile", "-Command"])
+        .arg(format!("Compress-Archive -Path '{}' -DestinationPath '{}' -CompressionLevel Optimal", out.display(), zip.display())))?;
+    eprintln!("built {} and {}", out.display(), zip.display());
+    Ok(())
+}
+
+/// The MSVC runtime's redistributable folder (`Microsoft.VC143.CRT`, x64) of an installed
+/// Visual Studio or its Build Tools.
+#[cfg(windows)]
+fn msvc_runtime() -> Option<PathBuf> {
+    let vs = PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio");
+    let alt = PathBuf::from(r"C:\Program Files\Microsoft Visual Studio");
+    let mut found: Vec<PathBuf> = Vec::new();
+    for base in [vs, alt] {
+        for year in std::fs::read_dir(&base).into_iter().flatten().flatten() {
+            for edition in std::fs::read_dir(year.path()).into_iter().flatten().flatten() {
+                let redist = edition.path().join(r"VC\Redist\MSVC");
+                for version in std::fs::read_dir(&redist).into_iter().flatten().flatten() {
+                    let crt = version.path().join(r"x64\Microsoft.VC143.CRT");
+                    if crt.join("vcruntime140.dll").exists() {
+                        found.push(crt);
+                    }
+                }
+            }
+        }
+    }
+    found.sort();
+    found.pop()
+}
+
 /// Windows: copies Chromium's runtime (CEF's Release folder and its Resources, as fetched
 /// into target/cef) into `dir`, where only what's changed is copied again.
 fn chromium_runtime(dir: &Path) -> anyhow::Result<()> {
@@ -338,8 +472,10 @@ fn main() -> anyhow::Result<()> {
         Some("precommit") => precommit(),
         #[cfg(target_os = "macos")]
         Some("dist") => dist::dist(),
-        #[cfg(not(target_os = "macos"))]
-        Some("dist") => anyhow::bail!("the shipped app is built on macOS"),
+        #[cfg(windows)]
+        Some("dist") => dist_windows(),
+        #[cfg(not(any(target_os = "macos", windows)))]
+        Some("dist") => anyhow::bail!("the shipped app is built on macOS and Windows"),
         Some("rules-key") => rules::key(),
         Some("rules-sign") => rules::sign(&std::env::args().nth(2).ok_or_else(|| anyhow::anyhow!("usage: cargo xtask rules-sign <rules.json>"))?),
         Some("prune") => {

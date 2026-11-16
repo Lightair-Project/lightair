@@ -120,10 +120,10 @@ pub fn all() -> Vec<Permission> {
     #[cfg(windows)]
     {
         let _ = (screen, music, bluetooth);
-        return vec![
+        vec![
             Permission { key: "camera", name: "Camera", why: "Camera objects and Camera Studio (Settings › Privacy & security › Camera)", state: av(Media::Camera) },
             Permission { key: "microphone", name: "Microphone", why: "Microphones in the mixer, recording and streaming (Settings › Privacy & security › Microphone)", state: av(Media::Microphone) },
-        ];
+        ]
     }
     #[cfg(not(windows))]
     vec![

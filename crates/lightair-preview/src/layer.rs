@@ -28,6 +28,11 @@ pub struct Layer {
     size: AtomicU64,
     /// The back buffers' format (graphics thread).
     format: Mutex<DXGI_FORMAT>,
+    /// The size the picture is shown at (pixels, packed; 0: not known): frames are rendered at
+    /// it (up to the canvas's own size), so the compositor shows them as they are. On a laptop
+    /// whose screen hangs off the other GPU, each frame crosses between the GPUs: a third of the
+    /// width is a ninth of the copying.
+    wanted: AtomicU64,
     /// Serialises presenting (graphics thread) with dropping.
     lock: Mutex<()>,
 }
@@ -55,6 +60,7 @@ impl Layer {
                 swap: swap?,
                 size: AtomicU64::new(pack(START, START)),
                 format: Mutex::new(DXGI_FORMAT_B8G8R8A8_UNORM),
+                wanted: AtomicU64::new(0),
                 lock: Mutex::new(()),
             })
         }
@@ -84,6 +90,18 @@ impl Layer {
     /// `IDXGISwapChain1*` (borrowed), for `IDCompositionVisual::SetContent`.
     pub fn swap_chain(&self) -> *mut c_void {
         self.swap.as_raw()
+    }
+
+    /// The size the picture is shown at, in pixels (the UI, when it places it).
+    pub fn show_at(&self, w: u32, h: u32) {
+        let packed = if w >= 2 && h >= 2 { pack(w & !1, h & !1) } else { 0 };
+        self.wanted.store(packed, Ordering::Relaxed);
+    }
+
+    /// What `show_at` asked for, if anything.
+    pub(crate) fn shown_at(&self) -> Option<(u32, u32)> {
+        let p = self.wanted.load(Ordering::Relaxed);
+        (p != 0).then_some(((p >> 32) as u32, p as u32))
     }
 
     /// The back buffers' size in pixels (the picture's visual scales it to its place).

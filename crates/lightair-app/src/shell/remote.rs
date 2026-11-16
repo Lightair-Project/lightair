@@ -1098,8 +1098,32 @@ fn merged(base: &Value, over: &Value) -> Value {
     }
 }
 
+/// This process's CPU time (seconds) and resident memory (bytes: its working set).
+#[cfg(windows)]
+fn process_usage() -> (f64, u64) {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    unsafe {
+        let me = GetCurrentProcess();
+        let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+        // (100-nanosecond units)
+        let secs = |t: FILETIME| ((t.dwHighDateTime as u64) << 32 | t.dwLowDateTime as u64) as f64 / 1e7;
+        let cpu = if GetProcessTimes(me, &mut created, &mut exited, &mut kernel, &mut user) != 0 {
+            secs(kernel) + secs(user)
+        } else {
+            0.0
+        };
+        let mut mem: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        mem.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let resident = if K32GetProcessMemoryInfo(me, &mut mem, mem.cb) != 0 { mem.WorkingSetSize as u64 } else { 0 };
+        (cpu, resident)
+    }
+}
+
 /// This process's CPU time (seconds) and resident memory (bytes).
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn process_usage() -> (f64, u64) {
     (0.0, 0)
 }

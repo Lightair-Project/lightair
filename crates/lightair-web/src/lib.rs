@@ -960,7 +960,7 @@ mod imp {
     /// The Direct3D 11 texture's NT handle (Windows), valid during the paint call.
     #[cfg(windows)]
     fn shared_surface(info: &AcceleratedPaintInfo) -> *mut std::ffi::c_void {
-        info.shared_texture_handle as *mut std::ffi::c_void
+        info.shared_texture_handle
     }
 
     #[cfg(not(any(target_os = "macos", windows)))]

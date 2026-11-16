@@ -230,7 +230,4 @@ real bug a Windows user would have hit:
 - Windows Studio Effects; the "Now playing" widget (WinRT media sessions); importing a sign-in
   from Chrome/Edge (DPAPI, app-bound keys); the zoom badge by the pointer; the system pointer's
   picture; display capture's pointer and follow-zoom on a second monitor (`display_frame`).
-- The Editor player still reads frames back (as the preview did); the remote API's process stats
-  read zero on Windows.
-- Sound-only media sources' strips (a file playing as "Mic" or "Music") show no level in the mixer
-  while the Master's moves: seen on Windows, not yet looked into on macOS.
+- The Editor player still reads frames back (as the preview did).

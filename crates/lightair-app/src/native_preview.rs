@@ -269,6 +269,9 @@ impl NativePreview {
         });
     }
 
+    /// Core Animation scales the layer to its frame itself: nothing to follow.
+    pub fn refit(&mut self) {}
+
     /// The canvas is on screen (the Live place) or not; placed again as it last was.
     pub fn set_visible(&mut self, visible: bool) {
         if visible != self.visible {
@@ -681,6 +684,7 @@ impl NativePreview {
     }
     pub fn place(&mut self, _: Option<gpui_kit::Bounds<gpui_kit::Pixels>>, _: &[(lightair_core::Id, gpui_kit::Bounds<gpui_kit::Pixels>)]) {}
     pub fn set_visible(&mut self, _: bool) {}
+    pub fn refit(&mut self) {}
     pub fn forget(&mut self, _: lightair_core::Id) {}
     pub fn place_meters(&mut self, _: &[(lightair_core::Id, MeterPlace)]) {}
     pub fn show_meters(&mut self, _: bool) {}
