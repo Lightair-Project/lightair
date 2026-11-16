@@ -4031,6 +4031,7 @@ dependencies = [
  "lightair-render",
  "lightair-store",
  "lightair-web",
+ "objc2 0.6.5",
  "parking_lot",
  "rtrb",
  "serde",

@@ -326,6 +326,8 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
     crate::pointer::register();
     crate::backdrop::register();
     crate::web::register();
+    #[cfg(target_os = "macos")]
+    crate::media_source::register();
 }
 
 /// Loads every module in `dir` (subject to the safe-module allowlist): `<module>.plugin` bundles

@@ -27,7 +27,10 @@ impl Player {
             .set_bool("restart_on_activate", false)
             .set_bool("close_when_inactive", false)
             .set_bool("hw_decode", true);
-        let source = ObsSource::create_private("ffmpeg_source", "Library player", Some(&settings))?;
+        // MP4 and QuickTime files through Lightair's own source (decoded into textures, no copy)
+        let local = serde_json::json!({"is_local_file": true, "local_file": path.to_string_lossy()});
+        let kind = if crate::kinds::native_media(&local) { crate::kinds::NATIVE_MEDIA } else { "ffmpeg_source" };
+        let source = ObsSource::create_private(kind, "Library player", Some(&settings))?;
         unsafe { sys::obs_source_set_monitoring_type(source.as_ptr(), sys::OBS_MONITORING_TYPE_MONITOR_ONLY) };
         Some(Player { source })
     }

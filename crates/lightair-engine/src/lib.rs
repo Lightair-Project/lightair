@@ -15,6 +15,8 @@ mod engine;
 mod log;
 pub mod loudness;
 pub mod media;
+#[cfg(target_os = "macos")]
+pub mod media_source;
 pub mod meters;
 pub mod monitoring;
 pub mod obs;
