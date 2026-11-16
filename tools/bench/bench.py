@@ -220,6 +220,27 @@ def cpu_seconds(t):
     return days * 86400 + secs
 
 
+_LIBC = None
+
+
+def energy(pids):
+    """The kernel's energy estimate (nJ) and instructions retired, summed over `pids` (same-user
+    processes: proc_pid_rusage RUSAGE_INFO_V6). CPU % counts time, whatever the core and clock:
+    light work spread over slow efficiency cores looks big; energy and instructions don't."""
+    import ctypes
+    global _LIBC
+    if _LIBC is None:
+        _LIBC = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+    nj = ins = 0
+    for p in pids:
+        buf = (ctypes.c_uint64 * 80)()
+        if _LIBC.proc_pid_rusage(p, 6, ctypes.byref(buf)) == 0:
+            f = buf[2:]  # after the uuid
+            ins += f[29]
+            nj += f[40]
+    return nj, ins
+
+
 def gpu_util():
     out = subprocess.run(["ioreg", "-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"], capture_output=True, text=True).stdout
     m = re.search(r'"Device Utilization %"=(\d+)', out)
@@ -292,6 +313,7 @@ def sample(pid, seconds, o, during=None):
     """Per-second samples of the app's process tree, the GPU and system helpers."""
     rows = []
     prev_tree = tree(pid)
+    prev_energy = energy(prev_tree)
     prev_sys = system_procs()
     prev_t = time.time()
     start = prev_t
@@ -304,14 +326,18 @@ def sample(pid, seconds, o, during=None):
         k += 1
         now = time.time()
         cur = tree(pid)
+        cur_energy = energy(cur)
         sys_now = system_procs()
         dt = now - prev_t
         cpu = sum(v[0] - prev_tree.get(p, (v[0],))[0] for p, v in cur.items()) / dt * 100
         main_cpu = (cur[pid][0] - prev_tree[pid][0]) / dt * 100 if pid in cur and pid in prev_tree else None
         sys_cpu = {n: (sys_now.get(n, 0) - prev_sys.get(n, 0)) / dt * 100 for n in sys_now}
-        rows.append({"t": now - start, "cpu_tree": cpu, "cpu_main": main_cpu, "rss_mb": sum(v[1] for v in cur.values()) / 1024,
+        power_mw = (cur_energy[0] - prev_energy[0]) / dt / 1e6
+        instr_g = (cur_energy[1] - prev_energy[1]) / dt / 1e9
+        rows.append({"t": now - start, "cpu_tree": cpu, "cpu_main": main_cpu, "power_mw": power_mw, "instr_g": instr_g,
+                     "rss_mb": sum(v[1] for v in cur.values()) / 1024,
                      "procs": len(cur), "gpu": gpu_util(), **{f"sys_{n}": v for n, v in sys_cpu.items()}})
-        prev_tree, prev_sys, prev_t = cur, sys_now, now
+        prev_tree, prev_sys, prev_t, prev_energy = cur, sys_now, now, cur_energy
     stats1 = o.req("GetStats")
     return rows, stats0, stats1
 
@@ -433,7 +459,8 @@ def quick(app, tag, seconds=30):
     wid = subprocess.run([os.path.join(B, "winup"), str(pid)], capture_output=True, text=True).stdout.strip()
     if wid:
         subprocess.run(["screencapture", "-x", "-o", f"-l{wid}", os.path.join(B, f"win-{app}-{tag}.png")])
-    out = {k: round(sm[k]["mean"], 1) for k in ("cpu_tree", "cpu_main", "gpu", "rss_mb", "sys_WindowServer") if k in sm}
+    out = {k: round(sm[k]["mean"], 2 if k == "instr_g" else 1)
+           for k in ("power_mw", "instr_g", "cpu_tree", "cpu_main", "gpu", "rss_mb", "sys_WindowServer") if k in sm}
     out["render_ms"] = round(s1["averageFrameRenderTime"], 2)
     out["lagged"] = s1["renderSkippedFrames"] - s0["renderSkippedFrames"]
     print(app, tag, json.dumps(out))
