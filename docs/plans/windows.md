@@ -210,12 +210,26 @@ real bug a Windows user would have hit:
 - Camera and microphone access: Windows's privacy switches (whole PC, user, desktop apps) are read
   from where Windows keeps them; a blocked camera says so, and the Permissions page opens the
   right Settings page instead of listing macOS's permissions.
+- A display capture with no display chosen (new, or a project from a Mac) captured nothing: it
+  takes the primary monitor, as macOS takes the main display. Lists of choices skipped nothing,
+  so OBS's disabled "[Select a display to capture]" placeholder was offered as a display.
+- Camera Studio's face maps (makeup, liner, light) never loaded: libobs's `GS_BUILD_MIPMAPS` asks
+  Direct3D 11 for a whole mip chain with one level's data, which D3D11 refuses; and the module
+  crashed about one run in three. The mip levels are made on the CPU now (every backend).
 
 **Performance** (measured: [../benchmarks/lightair-vs-obs-windows.md](../benchmarks/lightair-vs-obs-windows.md))
 - The canvas preview is drawn by DirectComposition under GPUI's UI, as macOS draws it with Core
   Animation: GPUI (third_party/gpui-pre-windows, patched) shows its swap chain over an underlay
   visual; each canvas's picture is a swap chain libobs's graphics thread presents to, straight
   from its own texture when the size matches. No frame is read back and no UI redraws for it.
+- The preview presents only when its swap chain's frame-latency waitable object says the
+  compositor took the last frame: a present that waited (while a display capture starts and
+  Windows reconfigures composition) made the program skip ~17 frames on each switch to a scene
+  with a display capture; now 3-4, as OBS.
+- The canvas preview renders at the size it's shown (on a laptop whose screen hangs off the other
+  GPU each frame crosses between them), with libobs's area filter when much smaller.
+- Media files decode on the GPU's video decoder by default (OBS's media source has it, off):
+  about 40% less CPU idle with two videos playing, 25% less recording.
 - The mixer's meters are DirectComposition visuals moved by a meter thread at 60 fps (glyph
   surfaces made once spell the peak readout): the window doesn't redraw for a moving meter.
 - Web pages: Chromium shares each frame as a D3D11 shared texture, opened by libobs (OBS's own

@@ -7,22 +7,23 @@
 ## Result
 
 Gameplay scene on air (1080p60 video with sound, 720p30 webcam video, chat and alert web pages,
-logo, title, mic and music files), 1920×1080 at 60 fps. OBS: the mean of 7 runs; Lightair: the
-mean of the last 2 (its final build), each run 60 s idle then 60 s recording while switching
-scenes every 10 s.
+logo, title, mic and music files), 1920×1080 at 60 fps. The final build against OBS, three runs
+each, alternating, the same evening; each run 60 s idle then 60 s recording while switching
+scenes every 10 s (through Desktop, which captures the display).
 
 | | OBS 33.0.1 | Lightair | |
 |---|---|---|---|
-| **CPU, idle** (cycles, app and helpers) | 2.95 G/s | **1.77 G/s** | −40 % |
-| CPU time, idle (% of one core) | 17.4 % | **9.3 %** | |
-| **GPU 3D busy, idle** (the app's processes) | 35.7 % | **13.2 %** | −63 % |
-| GPU 3D busy, idle (the whole GPU) | 33.3 % | **11.3 %** | |
-| Render time per frame (libobs), idle | **1.27 ms** | 1.62 ms | |
-| **CPU, recording** (cycles) | 7.96 G/s | **6.00 G/s** | −25 % |
-| CPU time, recording | 104.5 % | **68.0 %** | |
-| **Frames skipped while recording** (render / output) | 79 / 23 of 25,341 | **1 / 0** of 7,276 | |
-| Memory the app uses alone (USS), idle | **413 MB** | 617 MB | +49 % |
-| Desktop compositor (dwm.exe) GPU, idle | **2.7 %** | 5.0 % | |
+| **CPU, idle** (cycles, app and helpers) | 3.00 G/s | **1.82 G/s** | −39 % |
+| CPU time, idle (% of one core) | 18.0 % | **9.0 %** | |
+| **GPU 3D busy, idle** (the app's processes) | 38.2 % | **13.3 %** | −65 % |
+| GPU 3D busy, idle (the whole GPU) | 34.8 % | **11.2 %** | |
+| Render time per frame (libobs), idle | **1.23 ms** | 1.63 ms | |
+| **CPU, recording** (cycles) | 8.00 G/s | **6.01 G/s** | −25 % |
+| CPU time, recording | 106.0 % | **69.3 %** | |
+| GPU 3D busy, recording (the whole GPU) | 19.1 % | **12.7 %** | |
+| **Frames skipped while recording** (render / output, of ~10,900) | 14 / 9 | 13 / **0** | |
+| Memory the app uses alone (USS), idle / recording | **426 / 813 MB** | 592 / 942 MB | +39 / +16 % |
+| Desktop compositor (dwm.exe) GPU, idle | **2.7 %** | 5.2 % | |
 | Startup: window on screen (median of 5) | 2.09 s | **1.67 s** | |
 | Startup: ready over obs-websocket | **2.10 s** | 2.19 s | |
 | Quit | 30 s (didn't close when asked) | **0.9 s** | |
@@ -35,6 +36,18 @@ and a newer Chromium in its process) and a little of the compositor's GPU (the p
 are composition visuals it blends; OBS's preview is a window of its own). Its remote API used to
 answer 0.6 s after OBS's (2.69 s): the password is now read while libobs starts, and the API
 listens before Chromium starts (2.19 s).
+
+### Desktop scene (the display captured)
+
+30 s idle with Desktop on air (display capture, webcam video, overlays), one run each:
+
+| | OBS | Lightair |
+|---|---|---|
+| CPU | 1.70 G/s | 1.72 G/s |
+| GPU 3D busy (the whole GPU) | 33.3 % | **13.4 %** |
+| Desktop compositor GPU | 32.3 % | **11.8 %** |
+
+Switching to Desktop (the capture starting) skipped 3–4 frames in both.
 
 ### With both on software decoding
 
