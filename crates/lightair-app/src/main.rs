@@ -3,6 +3,7 @@
 mod activity_panel;
 mod assets;
 mod automations_panel;
+mod browser_import;
 mod camera_studio;
 mod chat_panel;
 mod chat_send;

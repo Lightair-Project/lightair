@@ -37,10 +37,10 @@ with what's known about each. Keep it current: strike items as they land.
 - **Sending** is verified only for Twitch's login and join (`LIGHTAIR_SELFTEST=twitch-login`);
   YouTube, Kick and TikTok sending (typing into their pages) are untested with a real session.
   Google may refuse sign-in in an embedded browser.
-- **Import a sign-in from Chrome / Brave / Edge / Arc** (offered, not built): copy only the
-  chosen platforms' cookies, decrypted with the browser's "Safe Storage" Keychain key (asks
-  once). Native Touch ID passkeys can't be used (Apple's restricted browser entitlement; Chrome's
-  own passkeys need Google's keychain group).
+- ~~**Import a sign-in from Chrome / Brave / Edge / Arc**~~ (done: Outputs › Sending › "Use my
+  browser's"; handing cookies to Lightair's browser checked with `LIGHTAIR_SELFTEST=cookie-set`,
+  reading a real browser's untested here since it asks for the Keychain). Native Touch ID
+  passkeys can't be used (Apple's restricted browser entitlement).
 - Chat panel: ~~tabs per platform, reply to a message~~ (done); moderation (delete, timeout, ban) left.
 
 ## Widgets
@@ -76,6 +76,7 @@ with what's known about each. Keep it current: strike items as they land.
   signature indicates they must be present"); running it again works. Cause not found yet:
   find it (keep the full log of a failing run).
 - **`media_native::a_rotated_video_shows_upright`** (lightair-preview) fails now and then when
-  the whole suite runs in parallel; passes alone.
+  the whole suite runs in parallel; passes alone. So does
+  `stream_sharing::identical_destinations_share_an_encoder` (lightair-engine; seconds received).
 - Media source render time +1 ms (deferred earlier).
 - Notarization needs `xcrun notarytool store-credentials` once (then `LIGHTAIR_NOTARY_PROFILE`).

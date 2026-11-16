@@ -4004,9 +4004,11 @@ dependencies = [
 name = "lightair-app"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "anyhow",
  "base64 0.22.1",
  "block2 0.6.2",
+ "cbc",
  "chrono",
  "cpal",
  "futures-channel",
@@ -4031,10 +4033,13 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
  "parking_lot",
+ "pbkdf2",
  "raw-window-handle",
  "rtrb",
  "serde",
  "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
@@ -6902,6 +6907,17 @@ dependencies = [
 
 [[package]]
 name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "sha1"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
@@ -7862,7 +7878,7 @@ dependencies = [
  "log",
  "native-tls",
  "rand 0.10.3",
- "sha1",
+ "sha1 0.11.0",
  "thiserror 2.0.21",
 ]
 
