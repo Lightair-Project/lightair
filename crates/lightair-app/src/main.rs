@@ -69,6 +69,8 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("LIGHTAIR_LOG").unwrap_or_else(|_| "info,libobs=warn".into()))
         .init();
+    // the chat readers that need a browser (Kick, the signed-in platforms) use Lightair's
+    lightair_live::pages::set_host(Arc::new(chat_panel::HiddenPages));
 
     // The canvas size comes from the workspace's primary canvas; read it before starting libobs.
     // the one asked for, the one open last, or the default

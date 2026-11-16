@@ -1,6 +1,8 @@
 # Live integrations: accounts, chat, widgets and automation in one app
 
-Status: research done (16 November 2026), nothing built. It turns
+Status (16 November 2026): research done; being built. The Chat panel reads Twitch, YouTube,
+CHZZK, SOOP and DouYu directly, and Kick and TikTok through hidden pages (crates/lightair-live,
+`pages`: the app gives it Lightair's Chromium). Sending, signed-in pages and the rest are next. It turns
 [docs/12](../12-chat-alerts-integrations.md) into a design and goes further: everything a
 streamer runs next to OBS today (a chat app, StreamElements or Streamlabs widgets, Streamer.bot,
 Speaker.bot, Restream chat) is part of Lightair, so nobody needs a second app. Lightair doesn't
@@ -269,9 +271,9 @@ A small service of Lightair's own, the only server any of this needs:
 | Facebook | Hidden Live Producer or video page | Typed into it | Comments, Stars, highlighted comments, replies, viewers | Persistent key in Live Producer |
 | Instagram | Hidden live page: its own comment requests, the page as a fallback | Typed into it | Comments, joins, viewers, follows and likes | New per stream: read from Live Producer |
 | X | Hidden broadcast page (its WebSocket frames) | Typed into it | Chat | Live Studio source key |
-| TikTok | Hidden live page: its own signed webcast socket, decoded in Rust from TikTok's protobuf | Typed into it | Chat, gifts with streaks, likes, follows, joins, shares, subs, battles | LIVE Center producer page (new per stream; ~1,000 followers) |
+| TikTok | Hidden live page. Built: its comments as the page draws them (no login, video paused). Next: its own signed webcast socket, decoded in Rust from TikTok's protobuf, for gifts and the rest | Typed into it | Chat, gifts with streaks, likes, follows, joins, shares, subs, battles | LIVE Center producer page (new per stream; ~1,000 followers) |
 | LinkedIn | Hidden event page | Typed into it | Comments, reactions | The event's custom stream (eligible accounts only) |
-| Kick | Its chat socket (Pusher), the chatroom found through the hidden page | Typed into the hidden page, or the official API | Chat, subs, gifts, bans, pins | Dashboard |
+| Kick | Its chat socket (Pusher), the chatroom and Kick's current Pusher app found through the hidden page (Kick rotates the app; Cloudflare turns away plain clients). Built | Typed into the hidden page, or the official API | Chat, subs, gifts, bans, pins | Dashboard |
 | Rumble | The Live Stream API link the user copies from their account (their own key: no approval), polled | Typed into the hidden page | Chat, rants, follows | Get Streamer Configuration |
 
 How the hidden pages work:

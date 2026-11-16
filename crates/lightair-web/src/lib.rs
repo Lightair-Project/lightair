@@ -27,6 +27,13 @@ pub type TextureSink = Arc<dyn Fn(*mut std::ffi::c_void, u32, u32) + Send + Sync
 /// length), and the sample rate. Chromium sends sound here instead of playing it.
 pub type AudioSink = Arc<dyn Fn(&[&[f32]], u32) + Send + Sync>;
 
+/// Where an agent page's messages go (`Page::open_agent`): what its script sent.
+pub type MessageSink = Arc<dyn Fn(String) + Send + Sync>;
+
+/// What an agent page's script puts before a message for Lightair:
+/// `console.log("\u0001lightair:" + text)`.
+pub const MESSAGE_PREFIX: &str = "\u{1}lightair:";
+
 /// A page's settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageOptions {
@@ -56,11 +63,36 @@ pub struct Page {
 }
 
 impl Page {
+    /// A page that isn't drawn, for reading a site as a person's browser would (a platform's
+    /// chat, its key page: docs/plans/live-integrations.md, 2.10). `script` runs after every
+    /// load of its main frame; what it logs with [`MESSAGE_PREFIX`] goes to `messages`. It shares
+    /// Lightair's cookies, so a site signed in to once stays signed in.
+    pub fn open_agent(url: &str, script: String, messages: MessageSink) -> Page {
+        let id = imp::next_id();
+        let options = PageOptions { url: url.into(), width: 1024, height: 768, fps: 1, zoom: 1.0, css: String::new() };
+        let none: FrameSink = Arc::new(|_, _, _| {});
+        let silent: AudioSink = Arc::new(|_, _| {});
+        imp::request(imp::Request::Open { id, options, sink: none, texture: None, audio: silent, agent: Some((script, messages)) });
+        // never throttled as a hidden page would be
+        imp::request(imp::Request::Visible { id, visible: true });
+        Page { id }
+    }
+
+    /// Runs `code` in the page's main frame now.
+    pub fn eval(&self, code: &str) {
+        imp::request(imp::Request::Eval { id: self.id, code: code.into() });
+    }
+
+    /// Goes to `url`.
+    pub fn navigate(&self, url: &str) {
+        imp::request(imp::Request::Navigate { id: self.id, url: url.into() });
+    }
+
     /// Opens `options` (made on the main thread soon after); its frames go to `sink`, its sound
     /// to `audio`.
     pub fn open(options: PageOptions, sink: FrameSink, audio: AudioSink) -> Page {
         let id = imp::next_id();
-        imp::request(imp::Request::Open { id, options, sink, texture: None, audio });
+        imp::request(imp::Request::Open { id, options, sink, texture: None, audio, agent: None });
         Page { id }
     }
 
@@ -69,7 +101,7 @@ impl Page {
     pub fn open_shared(options: PageOptions, texture: TextureSink, sink: FrameSink, audio: AudioSink) -> Page {
         let id = imp::next_id();
         let texture = cfg!(target_os = "macos").then_some(texture);
-        imp::request(imp::Request::Open { id, options, sink, texture, audio });
+        imp::request(imp::Request::Open { id, options, sink, texture, audio, agent: None });
         Page { id }
     }
 
@@ -146,7 +178,7 @@ pub fn set_waker(wake: impl Fn() + Send + Sync + 'static) {
 
 #[cfg(any(target_os = "macos", all(windows, not(lightair_cross_check))))]
 mod imp {
-    use super::{AudioSink, FrameSink, PageOptions, TextureSink};
+    use super::{AudioSink, FrameSink, MessageSink, PageOptions, TextureSink};
     use cef::*;
     use parking_lot::Mutex;
     use std::cell::RefCell;
@@ -155,8 +187,18 @@ mod imp {
     use std::sync::Arc;
 
     pub enum Request {
-        Open { id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink },
+        Open {
+            id: u64,
+            options: PageOptions,
+            sink: FrameSink,
+            texture: Option<TextureSink>,
+            audio: AudioSink,
+            /// An agent page: its script and where its messages go.
+            agent: Option<(String, MessageSink)>,
+        },
         Update { id: u64, options: PageOptions },
+        Eval { id: u64, code: String },
+        Navigate { id: u64, url: String },
         Reload { id: u64 },
         Style { id: u64, css: String },
         Visible { id: u64, visible: bool },
@@ -322,10 +364,15 @@ mod imp {
                     "no-first-run",
                     "no-default-browser-check",
                     "autoplay-policy=no-user-gesture-required",
-                ] {
+                ]
+                .into_iter()
+                .map(String::from)
+                // a developer's own, ";"-separated (host-resolver-rules, logging)
+                .chain(std::env::var("LIGHTAIR_WEB_SWITCHES").unwrap_or_default().split(';').filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()))
+                {
                     match switch.split_once('=') {
                         Some((name, value)) => line.append_switch_with_value(Some(&CefString::from(name)), Some(&CefString::from(value))),
-                        None => line.append_switch(Some(&CefString::from(switch))),
+                        None => line.append_switch(Some(&CefString::from(switch.as_str()))),
                     }
                 }
             }
@@ -574,13 +621,46 @@ mod imp {
     wrap_load_handler! {
         struct PageLoad {
             css: Arc<Mutex<String>>,
+            script: String,
         }
         impl LoadHandler {
-            fn on_load_end(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, _http_status_code: ::std::os::raw::c_int) {
+            fn on_load_end(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, http_status_code: ::std::os::raw::c_int) {
                 let Some(frame) = frame else { return };
+                if frame.is_main() != 1 {
+                    return;
+                }
+                if !self.script.is_empty() {
+                    tracing::debug!(url = %CefString::from(&frame.url()), status = http_status_code, "agent page loaded");
+                }
                 let css = self.css.lock().clone();
-                if frame.is_main() == 1 && !css.trim().is_empty() {
+                if !css.trim().is_empty() {
                     inject(frame, &css);
+                }
+                if !self.script.is_empty() {
+                    frame.execute_java_script(Some(&CefString::from(self.script.as_str())), Some(&CefString::from("lightair://agent")), 0);
+                }
+            }
+        }
+    }
+
+    // An agent page's messages: console lines with Lightair's prefix (the rest are the page's own)
+    wrap_display_handler! {
+        struct PageDisplay {
+            messages: Option<MessageSink>,
+        }
+        impl DisplayHandler {
+            fn on_console_message(&self, _browser: Option<&mut Browser>, _level: LogSeverity, message: Option<&CefString>, _source: Option<&CefString>, _line: ::std::os::raw::c_int) -> ::std::os::raw::c_int {
+                let (Some(sink), Some(message)) = (&self.messages, message) else { return 0 };
+                let text = message.to_string();
+                match text.strip_prefix(crate::MESSAGE_PREFIX) {
+                    Some(m) => {
+                        sink(m.to_string());
+                        1
+                    }
+                    None => {
+                        tracing::debug!(%text, "agent page console");
+                        0
+                    }
                 }
             }
         }
@@ -592,8 +672,12 @@ mod imp {
             life: LifeSpanHandler,
             audio: AudioHandler,
             load: LoadHandler,
+            display: DisplayHandler,
         }
         impl Client {
+            fn display_handler(&self) -> Option<DisplayHandler> {
+                Some(self.display.clone())
+            }
             fn load_handler(&self) -> Option<LoadHandler> {
                 Some(self.load.clone())
             }
@@ -620,7 +704,8 @@ mod imp {
         std::ptr::null_mut()
     }
 
-    fn open(id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink) {
+    fn open(id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink, agent: Option<(String, MessageSink)>) {
+        let (script, messages) = agent.map_or((String::new(), None), |(s, m)| (s, Some(m)));
         let view = Arc::new(Mutex::new(view_of(&options)));
         let format = Arc::new(Mutex::new((48_000, 2)));
         let css = Arc::new(Mutex::new(options.css.clone()));
@@ -628,7 +713,8 @@ mod imp {
             PageRender::new(view.clone(), sink, texture.clone()),
             PageLife::new(id),
             PageAudio::new(format, audio),
-            PageLoad::new(css.clone()),
+            PageLoad::new(css.clone(), script),
+            PageDisplay::new(messages),
         );
         // shared textures: Chromium's GPU frames go to the scene as they are (no readback)
         let window = WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: texture.is_some() as i32, ..Default::default() };
@@ -722,7 +808,17 @@ mod imp {
         let requests = std::mem::take(&mut *REQUESTS.lock());
         for r in requests {
             match r {
-                Request::Open { id, options, sink, texture, audio } => open(id, options, sink, texture, audio),
+                Request::Open { id, options, sink, texture, audio, agent } => open(id, options, sink, texture, audio, agent),
+                Request::Eval { id, code } => PAGES.with(|pages| {
+                    if let Some(frame) = pages.borrow().get(&id).and_then(|l| l.browser.as_ref()).and_then(|b| b.main_frame()) {
+                        frame.execute_java_script(Some(&CefString::from(code.as_str())), Some(&CefString::from("lightair://agent")), 0);
+                    }
+                }),
+                Request::Navigate { id, url } => PAGES.with(|pages| {
+                    if let Some(frame) = pages.borrow().get(&id).and_then(|l| l.browser.as_ref()).and_then(|b| b.main_frame()) {
+                        frame.load_url(Some(&CefString::from(url.as_str())));
+                    }
+                }),
                 Request::Update { id, options } => update(id, options),
                 Request::Reload { id } => reload(id),
                 Request::Style { id, css } => style(id, css),
@@ -788,12 +884,14 @@ mod imp {
 /// No Chromium here (the Windows check made from a Mac): pages never paint.
 #[cfg(not(any(target_os = "macos", all(windows, not(lightair_cross_check)))))]
 mod imp {
-    use super::{AudioSink, FrameSink, PageOptions, TextureSink};
+    use super::{AudioSink, FrameSink, MessageSink, PageOptions, TextureSink};
 
     #[allow(dead_code)] // (asked for, never made here)
     pub enum Request {
-        Open { id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink },
+        Open { id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink, agent: Option<(String, MessageSink)> },
         Update { id: u64, options: PageOptions },
+        Eval { id: u64, code: String },
+        Navigate { id: u64, url: String },
         Reload { id: u64 },
         Style { id: u64, css: String },
         Visible { id: u64, visible: bool },
