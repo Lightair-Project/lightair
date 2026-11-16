@@ -48,7 +48,11 @@ with what's known about each. Keep it current: strike items as they land.
   browser's"; handing cookies to Lightair's browser checked with `LIGHTAIR_SELFTEST=cookie-set`,
   reading a real browser's untested here since it asks for the Keychain). Native Touch ID
   passkeys can't be used (Apple's restricted browser entitlement).
-- Chat panel: ~~tabs per platform, reply to a message~~ (done); moderation (delete, timeout, ban) left.
+- Chat panel: ~~tabs per platform, reply to a message~~ (done); ~~moderation~~ (built: delete,
+  10-minute timeout, ban with a second click; Twitch by typing `/delete`, `/timeout`, `/ban`
+  into its chat box in a signed-in hidden page, Kick through its site's requests from one;
+  untested on a real chat. YouTube left.) Twitch's API (Helix) answers 404 to the site's
+  session, so the Stream panel's Twitch title edit (Helix) needs another route.
 
 ## Widgets
 

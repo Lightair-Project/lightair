@@ -39,10 +39,47 @@ pub struct ChatPanel {
     filter: String,
     /// The message being replied to.
     reply: Option<ChatEvent>,
+    /// The message whose Ban was clicked once (a second click bans).
+    confirm_ban: Option<u64>,
     _input_events: Subscription,
 }
 
 impl ChatPanel {
+    /// Deletes, times out or bans (as the signed-in account), saying so if it didn't work.
+    fn moderate(&mut self, e: &ChatEvent, action: lightair_live::moderate::Action, cx: &mut Context<Self>) {
+        use lightair_live::moderate::Action;
+        let (platform, channel) = (e.platform.clone(), e.channel.clone());
+        let name = e.name().to_string();
+        // owned copies for the thread
+        let owned = match action {
+            Action::Delete { message_id } => (0u8, message_id.to_string(), String::new(), 0, String::new()),
+            Action::Timeout { user_id, login, seconds, reason } => (1, user_id.to_string(), login.to_string(), seconds, reason.to_string()),
+            Action::Ban { user_id, login, reason } => (2, user_id.to_string(), login.to_string(), 0, reason.to_string()),
+        };
+        self.send_error = None;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let (kind, id, login, seconds, reason) = owned;
+                    let action = match kind {
+                        0 => Action::Delete { message_id: &id },
+                        1 => Action::Timeout { user_id: &id, login: &login, seconds, reason: &reason },
+                        _ => Action::Ban { user_id: &id, login: &login, reason: &reason },
+                    };
+                    lightair_live::moderate::act(&platform, &channel, action)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(e) = result {
+                    this.send_error = Some(format!("{name}: {e}"));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn new(studio: Entity<Studio>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dirty = Arc::new(AtomicBool::new(true));
         let hub = studio.read(cx).chat.clone();
@@ -78,7 +115,7 @@ impl ChatPanel {
                 this.send(text, cx);
             }
         });
-        ChatPanel { studio, focus: cx.focus_handle(), scroll: ScrollHandle::new(), images, last: 0, input, target: String::new(), send_error: None, filter: String::new(), reply: None, _input_events }
+        ChatPanel { studio, focus: cx.focus_handle(), scroll: ScrollHandle::new(), images, last: 0, input, target: String::new(), send_error: None, filter: String::new(), reply: None, confirm_ban: None, _input_events }
     }
 
     /// Sends `text` (as the person signed in on each platform), off the main thread.
@@ -259,6 +296,7 @@ impl ChatPanel {
                 .child({
                     let featured = e.clone();
                     let can_reply = e.native_id.is_some() && lightair_live::accounts::account(&e.platform).is_some();
+                    let can_moderate = e.user.is_some() && lightair_live::moderate::can(&e.platform) && lightair_live::accounts::account(&e.platform).is_some();
                     let target = e.clone();
                     div()
                         .absolute()
@@ -280,6 +318,42 @@ impl ChatPanel {
                                     }
                                 })),
                         )
+                        .when(can_moderate, |d| {
+                            let (del, out, ban) = (e.clone(), e.clone(), e.clone());
+                            let confirming = self.confirm_ban == Some(e.id);
+                            d.when(e.native_id.is_some(), |d| {
+                                d.child(
+                                    ui::icon_button(SharedString::from(format!("chat-delete-{}", e.id)), "trash", tok::text_secondary())
+                                        .tooltip(ui::tip("Delete message"))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            let id = del.native_id.clone().unwrap_or_default();
+                                            this.moderate(&del, lightair_live::moderate::Action::Delete { message_id: &id }, cx)
+                                        })),
+                                )
+                            })
+                            .child(
+                                ui::icon_button(SharedString::from(format!("chat-timeout-{}", e.id)), "timer", tok::text_secondary())
+                                    .tooltip(ui::tip("Time out for 10 minutes"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let u = out.user.clone().unwrap_or_default();
+                                        this.moderate(&out, lightair_live::moderate::Action::Timeout { user_id: &u.id, login: &u.login, seconds: 600, reason: "" }, cx)
+                                    })),
+                            )
+                            .child(
+                                ui::icon_button(SharedString::from(format!("chat-ban-{}", e.id)), "ban", if confirming { tok::error() } else { tok::text_secondary() })
+                                    .tooltip(ui::tip(if confirming { "Click again to ban" } else { "Ban" }))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.confirm_ban != Some(ban.id) {
+                                            this.confirm_ban = Some(ban.id);
+                                            cx.notify();
+                                            return;
+                                        }
+                                        this.confirm_ban = None;
+                                        let u = ban.user.clone().unwrap_or_default();
+                                        this.moderate(&ban, lightair_live::moderate::Action::Ban { user_id: &u.id, login: &u.login, reason: "" }, cx)
+                                    })),
+                            )
+                        })
                         .when(can_reply, |d| {
                             d.child(
                                 ui::icon_button(SharedString::from(format!("chat-reply-{}", e.id)), "reply", tok::text_secondary())
