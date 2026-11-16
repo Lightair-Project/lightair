@@ -36,6 +36,11 @@ pub(crate) struct Remote {
     cpu: Option<(Instant, f64)>,
     /// Settings shows the password.
     pub show_password: bool,
+    /// The password from the Keychain, once read (`Some(None)`: it gave none). Read off the
+    /// main thread: the first read can wait on a Keychain prompt (another build of Lightair
+    /// saved it), which mustn't freeze the window.
+    pub password: Option<Option<String>>,
+    reading_password: bool,
 }
 
 struct Shot {
@@ -195,16 +200,53 @@ impl StudioWindow {
         })
         .detach();
         let cpu = Some((Instant::now(), process_usage().0));
-        Remote { server: None, error: None, jobs, told: None, shot: None, cpu, show_password: false }
+        Remote { server: None, error: None, jobs, told: None, shot: None, cpu, show_password: false, password: None, reading_password: false }
     }
 
     /// Starts, restarts or stops the server to match the preferences.
+    /// Reads the remote API's password from the Keychain (or makes a new one, `new`) on a
+    /// background thread, then starts the server with it.
+    pub(super) fn read_remote_password(&mut self, new: bool, cx: &mut Context<Self>) {
+        if self.remote.reading_password {
+            return;
+        }
+        self.remote.reading_password = true;
+        cx.spawn(async move |this, cx| {
+            let password = cx
+                .background_executor()
+                .spawn(async move { if new { crate::secrets::new_remote_password() } else { crate::secrets::remote_password() } })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.remote.reading_password = false;
+                this.remote.password = Some(password);
+                if new {
+                    this.remote.restart(cx);
+                }
+                this.sync_remote(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn sync_remote(&mut self, cx: &mut Context<Self>) {
         let p = self.prefs.remote;
         // a test copy keeps off the running app's port
         let port = std::env::var("LIGHTAIR_REMOTE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(p.port);
-        let password = if p.require_password || p.lan { crate::secrets::remote_password() } else { None };
-        if (p.require_password || p.lan) && password.is_none() {
+        let needs = p.enabled && (p.require_password || p.lan) && std::env::var_os("LIGHTAIR_REMOTE_OFF").is_none();
+        let password = if needs {
+            match self.remote.password.clone() {
+                Some(p) => p,
+                None => {
+                    // started once the Keychain answers
+                    self.read_remote_password(false, cx);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        if needs && password.is_none() {
             self.remote.server = None;
             self.remote.error = Some("The Keychain didn't give Lightair a password for the remote API.".into());
             return;

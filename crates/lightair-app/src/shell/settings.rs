@@ -1199,7 +1199,13 @@ impl StudioWindow {
                 )),
         );
         if asks {
-            let password = crate::secrets::remote_password().unwrap_or_default();
+            if self.remote.password.is_none() {
+                let this = cx.entity().downgrade();
+                cx.defer(move |cx| {
+                    let _ = this.update(cx, |this, cx| this.read_remote_password(false, cx));
+                });
+            }
+            let password = self.remote.password.clone().flatten().unwrap_or_default();
             let shown = if self.remote.show_password { password.clone() } else { "•".repeat(12) };
             let show = self.remote.show_password;
             page = page.child(
@@ -1218,11 +1224,7 @@ impl StudioWindow {
                         ))
                         .child(copy("remote-copy-password", password))
                         .child(Button::new("remote-new-password").label("New").xsmall().ghost().on_click(cx.listener(
-                            |this, _, _, cx| {
-                                crate::secrets::new_remote_password();
-                                this.remote.restart(cx);
-                                this.sync_remote(cx);
-                            },
+                            |this, _, _, cx| this.read_remote_password(true, cx),
                         ))),
                 )),
             );

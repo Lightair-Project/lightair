@@ -383,6 +383,11 @@ impl Studio {
             let workspace = self.workspace().clone();
             self.engine.post(move |s| s.reconciler.refresh_audio(&workspace));
         }
+        // the camera and microphone sources held back for macOS's prompt, once answered
+        if lightair_engine::access::changed() {
+            let workspace = self.workspace().clone();
+            self.engine.post(move |s| s.reconciler.access_answered(&workspace));
+        }
     }
 
     /// Runs the end action of countdowns that just ended ("Then go to" a scene).

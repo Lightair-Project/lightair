@@ -675,6 +675,11 @@ impl AudioHost {
             return Ok(self.devices[&input].1);
         }
         self.close_device(input);
+        // macOS hasn't asked about the microphone yet: asked without waiting, opened once
+        // answered (`Reconciler::access_answered`)
+        if crate::access::hold_back(crate::access::Media::Microphone) {
+            return Err("waiting for microphone access".into());
+        }
         let devices = self.device_thread.get_or_insert_with(crate::devices::Devices::start);
         let (producer, consumer) = rtrb::RingBuffer::new(RING_FRAMES * 32);
         let channels = devices.open(input, device, self.sample_rate, producer)?;
