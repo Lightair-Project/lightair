@@ -42,8 +42,6 @@ pub struct Preferences {
     pub macos_background_before: Option<String>,
     /// The remote API: obs-websocket, JSON-RPC and MCP (Settings › Remote API).
     pub remote: RemoteApi,
-    /// The canvas preview's frames a second at most (0: every frame of the canvas).
-    pub preview_fps: u32,
 }
 
 /// The remote API's server (its password is in the Keychain: `secrets`).
@@ -126,16 +124,12 @@ impl Default for Preferences {
             record_mode: RecordMode::Program,
             macos_background_before: None,
             remote: RemoteApi::default(),
-            preview_fps: 0,
         }
     }
 }
 
 /// The sample rate libobs started with (a change applies next launch).
 pub static RUNNING_SAMPLE_RATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(48_000);
-
-/// Settings › Canvases › Live preview is Light (the preview at 30 fps, the meters at 15).
-pub static LIGHT_PREVIEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The loudness target, for the mixer's readout.
 pub static LOUDNESS_TARGET: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-14);
