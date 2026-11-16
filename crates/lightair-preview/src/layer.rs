@@ -4,26 +4,37 @@
 //! The swap chain belongs to libobs's own D3D11 device: each frame the graphics thread copies
 //! the preview's render target into the back buffer (a GPU copy) and presents without waiting.
 //! The app shows the swap chain in a composition visual under GPUI's (`native_preview`).
+//!
+//! Never waiting matters: libobs renders every output on this thread, so a present that blocked
+//! (the compositor busy, say while a display capture starts up and Windows reconfigures it)
+//! would make the program skip frames. The swap chain has a frame-latency waitable object; a
+//! frame is presented only when it's signalled (the compositor has taken the last one), else
+//! the preview skips that frame and the program goes on.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lightair_engine::sys;
 use parking_lot::Mutex;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Resource, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory2, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT_DO_NOT_WAIT, DXGI_SCALING_STRETCH,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
-    IDXGIFactory2, IDXGISwapChain1, DXGI_CREATE_FACTORY_FLAGS,
+    CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT_DO_NOT_WAIT,
+    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIFactory2, IDXGISwapChain1, IDXGISwapChain2,
 };
+use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::core::Interface;
 
 /// A swap chain the preview presents its frames to, shown by a composition visual.
 pub struct Layer {
     swap: IDXGISwapChain1,
+    /// Signalled when the swap chain can take a frame without blocking (`Present` would wait
+    /// otherwise); null where the system doesn't give one.
+    ready: HANDLE,
     /// The back buffers' size, packed (width << 32 | height).
     size: AtomicU64,
     /// The back buffers' format (graphics thread).
@@ -39,11 +50,12 @@ pub struct Layer {
 
 // SAFETY: the swap chain is used on libobs's graphics thread only (resize, copy, present); other
 // threads read `size` or hand the swap chain's pointer to DirectComposition, which takes its own
-// reference.
+// reference. The waitable handle is a kernel handle.
 unsafe impl Send for Layer {}
 unsafe impl Sync for Layer {}
 
 const START: u32 = 16;
+const FLAGS: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
 impl Layer {
     /// A swap chain on libobs's device (libobs must be running on Direct3D 11).
@@ -56,8 +68,18 @@ impl Layer {
             if swap.is_none() {
                 tracing::warn!("couldn't make a composition swap chain for the preview");
             }
+            let swap = swap?;
+            // at most one frame queued: the newest is what the window shows
+            let ready = match swap.cast::<IDXGISwapChain2>() {
+                Ok(s2) => {
+                    let _ = s2.SetMaximumFrameLatency(1);
+                    s2.GetFrameLatencyWaitableObject()
+                }
+                Err(_) => HANDLE::default(),
+            };
             Some(Self {
-                swap: swap?,
+                swap,
+                ready,
                 size: AtomicU64::new(pack(START, START)),
                 format: Mutex::new(DXGI_FORMAT_B8G8R8A8_UNORM),
                 wanted: AtomicU64::new(0),
@@ -81,7 +103,7 @@ impl Layer {
                 Scaling: DXGI_SCALING_STRETCH,
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
                 AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-                Flags: 0,
+                Flags: FLAGS.0 as u32,
             };
             factory.CreateSwapChainForComposition(device, &desc, None).ok()
         }
@@ -116,16 +138,24 @@ impl Layer {
         format_of(unsafe { sys::gs_texture_get_color_format(tex) }).is_some()
     }
 
+    /// Whether the swap chain can take a frame now, without `Present` waiting.
+    fn can_take(&self) -> bool {
+        self.ready.is_invalid() || unsafe { WaitForSingleObject(self.ready, 0) } == WAIT_OBJECT_0
+    }
+
     /// Copies `tex` (a `w`×`h` render target of libobs's) into the back buffer and presents it,
-    /// never waiting: a frame the compositor hasn't taken yet is skipped. Graphics thread,
-    /// inside libobs's graphics context. Whether it was presented.
+    /// never waiting: when the compositor hasn't taken the last frame yet, this one is skipped.
+    /// Graphics thread, inside libobs's graphics context. Whether it was presented.
     pub(crate) unsafe fn present(&self, tex: *mut sys::gs_texture_t, w: u32, h: u32) -> bool {
         let _held = self.lock.lock();
+        if !self.can_take() {
+            return false;
+        }
         unsafe {
             let Some(format) = format_of(sys::gs_texture_get_color_format(tex)) else { return false };
             let mut current = self.format.lock();
             if self.size() != (w, h) || *current != format {
-                if self.swap.ResizeBuffers(0, w, h, format, DXGI_SWAP_CHAIN_FLAG(0)).is_err() {
+                if self.swap.ResizeBuffers(0, w, h, format, FLAGS).is_err() {
                     return false;
                 }
                 self.size.store(pack(w, h), Ordering::Relaxed);
@@ -138,11 +168,26 @@ impl Layer {
             let Ok(context) = device.GetImmediateContext() else { return false };
             context.CopyResource(&back, src);
             drop(back);
+            let started = std::time::Instant::now();
             let hr = self.swap.Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+            let took = started.elapsed();
+            if took > std::time::Duration::from_millis(4) {
+                tracing::debug!(?took, "the preview's present waited");
+            }
             if hr.is_err() && hr != DXGI_ERROR_WAS_STILL_DRAWING {
                 tracing::debug!("preview present: {hr:?}");
             }
             hr.is_ok()
+        }
+    }
+}
+
+impl Drop for Layer {
+    fn drop(&mut self) {
+        if !self.ready.is_invalid() {
+            unsafe {
+                let _ = CloseHandle(self.ready);
+            }
         }
     }
 }
