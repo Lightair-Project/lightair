@@ -609,6 +609,7 @@ impl StudioWindow {
         .detach();
         let remote = Self::new_remote(window, cx);
         let automations = live_api::start_automations(&studio.read(cx).chat, remote.jobs());
+        live_api::feed_widgets(automations.clone(), studio.read(cx).widgets.clone());
         let automations_panel = {
             let a = automations.clone();
             cx.new(|cx| crate::automations_panel::AutomationsPanel::new(a, cx))
