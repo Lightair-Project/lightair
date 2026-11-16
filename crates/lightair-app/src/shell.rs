@@ -37,7 +37,7 @@ mod settings;
 mod source;
 
 use crate::geometry::{self as geo, CORNERS, Corner};
-use crate::mixer::MixerPanel;
+use crate::mixer::{MixerDock, MixerPanel};
 use crate::outputs_panel::{OutputsPanel, elapsed};
 use crate::rows::{DraggedRow, Renaming, RowTarget};
 use crate::safe_areas::{self, Profile};
@@ -277,6 +277,8 @@ type Guides = Vec<(bool, f32)>;
 pub struct StudioWindow {
     studio: Entity<Studio>,
     mixer: Entity<MixerPanel>,
+    /// The mixer's dock panel: its strips and the meter overlay.
+    mixer_dock: Entity<MixerDock>,
     outputs: Entity<OutputsPanel>,
     /// First click on "End stream" arms it; a second click within 3 s ends the stream.
     confirm_end: Option<Instant>,
@@ -481,11 +483,23 @@ impl StudioWindow {
         .detach();
         // Chromium for web page sources: driven from this (the main) thread, often while pages
         // are open, and now and then to pick up the first one asked for.
+        // It runs when Chromium asks (CEF's external pump): a page that animates asks often, a
+        // still page now and then, none never.
+        let (wake, mut woken) = futures_channel::mpsc::unbounded::<()>();
+        let wake = parking_lot::Mutex::new(wake);
+        lightair_web::set_waker(move || {
+            let _ = wake.lock().unbounded_send(());
+        });
         cx.spawn(async move |this, cx| {
+            use futures_util::StreamExt;
             loop {
                 lightair_web::pump();
-                let wait = if lightair_web::busy() { 8 } else { 120 };
-                cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
+                let wait = lightair_web::next_pump();
+                if !wait.is_zero() {
+                    let timer = cx.background_executor().timer(wait);
+                    let _ = futures_util::future::select(timer, woken.next()).await;
+                }
+                while woken.try_recv().is_ok() {}
                 if this.upgrade().is_none() {
                     break;
                 }
@@ -534,6 +548,7 @@ impl StudioWindow {
         })
         .detach();
         let mixer = cx.new(|cx| MixerPanel::new(studio.clone(), cx));
+        let mixer_dock = cx.new(|cx| MixerDock::new(mixer.clone(), cx));
         let outputs = cx.new(|cx| OutputsPanel::new(studio.clone(), cx));
         // Its Add destination dialog is drawn over the whole window.
         cx.observe(&outputs, |_, _, cx| cx.notify()).detach();
@@ -589,6 +604,7 @@ impl StudioWindow {
             active_canvas: Some(primary),
             side_by_side: false,
             mixer,
+            mixer_dock,
             outputs,
             confirm_end: None,
             studio,

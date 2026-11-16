@@ -57,8 +57,8 @@ impl ShellPanel {
                                 if p.region == Region::Canvas
                                     && let Some(shell) = p.shell.upgrade()
                                 {
-                                    let mixer = shell.read(cx).mixer.clone();
-                                    mixer.update(cx, |m, cx| m.tick_meters(cx));
+                                    let mixer = shell.read(cx).mixer_dock.clone();
+                                    crate::mixer::MixerDock::tick_meters(&mixer, cx);
                                 }
                             });
                         }
@@ -208,7 +208,7 @@ impl StudioWindow {
         let (objects, scenes) = (panel(Region::Hierarchy, cx), panel(Region::Scenes, cx));
         let (canvas, inspector) = (panel(Region::Canvas, cx), panel(Region::Inspector, cx));
         let assets = panel(Region::Assets, cx);
-        let (mixer, outputs) = (self.mixer.clone(), self.outputs.clone());
+        let (mixer, outputs) = (self.mixer_dock.clone(), self.outputs.clone());
         // Every group shows a tab bar, even with one panel, so any panel can be dropped onto
         // any header to join it as a tab (and the canvas gets a header like the rest).
         let (dock, skin) = DockSkin::dock_area("lightair-studio", Some(1), window, cx);

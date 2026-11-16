@@ -131,6 +131,19 @@ pub fn busy() -> bool {
     imp::busy()
 }
 
+/// How long until [`pump`] is due: when Chromium asked for its work to be done (it schedules
+/// it as pages animate, load or play), at most 33 ms while pages are open (CEF's own fallback),
+/// at once with requests waiting.
+pub fn next_pump() -> std::time::Duration {
+    imp::next_pump()
+}
+
+/// Called (from any thread) when [`pump`] is due sooner than [`next_pump`] last said: a request
+/// came in, or Chromium asked for its work sooner. The pump's loop wakes on it.
+pub fn set_waker(wake: impl Fn() + Send + Sync + 'static) {
+    imp::set_waker(Box::new(wake))
+}
+
 #[cfg(any(target_os = "macos", all(windows, not(lightair_cross_check))))]
 mod imp {
     use super::{AudioSink, FrameSink, PageOptions, TextureSink};
@@ -166,10 +179,50 @@ mod imp {
             OPEN_PAGES.fetch_add(1, Ordering::Relaxed);
         }
         REQUESTS.lock().push(r);
+        wake();
     }
 
     pub fn busy() -> bool {
         OPEN_PAGES.load(Ordering::Relaxed) > 0 || !REQUESTS.lock().is_empty()
+    }
+
+    // ------------------------------------------------------------ pump scheduling
+
+    /// When Chromium wants its work done next (nanoseconds after `EPOCH`; `u64::MAX`: not asked).
+    static DUE: AtomicU64 = AtomicU64::new(u64::MAX);
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    static WAKER: Mutex<Option<Box<dyn Fn() + Send + Sync>>> = Mutex::new(None);
+
+    fn now_ns() -> u64 {
+        EPOCH.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+    }
+
+    fn wake() {
+        if let Some(w) = WAKER.lock().as_ref() {
+            w();
+        }
+    }
+
+    pub fn set_waker(wake: Box<dyn Fn() + Send + Sync>) {
+        *WAKER.lock() = Some(wake);
+    }
+
+    /// Chromium asks for its work in `delay_ms` (any thread): the sooner of that and what's due.
+    fn schedule(delay_ms: i64) {
+        let at = now_ns() + delay_ms.max(0) as u64 * 1_000_000;
+        if DUE.fetch_min(at, Ordering::AcqRel) > at {
+            wake();
+        }
+    }
+
+    pub fn next_pump() -> std::time::Duration {
+        if !REQUESTS.lock().is_empty() {
+            return std::time::Duration::ZERO;
+        }
+        let cap = if OPEN_PAGES.load(Ordering::Relaxed) > 0 { 33 } else { 1000 };
+        let due = DUE.load(Ordering::Acquire);
+        let wait = if due == u64::MAX { cap * 1_000_000 } else { due.saturating_sub(now_ns()).min(cap * 1_000_000) };
+        std::time::Duration::from_nanos(wait)
     }
 
     // ------------------------------------------------------------ where Chromium is
@@ -245,6 +298,10 @@ mod imp {
             fn on_context_initialized(&self) {
                 tracing::debug!("Chromium ready for pages");
                 READY.store(true, Ordering::Relaxed);
+                wake();
+            }
+            fn on_schedule_message_pump_work(&self, delay_ms: i64) {
+                schedule(delay_ms);
             }
         }
     }
@@ -654,6 +711,8 @@ mod imp {
             return;
         }
         if STARTED.load(Ordering::Relaxed) {
+            // done now: Chromium asks again for what comes next
+            DUE.store(u64::MAX, Ordering::Release);
             do_message_loop_work();
         }
         // pages are made once Chromium's context is ready (macOS insists)
@@ -762,4 +821,10 @@ mod imp {
     pub fn busy() -> bool {
         false
     }
+
+    pub fn next_pump() -> std::time::Duration {
+        std::time::Duration::from_secs(1)
+    }
+
+    pub fn set_waker(_: Box<dyn Fn() + Send + Sync>) {}
 }
