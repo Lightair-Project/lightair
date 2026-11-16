@@ -154,12 +154,12 @@ impl StudioWindow {
 
     /// Brings in a StreamElements custom widget from a folder of its files.
     fn import_widget(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Import widget".into()) });
+        let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: true, multiple: false, prompt: Some("Import widget".into()) });
         self.close_add_object(window, cx);
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let Some(dir) = paths.into_iter().next() else { return };
-            let _ = this.update_in(cx, |this, window, cx| match lightair_widgets::import_folder(&dir) {
+            let _ = this.update_in(cx, |this, window, cx| match lightair_widgets::import(&dir) {
                 Ok(custom) => this.add_widget("custom", Some(custom), window, cx),
                 Err(e) => this.studio.update(cx, |s, cx| {
                     s.issue = Some(format!("Couldn't import that widget: {e}").into());
@@ -332,8 +332,8 @@ impl StudioWindow {
                     }
                     if import {
                         grid = grid.child(
-                            tile("widget-import".into(), "folder-open", "StreamElements")
-                                .tooltip(ui::tip("A StreamElements custom widget: choose the folder with its HTML, CSS, JS and fields files"))
+                            tile("widget-import".into(), "folder-open", "Import widget")
+                                .tooltip(ui::tip("A .lwidget package, or a StreamElements custom widget's folder (its HTML, CSS, JS and fields files)"))
                                 .on_click(cx.listener(|this, _, window, cx| this.import_widget(window, cx))),
                         );
                     }
