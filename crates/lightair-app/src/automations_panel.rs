@@ -45,6 +45,13 @@ fn fields(a: &Automation) -> Vec<(String, &'static str, bool)> {
         }
         Trigger::Event { .. } => f.push(("trigger.min_amount".into(), "At least (amount or raiders)", true)),
         Trigger::Hotkey { .. } => f.push(("trigger.keys".into(), "Keys (cmd-alt-1, ctrl-shift-f5, …)", false)),
+        Trigger::File { .. } => f.push(("trigger.path".into(), "File (its full path; ~/ for your home folder)", false)),
+        Trigger::Midi { .. } => {
+            f.push(("trigger.message".into(), "note (a pad or key) or cc (a knob or fader)", false));
+            f.push(("trigger.number".into(), "Which note or control (−1: any)", true));
+            f.push(("trigger.channel".into(), "Channel (1–16, 0: any)", true));
+        }
+        Trigger::Controller { .. } => f.push(("trigger.button".into(), "Button (South, East, Start, DPadUp, LeftTrigger…; empty: any)", false)),
         Trigger::Manual | Trigger::Output { .. } | Trigger::Start => {}
     }
     for (i, s) in a.steps.iter().enumerate() {
@@ -87,7 +94,13 @@ fn get(a: &Automation, key: &str) -> String {
 
 fn set(a: &Automation, key: &str, text: &str, number: bool) -> Option<Automation> {
     let mut v = serde_json::to_value(a).ok()?;
-    let value = if number { json!(text.trim().parse::<f64>().unwrap_or(0.0)) } else { json!(text) };
+    // whole numbers as integers, so integer fields (a MIDI note) take them
+    let value = match text.trim().parse::<f64>() {
+        Ok(n) if number && n.fract() == 0.0 && n.abs() < 1e15 => json!(n as i64),
+        Ok(n) if number => json!(n),
+        _ if number => json!(0),
+        _ => json!(text),
+    };
     let parts: Vec<&str> = key.split('.').collect();
     match parts.as_slice() {
         ["step", i, k] => v["steps"][i.parse::<usize>().ok()?][*k] = value,
@@ -346,6 +359,10 @@ impl AutomationsPanel {
                 ("Recording stops", Trigger::Output { what: "record".into(), state: "stop".into() }),
                 ("Lightair starts", Trigger::Start),
                 ("A hotkey (any app)", Trigger::Hotkey { keys: "cmd-alt-1".into() }),
+                ("A file changes", Trigger::File { path: "~/Documents/deaths.txt".into() }),
+                ("A MIDI pad or key", Trigger::Midi { message: "note".into(), number: -1, channel: 0 }),
+                ("A MIDI knob or fader", Trigger::Midi { message: "cc".into(), number: -1, channel: 0 }),
+                ("A game controller button", Trigger::Controller { button: "South".into() }),
                 ("Only by hand", Trigger::Manual),
             ];
             for (label, t) in options {

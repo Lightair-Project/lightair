@@ -47,6 +47,7 @@ pub(super) fn start_automations(hub: &lightair_live::Hub, jobs: super::remote::J
 /// The points leaderboard and the giveaway's entrants, for the widgets that show them (only
 /// while one exists).
 pub(super) fn feed_widgets(automations: Automations, widgets: Option<lightair_widgets::Widgets>) {
+    crate::triggers::watch(automations.clone());
     // automations: when streaming or recording starts or stops, and once at start
     {
         let a = automations.clone();

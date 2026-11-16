@@ -11,6 +11,9 @@ name = "lightair"
 path = "src/main.rs"
 
 [dependencies]
+# automation triggers (triggers.rs): MIDI inputs, game controllers
+midir = "0.11"
+gilrs = "0.11"
 lightair-engine.workspace = true
 lightair-automation.workspace = true
 lightair-live.workspace = true

@@ -62,7 +62,9 @@ with what's known about each. Keep it current: strike items as they land.
 ## Automations
 
 - Triggers: ~~stream/recording start and stop, app start, a web address per automation~~ (done);
-  ~~hotkeys~~ (done, untested by pressing); MIDI, game controller, voice phrases, file changes left.
+  ~~hotkeys~~ (done, untested by pressing); ~~MIDI, game controllers, file changes~~ (done:
+  triggers.rs; files tested end to end, MIDI and controllers without a device here); voice
+  phrases left.
 - Platform steps: title, category, ads, polls, predictions, rewards, raids, shoutouts with a clip,
   clips, markers, moderation (need the platform's session or official API).
 - A block editor beyond the current list (nested if/random editing in place; today they're in
