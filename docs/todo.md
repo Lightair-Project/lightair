@@ -52,10 +52,12 @@ with what's known about each. Keep it current: strike items as they land.
 
 ## Widgets
 
-- More first-party widgets from the plan: featured message, prediction, countdown (the Timer
-  object covers some), emote combo.
+- ~~Featured message, prediction, emote combo~~ (done: Chat › a message › Feature; Prediction
+  bets Lightair points with `!bet 1 100`, winners split the pot; Emote combo). Countdown: the
+  Timer object covers it.
 - A widget gallery; Streamlabs custom-widget shim.
-- Multi-line text fields in the widget Inspector (the social rotator takes commas for now).
+- ~~Multi-line text fields in the widget Inspector~~ (done: field type `textarea`; the social
+  rotator takes one a line).
 
 ## Automations
 

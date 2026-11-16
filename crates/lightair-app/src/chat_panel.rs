@@ -254,20 +254,43 @@ impl ChatPanel {
                 .flex()
                 .flex_col()
                 .gap(px(2.))
-                // reply (where Lightair can send, to a message the platform numbered)
-                .when(e.native_id.is_some() && lightair_live::accounts::account(&e.platform).is_some(), |d| {
+                // feature it (the Featured message widget), reply (where Lightair can send, to a
+                // message the platform numbered)
+                .child({
+                    let featured = e.clone();
+                    let can_reply = e.native_id.is_some() && lightair_live::accounts::account(&e.platform).is_some();
                     let target = e.clone();
-                    d.child(
-                        div().absolute().top(px(2.)).right(px(8.)).invisible().group_hover("chat-msg", |s| s.visible()).child(
-                            ui::icon_button(SharedString::from(format!("chat-reply-{}", e.id)), "reply", tok::text_secondary())
-                                .tooltip(ui::tip("Reply"))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.reply = Some(target.clone());
-                                    this.input.update(cx, |i, cx| i.focus(window, cx));
-                                    cx.notify();
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .right(px(8.))
+                        .flex()
+                        .gap_0p5()
+                        .invisible()
+                        .group_hover("chat-msg", |s| s.visible())
+                        .child(
+                            ui::icon_button(SharedString::from(format!("chat-feature-{}", e.id)), "message-square-quote", tok::text_secondary())
+                                .tooltip(ui::tip("Feature on stream (Featured message widget)"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(w) = this.studio.read(cx).widgets.as_ref() {
+                                        // stamped, so featuring it again shows it again
+                                        let mut v = serde_json::to_value(&featured).unwrap_or_default();
+                                        v["featured_at"] = lightair_live::event::now_ms().into();
+                                        w.set_data("featured", v);
+                                    }
                                 })),
-                        ),
-                    )
+                        )
+                        .when(can_reply, |d| {
+                            d.child(
+                                ui::icon_button(SharedString::from(format!("chat-reply-{}", e.id)), "reply", tok::text_secondary())
+                                    .tooltip(ui::tip("Reply"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.reply = Some(target.clone());
+                                        this.input.update(cx, |i, cx| i.focus(window, cx));
+                                        cx.notify();
+                                    })),
+                            )
+                        })
                 })
                 .when_some(e.reply_to.as_ref(), |d, r| {
                     d.child(
