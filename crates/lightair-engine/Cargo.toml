@@ -29,9 +29,10 @@ vst3 = "0.3"
 lightair-platform.workspace = true
 lightair-render.workspace = true
 
-# Audio Units, and VST3 bundles loaded through CoreFoundation
+# Audio Units, and VST3 bundles loaded through CoreFoundation; AVFoundation (media_source)
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
+objc2 = "0.6"
 
 # VST3 modules (DLLs) on Windows
 [target.'cfg(windows)'.dependencies]

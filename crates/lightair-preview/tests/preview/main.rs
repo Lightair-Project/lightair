@@ -9,6 +9,8 @@ mod fx;
 mod green_key;
 mod hierarchy;
 mod key_colour;
+#[cfg(target_os = "macos")]
+mod media_native;
 mod media_on_air;
 #[cfg(target_os = "macos")]
 mod nv12;

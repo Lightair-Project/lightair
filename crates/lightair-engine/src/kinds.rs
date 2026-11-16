@@ -11,6 +11,7 @@
 //! | mic | `coreaudio_source_capture` | `wasapi_source_capture` |
 //! | desktop audio | `sck_audio_capture` (type 0); a loopback device: `coreaudio_output_capture` | `wasapi_output_capture` |
 //! | app audio | `sck_audio_capture` (type 1) | `wasapi_process_output_capture` |
+//! | media file (`ffmpeg_source`) | MP4/QuickTime: `lightair_media`; others `ffmpeg_source` | `ffmpeg_source` |
 //!
 //! Settings that aren't Lightair's own (a camera's preset, say) pass through as they are.
 
@@ -19,6 +20,9 @@ use serde_json::{Value, json};
 
 /// The libobs source type and settings for a source, or `None` when its kind is libobs's own.
 pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
+    if kind == "ffmpeg_source" {
+        return native_media(settings).then(|| (NATIVE_MEDIA, settings.clone()));
+    }
     let mut out = settings.as_object().cloned().unwrap_or_default();
     let mut take = |from: &str| out.remove(from);
     let mode = take("mode").and_then(|m| m.as_i64()).unwrap_or(DISPLAY);
@@ -150,6 +154,25 @@ pub fn cameras() -> Vec<(String, String)> {
         // lists the same AVFoundation device ids
         crate::obs::property_items("av_capture_input_v2", "device")
     }
+}
+
+/// Lightair's own media source (macOS, [`crate::media_source`]): video decoded straight into
+/// textures.
+pub const NATIVE_MEDIA: &str = "lightair_media";
+
+/// Whether a media source (`ffmpeg_source`'s settings) plays with [`NATIVE_MEDIA`]: on macOS,
+/// a local file AVFoundation plays (MP4, QuickTime), at normal speed. Anything else (other
+/// containers, streams, a changed speed) stays with OBS's media source; `LIGHTAIR_MEDIA=ffmpeg`
+/// sends everything there (for comparison).
+pub fn native_media(settings: &Value) -> bool {
+    if !cfg!(target_os = "macos") || std::env::var("LIGHTAIR_MEDIA").is_ok_and(|v| v == "ffmpeg") {
+        return false;
+    }
+    let local = settings.get("is_local_file").and_then(Value::as_bool) != Some(false);
+    let speed = settings.get("speed_percent").and_then(Value::as_i64).unwrap_or(100);
+    let file = settings.get("local_file").and_then(Value::as_str).unwrap_or("");
+    let ext = std::path::Path::new(file).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    local && speed == 100 && matches!(ext.as_deref(), Some("mp4" | "m4v" | "mov"))
 }
 
 /// The libobs source type a source plays as (its own kind when that's libobs's).
