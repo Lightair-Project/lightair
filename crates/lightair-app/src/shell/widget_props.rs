@@ -14,7 +14,6 @@ use lightair_widgets::{Instance, catalog, test_events};
 use serde_json::{Value, json};
 
 use super::StudioWindow;
-use super::object_props::rgb_to_hsla;
 use crate::ui::{self, tok};
 
 /// The text-like fields' inputs for the selected widget.
@@ -38,12 +37,6 @@ fn shown(v: &Value) -> String {
         Value::Null => String::new(),
         other => other.to_string(),
     }
-}
-
-/// "#RRGGBB" → its colour (other forms aren't previewed).
-fn hex(s: &str) -> Option<u32> {
-    let h = s.trim().strip_prefix('#')?;
-    (h.len() == 6).then(|| u32::from_str_radix(h, 16).ok()).flatten()
 }
 
 pub(super) fn widget_of(source: &Source) -> Option<Instance> {
@@ -75,6 +68,15 @@ impl StudioWindow {
                 inputs.push((f.key.clone(), state));
             }
             self.props.widget = Some(WidgetEdit { source: source.id, inputs, _events: events });
+        }
+        // colour fields: a full picker each
+        for f in list.iter().filter(|f| f.kind == "colorpicker") {
+            let current = values.get(&f.key).and_then(|v| v.as_str()).and_then(super::colour_field::parse).unwrap_or_else(|| gpui_kit::rgb(0xFFFFFF).into());
+            let (id, key) = (source.id, f.key.clone());
+            let apply: super::colour_field::Apply = std::rc::Rc::new(move |this: &mut StudioWindow, c, cx| {
+                this.set_widget_field(id, &key, json!(super::colour_field::css(c)), cx);
+            });
+            self.sync_colour(&format!("w-{}-{}", source.id, f.key), current, apply, window, cx);
         }
         let w = self.props.widget.as_ref().unwrap();
         for (key, state) in &w.inputs {
@@ -228,11 +230,11 @@ impl StudioWindow {
                     return div().into_any_element();
                 };
                 let file = matches!(kind, "image-input" | "sound-input" | "video-input");
-                let colour = (kind == "colorpicker").then(|| hex(&shown(&value))).flatten();
-                let mut row = div().flex().items_center().gap_1().child(div().flex_1().min_w_0().child(TextInput::new(&state).small()));
-                if let Some(c) = colour {
-                    row = row.child(div().size(px(20.)).flex_none().rounded(px(4.)).border_1().border_color(tok::border()).bg(rgb_to_hsla(c)));
+                let mut row = div().flex().items_center().gap_1();
+                if kind == "colorpicker" {
+                    row = row.child(div().flex_none().child(self.colour_field(&format!("w-{source}-{}", f.key), cx)));
                 }
+                row = row.child(div().flex_1().min_w_0().child(TextInput::new(&state).small()));
                 if file {
                     let key = key.clone();
                     row = row.child(

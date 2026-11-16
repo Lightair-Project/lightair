@@ -206,7 +206,28 @@ impl StudioWindow {
             None => self.props.web_css = None,
         }
 
+        // colour controls: the text's, the colour object's (widgets' are synced with them)
+        if let Some(i) = source.as_ref().filter(|i| is_text(&i.kind) || i.kind == TIMER_KIND || is_colour(&i.kind)) {
+            let (key, keys): (&str, &'static [&'static str]) = if is_colour(&i.kind) { ("object-colour", &["color"]) } else { ("text-colour", &["color1", "color2"]) };
+            let current = super::colour_field::of_abgr(i.settings[keys[0]].as_u64().unwrap_or(0xFFFF_FFFF) as u32);
+            let id = i.id;
+            let apply: super::colour_field::Apply = std::rc::Rc::new(move |this: &mut StudioWindow, c, cx| {
+                let workspace = this.studio.read(cx).workspace().clone();
+                let Some(src) = workspace.sources.get(&id) else { return };
+                let v = json!(super::colour_field::abgr(c));
+                if keys.iter().all(|k| src.settings[*k] == v) {
+                    return;
+                }
+                let mut s = src.settings.clone();
+                for k in keys {
+                    s = with(&s, k, v.clone());
+                }
+                this.exec(Command::SetSourceSettings { source: id, settings: s }, cx);
+            });
+            self.sync_colour(key, current, apply, window, cx);
+        }
         self.sync_widget_props(source.as_deref(), window, cx);
+        self.keep_synced_colours();
 
         // Timer status, polled the same way.
         match source.as_ref().filter(|i| i.kind == TIMER_KIND) {
@@ -243,7 +264,7 @@ impl StudioWindow {
         }
     }
 
-    fn set_text(&mut self, source: Id, text: String, cx: &mut Context<Self>) {
+    pub(super) fn set_text(&mut self, source: Id, text: String, cx: &mut Context<Self>) {
         let workspace = self.studio.read(cx).workspace().clone();
         let Some(i) = workspace.sources.get(&source) else { return };
         if i.settings["text"].as_str() == Some(text.as_str()) {
@@ -292,32 +313,6 @@ impl StudioWindow {
         } else {
             None
         }
-    }
-
-    fn swatches(&self, source: &Source, key: &'static str, keys: &'static [&'static str], cx: &mut Context<Self>) -> Div {
-        let current = source.settings[key].as_u64().map(|c| rgb_of(c as u32));
-        let mut row = div().flex().flex_wrap().gap_1p5();
-        for (i, &rgb) in PALETTE.iter().enumerate() {
-            let (id, settings) = (source.id, source.settings.clone());
-            row = row.child(
-                div()
-                    .id(("swatch", i))
-                    .size(px(22.))
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .bg(rgb_to_hsla(rgb))
-                    .border_2()
-                    .border_color(if current == Some(rgb) { tok::text() } else { tok::border() })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let mut s = settings.clone();
-                        for k in keys {
-                            s = with(&s, k, json!(abgr(rgb)));
-                        }
-                        this.exec(Command::SetSourceSettings { source: id, settings: s }, cx);
-                    })),
-            );
-        }
-        row
     }
 
     fn text_section(&self, source: &Source, cx: &mut Context<Self>) -> impl IntoElement {
@@ -406,7 +401,7 @@ impl StudioWindow {
                 cx,
             )))
             .child(toggles)
-            .child(self.swatches(source, "color1", &["color1", "color2"], cx))
+            .child(self.colour_field("text-colour", cx))
     }
 
     fn timer_section(&self, source: &Source, cx: &mut Context<Self>) -> impl IntoElement {
@@ -853,8 +848,8 @@ impl StudioWindow {
         }
     }
 
-    fn colour_section(&self, source: &Source, cx: &mut Context<Self>) -> impl IntoElement {
-        self.section("Colour", None, cx).child(self.swatches(source, "color", &["color"], cx))
+    fn colour_section(&self, _source: &Source, cx: &mut Context<Self>) -> impl IntoElement {
+        self.section("Colour", None, cx).child(self.colour_field("object-colour", cx))
     }
 
     fn media_section(&self, source: &Source, cx: &mut Context<Self>) -> impl IntoElement {

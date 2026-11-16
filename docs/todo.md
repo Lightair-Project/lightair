@@ -6,14 +6,14 @@ with what's known about each. Keep it current: strike items as they land.
 
 ## Asked for, being worked on
 
-1. **A real colour picker for every colour field.** Many fields offer only a few swatches
+1. ~~**A real colour picker for every colour field.**~~ Done (shell/colour_field.rs). Many fields offer only a few swatches
    (text, colour objects: `object_props.rs` `PALETTE`/`swatches`; widget fields of type
    `colorpicker` are a text box with a preview: `shell/widget_props.rs`). Every colour field
    should open a proper picker (hue/saturation, alpha where it applies, hex input, the swatches
    as presets, an eyedropper: `eyedropper.rs` exists).
-2. **Edit text objects on the canvas.** Double-click a text object to type in place (today the
+2. ~~**Edit text objects on the canvas.**~~ Done (shell/canvas_text.rs; the field shows the code font, not the object's). Double-click a text object to type in place (today the
    text is edited in the Inspector's field only: `object_props.rs` `TextEdit`).
-3. **Sign-in that finishes on its own.** The sign-in window (`lightair_live::accounts::sign_in`,
+3. ~~**Sign-in that finishes on its own.**~~ Done. The sign-in window (`lightair_live::accounts::sign_in`,
    Outputs › a destination › Sending) should close itself as soon as the platform's sign-in
    cookie appears (poll `accounts::signed_in` while it's open), and the row update.
 4. **A Stream manager panel.** One place per destination for what's live: title, category or
