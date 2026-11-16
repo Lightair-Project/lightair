@@ -184,6 +184,8 @@ impl Studio {
         };
         let selected_scene = workspace.program.or(workspace.scenes.first().map(|s| s.id));
         let chat = lightair_live::Hub::new();
+        // what came before (before anything listens: it isn't new)
+        lightair_live::log::start(&chat, lightair_platform::paths::data_dir().join("chat"));
         let widgets = crate::widgets::start(&chat);
         let mut studio = Self {
             chat,
