@@ -46,6 +46,17 @@ mod mac {
         fn AEDeterminePermissionToAutomateTarget(target: *const AEDesc, class: u32, id: u32, ask: u8) -> i32;
     }
 
+    #[link(name = "CoreBluetooth", kind = "framework")]
+    unsafe extern "C" {}
+
+    /// CBManagerAuthorization: 0 not asked, 1 restricted, 2 denied, 3 allowed.
+    pub fn bluetooth() -> isize {
+        use objc2::msg_send;
+        use objc2::runtime::AnyClass;
+        let Some(class) = AnyClass::get(c"CBManager") else { return 0 };
+        unsafe { msg_send![class, authorization] }
+    }
+
     pub fn screen() -> bool {
         unsafe { CGPreflightScreenCaptureAccess() }
     }
@@ -96,6 +107,14 @@ pub fn all() -> Vec<Permission> {
     };
     #[cfg(not(target_os = "macos"))]
     let (screen, music) = (State::Allowed, State::NotNow);
+    #[cfg(target_os = "macos")]
+    let bluetooth = match mac::bluetooth() {
+        3 => State::Allowed,
+        0 => State::AskedOnUse,
+        _ => State::Denied,
+    };
+    #[cfg(not(target_os = "macos"))]
+    let bluetooth = State::AskedOnUse;
     vec![
         Permission { key: "screen", name: "Screen recording", why: "Display, window and app capture, and their thumbnails", state: screen },
         Permission { key: "camera", name: "Camera", why: "Camera objects and Camera Studio", state: av(Media::Camera) },
@@ -108,6 +127,7 @@ pub fn all() -> Vec<Permission> {
             state: if lightair_platform::input::can_listen() { State::Allowed } else { State::Denied },
         },
         Permission { key: "music", name: "Control Spotify and Music", why: "The Now playing widget (checked while one of them is open)", state: music },
+        Permission { key: "bluetooth", name: "Bluetooth", why: "Signing in with a passkey on your phone. macOS asks the first time", state: bluetooth },
         Permission { key: "network", name: "Local network", why: "Elgato Key Lights, devices on your network and remote control from them. macOS asks on first use", state: State::AskedOnUse },
     ]
 }
@@ -156,6 +176,7 @@ pub fn open_settings(key: &str) {
         "input" => "Privacy_ListenEvent",
         "music" => "Privacy_Automation",
         "network" => "Privacy_LocalNetwork",
+        "bluetooth" => "Privacy_Bluetooth",
         _ => "",
     };
     if cfg!(target_os = "macos") {
