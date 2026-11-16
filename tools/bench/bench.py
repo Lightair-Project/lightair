@@ -28,9 +28,11 @@ SCENES = ["Starting Soon", "Gameplay", "Desktop", "Just Chatting", "BRB", "Endin
 
 
 def main_display_uuid():
-    out = subprocess.run(["swift", "-e", "import CoreGraphics; let id = CGMainDisplayID(); "
+    # (CGDisplayCreateUUIDFromDisplayID moved to ColorSync)
+    out = subprocess.run(["swift", "-e", "import CoreGraphics; import ColorSync; let id = CGMainDisplayID(); "
                           "print(CFUUIDCreateString(nil, CGDisplayCreateUUIDFromDisplayID(id).takeRetainedValue())!)"],
                          capture_output=True, text=True).stdout.strip()
+    assert out, "couldn't read the main display's UUID"
     return out
 
 
@@ -422,7 +424,8 @@ def quick(app, tag, seconds=30):
     o = connect(app)
     wait_ready(app, o)
     time.sleep(12)
-    o.req("SetCurrentProgramScene", {"sceneName": "Gameplay"})
+    # BENCH_SCENE: another scene on air (Desktop: the display captured)
+    o.req("SetCurrentProgramScene", {"sceneName": os.environ.get("BENCH_SCENE", "Gameplay")})
     time.sleep(5)
     pid = main_pid(app)
     rows, s0, s1 = sample(pid, seconds, o)
@@ -430,7 +433,7 @@ def quick(app, tag, seconds=30):
     wid = subprocess.run([os.path.join(B, "winup"), str(pid)], capture_output=True, text=True).stdout.strip()
     if wid:
         subprocess.run(["screencapture", "-x", "-o", f"-l{wid}", os.path.join(B, f"win-{app}-{tag}.png")])
-    out = {k: round(sm[k]["mean"], 1) for k in ("cpu_tree", "cpu_main", "gpu", "rss_mb") if k in sm}
+    out = {k: round(sm[k]["mean"], 1) for k in ("cpu_tree", "cpu_main", "gpu", "rss_mb", "sys_WindowServer") if k in sm}
     out["render_ms"] = round(s1["averageFrameRenderTime"], 2)
     out["lagged"] = s1["renderSkippedFrames"] - s0["renderSkippedFrames"]
     print(app, tag, json.dumps(out))
