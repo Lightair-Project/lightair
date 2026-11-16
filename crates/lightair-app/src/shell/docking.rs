@@ -167,6 +167,12 @@ impl Panel for ShellPanel {
     fn inner_padding(&self, _: &App) -> bool {
         false
     }
+
+    /// The canvas: its preview is drawn under the window's UI (native_preview), showing
+    /// through where the canvas paints nothing.
+    fn transparent(&self, _: &App) -> bool {
+        self.region == Region::Canvas && crate::native_preview::on()
+    }
 }
 
 impl EventEmitter<PanelEvent> for ShellPanel {}

@@ -708,9 +708,11 @@ impl TabGroupRenderer for TabGroupSkin {
 
         // The column, the fill and the clip are base's now, applied around
         // this. What is left is the background and the two actions.
+        // Lightair patch: a panel may ask for no background (`Panel::transparent`)
+        let transparent = group.active_panel().and_then(PanelHandle::of).is_some_and(|h| h.transparent(cx));
         div()
             .id("tab-panel")
-            .bg(cx.theme().tokens.background)
+            .when(!transparent, |d| d.bg(cx.theme().tokens.background))
             // A collapsed group is a strip of tabs with no content, and the
             // actions act on content. The old dock gated them the same way.
             .when(!group.is_collapsed(), |this| {

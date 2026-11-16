@@ -708,6 +708,20 @@ impl WindowState {
     }
 }
 
+/// Lightair patch: windows' roots paint no background (`set_transparent_roots`).
+static TRANSPARENT_ROOTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lightair patch: whether windows' roots leave their background unpainted.
+pub(crate) fn transparent_roots() -> bool {
+    TRANSPARENT_ROOTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Lightair patch: windows opened transparent (`WindowBackgroundAppearance::Transparent`) leave
+/// their background to what's under them: their roots stop painting the theme's.
+pub fn set_transparent_roots(transparent: bool) {
+    TRANSPARENT_ROOTS.store(transparent, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl gpui_base::RootPlugin for WindowState {
     fn prepare(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss_removed_tooltip(window, cx);
@@ -719,10 +733,13 @@ impl gpui_base::RootPlugin for WindowState {
         use gpui::Refineable as _;
         // The surface's background must follow the window's rounded corners.
         let radii = window_border::window_corner_radii(window, cx);
+        // Lightair patch: a transparent window leaves its background to what's under it
+        let mut refinement = gpui::StyleRefinement::default().font_family(cx.theme().font_family.clone());
+        if !TRANSPARENT_ROOTS.load(std::sync::atomic::Ordering::Relaxed) {
+            refinement = refinement.bg(cx.theme().tokens.background);
+        }
         surface.style().refine(
-            &gpui::StyleRefinement::default()
-                .font_family(cx.theme().font_family.clone())
-                .bg(cx.theme().tokens.background)
+            &refinement
                 .text_color(cx.theme().foreground)
                 .rounded_tl(radii.top_left)
                 .rounded_tr(radii.top_right)

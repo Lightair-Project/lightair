@@ -12,6 +12,7 @@ mod shortcuts;
 mod library;
 mod mcp_bridge;
 mod mixer;
+mod native_preview;
 #[cfg(target_os = "macos")]
 mod plugin_editor;
 #[cfg(windows)]
@@ -130,6 +131,8 @@ fn main() {
             })
             .detach();
         frame_view::init(cx);
+        // the preview under the UI shows through where the window leaves room (native_preview)
+        gpui_kit::component::set_transparent_roots(native_preview::on());
         ui::apply_theme(cx);
         shell::bind_keys(cx);
         shell::app_menu::bind(cx);
@@ -184,6 +187,8 @@ fn main() {
             .unwrap_or((1440.0, 900.0));
         let options = WindowOptions {
             focus: !background,
+            // the canvas preview is drawn under the UI, showing where the UI leaves room
+            window_background: if native_preview::on() { WindowBackgroundAppearance::Transparent } else { WindowBackgroundAppearance::Opaque },
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(w), px(h)), cx))),
             titlebar: Some(TitlebarOptions {
                 title: Some("Lightair".into()),

@@ -401,6 +401,11 @@ pub struct StudioWindow {
     prefs: crate::prefs::Preferences,
     /// The remote API (obs-websocket, JSON-RPC, MCP).
     remote: remote::Remote,
+    /// The canvas preview drawn under the UI (macOS: native_preview), the canvases whose
+    /// previews show in it, and where each canvas's picture is (window points), as laid out.
+    native: std::rc::Rc<RefCell<Option<crate::native_preview::NativePreview>>>,
+    native_layers: HashSet<Id>,
+    native_rects: std::rc::Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     /// Resizable, collapsible, rearrangeable panels (built on first render).
     dock: Option<Entity<gpui_kit::component::dock::DockArea>>,
     canvas_menu:
@@ -684,6 +689,9 @@ impl StudioWindow {
             dock: None,
             prefs: crate::prefs::load_from(&crate::prefs::path()),
             remote,
+            native: Default::default(),
+            native_layers: HashSet::new(),
+            native_rects: Default::default(),
         }
     }
 
@@ -1752,6 +1760,31 @@ impl StudioWindow {
         }
     }
 
+    /// The preview under the UI (native_preview): made with the window, each canvas's preview
+    /// showing in its layer, shown in the Live place only. Whether it's there.
+    fn sync_native(&mut self, window: &Window) -> bool {
+        if !crate::native_preview::on() {
+            return false;
+        }
+        let mut native = self.native.borrow_mut();
+        if native.is_none() {
+            *native = crate::native_preview::NativePreview::attach(window, tok::bg_app(), tok::bg_canvas_well());
+        }
+        let Some(n) = native.as_mut() else { return false };
+        for (id, preview) in &self.previews {
+            if self.native_layers.insert(*id) {
+                preview.set_layer(Some(n.picture(*id)));
+            }
+        }
+        let gone: Vec<Id> = self.native_layers.iter().copied().filter(|id| !self.previews.contains_key(id)).collect();
+        for id in gone {
+            self.native_layers.remove(&id);
+            n.forget(id);
+        }
+        n.set_visible(self.place == Place::Live);
+        true
+    }
+
     /// Something on screen moves without input: redrawn 30 times a second.
     fn moving(&self) -> bool {
         self.studio_take_countdown.is_some()
@@ -1762,6 +1795,8 @@ impl StudioWindow {
     /// Frames drawn so far by the live pictures a region shows (it redraws when this changes).
     fn live_frames(&self, region: docking::Region) -> u64 {
         match region {
+            // drawn under the UI: a new frame needn't redraw the panel
+            docking::Region::Canvas if self.native.borrow().is_some() => 0,
             docking::Region::Canvas => self.previews.values().map(|p| p.frames()).sum(),
             docking::Region::Inspector => self.program_monitor.as_ref().map_or(0, |p| p.frames()),
             _ => 0,
@@ -1783,6 +1818,7 @@ impl StudioWindow {
 // ================================================================= render
 impl Render for StudioWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let native = self.sync_native(window);
         self.tick_add_object();
         self.ensure_dock(window, cx);
         self.sync_crop_preview(cx);
@@ -2047,7 +2083,8 @@ impl Render for StudioWindow {
             .size_full()
             .flex()
             .flex_col()
-            .bg(tok::bg_app())
+            // drawn under the UI with the preview when it's native
+            .when(!native, |d| d.bg(tok::bg_app()))
             .text_color(tok::text())
             .text_size(px(13.))
             .child(self.title_bar(&workspace, f32::from(window.viewport_size().width), cx))
@@ -3382,6 +3419,8 @@ impl StudioWindow {
         let frame = self.previews.get(&fid).and_then(|p| p.latest_frame());
         let editing = fid == self.canvas_id(workspace);
 
+        let native = self.native.borrow().is_some();
+        let (rects, zoom, pan, (cw, ch)) = (self.native_rects.clone(), self.zoom, self.pan, (shown.width as f32, shown.height as f32));
         let mut stage = div()
             .absolute()
             .top(px(16.))
@@ -3392,6 +3431,12 @@ impl StudioWindow {
                 canvas(
                     move |b, _, _| {
                         bounds_map.borrow_mut().insert(fid, b);
+                        // where the picture is this frame (as `mapping` works it out)
+                        let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
+                        let s = (bw / cw).min(bh / ch) * zoom;
+                        let x = f32::from(b.origin.x) + (bw - cw * s) / 2.0 + pan.0;
+                        let y = f32::from(b.origin.y) + (bh - ch * s) / 2.0 + pan.1;
+                        rects.borrow_mut().insert(fid, Bounds::new(point(px(x), px(y)), size(px(cw * s), px(ch * s))));
                     },
                     |_, _, _, _| {},
                 )
@@ -3399,6 +3444,8 @@ impl StudioWindow {
                 .size_full(),
             )
             .child(match frame {
+                // drawn under the UI (native_preview)
+                Some(_) if native => div().into_any_element(),
                 Some(f) => match (self.mapping(workspace, fid), self.stage_bounds.borrow().get(&fid).copied()) {
                     // Placed where the shown is (zoomed and panned).
                     (Some((ox, oy, s)), Some(b)) => crate::frame_view::frame(f)
@@ -3867,6 +3914,7 @@ impl StudioWindow {
 
     fn canvas_panel(&self, workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
         let live = runtime().any_stream_running();
+        let native = self.native.borrow().is_some();
         let stages: Vec<AnyElement> =
             self.visible_canvases(workspace).iter().map(|f| self.stage(workspace, f, cx).into_any_element()).collect();
         let well =
@@ -3877,7 +3925,7 @@ impl StudioWindow {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .bg(tok::bg_canvas_well())
+                    .when(!native, |d| d.bg(tok::bg_canvas_well()))
                     .when(live, |d| d.border_2().border_color(tok::live()))
                     .cursor(self.canvas_cursor(workspace, cx))
                     .on_mouse_down(MouseButton::Right, cx.listener(Self::canvas_right_down))
@@ -3894,6 +3942,26 @@ impl StudioWindow {
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::canvas_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::canvas_up))
                     .children(stages)
+                    // last: the stages have said where their pictures are this frame
+                    .when(native, |d| {
+                        let (n, rects) = (self.native.clone(), self.native_rects.clone());
+                        let shown: Vec<Id> = self.visible_canvases(workspace).iter().map(|c| c.id).collect();
+                        d.child(
+                            canvas(
+                                move |b, _, _| {
+                                    let rects = rects.borrow();
+                                    let pictures: Vec<(Id, Bounds<Pixels>)> =
+                                        shown.iter().filter_map(|id| rects.get(id).map(|r| (*id, *r))).collect();
+                                    if let Some(n) = n.borrow_mut().as_mut() {
+                                        n.place(Some(b), &pictures);
+                                    }
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full(),
+                        )
+                    })
                     .child(self.canvas_controls(workspace, cx))
                     .drag_over::<assets::DraggedAsset>(|s, _, _, _| s.border_2().border_color(tok::accent_primary()))
                     .drag_over::<ExternalPaths>(|s, _, _, _| s.border_2().border_color(tok::accent_primary()))
@@ -3908,11 +3976,17 @@ impl StudioWindow {
                         move |m, window, cx| menus::object_menu(m, &shell, window, cx)
                     }),
             );
+        // (the panel's own background where the preview doesn't show through)
         let well = match self.cue_scenes.then(|| self.program_column(workspace, cx)) {
-            Some(column) => well.child(column),
+            Some(column) => well.child(div().flex().h_full().bg(tok::bg_panel()).child(column)),
             None => well,
         };
-        div().flex().flex_col().size_full().child(self.canvas_tabs(workspace, cx)).child(well)
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(div().bg(tok::bg_panel()).child(self.canvas_tabs(workspace, cx)))
+            .child(well)
     }
 
     /// Per-canvas visibility, and copying this object's layout from another canvas.
