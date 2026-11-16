@@ -192,6 +192,9 @@ impl Preview {
 
     /// Draws the source at its own size (a player: the whole picture, whatever the canvas),
     /// rather than where it sits on the canvas.
+    /// macOS shows frames in a Core Animation layer under the UI; here the UI draws them.
+    pub fn set_layer(&self, _layer: Option<*mut std::ffi::c_void>) {}
+
     pub fn set_own_size(&self, own: bool) {
         self.0.shared.own_size.store(own, Ordering::Relaxed);
     }

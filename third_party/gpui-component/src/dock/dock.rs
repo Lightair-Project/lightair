@@ -61,9 +61,9 @@ impl DockAreaRenderer for DockSkin {
     fn split_frame(&self, node: NodeId, _: Axis, _: &mut Window, cx: &mut App) -> Stateful<Div> {
         // The size is base's; the background is this skin's, and is the only
         // reason this hook is implemented at all.
-        div()
-            .id(("dock-split-frame", node.as_u64()))
-            .bg(cx.theme().tokens.tab_bar)
+        // Lightair patch: transparent windows leave it unpainted, like their roots
+        let frame = div().id(("dock-split-frame", node.as_u64()));
+        if crate::root::transparent_roots() { frame } else { frame.bg(cx.theme().tokens.tab_bar) }
     }
 
     fn render_dock(

@@ -349,7 +349,9 @@ impl Pool {
         done
     }
 
-    /// A slot neither on screen nor being filled (the one shown longest ago), if any.
+    /// A slot neither on screen nor being filled (the one shown longest ago), if any. (The
+    /// buffers' surfaces always count as in use, bound to GL textures, so the ring's depth is
+    /// what keeps a frame the window server is compositing from being painted over.)
     fn free_slot(&mut self) -> Option<usize> {
         for k in 0..RING {
             let i = (self.next + k) % RING;
@@ -438,6 +440,56 @@ struct Shared {
     source: Mutex<Option<SourceRef>>,
     /// Draw the source at its own size (a player), not in the canvas's coordinates.
     own_size: AtomicBool,
+    /// A Core Animation layer each finished frame is shown in as well (the window's preview,
+    /// drawn under its UI without the UI redrawing; `Preview::set_layer`). Retained.
+    layer: Mutex<Option<LayerRef>>,
+}
+
+/// A retained `CALayer`.
+struct LayerRef(*mut c_void);
+
+impl Drop for LayerRef {
+    fn drop(&mut self) {
+        unsafe { ca::CFRelease(self.0) };
+    }
+}
+
+/// Core Animation, through the Objective-C runtime.
+mod ca {
+    use std::ffi::{c_char, c_void};
+
+    #[link(name = "QuartzCore", kind = "framework")]
+    unsafe extern "C" {}
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        pub fn CFRetain(cf: *const c_void) -> *const c_void;
+        pub fn CFRelease(cf: *const c_void);
+    }
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+
+    /// `layer.contents = surface` in a transaction of its own, without animation (any thread).
+    pub unsafe fn show(layer: *mut c_void, surface: *mut c_void) {
+        unsafe {
+            let pool = objc_autoreleasePoolPush();
+            let send0: unsafe extern "C" fn(*mut c_void, *mut c_void) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let send_bool: unsafe extern "C" fn(*mut c_void, *mut c_void, bool) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let send_obj: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let tx = objc_getClass(c"CATransaction".as_ptr());
+            send0(tx, sel_registerName(c"begin".as_ptr()));
+            send_bool(tx, sel_registerName(c"setDisableActions:".as_ptr()), true);
+            send_obj(layer, sel_registerName(c"setContents:".as_ptr()), surface);
+            send0(tx, sel_registerName(c"commit".as_ptr()));
+            objc_autoreleasePoolPop(pool);
+        }
+    }
 }
 
 struct CanvasRef(*mut sys::obs_canvas_t);
@@ -492,6 +544,7 @@ impl Preview {
             canvas,
             source: Mutex::new(None),
             own_size: AtomicBool::new(false),
+            layer: Mutex::new(None),
         });
         unsafe { sys::obs_add_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&shared) as *mut c_void) };
         Self(Arc::new(Handle { shared }))
@@ -521,6 +574,18 @@ impl Preview {
     /// rather than where it sits on the canvas.
     pub fn set_own_size(&self, own: bool) {
         self.0.shared.own_size.store(own, Ordering::Relaxed);
+    }
+
+    /// Shows each finished frame in `layer` (a `CALayer`, retained here) too, or stops with
+    /// `None`. The window draws its preview this way, under its UI, so a new frame doesn't make
+    /// the UI redraw.
+    pub fn set_layer(&self, layer: Option<*mut c_void>) {
+        let new = layer.filter(|l| !l.is_null()).map(|l| {
+            unsafe { ca::CFRetain(l) };
+            LayerRef(l)
+        });
+        let old = std::mem::replace(&mut *self.0.shared.layer.lock(), new);
+        drop(old);
     }
 
     pub fn source(&self) -> Option<*mut sys::obs_source_t> {
@@ -597,6 +662,11 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     if let Some(i) = unsafe { pool.finished() } {
         *shared.latest.lock() = Some(pool.slots[i].buffer.clone());
         shared.frames.fetch_add(1, Ordering::Relaxed);
+        if let Some(layer) = shared.layer.lock().as_ref()
+            && let Some(surface) = CVPixelBufferGetIOSurface(Some(&pool.slots[i].buffer))
+        {
+            unsafe { ca::show(layer.0, CFRetained::as_ptr(&surface).as_ptr() as *mut c_void) };
+        }
     }
     // the GPU is behind: this frame is skipped rather than waited for
     let Some(slot) = pool.free_slot() else { return };

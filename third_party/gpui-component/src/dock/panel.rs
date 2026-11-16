@@ -154,6 +154,12 @@ pub trait Panel: gpui_base::dock::Panel {
     fn cached(&self, cx: &App) -> bool {
         true
     }
+
+    /// Lightair patch: the tab group leaves this panel's background unpainted (something
+    /// under the window shows through where the panel paints nothing).
+    fn transparent(&self, cx: &App) -> bool {
+        false
+    }
 }
 
 /// Object-safe counterpart of [`Panel`], and the presentation half of the
@@ -169,6 +175,7 @@ pub trait PanelView: gpui_base::dock::PanelView {
     fn inner_padding(&self, cx: &App) -> bool;
     fn title_bar(&self, cx: &App) -> bool;
     fn cached(&self, cx: &App) -> bool;
+    fn transparent(&self, cx: &App) -> bool;
 }
 
 impl<T: Panel> PanelView for Entity<T> {
@@ -213,6 +220,10 @@ impl<T: Panel> PanelView for Entity<T> {
 
     fn cached(&self, cx: &App) -> bool {
         self.read(cx).cached(cx)
+    }
+
+    fn transparent(&self, cx: &App) -> bool {
+        self.read(cx).transparent(cx)
     }
 }
 
