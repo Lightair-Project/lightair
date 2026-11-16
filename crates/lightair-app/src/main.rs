@@ -25,6 +25,7 @@ mod plugin_editor;
 mod plugin_editor;
 mod plugin_scan;
 mod outputs_panel;
+mod permissions;
 mod platforms;
 mod preflight;
 mod prefs;

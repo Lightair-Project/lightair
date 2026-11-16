@@ -64,9 +64,13 @@ mod imp {
     }
 
     pub fn needs_asking(m: Media) -> bool {
-        let Some(class) = AnyClass::get(c"AVCaptureDevice") else { return false };
-        let status: isize = unsafe { msg_send![class, authorizationStatusForMediaType: media_type(m)] };
-        status == NOT_DETERMINED
+        status(m) == NOT_DETERMINED
+    }
+
+    /// AVAuthorizationStatus: 0 not asked, 1 restricted, 2 denied, 3 allowed.
+    pub fn status(m: Media) -> isize {
+        let Some(class) = AnyClass::get(c"AVCaptureDevice") else { return 3 };
+        unsafe { msg_send![class, authorizationStatusForMediaType: media_type(m)] }
     }
 
     pub fn ask(m: Media) {
@@ -92,7 +96,19 @@ mod imp {
     pub fn needs_asking(_: Media) -> bool {
         false
     }
+    pub fn status(_: Media) -> isize {
+        3
+    }
     pub fn ask(_: Media) {}
+}
+
+/// Whether the user allowed `m`: `None` not asked yet, `Some(false)` refused (or restricted).
+pub fn allowed(m: Media) -> Option<bool> {
+    match imp::status(m) {
+        0 => None,
+        3 => Some(true),
+        _ => Some(false),
+    }
 }
 
 /// macOS hasn't asked the user for `m` yet (opening it now would wait on the prompt).

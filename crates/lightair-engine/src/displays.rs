@@ -68,12 +68,17 @@ fn parse_label(label: &str) -> (String, Option<(u32, u32)>, bool) {
 
 /// Settings for the screen capture source in `mode`, with `key` (the portable "display",
 /// "window" or "app") set to `value`: (libobs kind, its settings).
+/// The capture itself (OBS's screen_capture) and its settings: the lists and thumbnails need
+/// a capture that runs now, not the wrapper that runs one only while shown.
 fn screen_settings(mode: i64, key: &str, value: Option<&serde_json::Value>) -> Option<(&'static str, serde_json::Value)> {
     let mut s = serde_json::json!({"mode": mode, "cursor": true});
     if let Some(v) = value {
         s[key] = v.clone();
     }
-    crate::kinds::resolve(lightair_core::kinds::SCREEN, &s)
+    let (kind, settings) = crate::kinds::resolve(lightair_core::kinds::SCREEN, &s)?;
+    #[cfg(target_os = "macos")]
+    let kind = crate::on_screen::inner_id(kind).unwrap_or(kind);
+    Some((kind, settings))
 }
 
 /// What the screen capture source offers for `key` ("display", "window" or "app") in `mode`:

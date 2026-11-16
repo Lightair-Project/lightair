@@ -343,6 +343,7 @@ impl StudioWindow {
                     "shortcuts" => Page::Shortcuts,
                     "remote" => Page::Remote,
                     "connections" => Page::Connections,
+                    "permissions" => Page::Permissions,
                     "about" => Page::About,
                     _ => Page::General,
                 };
