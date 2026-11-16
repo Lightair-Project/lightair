@@ -10,6 +10,8 @@ mod green_key;
 mod hierarchy;
 mod key_colour;
 mod media_on_air;
+#[cfg(target_os = "macos")]
+mod nv12;
 mod resize_canvas;
 mod screen_zoom;
 mod shape_mask;

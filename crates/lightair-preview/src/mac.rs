@@ -707,6 +707,8 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
 
     // the newest finished conversion goes to the UI
     if let Some(i) = unsafe { pool.finished() } {
+        // a new picture: the NV12 copy of the slot's last one goes (Metal; see `nv12`)
+        pool.slots[i].buffer.remove_attachment(&nv12_key());
         *shared.latest.lock() = Some(pool.slots[i].buffer.clone());
         shared.frames.fetch_add(1, Ordering::Relaxed);
         if let Some(layer) = shared.layer.lock().as_ref()
@@ -863,4 +865,72 @@ fn bgra_pixels(frame: &Frame) -> Option<(usize, Vec<u8>)> {
 /// The frame is NV12 (what GPUI's `surface()` draws), not BGRA (libobs's Metal renderer).
 pub fn frame_is_nv12(frame: &Frame) -> bool {
     objc2_core_video::CVPixelBufferGetPixelFormatType(frame) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+}
+
+/// The attachment on a BGRA frame holding its NV12 copy (`nv12`), dropped when the slot is
+/// filled again.
+fn nv12_key() -> CFRetained<CFString> {
+    CFString::from_static_str("LightairNV12")
+}
+
+/// NV12 copies the UI has made, reused once nothing else holds them (GPUI keeps the one it's
+/// drawing until its next frame).
+const NV12_KEPT: usize = 12;
+
+/// The frame as NV12, for GPUI's `surface()`: itself on OpenGL; on Metal (BGRA frames) a copy
+/// converted on the GPU by VideoToolbox, made once per frame (whichever views draw it) and only
+/// when something draws it with GPUI (the canvas's Core Animation layer takes BGRA as it is).
+/// Call on the UI thread.
+pub fn nv12(frame: &Frame) -> Option<Frame> {
+    use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
+    use objc2_video_toolbox::VTPixelTransferSession;
+    thread_local! {
+        static SESSION: Option<CFRetained<VTPixelTransferSession>> = {
+            let mut session: *mut VTPixelTransferSession = ptr::null_mut();
+            let rc = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut session)) };
+            if rc != 0 || session.is_null() {
+                tracing::error!(rc, "VTPixelTransferSessionCreate failed");
+                None
+            } else {
+                let session = unsafe { CFRetained::from_raw(NonNull::new_unchecked(session)) };
+                // GPUI's surface shader decodes BT.601 (VideoToolbox would pick BT.709)
+                unsafe {
+                    objc2_video_toolbox::VTSessionSetProperty(
+                        &session,
+                        objc2_video_toolbox::kVTPixelTransferPropertyKey_DestinationYCbCrMatrix,
+                        Some(kCVImageBufferYCbCrMatrix_ITU_R_601_4.as_ref()),
+                    )
+                };
+                Some(session)
+            }
+        };
+        static KEPT: std::cell::RefCell<Vec<Frame>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    if frame_is_nv12(frame) {
+        return Some(frame.clone());
+    }
+    let key = nv12_key();
+    if let Some(done) = unsafe { frame.attachment(&key, ptr::null_mut()) } {
+        // SAFETY: only `nv12` sets this attachment, always to a CVPixelBuffer
+        return Some(unsafe { CFRetained::cast_unchecked::<CVPixelBuffer>(done) });
+    }
+    let (w, h) = (CVPixelBufferGetWidth(frame), CVPixelBufferGetHeight(frame));
+    let out = KEPT.with_borrow_mut(|kept| {
+        kept.retain(|b| (CVPixelBufferGetWidth(b), CVPixelBufferGetHeight(b)) == (w, h));
+        // held only here: free (an attachment or GPUI holding it counts)
+        if let Some(free) = kept.iter().find(|b| b.retain_count() == 1) {
+            return Some(free.clone());
+        }
+        let new = pixel_buffer(w as u32, h as u32, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)?;
+        if kept.len() < NV12_KEPT {
+            kept.push(new.clone());
+        }
+        Some(new)
+    })?;
+    let ok = SESSION.with(|s| s.as_ref().is_some_and(|s| unsafe { s.transfer_image(frame, &out) } == 0));
+    if !ok {
+        return None;
+    }
+    unsafe { frame.set_attachment(&key, out.as_ref(), CVAttachmentMode::ShouldNotPropagate) };
+    Some(out)
 }

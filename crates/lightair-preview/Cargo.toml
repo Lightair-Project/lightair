@@ -15,6 +15,7 @@ parking_lot.workspace = true
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVReturn", "objc2-io-surface"] }
 objc2-io-surface = { version = "0.3", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "objc2-core-foundation"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTPixelTransferProperties", "VTPixelTransferSession", "VTSession", "objc2-core-video"] }
 
 [dev-dependencies]
 lightair-core.workspace = true
