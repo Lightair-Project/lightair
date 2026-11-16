@@ -242,8 +242,11 @@ impl StudioWindow {
         let port = std::env::var("LIGHTAIR_REMOTE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(p.port);
         let needs = p.enabled && (p.require_password || p.lan) && std::env::var_os("LIGHTAIR_REMOTE_OFF").is_none();
         let password = if needs {
-            match self.remote.password.clone() {
-                Some(p) => p,
+            match self.remote.password.clone().or_else(crate::secrets::early_remote_password) {
+                Some(p) => {
+                    self.remote.password = Some(p.clone());
+                    p
+                }
                 None => {
                     // started once the Keychain answers
                     self.read_remote_password(false, cx);
