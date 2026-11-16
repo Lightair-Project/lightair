@@ -507,6 +507,10 @@ impl StudioWindow {
                     if this.moving() || n.is_multiple_of(15) {
                         cx.notify();
                     }
+                    // the preview under the UI follows its pictures' new sizes (Windows)
+                    if let Some(n) = this.native.borrow_mut().as_mut() {
+                        n.refit();
+                    }
                 });
                 if alive.is_err() {
                     break;

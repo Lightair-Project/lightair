@@ -24,7 +24,10 @@ use serde_json::{Value, json};
 /// The libobs source type and settings for a source, or `None` when its kind is libobs's own.
 pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
     if kind == "ffmpeg_source" {
-        return native_media(settings).then(|| (NATIVE_MEDIA, settings.clone()));
+        if native_media(settings) {
+            return Some((NATIVE_MEDIA, settings.clone()));
+        }
+        return windows_hardware_decoding(settings).map(|s| ("ffmpeg_source", s));
     }
     let mut out = settings.as_object().cloned().unwrap_or_default();
     let mut take = |from: &str| out.remove(from);
@@ -182,6 +185,24 @@ pub fn native_media(settings: &Value) -> bool {
     let file = settings.get("local_file").and_then(Value::as_str).unwrap_or("");
     let ext = std::path::Path::new(file).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
     local && speed == 100 && matches!(ext.as_deref(), Some("mp4" | "m4v" | "mov"))
+}
+
+/// Windows: media files decode on the GPU's video decoder (D3D11VA), unless the source says
+/// otherwise. OBS leaves this off; on a PC it halves the app's CPU with two videos playing (a
+/// 1080p60 and a 720p30 file: 3.0 → 1.6 G cycles/s on an i5-9300H, docs/benchmarks), where on
+/// Apple Silicon software decoding is cheap and the copy back cost more (it stays off there).
+/// FFmpeg falls back to software by itself where the decoder can't. `LIGHTAIR_MEDIA_DECODE=software`
+/// turns it off (for comparison).
+fn windows_hardware_decoding(settings: &Value) -> Option<Value> {
+    if !cfg!(windows)
+        || settings.get("hw_decode").is_some()
+        || std::env::var("LIGHTAIR_MEDIA_DECODE").is_ok_and(|v| v == "software")
+    {
+        return None;
+    }
+    let mut s = settings.as_object().cloned().unwrap_or_default();
+    s.insert("hw_decode".into(), json!(true));
+    Some(Value::Object(s))
 }
 
 /// The libobs source type a source plays as (its own kind when that's libobs's).

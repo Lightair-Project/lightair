@@ -244,6 +244,8 @@ impl NativePreview {
                             let (sw, sh) = p.sized;
                             let (x, y) = ((px(b.origin.x) - wx).round(), (px(b.origin.y) - wy).round());
                             let (bw, bh) = (px(b.size.width).round(), px(b.size.height).round());
+                            // frames come at this size from now on (`refit` follows)
+                            p.layer.show_at(bw as u32, bh as u32);
                             transform(&p.visual, bw / sw.max(1) as f32, bh / sh.max(1) as f32, x, y);
                         }
                         None => transform(&p.visual, 0.0, 0.0, 0.0, 0.0),
@@ -253,6 +255,14 @@ impl NativePreview {
         }
         unsafe {
             let _ = self.device.Commit();
+        }
+    }
+
+    /// Places the pictures again when a swap chain changed size since (libobs's thread resizes
+    /// it to the size it's shown at, a frame after it's asked): called on a timer, cheap.
+    pub fn refit(&mut self) {
+        if self.pictures.values().any(|p| p.layer.size() != p.sized) {
+            self.apply();
         }
     }
 
@@ -396,6 +406,8 @@ struct Glyphs {
     surfaces: HashMap<char, [IDCompositionSurface; 2]>,
     /// Every glyph's box (pixels): one advance for all, like a fixed-width face.
     size: (f32, f32),
+    /// How far apart they sit (the box less the padding the text renderer leaves round a glyph).
+    advance: f32,
 }
 
 impl Glyphs {
@@ -445,7 +457,8 @@ impl Glyphs {
             let [a, b]: [IDCompositionSurface; 2] = made.try_into().map_err(|_| windows::core::Error::empty())?;
             surfaces.insert(c, [a, b]);
         }
-        Ok(Self { surfaces, size: (bw as f32, bh as f32) })
+        let advance = (bw as f32 - 2.0 * (10.0 * scale * 0.12)).max(1.0).ceil();
+        Ok(Self { surfaces, size: (bw as f32, bh as f32), advance })
     }
 }
 
@@ -581,7 +594,7 @@ impl StripVisuals {
             let red = usize::from(peak > -1.0);
             let (rx, ry, rw, rh) = self.readout;
             let n = text.chars().count().min(self.chars.len());
-            let x0 = (rx + (rw - g.size.0 * n as f32) / 2.0).round();
+            let x0 = (rx + (rw - g.advance * n as f32) / 2.0 - (g.size.0 - g.advance) / 2.0).round();
             let y0 = (ry + (rh - g.size.1) / 2.0).round();
             for (i, v) in self.chars.iter().enumerate() {
                 let surface = text.chars().nth(i).and_then(|c| g.surfaces.get(&c)).map(|s| &s[red]);
@@ -589,7 +602,7 @@ impl StripVisuals {
                     match surface {
                         Some(s) => {
                             let _ = v.SetContent(s);
-                            transform(v, 1.0, 1.0, x0 + g.size.0 * i as f32, y0);
+                            transform(v, 1.0, 1.0, x0 + g.advance * i as f32, y0);
                         }
                         None => {
                             let _ = v.SetContent(None::<&windows::core::IUnknown>);

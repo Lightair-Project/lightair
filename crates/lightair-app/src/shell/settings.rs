@@ -1447,8 +1447,24 @@ impl StudioWindow {
         let obs = format!("ws://{host}:{port}");
         let mcp_url = format!("http://{host}:{port}/mcp");
         let rpc = format!("ws://{host}:{port}/rpc");
-        let deck_app = std::path::Path::new("/Applications/Elgato Stream Deck.app").exists();
-        let deck_plugin = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.parent()?.join("Resources/Lightair.streamDeckPlugin"))).filter(|p| p.exists());
+        // Elgato's app, and the plugin packed into Lightair (macOS: in its Resources; Windows:
+        // beside lightair.exe)
+        let deck_app = if cfg!(windows) {
+            std::env::var_os("ProgramFiles")
+                .is_some_and(|p| std::path::Path::new(&p).join(r"Elgato\StreamDeck\StreamDeck.exe").exists())
+        } else {
+            std::path::Path::new("/Applications/Elgato Stream Deck.app").exists()
+        };
+        let deck_plugin = std::env::current_exe()
+            .ok()
+            .and_then(|e| {
+                if cfg!(windows) {
+                    Some(e.parent()?.join("Lightair.streamDeckPlugin"))
+                } else {
+                    Some(e.parent()?.parent()?.join("Resources/Lightair.streamDeckPlugin"))
+                }
+            })
+            .filter(|p| p.exists());
         let deck_note = match (deck_app, &deck_plugin) {
             (false, _) => "Lightair's plugin: keys for scenes, going live, recording, clips, automations and mute, lit with what's on. Install Elgato's Stream Deck app first.".to_string(),
             (true, None) => "This copy of Lightair has no plugin to install (it's packed into the app when built).".to_string(),
@@ -1461,8 +1477,10 @@ impl StudioWindow {
                     Some(&deck_note),
                     Button::new("remote-stream-deck").label("Install plugin").xsmall().outline().disabled(!deck_app || deck_plugin.is_none()).on_click(move |_, _, _| {
                         if let Some(p) = &deck_plugin {
-                            // Stream Deck installs a .streamDeckPlugin it's given
-                            let _ = std::process::Command::new("/usr/bin/open").arg(p).spawn();
+                            // Stream Deck installs a .streamDeckPlugin it's given (Explorer
+                            // opens a file with the app it belongs to)
+                            let opener = if cfg!(windows) { "explorer.exe" } else { "/usr/bin/open" };
+                            let _ = std::process::Command::new(opener).arg(p).spawn();
                         }
                     }),
                 ))

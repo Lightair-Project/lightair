@@ -303,11 +303,17 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
             (ovi.base_width, ovi.base_height)
         }
     };
-    let packed = shared.size.load(Ordering::Relaxed);
-    let (w, h) = if packed == 0 { (base_w & !1, base_h & !1) } else { ((packed >> 32) as u32, packed as u32) };
-    let asked = now_ms().saturating_sub(shared.asked.load(Ordering::Relaxed)) <= ASKED_FOR_MS;
     #[cfg(windows)]
     let layer = shared.layer.lock().clone();
+    let packed = shared.size.load(Ordering::Relaxed);
+    let (w, h) = if packed == 0 { (base_w & !1, base_h & !1) } else { ((packed >> 32) as u32, packed as u32) };
+    // shown smaller than the canvas: rendered at the size it's shown (zoomed in: the canvas's own)
+    #[cfg(windows)]
+    let (w, h) = match layer.as_ref().and_then(|l| l.shown_at()) {
+        Some((sw, sh)) if packed == 0 && sw < w && sh < h => (sw, sh),
+        _ => (w, h),
+    };
+    let asked = now_ms().saturating_sub(shared.asked.load(Ordering::Relaxed)) <= ASKED_FOR_MS;
     // the program as it is, at its own size, presented straight from libobs's texture
     #[cfg(windows)]
     if let Some(layer) = &layer
