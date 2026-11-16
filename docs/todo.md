@@ -16,7 +16,7 @@ with what's known about each. Keep it current: strike items as they land.
 3. ~~**Sign-in that finishes on its own.**~~ Done. The sign-in window (`lightair_live::accounts::sign_in`,
    Outputs › a destination › Sending) should close itself as soon as the platform's sign-in
    cookie appears (poll `accounts::signed_in` while it's open), and the row update.
-4. ~~**A Stream manager panel.**~~ Done in part (stream_panel.rs: live, title, category, viewers, uptime for Twitch, YouTube, Kick; Open dashboard signed in). Left: change title and category from Lightair itself for YouTube and Kick (Twitch done, untested on a real channel: Edit in the Stream panel), stream health per destination, more platforms' details. One place per destination for what's live: title, category or
+4. ~~**A Stream manager panel.**~~ Done in part (stream_panel.rs: live, title, category, viewers, uptime for Twitch, YouTube, Kick; Open dashboard signed in). Title and category edits: Twitch through the dashboard's own GraphQL mutation (Helix doesn't take the site's session), Kick through its site's request; both untested on a real channel (Edit in the Stream panel). YouTube Studio's edit asks for Google's anti-bot attestation, so YouTube stays its dashboard. Left: stream health per destination, more platforms' details. One place per destination for what's live: title, category or
    game, tags, viewers, uptime, stream health; change title and category per platform (through
    the signed-in pages, no app approval: docs/plans/live-integrations.md, 2.2 and 2.10).
 
@@ -52,14 +52,15 @@ with what's known about each. Keep it current: strike items as they land.
   10-minute timeout, ban with a second click; Twitch by typing `/delete`, `/timeout`, `/ban`
   into its chat box in a signed-in hidden page, Kick through its site's requests from one;
   untested on a real chat. YouTube left.) Twitch's API (Helix) answers 404 to the site's
-  session, so the Stream panel's Twitch title edit (Helix) needs another route.
+  session; the Stream panel's Twitch edit now uses the dashboard's GraphQL mutation.
 
 ## Widgets
 
 - ~~Featured message, prediction, emote combo~~ (done: Chat › a message › Feature; Prediction
   bets Lightair points with `!bet 1 100`, winners split the pot; Emote combo). Countdown: the
   Timer object covers it.
-- A widget gallery; Streamlabs custom-widget shim.
+- A widget gallery. ~~Streamlabs custom-widget shim~~ (done: sl-shim.js, chosen when the widget's
+  script listens on `document`; untested with a real Streamlabs widget).
 - ~~Multi-line text fields in the widget Inspector~~ (done: field type `textarea`; the social
   rotator takes one a line).
 
@@ -68,7 +69,7 @@ with what's known about each. Keep it current: strike items as they land.
 - Triggers: ~~stream/recording start and stop, app start, a web address per automation~~ (done);
   ~~hotkeys~~ (done, untested by pressing); ~~MIDI, game controllers, file changes~~ (done:
   triggers.rs; files tested end to end, MIDI and controllers without a device here); voice
-  phrases left.
+  phrases left (needs live on-device recognition: whisper here transcribes files only).
 - Platform steps: title, category, ads, polls, predictions, rewards, raids, shoutouts with a clip,
   clips, markers, moderation (need the platform's session or official API).
 - ~~A block editor beyond the current list~~ (done: If's conditions, Then and Otherwise, and
