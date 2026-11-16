@@ -1283,6 +1283,23 @@ impl StudioWindow {
                 .child(Button::new("pulsoid-paste").label(if heart { "Paste new token" } else { "Paste token" }).xsmall().outline().on_click(cx.listener(|this, _, _, cx| this.paste_pulsoid(cx))))
                 .when(heart, |d| d.child(Button::new("pulsoid-forget").label("Disconnect").xsmall().ghost().on_click(cx.listener(|this, _, _, cx| this.forget_pulsoid(cx))))),
         ));
+        let hue = lightair_live::integrations::hue_bridge();
+        let pairing = self.hue_note.as_deref().is_some_and(|n| n.ends_with('…'));
+        let devices = devices.child(row(
+            "Philips Hue",
+            Some(&match (&self.hue_note, &hue) {
+                (Some(n), _) => n.clone(),
+                (None, Some((a, _))) => format!("Paired with the bridge at {a}. Automations: Add step › Philips Hue light."),
+                _ => "Not paired. Pair finds the bridge on this network, then asks you to press its button.".to_string(),
+            }),
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(Button::new("hue-pair").label(if hue.is_some() { "Pair again" } else { "Pair" }).xsmall().outline().disabled(pairing).on_click(cx.listener(|this, _, _, cx| this.pair_hue(None, cx))))
+                .child(Button::new("hue-paste").label("Paste address").xsmall().ghost().disabled(pairing).on_click(cx.listener(|this, _, _, cx| this.paste_hue_address(cx))))
+                .when(hue.is_some(), |d| d.child(Button::new("hue-forget").label("Forget").xsmall().ghost().on_click(cx.listener(|this, _, _, cx| this.forget_hue(cx))))),
+        ));
         pages().child(tips).child(devices).child(
             group("How it works").child(
                 div()
@@ -1390,8 +1407,25 @@ impl StudioWindow {
         let obs = format!("ws://{host}:{port}");
         let mcp_url = format!("http://{host}:{port}/mcp");
         let rpc = format!("ws://{host}:{port}/rpc");
+        let deck_app = std::path::Path::new("/Applications/Elgato Stream Deck.app").exists();
+        let deck_plugin = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.parent()?.join("Resources/Lightair.streamDeckPlugin"))).filter(|p| p.exists());
+        let deck_note = match (deck_app, &deck_plugin) {
+            (false, _) => "Lightair's plugin: keys for scenes, going live, recording, clips, automations and mute, lit with what's on. Install Elgato's Stream Deck app first.".to_string(),
+            (true, None) => "This copy of Lightair has no plugin to install (it's packed into the app when built).".to_string(),
+            (true, Some(_)) => format!("Keys for scenes, going live, recording, clips, automations and mute, lit with what's on. Its key settings take this port ({port}){}.", if asks { " and the password" } else { "" }),
+        };
         page.child(
             group("Connect")
+                .child(row(
+                    "Stream Deck",
+                    Some(&deck_note),
+                    Button::new("remote-stream-deck").label("Install plugin").xsmall().outline().disabled(!deck_app || deck_plugin.is_none()).on_click(move |_, _, _| {
+                        if let Some(p) = &deck_plugin {
+                            // Stream Deck installs a .streamDeckPlugin it's given
+                            let _ = std::process::Command::new("/usr/bin/open").arg(p).spawn();
+                        }
+                    }),
+                ))
                 .child(row("AI agents (MCP)", Some(&agent), copy("remote-copy-agent", agent.clone())))
                 .child(row("MCP over HTTP", Some(&format!("{mcp_url} · Authorization: Bearer <password>")), copy("remote-copy-mcp", mcp_url.clone())))
                 .child(row("OBS tools (obs-websocket 5)", Some(&format!("{obs} · connect as to OBS")), copy("remote-copy-obs", obs.clone())))

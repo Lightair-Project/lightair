@@ -62,9 +62,11 @@ with what's known about each. Keep it current: strike items as they land.
 
 ## Integrations
 
-- Philips Hue (local bridge: press its button to pair), a Lightair Stream Deck plugin (Stream
-  Deck already works through obs-websocket compatibility), bring-your-own official API
-  credentials, Spotify's own API.
+- ~~Philips Hue~~ (done: Settings › Connections › Philips Hue, automation step "Philips Hue
+  light"; tested against a stand-in bridge only). ~~A Lightair Stream Deck plugin~~ (done:
+  streamdeck/, Settings › Remote API › Stream Deck; tested with a stand-in Stream Deck against a
+  real Lightair, not yet on a real Stream Deck). Left: bring-your-own official API credentials,
+  Spotify's own API.
 - **The relay** (`relay/`, Ko-fi) isn't deployed: needs a Cloudflare account
   (`npx wrangler deploy`), then Settings › Connections › Ko-fi.
 - Pulsoid and Elgato Key Lights are untested without a token / a light; VTube Studio was tested
@@ -77,6 +79,7 @@ with what's known about each. Keep it current: strike items as they land.
   find it (keep the full log of a failing run).
 - **`media_native::a_rotated_video_shows_upright`** (lightair-preview) fails now and then when
   the whole suite runs in parallel; passes alone. So does
-  `stream_sharing::identical_destinations_share_an_encoder` (lightair-engine; seconds received).
+  `stream_sharing::identical_destinations_share_an_encoder` and `audio::track_levels_follow_the_fader`
+  (lightair-engine; timing under load).
 - Media source render time +1 ms (deferred earlier).
 - Notarization needs `xcrun notarytool store-credentials` once (then `LIGHTAIR_NOTARY_PROFILE`).

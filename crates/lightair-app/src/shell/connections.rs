@@ -163,4 +163,59 @@ impl StudioWindow {
         self.start_heart_rate(String::new(), cx);
         cx.background_executor().spawn(async move { crate::secrets::set_connection_token("pulsoid", "") }).detach();
     }
+
+    /// Finds the Hue bridge (or uses `address`) and waits up to 40 seconds for its button.
+    pub(super) fn pair_hue(&mut self, address: Option<String>, cx: &mut Context<Self>) {
+        self.hue_note = Some("Looking for the bridge…".into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let note = |text: String, cx: &mut gpui::AsyncApp| {
+                let _ = this.update(cx, |this, cx| {
+                    this.hue_note = Some(text);
+                    cx.notify();
+                });
+            };
+            let address = match address {
+                Some(a) => a,
+                None => match cx.background_executor().spawn(async { lightair_live::integrations::hue_find() }).await {
+                    Ok(list) if !list.is_empty() => list[0].clone(),
+                    Ok(_) => return note("No bridge found on this network. Copy its address (Hue app › Settings › Bridges › ⓘ), then Paste address.".into(), cx),
+                    Err(e) => return note(format!("Couldn't look for the bridge ({e}). Copy its address from the Hue app, then Paste address."), cx),
+                },
+            };
+            note(format!("Press the button on the bridge at {address}…"), cx);
+            for _ in 0..40 {
+                let a = address.clone();
+                match cx.background_executor().spawn(async move { lightair_live::integrations::hue_pair(&a) }).await {
+                    Ok(true) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.hue_note = None;
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Ok(false) => cx.background_executor().timer(std::time::Duration::from_secs(1)).await,
+                    Err(e) => return note(e, cx),
+                }
+            }
+            note("The bridge's button wasn't pressed in time: choose Pair again, then press it.".into(), cx);
+        })
+        .detach();
+    }
+
+    pub(super) fn paste_hue_address(&mut self, cx: &mut Context<Self>) {
+        let text = cx.read_from_clipboard().and_then(|c| c.text()).map(|t| t.trim().to_string()).unwrap_or_default();
+        if text.is_empty() || !text.chars().all(|c| c.is_ascii_alphanumeric() || ".:-[]".contains(c)) {
+            self.hue_note = Some("Copy the bridge's address first (like 192.168.1.10).".into());
+            cx.notify();
+            return;
+        }
+        self.pair_hue(Some(text), cx);
+    }
+
+    pub(super) fn forget_hue(&mut self, cx: &mut Context<Self>) {
+        lightair_live::integrations::hue_forget();
+        self.hue_note = None;
+        cx.notify();
+    }
 }

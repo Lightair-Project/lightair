@@ -9,6 +9,7 @@ Lightair runs one local server (Settings › Remote API) that other apps and AI 
 | Way in | Address | For |
 |---|---|---|
 | obs-websocket v5 | `ws://host:4455/` | Stream Deck, Touch Portal, bots and other OBS tools, unchanged |
+| Lightair's Stream Deck plugin | JSON-RPC, below | Keys lit with what's on ([streamdeck/](../streamdeck/README.md)); Settings › Remote API › Stream Deck installs it |
 | JSON-RPC 2.0 | `ws://host:4455/rpc` | Scripts and apps written for Lightair |
 | MCP (Streamable HTTP) | `http://host:4455/mcp` | AI agents (`Authorization: Bearer <password>`) |
 | MCP (stdio) | `…/Lightair.app/Contents/MacOS/lightair mcp` | Agents that start tools as programs; reads the password from the Keychain, opens Lightair on the first tool call if it's closed |

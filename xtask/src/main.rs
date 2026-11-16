@@ -72,6 +72,13 @@ fn run(cmd: &mut Command) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The Stream Deck plugin (streamdeck/), packed as the file Stream Deck installs when opened:
+/// a zip of the `.sdPlugin` folder.
+pub(crate) fn stream_deck_plugin(dest: &Path) -> anyhow::Result<()> {
+    let _ = std::fs::remove_file(dest);
+    run(Command::new("/usr/bin/ditto").args(["-c", "-k", "--keepParent", "--norsrc", "--noextattr", "--noqtn"]).arg(root().join("streamdeck/app.lightair.sdPlugin")).arg(dest))
+}
+
 fn modules() -> anyhow::Result<()> {
     let root = root();
     for entry in std::fs::read_dir(root.join("modules"))? {
@@ -149,6 +156,7 @@ fn bundle(release: bool) -> anyhow::Result<()> {
     if icns.exists() {
         std::fs::copy(icns, app.join("Resources/Lightair.icns"))?;
     }
+    stream_deck_plugin(&app.join("Resources/Lightair.streamDeckPlugin"))?;
     for (from, to) in
         [(obs.join("Contents/Frameworks"), app.join("Frameworks")), (obs.join("Contents/PlugIns"), app.join("PlugIns"))]
     {
@@ -452,6 +460,12 @@ fn precommit() -> anyhow::Result<()> {
         windows_took.as_secs_f64()
     );
     anyhow::ensure!(mac + windows == 0, "clippy warnings");
+    // the Stream Deck plugin, between a stand-in Stream Deck and Lightair (needs Node)
+    if Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        run(Command::new("node").arg(root().join("streamdeck/test/run.js")))?;
+    } else {
+        eprintln!("skipped the Stream Deck plugin's test: no node");
+    }
     test(Vec::new())
 }
 
