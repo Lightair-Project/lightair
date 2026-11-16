@@ -89,7 +89,8 @@ fn main() {
             canvas,
             output: canvas,
             sample_rate,
-            extra_plugin_dirs: camera_studio::plugin_dir().into_iter().collect(),
+            // the shipped app loads it from its PlugIns with the rest
+            extra_plugin_dirs: camera_studio::plugin_dir().filter(|_| camera_studio::bundled_plugins().is_none()).into_iter().collect(),
             ..Default::default()
         })
         .unwrap_or_else(|e| panic!("could not start the engine: {e}")),
