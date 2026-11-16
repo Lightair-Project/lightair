@@ -54,6 +54,7 @@ fn fields(a: &Automation) -> Vec<(String, &'static str, bool)> {
             Step::Run { .. } => ("automation", "Automation", false),
             Step::Http { .. } => ("url", "Address", false),
             Step::Call { .. } => ("method", "Method", false),
+            Step::Script { .. } => ("code", "Code (one line here; the JSON for more)", false),
             _ => continue,
         };
         f.push((format!("step.{i}.{key}"), label, num));
@@ -108,6 +109,7 @@ fn new_step(kind: &str) -> Step {
         "clip" => Step::Call { method: "clip.save".into(), params: json!({}) },
         "http" => Step::Http { url: "https://".into(), method: "GET".into(), body: String::new() },
         "vts" => Step::Call { method: "vts.hotkey".into(), params: json!({"hotkey": "Name of the hotkey"}) },
+        "script" => Step::Script { code: "// ctx has name, message, amount, vars, …\nreturn { greeting: 'Hi ' + ctx.name };".into() },
         "light" => Step::Call { method: "light.set".into(), params: json!({"address": "192.168.1.20", "on": true, "brightness": 60, "temperature": 4500}) },
         _ => Step::Stop,
     }
@@ -127,6 +129,7 @@ const STEP_KINDS: &[(&str, &str)] = &[
     ("vts", "VTube Studio hotkey"),
     ("light", "Elgato Key Light"),
     ("http", "Web request"),
+    ("script", "JavaScript"),
     ("stop", "Stop"),
 ];
 
@@ -369,7 +372,7 @@ impl AutomationsPanel {
     fn steps(&self, a: &Automation, cx: &mut Context<Self>) -> Div {
         let mut col = div().flex().flex_col().gap_1();
         for (i, s) in a.steps.iter().enumerate() {
-            let field = ["text", "file", "seconds", "value", "amount", "automation", "url", "method"].iter().find_map(|k| self.input(&format!("step.{i}.{k}")));
+            let field = ["text", "file", "seconds", "value", "amount", "automation", "url", "method", "code"].iter().find_map(|k| self.input(&format!("step.{i}.{k}")));
             let (up, down, del) = (a.clone(), a.clone(), a.clone());
             let n = a.steps.len();
             col = col.child(

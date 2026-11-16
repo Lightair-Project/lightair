@@ -27,6 +27,9 @@ pub(super) fn start_automations(hub: &lightair_live::Hub, jobs: super::remote::J
         if let Some(out) = lightair_live::integrations::call(method, &params) {
             return out;
         }
+        if method == "script.run" {
+            return lightair_live::pages::run_script(params["code"].as_str().unwrap_or(""), &params["ctx"], Duration::from_secs(10));
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let call = Call { method: method.to_string(), params, client: "Automation" };
         jobs.unbounded_send((call, tx)).map_err(|_| "Lightair is closing".to_string())?;
