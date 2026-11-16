@@ -25,7 +25,8 @@ with what's known about each. Keep it current: strike items as they land.
 - **Facebook, Instagram, X, LinkedIn** readers and sending: through signed-in hidden pages.
   Needs a signed-in session to build against (selectors / their own requests are unknown until
   then).
-- **Huya** (TARS binary protocol) reader. ~~**Niconico**~~ (done: niconico.rs, NDGR; read a
+- ~~**Huya**~~ (done: huya.rs, TARS; chat, gifts, nobles; read a live room with
+  `LIGHTAIR_LIVE_CHECK=huya:<room>`). ~~**Niconico**~~ (done: niconico.rs, NDGR; read a
   live program's comments with `LIGHTAIR_LIVE_CHECK=niconico:lv… cargo test -p lightair-live
   live_check`).
 - ~~**SOOP** subscriptions~~ (done: new, renewed, gifted; also ad, video and sub-broadcast
@@ -80,9 +81,12 @@ with what's known about each. Keep it current: strike items as they land.
 
 ## Known issues
 
-- **`cargo xtask dist` sometimes leaves an invalid signature** ("code has no resources but
-  signature indicates they must be present"); running it again works. Cause not found yet:
-  find it (keep the full log of a failing run).
+- ~~**`cargo xtask dist` sometimes leaves an invalid signature**~~ (found: the bad app was what
+  a run that failed part way left behind, its Chromium helpers signed alone and their bundles not
+  yet sealed; it was then installed without checking dist's exit. Now a failed run moves its
+  app to `Lightair (failed).app`, and codesign retries when Apple's timestamp service has a
+  moment's trouble, the likely cause of the failure. `cargo xtask bundle` signs only the outer
+  app, so `codesign --verify --deep` on a bundle (not dist) build always reports the helpers.)
 - **`media_native::a_rotated_video_shows_upright`** (lightair-preview) fails now and then when
   the whole suite runs in parallel; passes alone. So does
   `stream_sharing::identical_destinations_share_an_encoder` and `audio::track_levels_follow_the_fader`
