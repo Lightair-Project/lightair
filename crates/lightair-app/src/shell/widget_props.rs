@@ -121,6 +121,23 @@ impl StudioWindow {
             .tooltip(ui::tip("Copy its address (for OBS or a browser on this computer)"))
             .on_click(cx.listener(move |_, _, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(url.clone()))));
         let mut body = self.section(title, Some(copy.into_any_element()), cx);
+        // an imported widget can go out again as a package
+        if let Some(custom) = instance.custom.clone() {
+            let size = (source.settings["width"].as_u64().unwrap_or(800) as u32, source.settings["height"].as_u64().unwrap_or(600) as u32);
+            let name = source.name.clone();
+            body = body.child(Button::new("widget-export").label("Export as .lwidget…").xsmall().outline().on_click(cx.listener(move |_, _, window, cx| {
+                let path = cx.prompt_for_new_path(&std::env::home_dir().unwrap_or_default().join("Desktop"), Some(&format!("{name}.lwidget")));
+                let (custom, name) = (custom.clone(), name.clone());
+                cx.spawn_in(window, async move |_, _| {
+                    if let Ok(Ok(Some(path))) = path.await
+                        && let Err(e) = lightair_widgets::export(&custom, &name, size, &path)
+                    {
+                        tracing::warn!(%e, "widget export");
+                    }
+                })
+                .detach();
+            })));
+        }
 
         // test events
         let platform = self.test_platform(cx);
