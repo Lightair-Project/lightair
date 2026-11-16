@@ -233,6 +233,20 @@ impl Drop for ObsCanvas {
 /// The choices a source instance offers for a list setting, as (label, value), read with its
 /// current settings applied (some sources fill their lists only then).
 pub(crate) fn source_list_items(src: *mut sys::obs_source_t, property: &str) -> Vec<(String, serde_json::Value)> {
+    // a capture run only while shown: its list is its capture's
+    #[cfg(target_os = "macos")]
+    if let Some(items) = crate::on_screen::with_capture(src, |capture| list_items(capture, property)) {
+        return items;
+    }
+    // a camera that isn't running: the system's cameras
+    let id = unsafe { CStr::from_ptr(sys::obs_source_get_id(src)) };
+    if id == c"lightair_camera_capture" && property == "device" {
+        return crate::kinds::cameras().into_iter().map(|(name, uid)| (name, serde_json::Value::from(uid))).collect();
+    }
+    list_items(src, property)
+}
+
+fn list_items(src: *mut sys::obs_source_t, property: &str) -> Vec<(String, serde_json::Value)> {
     let mut out = Vec::new();
     unsafe {
         let props = sys::obs_source_properties(src);

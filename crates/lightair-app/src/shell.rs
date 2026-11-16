@@ -412,6 +412,8 @@ pub struct StudioWindow {
     remote: remote::Remote,
     /// Automations (docs/plans/live-integrations.md, 2.6).
     pub(crate) automations: lightair_automation::Automations,
+    /// The Permissions page is being refreshed.
+    permissions_watch: std::cell::Cell<bool>,
     /// Heart rate being read (Pulsoid): set to stop it.
     heart_rate: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The canvas preview drawn under the UI (macOS: native_preview), the canvases whose
@@ -718,6 +720,7 @@ impl StudioWindow {
             remote,
             automations,
             heart_rate: None,
+            permissions_watch: Default::default(),
             automations_panel,
             native,
             native_layers: HashSet::new(),

@@ -36,6 +36,7 @@ pub(crate) enum Page {
     Shortcuts,
     Remote,
     Connections,
+    Permissions,
     About,
 }
 
@@ -50,6 +51,7 @@ const PAGES: &[(Page, &str, &str)] = &[
     (Page::Shortcuts, "Shortcuts", "keyboard"),
     (Page::Remote, "Remote API", "radio-tower"),
     (Page::Connections, "Connections", "plug"),
+    (Page::Permissions, "Permissions", "shield-check"),
     (Page::About, "About", "info"),
 ];
 
@@ -328,6 +330,7 @@ impl StudioWindow {
             Page::Shortcuts => self.shortcuts_page(cx),
             Page::Remote => self.remote_page(cx),
             Page::Connections => self.connections_page(cx),
+            Page::Permissions => self.permissions_page(cx),
             Page::About => self.about_page(cx),
         };
         let title = PAGES.iter().find(|(p, ..)| *p == page).map_or("", |(_, l, _)| *l);
@@ -1140,6 +1143,72 @@ impl StudioWindow {
     fn set_remote(&mut self, f: impl FnOnce(&mut crate::prefs::RemoteApi), cx: &mut Context<Self>) {
         self.set_pref(|p| f(&mut p.remote), cx);
         self.sync_remote(cx);
+    }
+
+    fn permissions_page(&self, cx: &mut Context<Self>) -> Div {
+        use crate::permissions::State;
+        // looked at again every second while this page is open (an answer in System Settings
+        // shows without coming back)
+        if !self.permissions_watch.get() {
+            self.permissions_watch.set(true);
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                    let open = this
+                        .update(cx, |this, cx| {
+                            let open = this.settings_open && this.settings_page == Page::Permissions;
+                            if open {
+                                cx.notify();
+                            } else {
+                                this.permissions_watch.set(false);
+                            }
+                            open
+                        })
+                        .unwrap_or(false);
+                    if !open {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        let mut list = group("What Lightair needs");
+        for p in crate::permissions::all() {
+            let (text, colour) = match p.state {
+                State::Allowed => ("Allowed", tok::ok()),
+                State::NotAsked => ("Not asked yet", tok::warn()),
+                State::Denied => ("Not allowed", tok::error()),
+                State::AskedOnUse => ("Asked on first use", tok::text_tertiary()),
+                State::NotNow => ("Checked while the app is open", tok::text_tertiary()),
+            };
+            let key = p.key;
+            let control = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().flex().items_center().gap_1().child(div().size(px(7.)).rounded_full().bg(colour)).child(div().text_size(px(12.)).text_color(colour).child(text)))
+                .when(p.state != State::Allowed, |d| {
+                    let label = if p.state == State::NotAsked { "Allow…" } else { "Open Settings" };
+                    d.child(Button::new(SharedString::from(format!("perm-{key}"))).label(label).xsmall().outline().on_click(move |_, _, _| {
+                        if label == "Allow…" {
+                            crate::permissions::ask(key)
+                        } else {
+                            crate::permissions::open_settings(key)
+                        }
+                    }))
+                });
+            list = list.child(row(p.name, Some(p.why), control));
+        }
+        pages().child(list).child(
+            group("Good to know").child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(12.))
+                    .text_color(tok::text_tertiary())
+                    .child("After allowing screen recording or input monitoring in System Settings, macOS may ask to quit and reopen Lightair before it takes effect."),
+            ),
+        )
     }
 
     fn connections_page(&self, cx: &mut Context<Self>) -> Div {

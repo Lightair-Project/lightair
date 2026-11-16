@@ -48,6 +48,37 @@ pub static CAMERA: Kind = Kind {
     access: Some(crate::access::Media::Camera),
 };
 
+/// The capture kind a wrapper stands for ("screen_capture" for "lightair_screen_capture").
+pub(crate) fn inner_id(id: &str) -> Option<&'static str> {
+    [&SCREEN, &CAMERA].into_iter().find(|k| k.id.to_bytes() == id.as_bytes()).and_then(|k| k.inner.to_str().ok())
+}
+
+/// Runs `f` with the capture a wrapper source stands for, to read what it offers (its displays,
+/// windows, devices): the running capture, or a private one made with the wrapper's settings
+/// for the moment (wrappers have no list of their own: they make their capture only while
+/// shown). `None` for any other source.
+pub(crate) fn with_capture<R>(source: *mut sys::obs_source_t, f: impl FnOnce(*mut sys::obs_source_t) -> R) -> Option<R> {
+    let id = unsafe { CStr::from_ptr(sys::obs_source_get_id(source)) };
+    let kind = [&SCREEN, &CAMERA].into_iter().find(|k| k.id == id)?;
+    let shared = unsafe { &*(sys::obs_obj_get_data(source as *mut c_void) as *const Arc<Shared>) };
+    let running = shared.child.lock().as_ref().map(|c| unsafe { sys::obs_source_get_ref(c.0) }).filter(|c| !c.is_null());
+    let capture = match running {
+        Some(c) => c,
+        // a camera isn't opened just to list devices (its light would come on): the caller lists them
+        None if kind.access.is_some() => return None,
+        None => {
+            let settings = shared.settings();
+            unsafe { sys::obs_source_create_private(kind.inner.as_ptr(), c"Lightair choices".as_ptr(), settings) }
+        }
+    };
+    if capture.is_null() {
+        return None;
+    }
+    let out = f(capture);
+    unsafe { sys::obs_source_release(capture) };
+    Some(out)
+}
+
 /// How long a capture keeps running once nothing shows it.
 const LINGER: Duration = Duration::from_secs(1);
 
