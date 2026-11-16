@@ -113,6 +113,9 @@ pub enum UiRequest {
 }
 
 pub struct Studio {
+    /// The chat of the destinations' channels (docs/plans/live-integrations.md), read while the
+    /// workspace is open.
+    pub chat: lightair_live::Hub,
     doc: Document,
     package: Option<Package>,
     engine: Arc<Engine>,
@@ -177,6 +180,7 @@ impl Studio {
         };
         let selected_scene = workspace.program.or(workspace.scenes.first().map(|s| s.id));
         let mut studio = Self {
+            chat: lightair_live::Hub::new(),
             doc: Document::new(workspace),
             package,
             engine,
@@ -206,6 +210,7 @@ impl Studio {
         studio.migrate();
         studio.rebuild_engine();
         studio.sync_clips();
+        studio.sync_chat();
         studio
     }
 
@@ -269,6 +274,7 @@ impl Studio {
                 self.push(change.before, change.after);
                 self.fix_selection();
                 self.sync_clips();
+                self.sync_chat();
                 self.sync_virtual_camera();
                 cx.notify();
                 Ok(())
@@ -458,6 +464,7 @@ impl Studio {
             self.issue = Some(format!("Undo: {}", change.label).into());
             self.push(change.before, change.after);
             self.sync_virtual_camera();
+            self.sync_chat();
             self.compact();
             self.fix_selection();
             cx.notify();
@@ -469,6 +476,7 @@ impl Studio {
             self.issue = Some(format!("Redo: {}", change.label).into());
             self.push(change.before, change.after);
             self.sync_virtual_camera();
+            self.sync_chat();
             self.compact();
             self.fix_selection();
             cx.notify();
@@ -506,6 +514,7 @@ impl Studio {
             s.reconciler.rebuild(&workspace);
         });
         self.sync_clips();
+        self.sync_chat();
         self.sync_virtual_camera();
         self.library_version += 1;
         // opened next time too (not by a copy started on a given workspace: tests, screenshots)
@@ -569,6 +578,22 @@ impl Studio {
     }
 
     /// Keeps the replay buffer running exactly when clips are on.
+    /// Reads the chat of every destination with a chat channel set (and stops reading the ones
+    /// no longer set).
+    fn sync_chat(&self) {
+        let channels: Vec<lightair_live::Channel> = self
+            .workspace()
+            .outputs
+            .destinations
+            .iter()
+            .filter_map(|d| {
+                let channel = d.chat.as_ref().filter(|c| !c.trim().is_empty())?;
+                Some(lightair_live::Channel { platform: d.platform.clone()?, channel: channel.trim().to_string() })
+            })
+            .collect();
+        self.chat.set_channels(&channels);
+    }
+
     fn sync_clips(&mut self) {
         let settings = self.workspace().outputs.clips;
         let running = runtime().get(OutputKey::Clips).state.is_running();

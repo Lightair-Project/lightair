@@ -41,6 +41,8 @@ struct Edit {
     server_input: Entity<InputState>,
     /// A new key; empty keeps the saved one.
     key: Entity<InputState>,
+    /// The channel whose chat is read (empty: none).
+    chat: Entity<InputState>,
     canvas: Option<Id>,
     /// `None`: Automatic.
     encoding: Option<Encoding>,
@@ -60,6 +62,8 @@ struct Configure {
     /// The pasted server address (when it hasn't).
     server_input: Entity<InputState>,
     key: Entity<InputState>,
+    /// The channel whose chat is read (empty: none).
+    chat: Entity<InputState>,
     canvas: Option<Id>,
     error: Option<String>,
     /// A vertical canvas was asked for: pick it once it exists.
@@ -170,6 +174,17 @@ fn section_label(text: &'static str) -> Div {
 
 /// A form row: its name on the left (an ⓘ with its meaning, when it has one), the control on
 /// the right (segmented controls hug their choices; inputs and dropdowns fill the row).
+/// The chat channel field: what to type for the platform, filled with `value`.
+fn chat_input(platform: &Platform, value: Option<&str>, window: &mut Window, cx: &mut Context<OutputsPanel>) -> Entity<InputState> {
+    let hint = lightair_live::channel_hint(platform.id).unwrap_or("Channel");
+    let input = cx.new(|cx| InputState::new(window, cx).placeholder(hint));
+    if let Some(v) = value {
+        let v = v.to_string();
+        input.update(cx, |i, cx| i.set_value(v, window, cx));
+    }
+    input
+}
+
 fn form_row(name: &'static str, tip: Option<SharedString>, control: impl IntoElement) -> Div {
     div()
         .flex()
@@ -305,6 +320,7 @@ impl OutputsPanel {
                 .placeholder(if platform.id == "custom" { "Stream key, token or SRT stream ID" } else { "Stream key" })
                 .masked(true)
         });
+        let chat = chat_input(platform, None, window, cx);
         // The shape it wants: a vertical canvas for vertical platforms, when there is one.
         let workspace = self.studio.read(cx).workspace().clone();
         let canvas = match platform.shape {
@@ -318,6 +334,7 @@ impl OutputsPanel {
             server: platforms::nearest_server(platform),
             server_input,
             key,
+            chat,
             canvas,
             error: None,
             want_vertical: false,
@@ -365,6 +382,7 @@ impl OutputsPanel {
             encoding: None,
             audio_mix: None,
             vod_mix: None,
+            chat: Some(c.chat.read(cx).value().trim().to_string()).filter(|c| !c.is_empty()),
         };
         if let Err(e) = crate::secrets::set_stream_key(destination.id, &key) {
             c.error = Some(format!("Couldn't save the stream key: {e}"));
@@ -400,6 +418,7 @@ impl OutputsPanel {
                 .placeholder("Saved in your Keychain · paste a new key to replace it")
                 .masked(true)
         });
+        let chat = chat_input(platform, d.chat.as_deref(), window, cx);
         self.setup = Some(Setup::Edit(Edit {
             id,
             platform,
@@ -407,6 +426,7 @@ impl OutputsPanel {
             server,
             server_input,
             key,
+            chat,
             canvas: d.canvas,
             encoding: d.encoding,
             audio_mix: d.audio_mix,
@@ -445,6 +465,7 @@ impl OutputsPanel {
             encoding: e.encoding,
             audio_mix: e.audio_mix,
             vod_mix: e.vod_mix,
+            chat: Some(e.chat.read(cx).value().trim().to_string()).filter(|c| !c.is_empty()),
             ..old
         };
         self.studio.update(cx, |s, cx| {
@@ -706,7 +727,14 @@ impl OutputsPanel {
         let id = e.id;
         let connection = card("Connection")
             .child(server)
-            .child(row("Stream key", None, div().flex_1().child(Input::new(&e.key).small().mask_toggle()).into_any_element()));
+            .child(row("Stream key", None, div().flex_1().child(Input::new(&e.key).small().mask_toggle()).into_any_element()))
+            .when(lightair_live::channel_hint(e.platform.id).is_some(), |d| {
+                d.child(row(
+                    "Chat",
+                    Some("The channel whose chat shows in the Chat panel. Read without logging in."),
+                    div().flex_1().child(Input::new(&e.chat).small()).into_any_element(),
+                ))
+            });
         let picture_sound = card("Picture & sound")
             .child(row("Canvas", None, shapes.into_any_element()))
             .child(row(
@@ -1091,7 +1119,14 @@ impl OutputsPanel {
                 form_card("Connection")
                     .child(server)
                     .child(key)
-                    .children(key_link.map(|l| div().flex().pl(px(120.)).child(l))),
+                    .children(key_link.map(|l| div().flex().pl(px(120.)).child(l)))
+                    .when(lightair_live::channel_hint(p.id).is_some(), |d| {
+                        d.child(form_row(
+                            "Chat",
+                            Some("The channel whose chat shows in the Chat panel. Read without logging in; leave empty for none.".into()),
+                            div().flex_1().child(Input::new(&c.chat).small()),
+                        ))
+                    }),
             )
             .child(picture)
             .when_some(c.error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(tok::error()).child(e)))

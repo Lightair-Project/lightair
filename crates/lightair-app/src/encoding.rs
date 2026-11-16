@@ -163,6 +163,7 @@ mod tests {
             encoding: None,
             audio_mix: None,
             vod_mix: None,
+            chat: None,
         };
         assert_eq!(automatic(&workspace, &d("twitch")).bitrate_kbps, 6000, "Twitch takes 6 Mbps");
         assert_eq!(automatic(&workspace, &d("youtube")).bitrate_kbps, 9000);

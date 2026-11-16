@@ -202,7 +202,7 @@ impl StudioWindow {
         let (objects, scenes) = (panel(Region::Hierarchy, cx), panel(Region::Scenes, cx));
         let (canvas, inspector) = (panel(Region::Canvas, cx), panel(Region::Inspector, cx));
         let assets = panel(Region::Assets, cx);
-        let (mixer, outputs) = (self.mixer_dock.clone(), self.outputs.clone());
+        let (mixer, outputs, chat) = (self.mixer_dock.clone(), self.outputs.clone(), self.chat.clone());
         // Every group shows a tab bar, even with one panel, so any panel can be dropped onto
         // any header to join it as a tab (and the canvas gets a header like the rest).
         let (dock, skin) = DockSkin::dock_area("lightair-studio", Some(1), window, cx);
@@ -235,7 +235,13 @@ impl StudioWindow {
             area.set_dock(
                 DockPlacement::Right,
                 DockLayout::v_split()
-                    .child(DockLayout::tabs().panel_view(panel_handle(outputs), cx), Some(px(320.)))
+                    .child(
+                        DockLayout::tabs()
+                            .panel_view(panel_handle(outputs), cx)
+                            .panel_view(panel_handle(chat), cx)
+                            .active_index(usize::from(std::env::var("LIGHTAIR_OPEN").is_ok_and(|h| h == "chat"))),
+                        Some(px(320.)),
+                    )
                     .child(DockLayout::tabs().panel_view(panel_handle(inspector), cx), None),
                 window,
                 cx,
@@ -492,6 +498,7 @@ impl StudioWindow {
                         encoding: None,
                         audio_mix: None,
                         vod_mix: None,
+                        chat: None,
                     };
                     self.exec(lightair_core::Command::AddDestination { destination }, cx);
                 }
@@ -511,6 +518,7 @@ impl StudioWindow {
                     }),
                     audio_mix: None,
                     vod_mix: None,
+                    chat: None,
                 };
                 let id = destination.id;
                 self.exec(lightair_core::Command::AddDestination { destination }, cx);

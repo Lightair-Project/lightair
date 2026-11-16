@@ -280,6 +280,8 @@ pub struct StudioWindow {
     /// The mixer's dock panel: its strips and the meter overlay.
     mixer_dock: Entity<MixerDock>,
     outputs: Entity<OutputsPanel>,
+    /// Every destination's chat (a tab beside Outputs).
+    chat: Entity<crate::chat_panel::ChatPanel>,
     /// First click on "End stream" arms it; a second click within 3 s ends the stream.
     confirm_end: Option<Instant>,
     /// One preview per canvas (the primary one renders the main canvas).
@@ -556,6 +558,7 @@ impl StudioWindow {
         let mixer = cx.new(|cx| MixerPanel::new(studio.clone(), native.clone(), cx));
         let mixer_dock = cx.new(|cx| MixerDock::new(mixer.clone(), cx));
         let outputs = cx.new(|cx| OutputsPanel::new(studio.clone(), cx));
+        let chat = cx.new(|cx| crate::chat_panel::ChatPanel::new(studio.clone(), cx));
         // Its Add destination dialog is drawn over the whole window.
         cx.observe(&outputs, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&outputs, |this, _, _: &crate::outputs_panel::AddVerticalCanvas, cx| {
@@ -612,6 +615,7 @@ impl StudioWindow {
             mixer,
             mixer_dock,
             outputs,
+            chat,
             confirm_end: None,
             studio,
             focus,
