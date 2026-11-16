@@ -40,6 +40,7 @@ pub(super) fn start_automations(hub: &lightair_live::Hub, jobs: super::remote::J
         }
     });
     lightair_live::integrations::set_dir(lightair_platform::paths::data_dir().join("integrations"));
+    lightair_live::rules::set_dir(lightair_platform::paths::data_dir().join("rules"));
     Automations::start(hub.clone(), lightair_platform::paths::data_dir().join("automations"), host)
 }
 

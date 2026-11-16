@@ -28,6 +28,7 @@ use std::process::Command;
 
 #[cfg(target_os = "macos")]
 mod dist;
+mod rules;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
@@ -277,6 +278,8 @@ fn main() -> anyhow::Result<()> {
         Some("dist") => dist::dist(),
         #[cfg(not(target_os = "macos"))]
         Some("dist") => anyhow::bail!("the shipped app is built on macOS"),
+        Some("rules-key") => rules::key(),
+        Some("rules-sign") => rules::sign(&std::env::args().nth(2).ok_or_else(|| anyhow::anyhow!("usage: cargo xtask rules-sign <rules.json>"))?),
         Some("prune") => {
             be_polite();
             let (files, bytes) = prune(None)?;
@@ -285,7 +288,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask (modules | bundle | dist | dev | virtual-camera [--uninstall] | test [--machine] [filter] | check [--changed] | precommit | prune)"
+                "usage: cargo xtask (modules | bundle | dist | dev | virtual-camera [--uninstall] | test [--machine] [filter] | check [--changed] | precommit | prune | rules-key | rules-sign <file>)"
             );
             Ok(())
         }

@@ -25,14 +25,20 @@ with what's known about each. Keep it current: strike items as they land.
 - **Facebook, Instagram, X, LinkedIn** readers and sending: through signed-in hidden pages.
   Needs a signed-in session to build against (selectors / their own requests are unknown until
   then).
-- **Huya** (TARS binary protocol) and **Niconico** (NDGR protobuf over HTTP streaming) readers.
-- **SOOP** subscriptions (service codes not yet known), **YouTube** raids, **Bilibili**
-  emoticons (sent as `[name]` text now).
+- **Huya** (TARS binary protocol) reader. ~~**Niconico**~~ (done: niconico.rs, NDGR; read a
+  live program's comments with `LIGHTAIR_LIVE_CHECK=niconico:lv… cargo test -p lightair-live
+  live_check`).
+- ~~**SOOP** subscriptions~~ (done: new, renewed, gifted; also ad, video and sub-broadcast
+  balloons, Quick View, OGQ and mission gifts; untested on a live stream). **YouTube** raids,
+  **Bilibili** emoticons (sent as `[name]` text now).
 - **YouTube Private streams**: readable only signed in as the owner; Unlisted works from the
   stream's link. Could find the owner's own live (Private/Unlisted) through the signed-in
   session.
-- **Reading rules updated without a release**: selectors and endpoints in a signed file Lightair
-  fetches (plan, 2.10).
+- ~~**Reading rules updated without a release**~~ (built: rules.rs; a per-platform off switch and
+  the send/TikTok selectors read through it, signed with Ed25519). Not live yet: needs a place
+  to publish (`ADDRESS` in rules.rs) and a key (`cargo xtask rules-key`, then paste the public
+  key into `PUBLIC_KEY`); `cargo xtask rules-sign rules.json` signs each update. More of the
+  readers' addresses and fields could move into it.
 - **TwitCasting** reader is untested on a live stream.
 - **Sending** is verified only for Twitch's login and join (`LIGHTAIR_SELFTEST=twitch-login`);
   YouTube, Kick and TikTok sending (typing into their pages) are untested with a real session.
