@@ -72,7 +72,13 @@ impl StreamPanel {
                             .outputs
                             .destinations
                             .iter()
-                            .filter_map(|d| Some((d.platform.clone()?, d.chat.clone().filter(|c| !c.trim().is_empty())?.trim().to_string())))
+                            .filter_map(|d| {
+                                let platform = d.platform.clone()?;
+                                // X signed in officially needs no channel: it's the account's own
+                                let chat = d.chat.clone().filter(|c| !c.trim().is_empty()).map(|c| c.trim().to_string());
+                                let chat = chat.or_else(|| (platform == "x" && lightair_live::official::signed_in("x")).then(String::new))?;
+                                Some((platform, chat))
+                            })
                             .collect();
                         out.dedup();
                         out

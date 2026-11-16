@@ -69,6 +69,15 @@ pub(super) fn feed_widgets(automations: Automations, widgets: Option<lightair_wi
                 if s != streaming {
                     streaming = s;
                     a.output_changed("stream", s);
+                    // X: going live there (with its title) once it sees the video; ending it
+                    if lightair_live::official::signed_in("x") {
+                        std::thread::spawn(move || {
+                            let r = if s { lightair_live::official::x_go_live().map(|_| ()) } else { lightair_live::official::x_end() };
+                            if let Err(e) = r {
+                                tracing::warn!(%e, "X broadcast");
+                            }
+                        });
+                    }
                 }
                 if r != recording {
                     recording = r;

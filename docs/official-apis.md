@@ -55,9 +55,25 @@ moderator:manage:banned_users moderator:manage:chat_messages`. No review.
 2. Its Client ID and Secret are `LIGHTAIR_KICK_CLIENT_ID` / `_SECRET` (Kick's token request
    wants the secret even with PKCE).
 
+## X
+
+1. [developer.x.com](https://developer.x.com) › a Project and App; **User authentication
+   settings**: OAuth 2.0, type **Native App** (public: no secret in Lightair) or Web App (then
+   `LIGHTAIR_X_CLIENT_SECRET`, sent as HTTP Basic), callback **`http://127.0.0.1:47802/callback`**
+   (another port: `LIGHTAIR_X_REDIRECT_PORT`).
+2. **The Livestream API needs X's approval** for the app (X's docs: ask your X account team to
+   turn it on; an Enterprise agreement). Its Client ID is `LIGHTAIR_X_CLIENT_ID`.
+
+Scopes asked: `broadcast.read broadcast.write tweet.read users.read offline.access`. X takes a
+title only when a broadcast starts, so the Stream panel's title for X is kept for the next one:
+when Lightair starts streaming, it waits for X's source to see the video and goes live on X with
+it (`POST /2/broadcasts`), and ends that broadcast when the stream stops. Chat: sending works
+(`POST /2/broadcasts/:id/chat`, 140 characters); X delivers chat to a public webhook (its
+Activity API), which needs the relay, so reading X chat isn't built yet.
+
 ## Not offered (yet)
 
-- **TikTok, Facebook, Instagram, X, LinkedIn**: their live APIs need app review or business
+- **TikTok, Facebook, Instagram, LinkedIn**: their live APIs need app review or business
   approval (or don't exist for this): the signed-in pages stay.
 - **YouTube message deletion**: the reader numbers messages as YouTube's site does, which the
   Data API doesn't know; bans and timeouts work.
