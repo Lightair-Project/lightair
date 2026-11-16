@@ -72,7 +72,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("To front / to back", "⇧⌘]  ⇧⌘["),
             ("Show or hide / lock", "⇧⌘H  ⇧⌘L"),
             ("Nudge", "Arrow keys"),
-            ("Rotate gizmo", "E"),
+            ("Rotate gizmo", "⇧⌘E"),
         ],
     ),
     (

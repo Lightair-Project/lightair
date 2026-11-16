@@ -145,7 +145,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(crate::ui::key("cmd-m"), AddMarker, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-a"), SelectAll, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-,"), OpenSettings, Some("Studio")),
-        KeyBinding::new("e", ToggleRotateTool, Some("Studio")),
+        // (never a plain letter: it would take that letter from anything being typed)
+        KeyBinding::new(crate::ui::key("cmd-shift-e"), ToggleRotateTool, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-shift-m"), ToggleMics, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-g"), GroupSelection, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-="), ZoomIn, Some("Studio")),
@@ -1991,7 +1992,13 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
             .on_action(cx.listener(|this, _: &OpenAudioSettings, _, cx| this.open_settings(settings::Page::Audio, cx)))
-            .on_action(cx.listener(|this, _: &ToggleRotateTool, _, cx| {
+            .on_action(cx.listener(|this, _: &ToggleRotateTool, window, cx| {
+                // a plain letter: while a text field has the keyboard it's typing, not the tool
+                // (passed on, so the field gets it)
+                if typing(window) {
+                    cx.propagate();
+                    return;
+                }
                 this.rotate_tool = !this.rotate_tool;
                 this.gizmo_hover = None;
                 cx.notify();
@@ -4482,5 +4489,22 @@ fn transition_preview(kind: TransitionKind, direction: Direction, t: Option<f32>
         TransitionKind::Stinger => frame
             .child(scene(t >= 0.5, 0.0, 0.0))
             .child(div().absolute().left(relative(-0.55 + 1.6 * t)).top_0().w(relative(0.5)).h_full().bg(rgb(0x7C5CFF))),
+    }
+}
+
+#[cfg(test)]
+mod keys {
+    /// Every shortcut needs a modifier or a key that types nothing: a plain letter, digit or
+    /// sign would be taken from text fields.
+    #[test]
+    fn no_shortcut_is_a_plain_typing_key() {
+        for file in [include_str!("shell.rs"), include_str!("editor.rs")] {
+            for (i, _) in file.match_indices("KeyBinding::new(\"") {
+                let rest = &file[i + 17..];
+                let key = &rest[..rest.find('"').unwrap()];
+                let plain = key.chars().count() == 1 || (key.starts_with("shift-") && key.chars().count() == 7);
+                assert!(!plain, "a shortcut on a typing key: {key:?}");
+            }
+        }
     }
 }
