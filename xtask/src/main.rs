@@ -259,11 +259,19 @@ fn dev(release: bool) -> anyhow::Result<()> {
     let mux = obs_mux();
     let profile = if release { "release" } else { "debug" };
     let out = root().join("target").join(profile);
+    // Windows: the encoders' test programs too (NVENC, Quick Sync and AMF register only once
+    // theirs, run from beside the executable, says the hardware works)
+    let mut helpers = vec![mux];
+    if cfg!(windows) {
+        helpers.extend(["obs-nvenc-test.exe", "obs-qsv-test.exe", "obs-amf-test.exe"].map(|h| obs_bin().join(h)));
+    }
     for dir in [out.clone(), out.join("deps")] {
         std::fs::create_dir_all(&dir)?;
-        let link = dir.join(mux.file_name().unwrap());
-        if !link.exists() {
-            link_file(&mux, &link)?;
+        for helper in helpers.iter().filter(|h| h.exists()) {
+            let link = dir.join(helper.file_name().unwrap());
+            if !link.exists() {
+                link_file(helper, &link)?;
+            }
         }
         if cfg!(windows) {
             chromium_runtime(&dir)?;

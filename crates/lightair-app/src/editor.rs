@@ -1914,7 +1914,7 @@ impl Editor {
                         div()
                             .flex_1()
                             .text_size(px(12.))
-                            .font_family("Menlo")
+                            .font_family(crate::ui::MONO)
                             .child(div().flex().gap_1().child(div().text_color(tok::accent_primary()).child(clock(self.playhead))).child(div().text_color(tok::text_tertiary()).child(format!("/ {}", clock(duration))))),
                     )
                     .child(ui::icon_button("ed-play", if self.playing.is_some() { "pause" } else { "play" }, tok::text()).on_click(cx.listener(|this, _, _, cx| this.play(cx))))

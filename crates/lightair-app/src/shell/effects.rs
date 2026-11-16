@@ -703,7 +703,7 @@ impl StudioWindow {
                     .flex_none()
                     .text_right()
                     .text_size(px(11.))
-                    .font_family("Menlo")
+                    .font_family(crate::ui::MONO)
                     .text_color(if changed { tok::text() } else { tok::text_tertiary() })
                     .child(s.display(value)),
             )
@@ -821,7 +821,7 @@ impl StudioWindow {
             .items_center()
             .gap_2()
             .child(picker)
-            .child(div().flex_1().text_size(px(11.)).font_family("Menlo").text_color(tok::text_secondary()).child(hex))
+            .child(div().flex_1().text_size(px(11.)).font_family(crate::ui::MONO).text_color(tok::text_secondary()).child(hex))
             .when(crate::eyedropper::AVAILABLE, |row| {
                 row.child(
                     ui::icon_button(SharedString::from(format!("fx-drop-{eid}-{key}")), "pipette", tok::text_secondary())

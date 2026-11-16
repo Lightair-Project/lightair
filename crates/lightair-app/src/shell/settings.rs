@@ -215,7 +215,7 @@ impl StudioWindow {
         parts.push(k.key.to_lowercase());
         let keys = parts.join("-");
         if crate::shortcuts::parse(&keys).is_none() {
-            self.shortcut_note = Some("Use ⌘, ⌃ or ⌥ with a letter or number, or an F key.".into());
+            self.shortcut_note = Some(if cfg!(windows) { "Use Ctrl or Alt with a letter or number, or an F key.".into() } else { "Use ⌘, ⌃ or ⌥ with a letter or number, or an F key.".into() });
             cx.notify();
             return;
         }
@@ -625,7 +625,7 @@ impl StudioWindow {
 
     fn shortcuts_page(&self, cx: &mut Context<Self>) -> Div {
         use crate::shortcuts::{GlobalAction, display};
-        let mut global = group("Anywhere on your Mac");
+        let mut global = group(if cfg!(windows) { "Anywhere on your PC" } else { "Anywhere on your Mac" });
         for (i, action) in GlobalAction::ALL.iter().copied().enumerate() {
             let keys = self.prefs.global_shortcuts.iter().find(|h| h.action == action).map(|h| h.keys.clone());
             let capturing = self.shortcut_capture == Some(action);
@@ -671,7 +671,7 @@ impl StudioWindow {
         for (title, items) in SHORTCUTS {
             let mut g = group(title);
             for (what, keys) in *items {
-                g = g.child(row(what, None, value(keys)));
+                g = g.child(row(what, None, value(&crate::ui::keys_label(keys))));
             }
             page = page.child(g);
         }
@@ -1206,7 +1206,7 @@ impl StudioWindow {
                     .py_2()
                     .text_size(px(12.))
                     .text_color(tok::text_tertiary())
-                    .child("After allowing screen recording or input monitoring in System Settings, macOS may ask to quit and reopen Lightair before it takes effect."),
+                    .child(if cfg!(windows) { "Windows has a switch for desktop apps under each of these in Settings › Privacy & security: with it off, a camera shows black and a microphone stays silent." } else { "After allowing screen recording or input monitoring in System Settings, macOS may ask to quit and reopen Lightair before it takes effect." }),
             ),
         )
     }
@@ -1342,7 +1342,7 @@ impl StudioWindow {
                     .py_2()
                     .text_size(px(12.))
                     .text_color(tok::text_tertiary())
-                    .child("Copy the token from the service's own dashboard, then choose Paste token: Lightair keeps it in the Keychain and never shows it. Tips arrive like any other event, in Activity, alert boxes, goals and automations."),
+                    .child("Copy the token from the service's own dashboard, then choose Paste token: Lightair keeps it in the system's credential store and never shows it. Tips arrive like any other event, in Activity, alert boxes, goals and automations."),
             ),
         )
     }
@@ -1357,7 +1357,12 @@ impl StudioWindow {
             (Some(e), _) => e.clone(),
             (None, Some(s)) => {
                 let n = s.clients().len();
-                let who = if r.lan { "this Mac and your network" } else { "this Mac only" };
+                let who = match (r.lan, cfg!(windows)) {
+                    (true, true) => "this PC and your network",
+                    (false, true) => "this PC only",
+                    (true, false) => "this Mac and your network",
+                    (false, false) => "this Mac only",
+                };
                 format!("On, for {who} · {n} client{} connected", plural(n))
             }
             (None, None) => "Off".into(),
@@ -1385,7 +1390,7 @@ impl StudioWindow {
                         .child(Button::new("remote-port-down").icon(ui::icon("minus")).xsmall().ghost().on_click(cx.listener(
                             move |this, _, _, cx| this.set_remote(|p| p.port = p.port.saturating_sub(1).max(1024), cx),
                         )))
-                        .child(div().w(px(56.)).text_center().text_size(px(12.)).font_family("Menlo").child(r.port.to_string()))
+                        .child(div().w(px(56.)).text_center().text_size(px(12.)).font_family(crate::ui::MONO).child(r.port.to_string()))
                         .child(Button::new("remote-port-up").icon(ui::icon("plus")).xsmall().ghost().on_click(cx.listener(
                             move |this, _, _, cx| this.set_remote(|p| p.port = p.port.saturating_add(1), cx),
                         ))),
@@ -1398,7 +1403,7 @@ impl StudioWindow {
                 ))
                 .child(row(
                     "Ask for the password",
-                    Some(if r.lan { "Always, while other devices may connect." } else { "Apps on this Mac must send it too." }),
+                    Some(if r.lan { "Always, while other devices may connect." } else if cfg!(windows) { "Apps on this PC must send it too." } else { "Apps on this Mac must send it too." }),
                     switch("remote-password-on", asks).on_click(cx.listener(move |this, _, _, cx| {
                         if !r.lan {
                             this.set_remote(|p| p.require_password = !r.require_password, cx)
@@ -1419,7 +1424,7 @@ impl StudioWindow {
             page = page.child(
                 group("Password").child(row(
                     &shown,
-                    Some("Kept in the Keychain."),
+                    Some(if cfg!(windows) { "Kept in Windows Credential Manager." } else { "Kept in the Keychain." }),
                     div()
                         .flex()
                         .items_center()
@@ -1544,7 +1549,7 @@ fn note(text: &str) -> Div {
 }
 
 fn value(text: &str) -> Div {
-    div().text_size(px(12.)).font_family("Menlo").text_color(tok::text_secondary()).child(text.to_string())
+    div().text_size(px(12.)).font_family(crate::ui::MONO).text_color(tok::text_secondary()).child(text.to_string())
 }
 
 fn pref_chip(id: impl Into<ElementId>, label: String, on: bool) -> Stateful<Div> {
@@ -1621,7 +1626,7 @@ fn stepper(
                 .ghost()
                 .on_click(cx.listener(move |this, _, _, cx| this.exec(minus.clone(), cx))),
         )
-        .child(div().w(px(80.)).text_center().text_size(px(12.)).font_family("Menlo").child(value))
+        .child(div().w(px(80.)).text_center().text_size(px(12.)).font_family(crate::ui::MONO).child(value))
         .child(
             Button::new((id, 1usize))
                 .icon(ui::icon("plus"))
