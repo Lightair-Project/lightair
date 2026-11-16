@@ -44,6 +44,7 @@ fn fields(a: &Automation) -> Vec<(String, &'static str, bool)> {
             f.push(("trigger.min_messages".into(), "Only after this many chat messages", true));
         }
         Trigger::Event { .. } => f.push(("trigger.min_amount".into(), "At least (amount or raiders)", true)),
+        Trigger::Hotkey { .. } => f.push(("trigger.keys".into(), "Keys (cmd-alt-1, ctrl-shift-f5, …)", false)),
         Trigger::Manual | Trigger::Output { .. } | Trigger::Start => {}
     }
     for (i, s) in a.steps.iter().enumerate() {
@@ -145,7 +146,25 @@ impl AutomationsPanel {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(200)).await;
-                if dirty.swap(false, Ordering::AcqRel) && this.update(cx, |_, cx| cx.notify()).is_err() {
+                // (hotkeys registered on this, the main, thread)
+                if dirty.swap(false, Ordering::AcqRel)
+                    && this
+                        .update(cx, |this, cx| {
+                            let keys = this
+                                .automations
+                                .list()
+                                .into_iter()
+                                .filter(|a| a.enabled)
+                                .filter_map(|a| match a.trigger {
+                                    Trigger::Hotkey { keys } if crate::shortcuts::parse(&keys).is_some() => Some((a.id, keys)),
+                                    _ => None,
+                                })
+                                .collect();
+                            crate::shortcuts::set_automation_keys(keys);
+                            cx.notify()
+                        })
+                        .is_err()
+                {
                     break;
                 }
                 if this.upgrade().is_none() {
@@ -324,6 +343,7 @@ impl AutomationsPanel {
                 ("Recording starts", Trigger::Output { what: "record".into(), state: "start".into() }),
                 ("Recording stops", Trigger::Output { what: "record".into(), state: "stop".into() }),
                 ("Lightair starts", Trigger::Start),
+                ("A hotkey (any app)", Trigger::Hotkey { keys: "cmd-alt-1".into() }),
                 ("Only by hand", Trigger::Manual),
             ];
             for (label, t) in options {

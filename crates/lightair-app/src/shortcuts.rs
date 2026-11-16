@@ -21,6 +21,8 @@ pub enum GlobalAction {
     /// Zooms a scene's screen in (following the pointer) or back out, where its zoom is Toggle.
     FollowZoom,
     Scene(u8),
+    /// An automation's hotkey (its place in `automation_keys`).
+    Automation(u16),
 }
 
 impl GlobalAction {
@@ -51,8 +53,42 @@ impl GlobalAction {
             GlobalAction::MuteMics => "Mute or unmute microphones".into(),
             GlobalAction::FollowZoom => "Screen zoom in or out (Toggle zoom)".into(),
             GlobalAction::Scene(n) => format!("Scene {n} on air"),
+            GlobalAction::Automation(_) => "An automation".into(),
         }
     }
+}
+
+/// The shortcuts from Settings last registered, and automations' hotkeys (automation id, keys).
+static BASE: std::sync::Mutex<Vec<(GlobalAction, String)>> = std::sync::Mutex::new(Vec::new());
+static AUTOMATIONS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Registers Settings' shortcuts and the automations' hotkeys together: the ones the system
+/// refused.
+pub fn register_all(base: &[(GlobalAction, String)]) -> Vec<GlobalAction> {
+    *BASE.lock().unwrap() = base.to_vec();
+    let mut all = base.to_vec();
+    for (i, (_, keys)) in AUTOMATIONS.lock().unwrap().iter().enumerate() {
+        // a key already taken by Settings' shortcuts stays theirs
+        if !base.iter().any(|(_, k)| k == keys) {
+            all.push((GlobalAction::Automation(i as u16), keys.clone()));
+        }
+    }
+    register(&all)
+}
+
+/// The automations' hotkeys changed: registered again with Settings' shortcuts.
+pub fn set_automation_keys(keys: Vec<(String, String)>) {
+    if *AUTOMATIONS.lock().unwrap() == keys {
+        return;
+    }
+    *AUTOMATIONS.lock().unwrap() = keys;
+    let base = BASE.lock().unwrap().clone();
+    register_all(&base);
+}
+
+/// The automation a hotkey belongs to.
+pub fn automation_for(i: u16) -> Option<String> {
+    AUTOMATIONS.lock().unwrap().get(i as usize).map(|(id, _)| id.clone())
 }
 
 #[cfg(target_os = "macos")]
