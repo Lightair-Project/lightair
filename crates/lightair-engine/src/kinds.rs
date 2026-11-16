@@ -7,13 +7,14 @@
 //! | screen: window | `screen_capture` (type 1)* | `window_capture` |
 //! | screen: app | `screen_capture` (type 2)* | `window_capture` (by executable) |
 //! | screen: game | `screen_capture` (type 1)* | `game_capture` (a window, or any full-screen game) |
-//! | camera | `macos-avcapture` | `dshow_source` |
+//! | camera | `macos-avcapture`* | `dshow_source` |
 //! | mic | `coreaudio_source_capture` | `wasapi_source_capture` |
-//! | desktop audio | `sck_audio_capture` (type 0); a loopback device: `coreaudio_output_capture` | `wasapi_output_capture` |
-//! | app audio | `sck_audio_capture` (type 1) | `wasapi_process_output_capture` |
+//! | desktop audio | `lightair_system_audio` (type 0, a Core Audio tap); a loopback device: `coreaudio_output_capture` | `wasapi_output_capture` |
+//! | app audio | `lightair_system_audio` (type 1) | `wasapi_process_output_capture` |
 //! | media file (`ffmpeg_source`) | MP4/QuickTime: `lightair_media`; others `ffmpeg_source` | `ffmpeg_source` |
 //!
-//! \* through `lightair_screen_capture`, which runs it only while shown.
+//! \* through `lightair_screen_capture` / `lightair_camera_capture`, which run them only while
+//! something shows them (`crate::on_screen`).
 //!
 //! Settings that aren't Lightair's own (a camera's preset, say) pass through as they are.
 
@@ -105,7 +106,7 @@ pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
                 set("window", window);
                 set("application", app);
                 set("show_cursor", Some(cursor));
-                // OBS's screen_capture, run only while shown (crate::screen_capture)
+                // OBS's screen_capture, run only while shown (crate::on_screen)
                 "lightair_screen_capture"
             }
             CAMERA => {
@@ -120,7 +121,8 @@ pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
                     set("use_preset", Some(json!(true)));
                     set("preset", Some(json!(preset)));
                 }
-                "macos-avcapture"
+                // OBS's macos-avcapture, run only while shown (crate::on_screen)
+                "lightair_camera_capture"
             }
             MIC => {
                 set("device_id", Some(device_or_default()));
@@ -132,15 +134,16 @@ pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
                     set("device_id", Some(d));
                     "coreaudio_output_capture"
                 }
+                // Core Audio's process taps, not ScreenCaptureKit (crate::system_audio)
                 None => {
                     set("type", Some(json!(0)));
-                    "sck_audio_capture"
+                    "lightair_system_audio"
                 }
             },
             APP_AUDIO => {
                 set("type", Some(json!(1)));
                 set("application", app);
-                "sck_audio_capture"
+                "lightair_system_audio"
             }
             _ => return None,
         }
@@ -227,18 +230,18 @@ mod tests {
         assert!(s.get("mode").is_none() && s.get("cursor").is_none());
 
         assert_eq!(resolve(MIC, &json!({})).unwrap(), ("coreaudio_input_capture", json!({"device_id": "default"})));
-        assert_eq!(resolve(DESKTOP_AUDIO, &json!({})).unwrap(), ("sck_audio_capture", json!({"type": 0})));
+        assert_eq!(resolve(DESKTOP_AUDIO, &json!({})).unwrap(), ("lightair_system_audio", json!({"type": 0})));
         assert_eq!(
             resolve(DESKTOP_AUDIO, &json!({"device": "BlackHole2ch_UID"})).unwrap(),
             ("coreaudio_output_capture", json!({"device_id": "BlackHole2ch_UID"}))
         );
         assert_eq!(
             resolve(APP_AUDIO, &json!({"app": "com.spotify.client"})).unwrap(),
-            ("sck_audio_capture", json!({"type": 1, "application": "com.spotify.client"}))
+            ("lightair_system_audio", json!({"type": 1, "application": "com.spotify.client"}))
         );
         assert_eq!(
             resolve(CAMERA, &json!({"device": "x", "height": 720})).unwrap(),
-            ("macos-avcapture", json!({"device": "x", "use_preset": true, "preset": "AVCaptureSessionPreset1280x720"}))
+            ("lightair_camera_capture", json!({"device": "x", "use_preset": true, "preset": "AVCaptureSessionPreset1280x720"}))
         );
         assert_eq!(libobs_key(SCREEN, "display"), Some("display_uuid"));
         assert!(resolve("color_source_v3", &json!({})).is_none());
