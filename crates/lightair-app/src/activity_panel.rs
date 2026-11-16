@@ -95,6 +95,10 @@ impl ActivityPanel {
                 let a = amount.as_f64().unwrap_or(0.0);
                 parts.push(match currency.as_str() {
                     "BITS" => format!("{a} bits"),
+                    "TIKTOK_COIN" => format!("{a} TikTok coins"),
+                    "KICKS" => format!("{a} Kicks"),
+                    "CHEESE" => format!("{a} 치즈"),
+                    "SOOP_BALLOON" => format!("{a} 별풍선"),
                     c if c.len() == 3 => format!("{a:.2} {c}"),
                     c => format!("{a} {}", c.to_lowercase().replace('_', " ")),
                 });

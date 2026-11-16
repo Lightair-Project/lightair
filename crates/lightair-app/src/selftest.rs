@@ -325,7 +325,9 @@ fn agent_page() {
         std::env::var("LIGHTAIR_SELFTEST_SCRIPT")
             .unwrap_or_else(|_| "lightair('title=' + document.title + ' body=' + (document.body ? document.body.innerText.slice(0, 120) : ''));".into())
     );
-    let page = lightair_web::Page::open_agent(&url, script, std::sync::Arc::new(move |m| sink.lock().push(m)));
+    // LIGHTAIR_SELFTEST_EARLY: run as each load starts too
+    let early = std::env::var("LIGHTAIR_SELFTEST_EARLY").map(|e| format!("{}{e}", lightair_live::pages::PRELUDE)).unwrap_or_default();
+    let page = lightair_web::Page::open_agent_early(&url, early, script, std::sync::Arc::new(move |m| sink.lock().push(m)));
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_secs(40) && got.lock().is_empty() {
         lightair_web::pump();

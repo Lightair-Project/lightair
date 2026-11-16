@@ -252,6 +252,10 @@ impl lightair_live::pages::Host for HiddenPages {
         Box::new(HiddenPage(lightair_web::Page::open_agent(url, script.into(), on_message)))
     }
 
+    fn open_early(&self, url: &str, early: &str, script: &str, on_message: lightair_live::pages::OnMessage) -> Box<dyn lightair_live::pages::Page> {
+        Box::new(HiddenPage(lightair_web::Page::open_agent_early(url, early.into(), script.into(), on_message)))
+    }
+
     fn open_window(&self, url: &str, title: &str, on_closed: Arc<dyn Fn() + Send + Sync>) -> Box<dyn lightair_live::pages::Page> {
         Box::new(HiddenPage(lightair_web::Page::open_window(url, title, (1000, 760), on_closed)))
     }

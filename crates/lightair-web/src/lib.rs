@@ -104,11 +104,17 @@ impl Page {
     /// load of its main frame; what it logs with [`MESSAGE_PREFIX`] goes to `messages`. It shares
     /// Lightair's cookies, so a site signed in to once stays signed in.
     pub fn open_agent(url: &str, script: String, messages: MessageSink) -> Page {
+        Self::open_agent_early(url, String::new(), script, messages)
+    }
+
+    /// `open_agent`, with `early` run as each load starts (before the page's own scripts get
+    /// far: to listen in on its connections).
+    pub fn open_agent_early(url: &str, early: String, script: String, messages: MessageSink) -> Page {
         let id = imp::next_id();
         let options = PageOptions { url: url.into(), width: 1024, height: 768, fps: 1, zoom: 1.0, css: String::new() };
         let none: FrameSink = Arc::new(|_, _, _| {});
         let silent: AudioSink = Arc::new(|_, _| {});
-        imp::request(imp::Request::Open { id, options, sink: none, texture: None, audio: silent, agent: Some((script, messages)), window: None });
+        imp::request(imp::Request::Open { id, options, sink: none, texture: None, audio: silent, agent: Some((early, script, messages)), window: None });
         // never throttled as a hidden page would be
         imp::request(imp::Request::Visible { id, visible: true });
         Page { id }
@@ -244,7 +250,7 @@ mod imp {
             texture: Option<TextureSink>,
             audio: AudioSink,
             /// An agent page: its script and where its messages go.
-            agent: Option<(String, MessageSink)>,
+            agent: Option<(String, String, MessageSink)>,
             /// A page in a window of its own: its title, and who to tell when it closes.
             window: Option<(String, OnClosed)>,
         },
@@ -742,9 +748,19 @@ mod imp {
     wrap_load_handler! {
         struct PageLoad {
             css: Arc<Mutex<String>>,
+            // run as each load starts, before the page's own scripts get far (hooks)
+            early: String,
             script: String,
         }
         impl LoadHandler {
+            fn on_load_start(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition_type: TransitionType) {
+                if let Some(frame) = frame
+                    && frame.is_main() == 1
+                    && !self.early.is_empty()
+                {
+                    frame.execute_java_script(Some(&CefString::from(self.early.as_str())), Some(&CefString::from("lightair://early")), 0);
+                }
+            }
             fn on_load_end(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, http_status_code: ::std::os::raw::c_int) {
                 let Some(frame) = frame else { return };
                 if frame.is_main() != 1 {
@@ -869,8 +885,8 @@ mod imp {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn open(id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink, agent: Option<(String, MessageSink)>, window_of: Option<(String, OnClosed)>) {
-        let (script, messages) = agent.map_or((String::new(), None), |(s, m)| (s, Some(m)));
+    fn open(id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink, agent: Option<(String, String, MessageSink)>, window_of: Option<(String, OnClosed)>) {
+        let (early, script, messages) = agent.map_or((String::new(), String::new(), None), |(e, s, m)| (e, s, Some(m)));
         let view = Arc::new(Mutex::new(view_of(&options)));
         let format = Arc::new(Mutex::new((48_000, 2)));
         let css = Arc::new(Mutex::new(options.css.clone()));
@@ -878,7 +894,7 @@ mod imp {
             PageRender::new(view.clone(), sink, texture.clone()),
             PageLife::new(id),
             PageAudio::new(format, audio),
-            PageLoad::new(css.clone(), script),
+            PageLoad::new(css.clone(), early, script),
             PageDisplay::new(messages),
         );
         // shared textures: Chromium's GPU frames go to the scene as they are (no readback)
@@ -1071,7 +1087,7 @@ mod imp {
 
     #[allow(dead_code)] // (asked for, never made here)
     pub enum Request {
-        Open { id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink, agent: Option<(String, MessageSink)>, window: Option<(String, OnClosed)> },
+        Open { id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink, agent: Option<(String, String, MessageSink)>, window: Option<(String, OnClosed)> },
         Cookies { url: String, done: CookiesDone },
         Update { id: u64, options: PageOptions },
         Eval { id: u64, code: String },
