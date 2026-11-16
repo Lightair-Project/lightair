@@ -9,7 +9,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::Sizable;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input as TextInput, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_live::stream_info::{self, StreamInfo};
@@ -29,6 +30,10 @@ pub struct StreamPanel {
     drawn: Rc<Cell<Instant>>,
     /// Dashboards open (closed with their windows).
     windows: Vec<Box<dyn lightair_live::pages::Page>>,
+    /// The channel being edited: its title and category fields.
+    editing: Option<(Key, Entity<InputState>, Entity<InputState>)>,
+    /// What the last change said, per channel.
+    notes: HashMap<Key, String>,
 }
 
 fn since(ms: i64) -> String {
@@ -82,12 +87,48 @@ impl StreamPanel {
             }
         })
         .detach();
-        StreamPanel { studio, focus: cx.focus_handle(), info: HashMap::new(), drawn, windows: Vec::new() }
+        StreamPanel { studio, focus: cx.focus_handle(), info: HashMap::new(), drawn, windows: Vec::new(), editing: None, notes: HashMap::new() }
     }
 
     fn open_dashboard(&mut self, url: String, name: String) {
         let Ok(host) = lightair_live::pages::host() else { return };
         self.windows.push(host.open_window(&url, &format!("{name} · Lightair"), std::sync::Arc::new(|| {})));
+    }
+
+    fn start_edit(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) {
+        let now = self.info.get(&key).and_then(|r| r.as_ref().ok()).cloned().unwrap_or_default();
+        let title = cx.new(|cx| InputState::new(window, cx).placeholder("Title").default_value(now.title));
+        let category = cx.new(|cx| InputState::new(window, cx).placeholder("Category or game").default_value(now.category));
+        title.update(cx, |t, cx| t.focus(window, cx));
+        self.editing = Some((key, title, category));
+        cx.notify();
+    }
+
+    fn save_edit(&mut self, cx: &mut Context<Self>) {
+        let Some((key, title, category)) = self.editing.take() else { return };
+        let (t, c) = (title.read(cx).value().to_string(), category.read(cx).value().to_string());
+        let before = self.info.get(&key).and_then(|r| r.as_ref().ok()).cloned().unwrap_or_default();
+        let t = (t != before.title).then_some(t);
+        let c = (c != before.category).then_some(c);
+        self.notes.insert(key.clone(), "Saving…".into());
+        cx.spawn(async move |this, cx| {
+            let k = key.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let r = stream_info::edit(&k.0, &k.1, t.as_deref(), c.as_deref());
+                    (r, stream_info::info(&k.0, &k.1))
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let (r, fresh) = result;
+                this.notes.insert(key.clone(), r.unwrap_or_else(|e| e));
+                this.info.insert(key, fresh);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn row(&self, platform: &str, channel: &str, i: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -129,6 +170,10 @@ impl StreamPanel {
                         .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text()).child(p.name))
                         .child(div().flex().items_center().gap_1().child(div().size(px(7.)).rounded_full().bg(colour)).child(div().text_size(px(11.)).text_color(colour).child(state)))
                         .child(div().flex_1())
+                        .when(stream_info::can_edit(platform) && self.editing.is_none(), |d| {
+                            let key = (platform.to_string(), channel.to_string());
+                            d.child(Button::new(("stream-edit", i)).label("Edit").xsmall().outline().on_click(cx.listener(move |this, _, window, cx| this.start_edit(key.clone(), window, cx))))
+                        })
                         .when_some(dashboard, |d, url| {
                             d.child(Button::new(("stream-dashboard", i)).label("Open dashboard").xsmall().outline().on_click(cx.listener(move |this, _, _, _| {
                                 this.open_dashboard(url.clone(), name.clone());
@@ -141,6 +186,28 @@ impl StreamPanel {
                     d.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(line))
                 })
                 .when_some(info.and_then(|r| r.as_ref().err()).cloned(), |d, e| d.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(e)))
+                .when_some(self.editing.as_ref().filter(|(k, _, _)| k.0 == platform && k.1 == channel), |d, (_, t, c)| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .pt_1()
+                            .child(TextInput::new(t).small())
+                            .child(TextInput::new(c).small())
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_1()
+                                    .child(Button::new(("stream-save", i)).label("Save").xsmall().on_click(cx.listener(|this, _, _, cx| this.save_edit(cx))))
+                                    .child(Button::new(("stream-cancel", i)).label("Cancel").xsmall().ghost().on_click(cx.listener(|this, _, _, cx| {
+                                        this.editing = None;
+                                        cx.notify();
+                                    }))),
+                            ),
+                    )
+                })
+                .when_some(self.notes.get(&(platform.to_string(), channel.to_string())).cloned(), |d, n| d.child(div().text_size(px(11.)).text_color(tok::text_secondary()).child(n)))
                 .into_any_element(),
         )
     }
