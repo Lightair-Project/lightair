@@ -1,6 +1,6 @@
 # Lightair Brand
 
-The Lightair mark is the **on-air light**: a red dot in a white ring on an ink rounded square. The wordmark carries the same red dot over the first **i**. Flat, two colours plus one accent, no effects.
+The Lightair mark is the **L-light**: a bold white geometric **L** with the red on-air light in its corner, on an ink rounded square. The wordmark carries the same red light over the first **i**, so the icon and the name read as one family. (The earlier mark, a red dot in a white ring, looked too much like other recorders' icons.) Flat, two colours plus one accent, no effects.
 
 ![Brand board](final/board.png)
 
@@ -9,7 +9,7 @@ The Lightair mark is the **on-air light**: a red dot in a white ring on an ink r
 | Asset | Files | Use |
 |---|---|---|
 | **App icon** | `final/icon/Lightair.icns`, `lightair-icon.svg`, PNGs 16–1024 | macOS app bundle, website, store listings |
-| **Small icon** | `final/icon/lightair-icon-small.svg` | Sizes ≤ 32 px (thicker ring, wider gap). The `.icns` already uses it for 16 and 32 px |
+| **Small icon** | `final/icon/lightair-icon-small.svg` | Sizes ≤ 32 px (heavier L, bigger light). The `.icns` already uses it for 16 and 32 px |
 | **Wordmark** | `final/wordmark/lightair-wordmark-{ink,white}.svg` + PNGs (120/240/480 px tall) | Headers, docs, splash, social |
 | **Lockup** | `final/lockup/lightair-lockup-{ink,white}.svg` + PNGs (120/240 px tall) | Website header, about window, slides |
 | **Board** | `final/board.png` | Overview |
@@ -35,10 +35,9 @@ These are the same values as the app's design system tokens (`bg.app`, `state.li
 |---|---|
 | Body | 824 × 824 rounded square, centred; corner radius 185.4 with 60 % continuous-corner smoothing |
 | Edge | 6 px inset hairline in Edge colour |
-| Red dot | radius 20.5 % of body |
-| Gap | 3.4 % of body |
-| Ring | 3.0 % of body, white |
-| Small variant | dot 19 %, gap 6 %, ring 7.5 %, no hairline |
+| L | white; its box from 28 % to 72 % across and 24 % to 76 % down the body; stroke 15.5 % of body, fully rounded ends |
+| Light | On-air red, radius 10.5 % of body; centre 8.5 % in from the L's right edge and 13 % down from its top |
+| Small variant | box 25–75 % × 21–79 %, stroke 20 %, light radius 12.5 %, no hairline |
 
 **Wordmark:** "Lightair" set in **Inter SemiBold (600)**, tracking −0.02 em, Inter's own kerning. The tittle of the first **i** is replaced by an On-air red circle 1.18 × the tittle's size, raised so the gap to the stem stays the same. Outlines are converted to paths, so no font is needed to use the SVGs.
 

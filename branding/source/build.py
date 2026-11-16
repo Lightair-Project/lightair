@@ -140,10 +140,13 @@ RADIUS = 185.4
 SMOOTH = 0.6
 HAIR = 6
 
-# Ring geometry as fractions of the body size. "small" is tuned for 16 and 32 px renders.
+# The L-light: a bold geometric L with the on-air light in its corner. Fractions of the body
+# size: the L's box (left, top, right, bottom), its stroke, and the dot (radius, and its centre's
+# inset from the box's top-right). "small" is tuned for 16 and 32 px renders: a heavier L, a
+# bigger light, no hairline.
 ICON_VARIANTS = {
-    "regular": dict(dot=0.205, gap=0.034, stroke=0.030, hairline=True),
-    "small": dict(dot=0.190, gap=0.060, stroke=0.075, hairline=False),
+    "regular": dict(box=(0.28, 0.24, 0.72, 0.76), stroke=0.155, dot=0.105, inset=(0.085, 0.13), hairline=True),
+    "small": dict(box=(0.25, 0.21, 0.75, 0.79), stroke=0.20, dot=0.125, inset=(0.095, 0.13), hairline=False),
 }
 
 
@@ -151,10 +154,6 @@ def icon_parts(variant, size=CANVAS, body=BODY, off=BODY_OFF, radius=RADIUS):
     v = ICON_VARIANTS[variant]
     k = size / CANVAS
     body, off, radius = body * k, off * k, radius * k
-    rd = v["dot"] * body
-    ri = rd + v["gap"] * body
-    ro = ri + v["stroke"] * body
-    c = off + body / 2
     parts = []
     if v["hairline"]:
         hair = HAIR * k
@@ -163,8 +162,12 @@ def icon_parts(variant, size=CANVAS, body=BODY, off=BODY_OFF, radius=RADIUS):
         parts.append(("path", squircle_ops(inner, radius * inner / body, SMOOTH, off + hair, off + hair), INK))
     else:
         parts.append(("path", squircle_ops(body, radius, SMOOTH, off, off), INK))
-    parts.append(("ring", (c, c, (ri + ro) / 2, ro - ri), WHITE))
-    parts.append(("circle", (c, c, rd), RED))
+    x0, y0, x1, y1 = (off + f * body for f in v["box"])
+    t = v["stroke"] * body
+    parts.append(("rrect", (x0, y0, x0 + t, y1, t / 2), WHITE))   # the stem
+    parts.append(("rrect", (x0, y1 - t, x1, y1, t / 2), WHITE))   # the foot
+    ix, iy = v["inset"]
+    parts.append(("circle", (x1 - ix * body, y0 + iy * body, v["dot"] * body), RED))
     return parts
 
 
@@ -179,6 +182,9 @@ def parts_to_svg(parts, w, h, extra=""):
         elif kind == "ring":
             cx, cy, r, sw = geo
             body.append(f'  <circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r:.2f}" fill="none" stroke="{col}" stroke-width="{sw:.2f}"/>')
+        elif kind == "rrect":
+            x0, y0, x1, y1, r = geo
+            body.append(f'  <rect x="{x0:.2f}" y="{y0:.2f}" width="{x1 - x0:.2f}" height="{y1 - y0:.2f}" rx="{r:.2f}" fill="{col}"/>')
         elif kind == "raw":
             body.append(geo)
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0f}" height="{h:.0f}" '
@@ -193,6 +199,9 @@ def draw_parts(img, parts, scale):
         elif kind == "circle":
             cx, cy, r = (v * scale for v in geo)
             d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=rgb(col))
+        elif kind == "rrect":
+            x0, y0, x1, y1, r = (v * scale for v in geo)
+            d.rounded_rectangle((x0, y0, x1, y1), radius=r, fill=rgb(col))
         elif kind == "ring":
             cx, cy, r, sw = (v * scale for v in geo)
             ro, ri = r + sw / 2, r - sw / 2
@@ -432,6 +441,8 @@ def build_lockup(geo):
                 g = [(op[0],) + tuple(((p[0], p[1] + icon_y) if isinstance(p, tuple) else p) for p in op[1:]) for op in g]
             elif kind in ("circle", "ring"):
                 g = (g[0], g[1] + icon_y) + tuple(g[2:])
+            elif kind == "rrect":
+                g = (g[0], g[1] + icon_y, g[2], g[3] + icon_y, g[4])
             shifted.append((kind, g, c))
         word = ("raw", wordmark_svg_group(geo, col, L["icon"] + L["gap"] - x0, -L["top"]), None)
         svg = parts_to_svg(shifted + [word], L["w"], L["h"])
