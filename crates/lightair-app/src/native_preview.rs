@@ -189,6 +189,9 @@ impl NativePreview {
             send_bool(well_layer, c"setMasksToBounds:", true);
             send_p(well_view, c"setLayer:", well_layer);
             send_bool(well_view, c"setWantsLayer:", true);
+            // the pictures stay inside it, zoomed in or not (views stopped clipping their
+            // subviews by default in macOS 14)
+            send_bool(well_view, c"setClipsToBounds:", true);
             send_bool(well_view, c"setHidden:", true);
             send_p(view, c"addSubview:", well_view);
             add_below(content, view, gpui_view);
