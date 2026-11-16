@@ -75,7 +75,10 @@ with what's known about each. Keep it current: strike items as they land.
 - ~~A block editor beyond the current list~~ (done: If's conditions, Then and Otherwise, and
   Random's choices edited in place, nested to any depth; moving a step between lists is still
   delete and add).
-- Streamer.bot import; Twitch channel-point redemptions (EventSub with a user token).
+- ~~Streamer.bot import~~ (done: Automations › New › Import from Streamer.bot, from a copied
+  export; all 141 public exports found import, C# kept as comments to port, older If/Else and
+  some OBS steps listed as not brought over). Twitch channel-point redemptions (EventSub with
+  the official sign-in's token) left.
 
 ## Integrations
 
