@@ -18,7 +18,12 @@ fn text<'a>(p: &'a Value, key: &str) -> Option<&'a str> {
 
 /// Starts the automations; their steps call Lightair through `jobs` (the remote API's queue).
 pub(super) fn start_automations(hub: &lightair_live::Hub, jobs: super::remote::JobSender) -> Automations {
+    let chat = hub.clone();
     let host: Host = Arc::new(move |method: &str, params: Value| {
+        // (sending takes a moment: on the automation's own thread)
+        if method == "chat.send" {
+            return crate::chat_send::send(&chat, &params);
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let call = Call { method: method.to_string(), params, client: "Automation" };
         jobs.unbounded_send((call, tx)).map_err(|_| "Lightair is closing".to_string())?;
@@ -62,7 +67,16 @@ impl StudioWindow {
                 let start = h.len().saturating_sub(limit);
                 Ok(json!({"events": &h[start..], "channels": hub.status().into_iter().map(|(c, s)| json!({"platform": c.platform, "channel": c.channel, "status": s})).collect::<Vec<_>>()}))
             }
-            "chat.send" => self.send_chat(p, cx),
+            // the server and automations send on their own threads; anything else, off this one
+            "chat.send" => {
+                let (hub, p) = (hub.clone(), p.clone());
+                std::thread::spawn(move || {
+                    if let Err(e) = crate::chat_send::send(&hub, &p) {
+                        tracing::warn!(%e, "chat not sent");
+                    }
+                });
+                Ok(json!({"queued": true}))
+            }
             "widgets.list" => widgets.map(|w| json!({"widgets": w.list().into_iter().map(|(id, kind)| json!({"id": id, "kind": kind})).collect::<Vec<_>>(), "session": w.session()})).ok_or_else(no_widgets),
             "widgets.test" => {
                 let w = widgets.ok_or_else(no_widgets);
@@ -138,15 +152,5 @@ impl StudioWindow {
             _ => return None,
         })
     }
-
-    /// Sends chat where it can be sent (accounts that can send are set up in Outputs).
-    fn send_chat(&mut self, p: &Value, cx: &mut Context<Self>) -> Reply {
-        let text = text(p, "text").unwrap_or("").trim().to_string();
-        if text.is_empty() {
-            return Err(ApiError::invalid("nothing to send"));
-        }
-        let platform = p.get("platform").and_then(Value::as_str).unwrap_or("").to_string();
-        let sent = crate::chat_send::send(&self.studio.read(cx).chat, &platform, &text);
-        sent.map(|n| json!({"sent": n})).map_err(|e| ApiError::new(ErrorKind::State, e))
-    }
 }
+

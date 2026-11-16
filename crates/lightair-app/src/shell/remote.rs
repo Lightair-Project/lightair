@@ -271,7 +271,12 @@ impl StudioWindow {
         self.remote.server = None;
         let jobs = self.remote.jobs.clone();
         let engine = self.studio.read(cx).engine().clone();
+        let chat = self.studio.read(cx).chat.clone();
         let handler: Handler = Arc::new(move |call: Call| {
+            // sending takes a moment: on the server's thread, not the main one
+            if call.method == "chat.send" {
+                return crate::chat_send::send(&chat, &call.params).map_err(|e| ApiError::new(ErrorKind::State, e));
+            }
             // asking the system for windows and devices takes a moment: not on the main thread
             if call.method == "capture.targets" {
                 return capture_targets(&call.params, &engine);

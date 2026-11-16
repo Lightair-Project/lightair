@@ -34,6 +34,26 @@ pub type MessageSink = Arc<dyn Fn(String) + Send + Sync>;
 /// `console.log("\u0001lightair:" + text)`.
 pub const MESSAGE_PREFIX: &str = "\u{1}lightair:";
 
+/// Called when a window page is closed (by the person, or dropped).
+pub type OnClosed = Arc<dyn Fn() + Send + Sync>;
+
+/// Gets the cookies asked for: (name, value).
+pub type CookiesDone = Box<dyn FnOnce(Vec<(String, String)>) + Send>;
+
+static PROFILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Where Chromium keeps its profile (cookies, storage), so sign-ins last (set once, before the
+/// first page; the default is a temporary folder).
+pub fn set_profile_dir(dir: std::path::PathBuf) {
+    let _ = PROFILE.set(dir);
+}
+
+/// The cookies Chromium would send to `url` (name, value), given to `done` (on Chromium's
+/// thread; empty when there are none or Chromium isn't here).
+pub fn cookies(url: &str, done: impl FnOnce(Vec<(String, String)>) + Send + 'static) {
+    imp::request(imp::Request::Cookies { url: url.into(), done: Box::new(done) });
+}
+
 type Resolver = Box<dyn Fn(&str) -> String + Send + Sync>;
 static RESOLVER: std::sync::OnceLock<Resolver> = std::sync::OnceLock::new();
 
@@ -88,9 +108,20 @@ impl Page {
         let options = PageOptions { url: url.into(), width: 1024, height: 768, fps: 1, zoom: 1.0, css: String::new() };
         let none: FrameSink = Arc::new(|_, _, _| {});
         let silent: AudioSink = Arc::new(|_, _| {});
-        imp::request(imp::Request::Open { id, options, sink: none, texture: None, audio: silent, agent: Some((script, messages)) });
+        imp::request(imp::Request::Open { id, options, sink: none, texture: None, audio: silent, agent: Some((script, messages)), window: None });
         // never throttled as a hidden page would be
         imp::request(imp::Request::Visible { id, visible: true });
+        Page { id }
+    }
+
+    /// A page in a window of its own, for a person to use (signing in to a platform): shares
+    /// every page's cookies. `on_closed` runs when it's closed.
+    pub fn open_window(url: &str, title: &str, size: (u32, u32), on_closed: OnClosed) -> Page {
+        let id = imp::next_id();
+        let options = PageOptions { url: url.into(), width: size.0, height: size.1, fps: 60, zoom: 1.0, css: String::new() };
+        let none: FrameSink = Arc::new(|_, _, _| {});
+        let silent: AudioSink = Arc::new(|_, _| {});
+        imp::request(imp::Request::Open { id, options, sink: none, texture: None, audio: silent, agent: None, window: Some((title.into(), on_closed)) });
         Page { id }
     }
 
@@ -109,7 +140,7 @@ impl Page {
     pub fn open(options: PageOptions, sink: FrameSink, audio: AudioSink) -> Page {
         let options = resolved(options);
         let id = imp::next_id();
-        imp::request(imp::Request::Open { id, options, sink, texture: None, audio, agent: None });
+        imp::request(imp::Request::Open { id, options, sink, texture: None, audio, agent: None, window: None });
         Page { id }
     }
 
@@ -119,7 +150,7 @@ impl Page {
         let options = resolved(options);
         let id = imp::next_id();
         let texture = cfg!(target_os = "macos").then_some(texture);
-        imp::request(imp::Request::Open { id, options, sink, texture, audio, agent: None });
+        imp::request(imp::Request::Open { id, options, sink, texture, audio, agent: None, window: None });
         Page { id }
     }
 
@@ -197,7 +228,7 @@ pub fn set_waker(wake: impl Fn() + Send + Sync + 'static) {
 
 #[cfg(any(target_os = "macos", all(windows, not(lightair_cross_check))))]
 mod imp {
-    use super::{AudioSink, FrameSink, MessageSink, PageOptions, TextureSink};
+    use super::{AudioSink, CookiesDone, FrameSink, MessageSink, OnClosed, PageOptions, TextureSink};
     use cef::*;
     use parking_lot::Mutex;
     use std::cell::RefCell;
@@ -214,7 +245,10 @@ mod imp {
             audio: AudioSink,
             /// An agent page: its script and where its messages go.
             agent: Option<(String, MessageSink)>,
+            /// A page in a window of its own: its title, and who to tell when it closes.
+            window: Option<(String, OnClosed)>,
         },
+        Cookies { url: String, done: CookiesDone },
         Update { id: u64, options: PageOptions },
         Eval { id: u64, code: String },
         Navigate { id: u64, url: String },
@@ -455,8 +489,10 @@ mod imp {
     /// time. Another Lightair running alongside (a second copy, a test) gets one of its own,
     /// removed by a later start once that copy has gone.
     fn cache_dir() -> std::path::PathBuf {
-        let temp = std::env::temp_dir();
-        let shared = temp.join("lightair-web");
+        let (temp, shared) = match super::PROFILE.get() {
+            Some(dir) => (dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(std::env::temp_dir), dir.clone()),
+            None => (std::env::temp_dir(), std::env::temp_dir().join("lightair-web")),
+        };
         #[cfg(target_os = "macos")]
         {
             let alive = |pid: i32| pid > 0 && unsafe { libc::kill(pid, 0) } == 0;
@@ -624,11 +660,23 @@ mod imp {
         }
     }
 
+    thread_local! {
+        /// Window pages' close callbacks.
+        static WINDOWS: RefCell<HashMap<u64, OnClosed>> = RefCell::new(HashMap::new());
+    }
+
     wrap_life_span_handler! {
         struct PageLife {
             id: u64,
         }
         impl LifeSpanHandler {
+            fn on_before_close(&self, _browser: Option<&mut Browser>) {
+                let id = self.id;
+                if let Some(f) = WINDOWS.with(|w| w.borrow_mut().remove(&id)) {
+                    PAGES.with(|pages| pages.borrow_mut().remove(&id));
+                    f();
+                }
+            }
             fn on_after_created(&self, browser: Option<&mut Browser>) {
                 let Some(browser) = browser else { return };
                 let id = self.id;
@@ -716,6 +764,45 @@ mod imp {
         }
     }
 
+    /// Hands what was collected over when Chromium lets go of the visitor (after the last
+    /// cookie, or at once when there are none).
+    struct CookieJar {
+        found: Mutex<Vec<(String, String)>>,
+        done: Mutex<Option<CookiesDone>>,
+    }
+
+    impl Drop for CookieJar {
+        fn drop(&mut self) {
+            if let Some(done) = self.done.get_mut().take() {
+                done(std::mem::take(self.found.get_mut()));
+            }
+        }
+    }
+
+    wrap_cookie_visitor! {
+        struct CookieCollector {
+            jar: Arc<CookieJar>,
+        }
+        impl CookieVisitor {
+            fn visit(&self, cookie: Option<&Cookie>, _count: ::std::os::raw::c_int, _total: ::std::os::raw::c_int, _delete_cookie: Option<&mut ::std::os::raw::c_int>) -> ::std::os::raw::c_int {
+                if let Some(c) = cookie {
+                    self.jar.found.lock().push((c.name.to_string(), c.value.to_string()));
+                }
+                1
+            }
+        }
+    }
+
+    fn cookies(url: String, done: CookiesDone) {
+        let jar = Arc::new(CookieJar { found: Mutex::new(Vec::new()), done: Mutex::new(Some(done)) });
+        if let Some(manager) = cookie_manager_get_global_manager(None) {
+            let mut visitor = CookieCollector::new(jar.clone());
+            manager.visit_url_cookies(Some(&CefString::from(url.as_str())), 1, Some(&mut visitor));
+        }
+        // the visitor's copy (Chromium's) and this one: the last to go answers
+        drop(jar);
+    }
+
     // An agent page's messages: console lines with Lightair's prefix (the rest are the page's own)
     wrap_display_handler! {
         struct PageDisplay {
@@ -781,7 +868,8 @@ mod imp {
         std::ptr::null_mut()
     }
 
-    fn open(id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink, agent: Option<(String, MessageSink)>) {
+    #[allow(clippy::too_many_arguments)]
+    fn open(id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink, agent: Option<(String, MessageSink)>, window_of: Option<(String, OnClosed)>) {
         let (script, messages) = agent.map_or((String::new(), None), |(s, m)| (s, Some(m)));
         let view = Arc::new(Mutex::new(view_of(&options)));
         let format = Arc::new(Mutex::new((48_000, 2)));
@@ -794,14 +882,27 @@ mod imp {
             PageDisplay::new(messages),
         );
         // shared textures: Chromium's GPU frames go to the scene as they are (no readback)
-        let window = WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: texture.is_some() as i32, ..Default::default() };
+        let window = match &window_of {
+            // a window of its own, in the middle of the screen
+            Some((title, closed)) => {
+                WINDOWS.with(|w| w.borrow_mut().insert(id, closed.clone()));
+                WindowInfo {
+                    window_name: CefString::from(title.as_str()),
+                    bounds: Rect { x: 160, y: 120, width: options.width as i32, height: options.height as i32 },
+                    runtime_style: RuntimeStyle::ALLOY,
+                    ..Default::default()
+                }
+            }
+            None => WindowInfo { windowless_rendering_enabled: 1, shared_texture_enabled: texture.is_some() as i32, ..Default::default() },
+        };
         let browser_settings = BrowserSettings {
             windowless_frame_rate: options.fps.clamp(1, 60) as i32,
             background_color: 0x0000_0000,
             ..Default::default()
         };
         let url = CefString::from(options.url.as_str());
-        PAGES.with(|pages| pages.borrow_mut().insert(id, Live { browser: None, view, css, options, visible: false }));
+        let visible = window_of.is_some();
+        PAGES.with(|pages| pages.borrow_mut().insert(id, Live { browser: None, view, css, options, visible }));
         if browser_host_create_browser(Some(&window), Some(&mut client), Some(&url), Some(&browser_settings), None, None) != 1 {
             tracing::warn!("Chromium didn't open a page");
         }
@@ -889,7 +990,8 @@ mod imp {
         let requests = std::mem::take(&mut *REQUESTS.lock());
         for r in requests {
             match r {
-                Request::Open { id, options, sink, texture, audio, agent } => open(id, options, sink, texture, audio, agent),
+                Request::Open { id, options, sink, texture, audio, agent, window } => open(id, options, sink, texture, audio, agent, window),
+                Request::Cookies { url, done } => cookies(url, done),
                 Request::Eval { id, code } => PAGES.with(|pages| {
                     if let Some(frame) = pages.borrow().get(&id).and_then(|l| l.browser.as_ref()).and_then(|b| b.main_frame()) {
                         frame.execute_java_script(Some(&CefString::from(code.as_str())), Some(&CefString::from("lightair://agent")), 0);
@@ -965,11 +1067,12 @@ mod imp {
 /// No Chromium here (the Windows check made from a Mac): pages never paint.
 #[cfg(not(any(target_os = "macos", all(windows, not(lightair_cross_check)))))]
 mod imp {
-    use super::{AudioSink, FrameSink, MessageSink, PageOptions, TextureSink};
+    use super::{AudioSink, CookiesDone, FrameSink, MessageSink, OnClosed, PageOptions, TextureSink};
 
     #[allow(dead_code)] // (asked for, never made here)
     pub enum Request {
-        Open { id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink, agent: Option<(String, MessageSink)> },
+        Open { id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink, agent: Option<(String, MessageSink)>, window: Option<(String, OnClosed)> },
+        Cookies { url: String, done: CookiesDone },
         Update { id: u64, options: PageOptions },
         Eval { id: u64, code: String },
         Navigate { id: u64, url: String },
@@ -983,7 +1086,11 @@ mod imp {
         0
     }
 
-    pub fn request(_: Request) {}
+    pub fn request(r: Request) {
+        if let Request::Cookies { done, .. } = r {
+            done(Vec::new());
+        }
+    }
 
     pub fn available() -> bool {
         false

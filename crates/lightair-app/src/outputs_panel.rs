@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use gpui_kit::component::Sizable;
+use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
@@ -73,12 +73,20 @@ struct Configure {
 /// Asks the window to add a vertical canvas (reframing every scene into it).
 pub struct AddVerticalCanvas;
 
+type SignIn = (String, Box<dyn lightair_live::pages::Page>, std::sync::Arc<std::sync::atomic::AtomicBool>);
+
 pub struct OutputsPanel {
     studio: Entity<Studio>,
     setup: Option<Setup>,
     focus: FocusHandle,
     /// The recording drive's free space.
     disk: crate::storage::DiskWatch,
+    /// Signed in on each platform (for sending chat), as last looked up.
+    signed_in: std::collections::HashMap<String, bool>,
+    /// Platforms looked up already (or being).
+    asked: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// A sign-in window open: its platform, the page, and whether it was closed.
+    sign_in: Option<SignIn>,
 }
 
 pub fn elapsed(since: Instant) -> String {
@@ -253,6 +261,84 @@ fn toggle(id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
 }
 
 impl OutputsPanel {
+    /// Looks up (off the main thread) whether `platform` is signed in.
+    fn check_signed_in(&self, platform: &str, cx: &mut Context<Self>) {
+        self.asked.borrow_mut().insert(platform.to_string());
+        let p = platform.to_string();
+        cx.spawn(async move |this, cx| {
+            let q = p.clone();
+            let yes = cx.background_executor().spawn(async move { lightair_live::accounts::signed_in(&q) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.signed_in.insert(p, yes);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Opens the platform's sign-in page in a window; looks again when it's closed.
+    fn open_sign_in(&mut self, platform: &str, cx: &mut Context<Self>) {
+        let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = closed.clone();
+        match lightair_live::accounts::sign_in(platform, std::sync::Arc::new(move || flag.store(true, std::sync::atomic::Ordering::Release))) {
+            Ok(page) => {
+                self.sign_in = Some((platform.to_string(), page, closed));
+                cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                        let done = this
+                            .update(cx, |this, cx| {
+                                let finished = this.sign_in.as_ref().is_none_or(|(_, _, c)| c.load(std::sync::atomic::Ordering::Acquire));
+                                if finished && let Some((p, _, _)) = this.sign_in.take() {
+                                    this.check_signed_in(&p, cx);
+                                }
+                                finished
+                            })
+                            .unwrap_or(true);
+                        if done {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            }
+            Err(e) => tracing::warn!(%e, "sign in"),
+        }
+        cx.notify();
+    }
+
+    /// "Sending": signed in or not, and the button to sign in (platforms Lightair can send to).
+    fn sending_row(&self, platform: &'static str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let account = lightair_live::accounts::account(platform)?;
+        let key = account.platform.to_string();
+        if !self.asked.borrow().contains(&key) {
+            self.check_signed_in(&key, cx);
+        }
+        let yes = self.signed_in.get(&key).copied().unwrap_or(false);
+        let open = self.sign_in.as_ref().is_some_and(|(p, _, _)| *p == key);
+        let label = if open { "Finish in the window, then close it" } else if yes { "Sign in again" } else { "Sign in to send" };
+        let status = div()
+            .text_size(px(12.))
+            .text_color(if yes { tok::ok() } else { tok::text_tertiary() })
+            .child(if yes { "Signed in" } else { "Not signed in" });
+        let k = key.clone();
+        Some(
+            form_row(
+                "Sending",
+                Some("Sign in on the platform's own page, in a Lightair window: chat commands, automations and replies then send as you.".into()),
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(status)
+                    .child(Button::new("sign-in").label(label).small().outline().disabled(open).on_click(cx.listener(move |this, _, _, cx| this.open_sign_in(&k, cx))))
+                    .into_any_element(),
+            )
+            .into_any_element(),
+        )
+    }
+
     pub fn new(studio: Entity<Studio>, cx: &mut Context<Self>) -> Self {
         cx.observe(&studio, |_, _, cx| cx.notify()).detach();
         // elapsed times and the recording drive, twice a second while an output runs
@@ -267,7 +353,7 @@ impl OutputsPanel {
             }
         })
         .detach();
-        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default() }
+        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default(), signed_in: Default::default(), asked: Default::default(), sign_in: None }
     }
 
     /// Asks for a vertical canvas, to send once it's there.
@@ -734,7 +820,8 @@ impl OutputsPanel {
                     Some("The channel whose chat shows in the Chat panel. Read without logging in."),
                     div().flex_1().child(Input::new(&e.chat).small()).into_any_element(),
                 ))
-            });
+            })
+            .children(self.sending_row(e.platform.id, cx));
         let picture_sound = card("Picture & sound")
             .child(row("Canvas", None, shapes.into_any_element()))
             .child(row(

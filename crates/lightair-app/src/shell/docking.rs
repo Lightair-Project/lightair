@@ -265,6 +265,19 @@ impl StudioWindow {
         // Development: open a dialog on launch for screenshots (no clicking needed).
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
             Ok("add-object") => self.open_add_object(window, cx),
+            // a platform's sign-in window (kept open until closed)
+            Ok(hook) if hook.starts_with("signin-") => {
+                static KEPT: parking_lot::Mutex<Option<Box<dyn lightair_live::pages::Page>>> = parking_lot::Mutex::new(None);
+                let closed: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(|| tracing::info!("CHECK sign-in window closed"));
+                if let Ok(url) = std::env::var("LIGHTAIR_SIGNIN_URL") {
+                    *KEPT.lock() = Some(crate::chat_panel::window_page(&url, closed));
+                } else {
+                    match lightair_live::accounts::sign_in(&hook[7..], closed) {
+                        Ok(page) => *KEPT.lock() = Some(page),
+                        Err(e) => tracing::warn!(%e, "CHECK sign-in"),
+                    }
+                }
+            }
             // recipes added (and an alert box, for their voice), then the test events sent
             Ok(hook) if hook.starts_with("automations-") => {
                 for key in hook[12..].split(',') {
