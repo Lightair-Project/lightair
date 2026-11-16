@@ -1858,6 +1858,12 @@ impl StudioWindow {
             return false;
         }
         let mut native = self.native.borrow_mut();
+        // GPUI remade its composition (a lost device): the visuals go with it
+        #[cfg(windows)]
+        if native.as_ref().is_some_and(|n| !n.current()) {
+            *native = None;
+            self.native_layers.clear();
+        }
         if native.is_none() {
             *native = crate::native_preview::NativePreview::attach(window, tok::bg_app(), tok::bg_canvas_well());
         }
@@ -3513,10 +3519,16 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let bounds_map = self.stage_bounds.clone();
         let fid = shown.id;
-        let frame = self.previews.get(&fid).and_then(|p| p.latest_frame());
+        let native = self.native.borrow().is_some();
+        // drawn under the UI (native_preview): only whether it has started is needed here, and
+        // asking for a frame would have the preview read every frame back
+        let frame = match self.previews.get(&fid) {
+            Some(p) if native => (p.frames() > 0).then_some(None),
+            Some(p) => p.latest_frame().map(Some),
+            None => None,
+        };
         let editing = fid == self.canvas_id(workspace);
 
-        let native = self.native.borrow().is_some();
         let (rects, zoom, pan, (cw, ch)) = (self.native_rects.clone(), self.zoom, self.pan, (shown.width as f32, shown.height as f32));
         let mut stage = div()
             .absolute()
@@ -3542,8 +3554,8 @@ impl StudioWindow {
             )
             .child(match frame {
                 // drawn under the UI (native_preview)
-                Some(_) if native => div().into_any_element(),
-                Some(f) => match (self.mapping(workspace, fid), self.stage_bounds.borrow().get(&fid).copied()) {
+                Some(None) => div().into_any_element(),
+                Some(Some(f)) => match (self.mapping(workspace, fid), self.stage_bounds.borrow().get(&fid).copied()) {
                     // Placed where the shown is (zoomed and panned).
                     (Some((ox, oy, s)), Some(b)) => crate::frame_view::frame(f)
                         .absolute()

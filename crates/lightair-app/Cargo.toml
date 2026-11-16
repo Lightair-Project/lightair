@@ -10,6 +10,10 @@ publish.workspace = true
 name = "lightair"
 path = "src/main.rs"
 
+[build-dependencies]
+# Windows: the icon and version information in lightair.exe
+embed-resource = "3"
+
 [dependencies]
 # automation triggers (triggers.rs): MIDI inputs, game controllers
 midir = "0.11"
@@ -63,6 +67,19 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+# The preview under the UI: DirectComposition visuals in GPUI's window (its underlay, patched in
+# third_party/gpui-pre-windows).
+gpui-pre-windows = "=0.3.12"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+windows-numerics = "0.3"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

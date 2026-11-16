@@ -1,0 +1,142 @@
+//! Windows: the preview presented straight into a DirectComposition swap chain (the window's
+//! canvas picture, under its UI), with no copy through memory and no redraw of the UI.
+//!
+//! The swap chain belongs to libobs's own D3D11 device: each frame the graphics thread copies
+//! the preview's render target into the back buffer (a GPU copy) and presents without waiting.
+//! The app shows the swap chain in a composition visual under GPUI's (`native_preview`).
+
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use lightair_engine::sys;
+use parking_lot::Mutex;
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Resource, ID3D11Texture2D};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory2, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT_DO_NOT_WAIT, DXGI_SCALING_STRETCH,
+    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    IDXGIFactory2, IDXGISwapChain1, DXGI_CREATE_FACTORY_FLAGS,
+};
+use windows::core::Interface;
+
+/// A swap chain the preview presents its frames to, shown by a composition visual.
+pub struct Layer {
+    swap: IDXGISwapChain1,
+    /// The back buffers' size, packed (width << 32 | height).
+    size: AtomicU64,
+    /// The back buffers' format (graphics thread).
+    format: Mutex<DXGI_FORMAT>,
+    /// Serialises presenting (graphics thread) with dropping.
+    lock: Mutex<()>,
+}
+
+// SAFETY: the swap chain is used on libobs's graphics thread only (resize, copy, present); other
+// threads read `size` or hand the swap chain's pointer to DirectComposition, which takes its own
+// reference.
+unsafe impl Send for Layer {}
+unsafe impl Sync for Layer {}
+
+const START: u32 = 16;
+
+impl Layer {
+    /// A swap chain on libobs's device (libobs must be running on Direct3D 11).
+    pub fn new() -> Option<Self> {
+        unsafe {
+            sys::obs_enter_graphics();
+            let device = sys::gs_get_device_obj();
+            let swap = if device.is_null() { None } else { Self::make(device) };
+            sys::obs_leave_graphics();
+            if swap.is_none() {
+                tracing::warn!("couldn't make a composition swap chain for the preview");
+            }
+            Some(Self {
+                swap: swap?,
+                size: AtomicU64::new(pack(START, START)),
+                format: Mutex::new(DXGI_FORMAT_B8G8R8A8_UNORM),
+                lock: Mutex::new(()),
+            })
+        }
+    }
+
+    unsafe fn make(device: *mut c_void) -> Option<IDXGISwapChain1> {
+        unsafe {
+            let device = ID3D11Device::from_raw_borrowed(&device)?;
+            let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
+            let desc = DXGI_SWAP_CHAIN_DESC1 {
+                Width: START,
+                Height: START,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                Stereo: false.into(),
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                BufferCount: 2,
+                Scaling: DXGI_SCALING_STRETCH,
+                SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                Flags: 0,
+            };
+            factory.CreateSwapChainForComposition(device, &desc, None).ok()
+        }
+    }
+
+    /// `IDXGISwapChain1*` (borrowed), for `IDCompositionVisual::SetContent`.
+    pub fn swap_chain(&self) -> *mut c_void {
+        self.swap.as_raw()
+    }
+
+    /// The back buffers' size in pixels (the picture's visual scales it to its place).
+    pub fn size(&self) -> (u32, u32) {
+        let p = self.size.load(Ordering::Relaxed);
+        ((p >> 32) as u32, p as u32)
+    }
+
+    /// Whether `tex` can be presented as it is (8-bit BGRA or RGBA: the formats a composition
+    /// swap chain takes, and a copy keeps).
+    pub(crate) unsafe fn can_present(&self, tex: *mut sys::gs_texture_t) -> bool {
+        format_of(unsafe { sys::gs_texture_get_color_format(tex) }).is_some()
+    }
+
+    /// Copies `tex` (a `w`×`h` render target of libobs's) into the back buffer and presents it,
+    /// never waiting: a frame the compositor hasn't taken yet is skipped. Graphics thread,
+    /// inside libobs's graphics context. Whether it was presented.
+    pub(crate) unsafe fn present(&self, tex: *mut sys::gs_texture_t, w: u32, h: u32) -> bool {
+        let _held = self.lock.lock();
+        unsafe {
+            let Some(format) = format_of(sys::gs_texture_get_color_format(tex)) else { return false };
+            let mut current = self.format.lock();
+            if self.size() != (w, h) || *current != format {
+                if self.swap.ResizeBuffers(0, w, h, format, DXGI_SWAP_CHAIN_FLAG(0)).is_err() {
+                    return false;
+                }
+                self.size.store(pack(w, h), Ordering::Relaxed);
+                *current = format;
+            }
+            let src = sys::gs_texture_get_obj(tex);
+            let Some(src) = ID3D11Resource::from_raw_borrowed(&src) else { return false };
+            let Ok(back) = self.swap.GetBuffer::<ID3D11Texture2D>(0) else { return false };
+            let Ok(device) = back.GetDevice() else { return false };
+            let Ok(context) = device.GetImmediateContext() else { return false };
+            context.CopyResource(&back, src);
+            drop(back);
+            let hr = self.swap.Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+            if hr.is_err() && hr != DXGI_ERROR_WAS_STILL_DRAWING {
+                tracing::debug!("preview present: {hr:?}");
+            }
+            hr.is_ok()
+        }
+    }
+}
+
+fn format_of(format: sys::gs_color_format) -> Option<DXGI_FORMAT> {
+    match format {
+        sys::GS_BGRA => Some(DXGI_FORMAT_B8G8R8A8_UNORM),
+        sys::GS_RGBA => Some(DXGI_FORMAT_R8G8B8A8_UNORM),
+        _ => None,
+    }
+}
+
+fn pack(w: u32, h: u32) -> u64 {
+    ((w as u64) << 32) | h as u64
+}

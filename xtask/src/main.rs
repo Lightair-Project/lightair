@@ -253,13 +253,67 @@ fn bundle_chromium(root: &Path, app: &Path, profile: &str, copy: bool, id: &str)
 }
 
 /// Links OBS's helper programs next to the debug binary (development without the bundle).
-fn dev() -> anyhow::Result<()> {
+/// Windows: Chromium's runtime too (lightair.exe loads libcef.dll as it starts, and Chromium
+/// finds its resources beside it), for `target/debug`, or `target/release` with `--release`.
+fn dev(release: bool) -> anyhow::Result<()> {
     let mux = obs_mux();
-    for dir in [root().join("target/debug"), root().join("target/debug/deps")] {
+    let profile = if release { "release" } else { "debug" };
+    let out = root().join("target").join(profile);
+    for dir in [out.clone(), out.join("deps")] {
         std::fs::create_dir_all(&dir)?;
         let link = dir.join(mux.file_name().unwrap());
         if !link.exists() {
             link_file(&mux, &link)?;
+        }
+        if cfg!(windows) {
+            chromium_runtime(&dir)?;
+        }
+    }
+    Ok(())
+}
+
+/// Windows: copies Chromium's runtime (CEF's Release folder and its Resources, as fetched
+/// into target/cef) into `dir`, where only what's changed is copied again.
+fn chromium_runtime(dir: &Path) -> anyhow::Result<()> {
+    let Some(cef) = std::fs::read_dir(root().join("target/cef"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|version| std::fs::read_dir(version.path()).into_iter().flatten().flatten())
+        .map(|platform| platform.path())
+        .find(|p| p.join("libcef.dll").exists())
+    else {
+        eprintln!("no Chromium in target/cef (build lightair-web once): web pages won't paint");
+        return Ok(());
+    };
+    fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let (src, dst) = (entry.path(), to.join(entry.file_name()));
+            if entry.file_type()?.is_dir() {
+                copy_tree(&src, &dst)?;
+            } else {
+                let same = std::fs::metadata(&dst).ok().zip(entry.metadata().ok()).is_some_and(|(d, s)| d.len() == s.len() && d.modified().ok() >= s.modified().ok());
+                if !same {
+                    std::fs::copy(&src, &dst)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    for entry in std::fs::read_dir(&cef)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let wanted = name.ends_with(".dll") || name.ends_with(".pak") || name.ends_with(".dat") || name.ends_with(".bin") || name.ends_with(".json");
+        if entry.file_type()?.is_dir() && name == "locales" {
+            copy_tree(&entry.path(), &dir.join("locales"))?;
+        } else if wanted && name != "archive.json" {
+            let dst = dir.join(&name);
+            let same = std::fs::metadata(&dst).ok().zip(entry.metadata().ok()).is_some_and(|(d, s)| d.len() == s.len());
+            if !same {
+                std::fs::copy(entry.path(), dst)?;
+            }
         }
     }
     Ok(())
@@ -269,7 +323,7 @@ fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("modules") => modules(),
         Some("bundle") => bundle(std::env::args().any(|a| a == "--release")),
-        Some("dev") => dev(),
+        Some("dev") => dev(std::env::args().any(|a| a == "--release")),
         Some("virtual-camera") => virtual_camera(std::env::args().any(|a| a == "--uninstall")),
         Some("test") => test(std::env::args().skip(2).collect()),
         Some("check") => check(std::env::args().any(|a| a == "--changed")),

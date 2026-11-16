@@ -3222,8 +3222,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-windows"
 version = "0.3.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7201762420222d5b5ce5bdf0056996199212a3349bfb2457a3a0238c688681f3"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -4226,11 +4224,13 @@ dependencies = [
  "cbc",
  "chrono",
  "cpal",
+ "embed-resource",
  "futures-channel",
  "futures-util",
  "getrandom 0.3.4",
  "gilrs",
  "gpui-kit",
+ "gpui-pre-windows",
  "image",
  "keyring",
  "libc",
@@ -4259,6 +4259,8 @@ dependencies = [
  "sha2 0.10.9",
  "tracing",
  "tracing-subscriber",
+ "windows 0.62.2",
+ "windows-numerics 0.3.1",
  "windows-sys 0.61.2",
 ]
 
@@ -4328,6 +4330,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vst3",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
 ]
 
@@ -4377,6 +4380,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "windows 0.62.2",
 ]
 
 [[package]]
