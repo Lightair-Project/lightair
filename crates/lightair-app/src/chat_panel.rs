@@ -107,7 +107,7 @@ impl ChatPanel {
                     .text_size(px(12.))
                     .text_color(tok::text_tertiary())
                     .text_center()
-                    .child("Add your channel to a Twitch, YouTube or CHZZK destination in Outputs (its Chat field) to read its chat here."),
+                    .child("Add your channel to a Twitch, YouTube, CHZZK, SOOP or DouYu destination in Outputs (its Chat field) to read its chat here."),
             )
     }
 
