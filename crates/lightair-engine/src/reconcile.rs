@@ -71,6 +71,9 @@ pub struct Reconciler {
     /// Countdown/stopwatch/clock sources, driven by their own tick callback.
     timers: Arc<Timers>,
     timers_tick: bool,
+    /// Sources held back until the user answers macOS's camera or microphone prompt
+    /// ([`crate::access`]).
+    awaiting_access: HashSet<Id>,
 }
 
 /// libobs state for one mixer track: its output channel, volume meter and effect filters.
@@ -373,6 +376,19 @@ impl Reconciler {
         true
     }
 
+    /// The user answered macOS's camera or microphone prompt ([`crate::access::changed`]): the
+    /// sources held back are made, in every scene that shows them, and the mixer opens its
+    /// devices.
+    pub fn access_answered(&mut self, workspace: &Workspace) {
+        let waiting: Vec<Id> = self.awaiting_access.drain().collect();
+        for id in waiting {
+            if let Some(source) = workspace.sources.get(&id) {
+                self.recreate_source(source, workspace);
+            }
+        }
+        self.sync_audio(workspace);
+    }
+
     /// Plays the mixer again (a plugin insert finished loading: [`crate::plugins::changed`]).
     pub fn refresh_audio(&mut self, workspace: &Workspace) {
         self.sync_audio(workspace);
@@ -562,6 +578,14 @@ impl Reconciler {
             Some((id, _)) => id,
             None => source.kind.as_str(),
         };
+        // opening a camera or microphone macOS hasn't asked about yet would wait here, on the
+        // prompt: it's asked without waiting, and the source made once answered
+        if let Some(media) = crate::access::needed_by(kind)
+            && crate::access::hold_back(media)
+        {
+            self.awaiting_access.insert(source.id);
+            return;
+        }
         let settings = data_from_json(&source_settings(source, false));
         match ObsSource::create(kind, &source.id.to_string(), Some(&settings)) {
             Some(src) => {
@@ -578,6 +602,7 @@ impl Reconciler {
     }
 
     fn destroy_source(&mut self, id: Id) {
+        self.awaiting_access.remove(&id);
         self.timers.remove(id);
         if self.held.remove(&id)
             && let Some(src) = self.sources.get(&id)
