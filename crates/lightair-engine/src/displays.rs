@@ -139,8 +139,11 @@ pub fn list(captures: bool) -> Vec<Display> {
     let main = main_display_uuid();
     screen_options(DISPLAY, "display")
         .into_iter()
-        .map(|(label, value)| {
+        .enumerate()
+        .map(|(i, (label, value))| {
             let (name, size, primary) = parse_label(&label);
+            // (a monitor that reports no name of its own, as a laptop's panel may)
+            let name = if name.is_empty() { format!("Display {}", i + 1) } else { name };
             let capture = if captures { screen_capture(DISPLAY, "display", &value, &name) } else { None };
             let is_main = primary || (main.is_some() && value.as_str() == main.as_deref());
             Display { name, size, value, main: is_main, capture }

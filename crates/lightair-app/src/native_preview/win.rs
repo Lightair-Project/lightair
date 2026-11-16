@@ -314,8 +314,9 @@ impl NativePreview {
             }
             match StripVisuals::new(&self.device, place, s, m.glyphs.as_ref()) {
                 Ok(mut v) => {
+                    // the levels carry over; what's drawn doesn't (these visuals are new)
                     if let Some(shown) = shown {
-                        v.shown = shown;
+                        v.shown = Shown { text: None, ..shown };
                     }
                     unsafe {
                         let _ = self.meters_root.AddVisual(&v.clip, false, None);
