@@ -17,6 +17,7 @@ pub fn run(engine: &Engine, what: &str) {
         "virtual-camera" => virtual_camera(engine),
         "web" => web(engine),
         "agent-page" => agent_page(),
+        "script" => script(),
         "displays" => displays(engine),
         // puts Lightair's Backgrounds back: LIGHTAIR_BG_PICTURE and LIGHTAIR_BG_ON (0/1)
         "restore-backgrounds" => {
@@ -304,6 +305,33 @@ unsafe extern "C" fn web_audio(_: *mut std::ffi::c_void, _: *mut lightair_engine
     let samples = unsafe { std::slice::from_raw_parts(plane, audio.frames as usize) };
     let loudest = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     WEB_PEAK.fetch_max(loudest.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `LIGHTAIR_SELFTEST=script`: an automation's JavaScript step, run in its hidden page.
+fn script() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject};
+        let _app: *mut AnyObject = unsafe { msg_send![AnyClass::get(c"NSApplication").unwrap(), sharedApplication] };
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let ctx = serde_json::json!({"name": "Mochi", "value": 5});
+        let first = lightair_live::pages::run_script("await new Promise(r => setTimeout(r, 50)); return { greeting: 'Hi ' + ctx.name, double: ctx.value * 2 };", &ctx, Duration::from_secs(10));
+        let second = lightair_live::pages::run_script("throw new Error('nope')", &ctx, Duration::from_secs(10));
+        let _ = tx.send((first, second));
+    });
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(30) {
+        lightair_web::pump();
+        std::thread::sleep(Duration::from_millis(8));
+        if let Ok((first, second)) = rx.try_recv() {
+            println!("SELFTEST script: {first:?} then {second:?} after {} ms", start.elapsed().as_millis());
+            return;
+        }
+    }
+    println!("SELFTEST script: no answer");
 }
 
 /// `LIGHTAIR_SELFTEST=agent-page`: a hidden page's script sends a message back (the bridge the
