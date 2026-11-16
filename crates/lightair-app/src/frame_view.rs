@@ -6,8 +6,51 @@ use gpui_kit::*;
 use lightair_preview::Frame;
 
 #[cfg(target_os = "macos")]
-pub fn frame(f: Frame) -> Surface {
-    surface(f)
+pub fn frame(f: Frame) -> FrameElement {
+    // GPUI draws NV12 surfaces only; libobs's Metal renderer (an experiment, LIGHTAIR_GRAPHICS)
+    // hands over BGRA frames, shown under the UI by Core Animation instead (native_preview)
+    if !lightair_preview::frame_is_nv12(&f) {
+        return FrameElement::Empty(Box::new(div()));
+    }
+    FrameElement::Surface(Box::new(surface(f)))
+}
+
+/// A frame drawn by GPUI, or nothing where GPUI can't draw it.
+#[cfg(target_os = "macos")]
+pub enum FrameElement {
+    Surface(Box<Surface>),
+    Empty(Box<Div>),
+}
+
+#[cfg(target_os = "macos")]
+impl FrameElement {
+    pub fn object_fit(self, fit: ObjectFit) -> Self {
+        match self {
+            FrameElement::Surface(s) => FrameElement::Surface(Box::new(s.object_fit(fit))),
+            e => e,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Styled for FrameElement {
+    fn style(&mut self) -> &mut StyleRefinement {
+        match self {
+            FrameElement::Surface(s) => s.as_mut().style(),
+            FrameElement::Empty(d) => d.as_mut().style(),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl IntoElement for FrameElement {
+    type Element = AnyElement;
+    fn into_element(self) -> AnyElement {
+        match self {
+            FrameElement::Surface(s) => (*s).into_any_element(),
+            FrameElement::Empty(d) => (*d).into_any_element(),
+        }
+    }
 }
 
 /// Starts what takes unused frame images out of the windows' texture atlases.

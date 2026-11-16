@@ -139,6 +139,33 @@ Nothing is throttled: the preview runs at the canvas's rate and the meters at 60
 - The native drawing is macOS only; Windows still draws the preview and meters with GPUI
   (`LIGHTAIR_GPUI_PREVIEW=1` does that on macOS too, for comparison).
 
+## libobs's Metal renderer
+
+libobs 31+ has an experimental Metal renderer next to OpenGL. Both apps were measured on each,
+back to back, the same afternoon (same harness, same scenario):
+
+| | OBS OpenGL | OBS Metal | Lightair OpenGL | Lightair Metal |
+|---|---|---|---|---|
+| CPU, idle | 54.6 % | 57.4 % | 57.5 % | 60.3 % |
+| CPU, recording | 47.7 % | 54.9 % | 58.3 % | 57.6 % |
+| GPU busy, idle / recording | 26.9 / 28.6 % | 33.4 / 31.1 % | 29.3 / 32.7 % | 32.2 / 36.0 % |
+| Render time, idle / recording | 1.09 / 4.21 ms | 0.70 / 2.19 ms | 0.88 / 2.95 ms | 0.84 / 2.96 ms |
+| VideoToolbox services (system), idle | 0 % | 10 % | 0 % | 0 % |
+| Frames skipped | 0 | 0 | 0 | 0 |
+
+- **OBS** spends less time per frame rendering on Metal but more CPU and GPU overall, and its
+  Metal build keeps macOS's VideoToolbox decoder and encoder services busy (~10 % more CPU).
+- **Lightair** is about the same on both: the work OpenGL made expensive (the preview's copy,
+  stalls) is already done outside libobs (the preview and meters are Core Animation layers).
+- So the renderer isn't where the remaining cost is; Metal is worth having for the future
+  (Apple deprecated OpenGL; HDR), not for speed today.
+
+Lightair runs on Metal with `LIGHTAIR_GRAPHICS=metal`: the preview's frames are BGRA, copied
+by libobs into IOSurfaces (on OpenGL they're converted to NV12). 18 of the 19 preview tests
+pass on Metal; background removal with macOS's green backdrop (Camera Studio) doesn't key
+yet, and the GPUI-drawn previews (the program monitor, display thumbnails, the Library
+player) show nothing there (GPUI draws NV12 only). Not the default until those are done.
+
 ## Reproduce
 
 ```sh

@@ -361,7 +361,9 @@ mod shared {
         unsafe {
             // an IOSurface is a rectangle texture; Chromium's pixels are premultiplied (the
             // blend says so)
-            let effect = sys::obs_get_base_effect(sys::OBS_EFFECT_DEFAULT_RECT);
+            // (Metal has no rectangle textures)
+            let rect = sys::gs_get_device_type() as u32 != sys::GS_DEVICE_METAL;
+            let effect = sys::obs_get_base_effect(if rect { sys::OBS_EFFECT_DEFAULT_RECT } else { sys::OBS_EFFECT_DEFAULT });
             let image = sys::gs_effect_get_param_by_name(effect, c"image".as_ptr());
             sys::gs_effect_set_texture(image, *tex);
             sys::gs_blend_state_push();
