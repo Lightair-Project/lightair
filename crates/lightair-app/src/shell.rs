@@ -29,6 +29,8 @@ mod golive;
 mod hierarchy;
 mod inspector;
 mod object_props;
+mod canvas_text;
+mod colour_field;
 mod connections;
 mod live_api;
 mod widget_props;
@@ -328,6 +330,10 @@ pub struct StudioWindow {
     fx_groups: std::collections::HashSet<String>,
     /// Colour pickers of the selected object's effects, by "effect:key".
     colour_pickers: std::collections::HashMap<String, effects::ColourPicker>,
+    /// Colour controls of text, colour objects and widgets.
+    colours: colour_field::ColourFields,
+    /// A text object being typed into on the canvas.
+    canvas_text: Option<canvas_text::CanvasText>,
     /// Open plugin editor windows, by effect.
     plugin_editors: std::collections::HashMap<Id, crate::plugin_editor::Editor>,
     /// The installed plugins (scanned when the audio catalog first opens).
@@ -673,6 +679,8 @@ impl StudioWindow {
             presence: Default::default(),
             fx_groups: Default::default(),
             colour_pickers: Default::default(),
+            colours: Default::default(),
+            canvas_text: None,
             plugin_editors: Default::default(),
             plugin_list: None,
             interfaces: RefCell::new((std::time::Instant::now(), Vec::new())),
@@ -1103,6 +1111,10 @@ impl StudioWindow {
 
     // ------------------------------------------------------------ canvas interaction
     fn canvas_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // a click outside the text being typed: done typing
+        if self.canvas_text.is_some() {
+            self.finish_canvas_text(true, window, cx);
+        }
         window.focus(&self.focus, cx);
         if self.space_down {
             self.panning = Some((ev.position, self.pan));
@@ -1189,6 +1201,16 @@ impl StudioWindow {
                     self.frame_of(scene, l, canvas).is_some_and(|lo| lo.visible && geo::contains(&lo, (x, y)))
                 })
             });
+        // double-click a text object: type into it right there
+        if ev.click_count == 2
+            && let Some(object) = hit.filter(|o| !scene.locked(o.id))
+            && let Some(src) = object.source.and_then(|i| workspace.sources.get(&i)).filter(|i| object_props::is_text(&i.kind))
+        {
+            let (object, source) = (object.id, src.id);
+            self.select_object(Some(object), cx);
+            self.start_canvas_text(object, source, canvas, window, cx);
+            return;
+        }
         let selection = studio.selection();
         match hit {
             // ⇧ or ⌘: add or studio_take away
@@ -1713,7 +1735,7 @@ impl StudioWindow {
         .detach();
     }
 
-    fn add_text(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn add_text(&mut self, cx: &mut Context<Self>) {
         let settings = json!({
             "text": "Lightair",
             "font": {"face": "Helvetica Neue", "size": 128, "flags": 1},
@@ -3999,6 +4021,7 @@ impl StudioWindow {
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::canvas_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::canvas_up))
                     .children(stages)
+                    .children(self.canvas_text_overlay(cx))
                     // last: the stages have said where their pictures are this frame
                     .when(native, |d| {
                         let (n, rects) = (self.native.clone(), self.native_rects.clone());

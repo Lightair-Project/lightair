@@ -283,13 +283,31 @@ impl OutputsPanel {
         match lightair_live::accounts::sign_in(platform, std::sync::Arc::new(move || flag.store(true, std::sync::atomic::Ordering::Release))) {
             Ok(page) => {
                 self.sign_in = Some((platform.to_string(), page, closed));
+                let p = platform.to_string();
                 cx.spawn(async move |this, cx| {
+                    // the session before (to tell a new sign-in from the one already there)
+                    let q = p.clone();
+                    let before = cx.background_executor().spawn(async move { lightair_live::accounts::session(&q) }).await;
+                    let mut ticks = 0u32;
                     loop {
                         cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                        ticks += 1;
+                        // signed in now: the window has done its job
+                        let mut signed = false;
+                        if ticks.is_multiple_of(2) {
+                            let q = p.clone();
+                            let now = cx.background_executor().spawn(async move { lightair_live::accounts::session(&q) }).await;
+                            signed = now.is_some() && now != before;
+                        }
                         let done = this
                             .update(cx, |this, cx| {
-                                let finished = this.sign_in.as_ref().is_none_or(|(_, _, c)| c.load(std::sync::atomic::Ordering::Acquire));
+                                let closed = this.sign_in.as_ref().is_none_or(|(_, _, c)| c.load(std::sync::atomic::Ordering::Acquire));
+                                let finished = closed || signed;
+                                // (dropping the page closes its window)
                                 if finished && let Some((p, _, _)) = this.sign_in.take() {
+                                    if signed {
+                                        this.signed_in.insert(p.clone(), true);
+                                    }
                                     this.check_signed_in(&p, cx);
                                 }
                                 finished

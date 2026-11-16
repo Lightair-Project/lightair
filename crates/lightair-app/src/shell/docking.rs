@@ -265,6 +265,17 @@ impl StudioWindow {
         // Development: open a dialog on launch for screenshots (no clicking needed).
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
             Ok("add-object") => self.open_add_object(window, cx),
+            // a text object being typed into on the canvas
+            Ok("canvas-text") => {
+                self.add_text(cx);
+                let studio = self.studio.read(cx);
+                let w = studio.workspace().clone();
+                let found = studio.selected_scene.and_then(|s| w.scene(s)).zip(studio.selected_object).and_then(|(scene, o)| scene.object(o).and_then(|o| o.source.map(|s| (o.id, s))));
+                let canvas = w.primary_canvas().id;
+                if let Some((object, source)) = found {
+                    self.start_canvas_text(object, source, canvas, window, cx);
+                }
+            }
             // a platform's sign-in window (kept open until closed)
             Ok(hook) if hook.starts_with("signin-") => {
                 static KEPT: parking_lot::Mutex<Option<Box<dyn lightair_live::pages::Page>>> = parking_lot::Mutex::new(None);
