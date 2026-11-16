@@ -1305,6 +1305,7 @@ impl StudioWindow {
             ("youtube", "YouTube", "title, description and category; chat; bans and timeouts; your Private and Unlisted streams"),
             ("twitch", "Twitch", "title and category; chat; delete, timeouts and bans"),
             ("kick", "Kick", "title and category; chat; timeouts and bans"),
+            ("x", "X", "going live with your title when you stream, ending it after; chat (X's approval needed)"),
         ] {
             let account = lightair_live::oauth::account(provider);
             let available = lightair_live::oauth::available(provider);
