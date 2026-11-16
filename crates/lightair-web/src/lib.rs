@@ -34,6 +34,22 @@ pub type MessageSink = Arc<dyn Fn(String) + Send + Sync>;
 /// `console.log("\u0001lightair:" + text)`.
 pub const MESSAGE_PREFIX: &str = "\u{1}lightair:";
 
+type Resolver = Box<dyn Fn(&str) -> String + Send + Sync>;
+static RESOLVER: std::sync::OnceLock<Resolver> = std::sync::OnceLock::new();
+
+/// Turns addresses of the app's own (a widget's `lightair-widget://…`) into what Chromium
+/// loads, when a page opens or changes (set once, by the app).
+pub fn set_url_resolver(f: impl Fn(&str) -> String + Send + Sync + 'static) {
+    let _ = RESOLVER.set(Box::new(f));
+}
+
+fn resolved(mut o: PageOptions) -> PageOptions {
+    if let Some(r) = RESOLVER.get() {
+        o.url = r(&o.url);
+    }
+    o
+}
+
 /// A page's settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageOptions {
@@ -91,6 +107,7 @@ impl Page {
     /// Opens `options` (made on the main thread soon after); its frames go to `sink`, its sound
     /// to `audio`.
     pub fn open(options: PageOptions, sink: FrameSink, audio: AudioSink) -> Page {
+        let options = resolved(options);
         let id = imp::next_id();
         imp::request(imp::Request::Open { id, options, sink, texture: None, audio, agent: None });
         Page { id }
@@ -99,6 +116,7 @@ impl Page {
     /// Like [`Page::open`], but where Chromium can share its frames as GPU textures (macOS),
     /// they go to `texture` instead of being read back into memory for `sink`.
     pub fn open_shared(options: PageOptions, texture: TextureSink, sink: FrameSink, audio: AudioSink) -> Page {
+        let options = resolved(options);
         let id = imp::next_id();
         let texture = cfg!(target_os = "macos").then_some(texture);
         imp::request(imp::Request::Open { id, options, sink, texture, audio, agent: None });
@@ -107,6 +125,7 @@ impl Page {
 
     /// New settings: another address, size or rate.
     pub fn update(&self, options: PageOptions) {
+        let options = resolved(options);
         imp::request(imp::Request::Update { id: self.id, options });
     }
 
@@ -704,8 +723,12 @@ mod imp {
         }
         impl DisplayHandler {
             fn on_console_message(&self, _browser: Option<&mut Browser>, _level: LogSeverity, message: Option<&CefString>, _source: Option<&CefString>, _line: ::std::os::raw::c_int) -> ::std::os::raw::c_int {
-                let (Some(sink), Some(message)) = (&self.messages, message) else { return 0 };
+                let Some(message) = message else { return 0 };
                 let text = message.to_string();
+                let Some(sink) = &self.messages else {
+                    tracing::debug!(%text, line = _line, "page console");
+                    return 0;
+                };
                 match text.strip_prefix(crate::MESSAGE_PREFIX) {
                     Some(m) => {
                         sink(m.to_string());

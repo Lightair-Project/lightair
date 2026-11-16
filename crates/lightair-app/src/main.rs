@@ -1,5 +1,6 @@
 //! Lightair application entry point.
 
+mod activity_panel;
 mod assets;
 mod camera_studio;
 mod chat_panel;
@@ -39,6 +40,7 @@ mod system_effects;
 #[path = "system_effects_win.rs"]
 mod system_effects;
 mod ui;
+mod widgets;
 
 use std::path::PathBuf;
 use std::sync::Arc;

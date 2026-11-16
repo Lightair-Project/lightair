@@ -203,6 +203,7 @@ impl StudioWindow {
         let (canvas, inspector) = (panel(Region::Canvas, cx), panel(Region::Inspector, cx));
         let assets = panel(Region::Assets, cx);
         let (mixer, outputs, chat) = (self.mixer_dock.clone(), self.outputs.clone(), self.chat.clone());
+        let activity = self.activity.clone();
         // Every group shows a tab bar, even with one panel, so any panel can be dropped onto
         // any header to join it as a tab (and the canvas gets a header like the rest).
         let (dock, skin) = DockSkin::dock_area("lightair-studio", Some(1), window, cx);
@@ -239,7 +240,12 @@ impl StudioWindow {
                         DockLayout::tabs()
                             .panel_view(panel_handle(outputs), cx)
                             .panel_view(panel_handle(chat), cx)
-                            .active_index(usize::from(std::env::var("LIGHTAIR_OPEN").is_ok_and(|h| h == "chat"))),
+                            .panel_view(panel_handle(activity), cx)
+                            .active_index(match std::env::var("LIGHTAIR_OPEN").as_deref() {
+                                Ok("chat") => 1,
+                                Ok(h) if h.starts_with("activity") => 2,
+                                _ => 0,
+                            }),
                         Some(px(320.)),
                     )
                     .child(DockLayout::tabs().panel_view(panel_handle(inspector), cx), None),
@@ -253,6 +259,30 @@ impl StudioWindow {
         // Development: open a dialog on launch for screenshots (no clicking needed).
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
             Ok("add-object") => self.open_add_object(window, cx),
+            // a widget added and selected; LIGHTAIR_TEST_EVENTS ("sub,paid,…") then sent to it
+            Ok(hook) if hook.trim_start_matches("activity-").starts_with("widget-") => {
+                for kind in hook.trim_start_matches("activity-")[7..].split(',') {
+                    match kind.strip_prefix("import:") {
+                        Some(dir) => match lightair_widgets::import_folder(std::path::Path::new(dir)) {
+                            Ok(custom) => self.add_widget("custom", Some(custom), window, cx),
+                            Err(e) => tracing::warn!(%e, "widget import"),
+                        },
+                        None => self.add_widget(kind, None, window, cx),
+                    }
+                }
+                let tests: Vec<String> = std::env::var("LIGHTAIR_TEST_EVENTS").unwrap_or_default().split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+                cx.spawn_in(window, async move |this, cx| {
+                    for kind in tests {
+                        cx.background_executor().timer(std::time::Duration::from_millis(4000)).await;
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(w) = &this.studio.read(cx).widgets {
+                                w.test(&kind, "twitch");
+                            }
+                        });
+                    }
+                })
+                .detach();
+            }
             Ok(open @ ("add-display" | "add-window" | "add-app")) => {
                 self.open_add_object(window, cx);
                 self.pick_screen(open.trim_start_matches("add-"), window, cx);

@@ -22,6 +22,7 @@ lightair-remote = { path = "crates/lightair-remote" }
 lightair-store = { path = "crates/lightair-store" }
 lightair-ui = { path = "crates/lightair-ui" }
 lightair-web = { path = "crates/lightair-web" }
+lightair-widgets = { path = "crates/lightair-widgets" }
 
 # external
 anyhow = "1"

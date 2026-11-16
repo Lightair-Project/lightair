@@ -29,6 +29,7 @@ mod golive;
 mod hierarchy;
 mod inspector;
 mod object_props;
+mod widget_props;
 mod menus;
 pub(crate) mod mixer_props;
 mod palette;
@@ -282,6 +283,8 @@ pub struct StudioWindow {
     outputs: Entity<OutputsPanel>,
     /// Every destination's chat (a tab beside Outputs).
     chat: Entity<crate::chat_panel::ChatPanel>,
+    /// Follows, subs, donations and raids (a tab beside Chat).
+    activity: Entity<crate::activity_panel::ActivityPanel>,
     /// First click on "End stream" arms it; a second click within 3 s ends the stream.
     confirm_end: Option<Instant>,
     /// One preview per canvas (the primary one renders the main canvas).
@@ -559,6 +562,7 @@ impl StudioWindow {
         let mixer_dock = cx.new(|cx| MixerDock::new(mixer.clone(), cx));
         let outputs = cx.new(|cx| OutputsPanel::new(studio.clone(), cx));
         let chat = cx.new(|cx| crate::chat_panel::ChatPanel::new(studio.clone(), cx));
+        let activity = cx.new(|cx| crate::activity_panel::ActivityPanel::new(studio.clone(), cx));
         // Its Add destination dialog is drawn over the whole window.
         cx.observe(&outputs, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&outputs, |this, _, _: &crate::outputs_panel::AddVerticalCanvas, cx| {
@@ -616,6 +620,7 @@ impl StudioWindow {
             mixer_dock,
             outputs,
             chat,
+            activity,
             confirm_end: None,
             studio,
             focus,
@@ -1610,6 +1615,24 @@ impl StudioWindow {
         size: (f32, f32),
         cx: &mut Context<Self>,
     ) -> Option<Id> {
+        // a source with sound of its own (a web page) also gets a mixer track
+        let sound = kind == lightair_engine::web::KIND;
+        self.add_placed_object(name, kind, settings, size, (0.5, 0.5), sound, cx)
+    }
+
+    /// `add_source_object_id`, put at `place` (across and down the room left: 0.5 centres it)
+    /// and with a mixer track if it has `sound`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn add_placed_object(
+        &mut self,
+        name: &str,
+        kind: &str,
+        settings: serde_json::Value,
+        size: (f32, f32),
+        place: (f32, f32),
+        sound: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Id> {
         self.add_menu = false;
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
@@ -1621,15 +1644,14 @@ impl StudioWindow {
             .map(|f| {
                 let s = (f.width as f32 / w).min(f.height as f32 / h).min(1.0);
                 let (lw, lh) = (w * s, h * s);
-                (f.id, Layout::boxed((f.width as f32 - lw) / 2.0, (f.height as f32 - lh) / 2.0, lw, lh))
+                (f.id, Layout::boxed((f.width as f32 - lw) * place.0, (f.height as f32 - lh) * place.1, lw, lh))
             })
             .collect();
         let source = Source::new(name, kind, settings);
         let source_id = source.id;
         let object = Object::new(name, source.id, layouts);
         let object_id = object.id;
-        // a source with sound of its own (a web page) also gets a mixer track
-        let track = (kind == lightair_engine::web::KIND).then(|| lightair_core::Track::new(name, source_id));
+        let track = sound.then(|| lightair_core::Track::new(name, source_id));
         let mut commands = vec![Command::AddSource { source }, Command::AddObject { scene, object, index: None }];
         commands.extend(track.map(|track| Command::AddTrack { track, index: None }));
         let cmd = Command::Batch { label: format!("Add {name}"), commands };
