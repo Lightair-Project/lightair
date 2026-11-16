@@ -16,6 +16,7 @@ pub fn run(engine: &Engine, what: &str) {
         "green-key" => green_key(engine),
         "virtual-camera" => virtual_camera(engine),
         "web" => web(engine),
+        "agent-page" => agent_page(),
         "displays" => displays(engine),
         // puts Lightair's Backgrounds back: LIGHTAIR_BG_PICTURE and LIGHTAIR_BG_ON (0/1)
         "restore-backgrounds" => {
@@ -303,6 +304,35 @@ unsafe extern "C" fn web_audio(_: *mut std::ffi::c_void, _: *mut lightair_engine
     let samples = unsafe { std::slice::from_raw_parts(plane, audio.frames as usize) };
     let loudest = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     WEB_PEAK.fetch_max(loudest.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `LIGHTAIR_SELFTEST=agent-page`: a hidden page's script sends a message back (the bridge the
+/// chat readers that need a browser use); `LIGHTAIR_SELFTEST_URL` loads a page of one's own.
+fn agent_page() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject};
+        let _app: *mut AnyObject = unsafe { msg_send![AnyClass::get(c"NSApplication").unwrap(), sharedApplication] };
+    }
+    let url = std::env::var("LIGHTAIR_SELFTEST_URL").unwrap_or_else(|_| "data:text/html,<title>agent</title><p>hello</p>".into());
+    let got = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let sink = got.clone();
+    // LIGHTAIR_SELFTEST_SCRIPT: a script of one's own (exploring a site's page)
+    let script = format!(
+        "{}{}",
+        lightair_live::pages::PRELUDE,
+        std::env::var("LIGHTAIR_SELFTEST_SCRIPT")
+            .unwrap_or_else(|_| "lightair('title=' + document.title + ' body=' + (document.body ? document.body.innerText.slice(0, 120) : ''));".into())
+    );
+    let page = lightair_web::Page::open_agent(&url, script, std::sync::Arc::new(move |m| sink.lock().push(m)));
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(40) && got.lock().is_empty() {
+        lightair_web::pump();
+        std::thread::sleep(Duration::from_millis(8));
+    }
+    println!("SELFTEST agent page messages: {:?} after {} ms", got.lock(), start.elapsed().as_millis());
+    drop(page);
 }
 
 /// `LIGHTAIR_SELFTEST=web`: a web page (magenta, playing a tone) on air, Chromium driven from

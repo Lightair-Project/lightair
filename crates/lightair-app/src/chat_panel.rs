@@ -107,7 +107,7 @@ impl ChatPanel {
                     .text_size(px(12.))
                     .text_color(tok::text_tertiary())
                     .text_center()
-                    .child("Add your channel to a Twitch, YouTube, CHZZK, SOOP or DouYu destination in Outputs (its Chat field) to read its chat here."),
+                    .child("Add your channel to a Twitch, YouTube, TikTok, Kick, CHZZK, SOOP or DouYu destination in Outputs (its Chat field) to read its chat here."),
             )
     }
 
@@ -237,6 +237,28 @@ impl ChatPanel {
             }
         }
         row.into_any_element()
+    }
+}
+
+/// Hidden pages for the chat readers, in Lightair's Chromium (its cookies, so a platform signed
+/// in to once stays signed in).
+pub struct HiddenPages;
+
+struct HiddenPage(lightair_web::Page);
+
+impl lightair_live::pages::Host for HiddenPages {
+    fn open(&self, url: &str, script: &str, on_message: lightair_live::pages::OnMessage) -> Box<dyn lightair_live::pages::Page> {
+        Box::new(HiddenPage(lightair_web::Page::open_agent(url, script.into(), on_message)))
+    }
+}
+
+impl lightair_live::pages::Page for HiddenPage {
+    fn eval(&self, code: &str) {
+        self.0.eval(code);
+    }
+
+    fn navigate(&self, url: &str) {
+        self.0.navigate(url);
     }
 }
 
