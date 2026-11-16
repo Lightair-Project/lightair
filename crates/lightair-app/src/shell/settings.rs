@@ -1025,7 +1025,7 @@ impl StudioWindow {
             .child(group("Add a canvas").child(div().px_3().py_2().child(add)))
             .child(group("Preview").child(row(
                 "Live preview",
-                Some("Smooth draws every frame of the canvas; Light draws 30 a second, leaving more of the computer for the show. Recordings and streams are the same either way."),
+                Some("Smooth draws every frame of the canvas and moves meters 30 times a second; Light draws 30 frames and moves meters 15 times, leaving more of the computer for the show. Recordings and streams are the same either way."),
                 {
                     let light = self.prefs.preview_fps == 30;
                     div()
@@ -1034,12 +1034,14 @@ impl StudioWindow {
                         .p_0p5()
                         .rounded(px(7.))
                         .bg(tok::bg_panel())
-                        .child(pref_chip("preview-smooth", "Smooth".into(), !light).on_click(
-                            cx.listener(|this, _, _, cx| this.set_pref(|p| p.preview_fps = 0, cx)),
-                        ))
-                        .child(pref_chip("preview-light", "Light".into(), light).on_click(
-                            cx.listener(|this, _, _, cx| this.set_pref(|p| p.preview_fps = 30, cx)),
-                        ))
+                        .child(pref_chip("preview-smooth", "Smooth".into(), !light).on_click(cx.listener(|this, _, _, cx| {
+                            crate::prefs::LIGHT_PREVIEW.store(false, std::sync::atomic::Ordering::Relaxed);
+                            this.set_pref(|p| p.preview_fps = 0, cx)
+                        })))
+                        .child(pref_chip("preview-light", "Light".into(), light).on_click(cx.listener(|this, _, _, cx| {
+                            crate::prefs::LIGHT_PREVIEW.store(true, std::sync::atomic::Ordering::Relaxed);
+                            this.set_pref(|p| p.preview_fps = 30, cx)
+                        })))
                 },
             )))
     }

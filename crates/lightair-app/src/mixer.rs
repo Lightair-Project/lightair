@@ -1504,6 +1504,13 @@ enum Spot {
     Readout,
 }
 
+/// How often the meters move (ms): 30 times a second; 15 with Settings › Canvases › Live
+/// preview › Light. Each move redraws the window (GPUI draws it whole), so it's most of what
+/// the UI costs while nothing else changes.
+fn meter_ms() -> u64 {
+    if crate::prefs::LIGHT_PREVIEW.load(std::sync::atomic::Ordering::Relaxed) { 66 } else { 33 }
+}
+
 /// The meters' levels, painted over the mixer where its strips left room for them. Only this
 /// redraws 30 times a second; the strips (cached) are laid out again only when they change. In
 /// GPUI a view that redraws takes its parents with it, but not their other children.
@@ -1524,7 +1531,7 @@ impl MeterOverlay {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(33)).await;
                 let alive = this.update(cx, |m, cx| {
-                    if m.moved.elapsed() >= std::time::Duration::from_millis(50) {
+                    if m.moved.elapsed() >= std::time::Duration::from_millis(meter_ms() + 17) {
                         m.moved = Instant::now();
                         cx.notify();
                     }
@@ -1540,7 +1547,7 @@ impl MeterOverlay {
 
     /// The canvas drew a frame: the meters move with it if they're due (same redraw).
     fn tick(&mut self, cx: &mut Context<Self>) {
-        if self.moved.elapsed() >= std::time::Duration::from_millis(30) {
+        if self.moved.elapsed() >= std::time::Duration::from_millis(meter_ms() - 3) {
             self.moved = Instant::now();
             cx.notify();
         }

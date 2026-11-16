@@ -134,6 +134,9 @@ impl Default for Preferences {
 /// The sample rate libobs started with (a change applies next launch).
 pub static RUNNING_SAMPLE_RATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(48_000);
 
+/// Settings › Canvases › Live preview is Light (the preview at 30 fps, the meters at 15).
+pub static LIGHT_PREVIEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The loudness target, for the mixer's readout.
 pub static LOUDNESS_TARGET: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-14);
 

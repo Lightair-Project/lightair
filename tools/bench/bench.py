@@ -17,7 +17,7 @@ TOOLS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(TOOLS))
 B = os.environ.get("LIGHTAIR_BENCH_DIR", os.path.join(ROOT, "target", "bench"))
 sys.path.insert(0, TOOLS)
-from obsws import ObsWs  # noqa: E402
+from obsws import ObsWs, Rpc  # noqa: E402
 
 M = os.path.join(B, "media")
 LIGHTAIR_APP = os.environ.get("LIGHTAIR_APP", os.path.join(ROOT, "target", "release", "Lightair.app"))
@@ -124,6 +124,12 @@ def setup(app):
                 t.update({"boundsType": "OBS_BOUNDS_STRETCH", "boundsWidth": box[2], "boundsHeight": box[3], "boundsAlignment": 0})
             o.req("SetSceneItemTransform", {"sceneName": scene, "sceneItemId": item, "sceneItemTransform": t})
     o.req("SetInputVolume", {"inputName": "Music", "inputVolumeDb": -20})
+    if app == "lightair":
+        # recordings into target/bench, never the user's folder
+        r = Rpc(port=PORT[app], password=password(app))
+        rec = r.call("workspace.get")["outputs"]["recording"]
+        rec["folder"] = os.path.join(B, "rec-la")
+        r.call("commands.execute", {"commands": [{"SetRecordingSettings": {"settings": rec}}]})
     o.req("SetCurrentProgramScene", {"sceneName": "Gameplay"})
     # anything left from before (OBS's default scene, Lightair's starter one)
     for s in o.req("GetSceneList")["scenes"]:
@@ -141,7 +147,7 @@ def launch(app):
                "--disable-missing-files-check"]
     else:
         env = {"LIGHTAIR_PROJECT": LA_WS, "LIGHTAIR_REMOTE_PORT": str(PORT["lightair"]),
-               "LIGHTAIR_LOG": "info,libobs=info", "LIGHTAIR_STARTER": "plain", **{k: v for k, v in os.environ.items() if k.startswith("LIGHTAIR_TEMP")}}
+               "LIGHTAIR_LOG": "info,libobs=info", "LIGHTAIR_STARTER": "plain", **{k: v for k, v in os.environ.items() if k.startswith(("LIGHTAIR_TEMP", "LIGHTAIR_GPUI_PREVIEW"))}}
         cmd = ["open", "-n"]
         for k, v in env.items():
             cmd += ["--env", f"{k}={v}"]
@@ -328,6 +334,14 @@ def ffprobe(path):
 def run(app, tag):
     assert main_pid(app) is None, f"{app} already running"
     rec_dir = os.path.join(B, "rec-obs" if app == "obs" else "rec-la")
+    if app == "lightair":
+        # never a recording outside target/bench
+        launch(app)
+        r = Rpc(port=PORT[app], password=password(app))
+        connect(app)
+        folder = r.call("workspace.get")["outputs"]["recording"].get("folder")
+        quit_app(app, main_pid(app))
+        assert folder == rec_dir, f"Lightair records to {folder}, not {rec_dir}: run setup first"
     before = set(os.listdir(rec_dir))
     t0 = launch(app)
     o = connect(app)
