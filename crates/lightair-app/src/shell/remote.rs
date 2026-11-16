@@ -255,7 +255,7 @@ impl StudioWindow {
         };
         if needs && password.is_none() {
             self.remote.server = None;
-            self.remote.error = Some("The Keychain didn't give Lightair a password for the remote API.".into());
+            self.remote.error = Some(format!("The {} didn't give Lightair a password for the remote API.", crate::ui::KEYCHAIN));
             return;
         }
         let config = Config { port, lan: p.lan, password };
@@ -911,7 +911,7 @@ impl StudioWindow {
             "text" | "text_ft2_source_v2" | "text_ft2_source" => {
                 defaults(&mut s, json!({
                     "text": "Text",
-                    "font": {"face": "Helvetica Neue", "size": 128, "flags": 1},
+                    "font": {"face": crate::ui::TEXT_FACE, "size": 128, "flags": 1},
                     "color1": 0xFFFFFFFFu32, "color2": 0xFFFFFFFFu32,
                 }));
                 let n = s["text"].as_str().unwrap_or("Text").chars().count().clamp(4, 40) as f32;
@@ -994,7 +994,7 @@ impl StudioWindow {
             "timer" | lightair_engine::timers::TIMER_KIND => {
                 defaults(&mut s, json!({
                     "mode": "countdown", "seconds": 300, "autostart": true,
-                    "font": {"face": "Helvetica Neue", "size": 160, "flags": 1},
+                    "font": {"face": crate::ui::TEXT_FACE, "size": 160, "flags": 1},
                     "color1": 0xFFFFFFFFu32, "color2": 0xFFFFFFFFu32,
                 }));
                 NewSource { kind: lightair_engine::timers::TIMER_KIND.into(), settings: s, size: (560.0, 200.0), sound: false, name: "Countdown".into() }

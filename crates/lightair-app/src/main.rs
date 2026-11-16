@@ -95,7 +95,8 @@ fn main() {
     // The canvas size comes from the workspace's primary canvas; read it before starting libobs.
     // the one asked for, the one open last, or the default
     let workspace_dir = std::env::var_os("LIGHTAIR_PROJECT")
-        .map(PathBuf::from)
+        // (absolute: on Windows the engine works from libobs's folder once it starts)
+        .map(|p| std::path::absolute(&p).unwrap_or_else(|_| PathBuf::from(p)))
         .or_else(|| prefs::load_from(&prefs::path()).last_workspace.filter(|d| lightair_store::is_workspace(d)))
         .unwrap_or_else(|| workspaces_dir().join("Default.lightair"));
     let canvas = lightair_store::load_snapshot(&workspace_dir)

@@ -237,6 +237,12 @@ unsafe fn bootstrap(cfg: &EngineConfig) -> Result<(Runtime, Capabilities, String
         in_bundle = runtime.in_bundle, "libobs runtime");
 
     let _ = std::fs::create_dir_all(&cfg.module_config_dir);
+    // Windows: OBS's modules find their own files from the working folder, OBS's `bin\64bit`
+    // (game capture's hooks in `..\..\core\win-capture\data`), as OBS sets it when it starts
+    #[cfg(windows)]
+    if let Err(e) = std::env::set_current_dir(&runtime.frameworks) {
+        tracing::warn!(%e, "couldn't work from libobs's folder: game capture may not hook");
+    }
     let locale = c(&cfg.locale);
     let config_dir = c(&cfg.module_config_dir.to_string_lossy());
     if !unsafe { sys::obs_startup(locale.as_ptr(), config_dir.as_ptr(), std::ptr::null_mut()) } {
