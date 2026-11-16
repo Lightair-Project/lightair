@@ -1,5 +1,8 @@
 //! Lightair application entry point.
 
+// Windows: a window app, no console (development builds keep theirs, for the log)
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod activity_panel;
 mod assets;
 mod automations_panel;
@@ -65,6 +68,12 @@ fn workspaces_dir() -> PathBuf {
 }
 
 fn main() {
+    // Chromium's own processes, when Chromium started this program for one (Windows, where
+    // lightair-web-helper.exe isn't beside it)
+    #[cfg(windows)]
+    if let Some(code) = lightair_web::helper_main() {
+        std::process::exit(code);
+    }
     // a helper process listing a VST3 bundle's effects (plugin_scan)
     if let Some(code) = plugin_scan::probe_main() {
         std::process::exit(code);

@@ -1833,6 +1833,7 @@ mod macos_effects_tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "the macOS camera effects aren't managed on Windows")]
     fn macos_backgrounds_follow_the_scene_on_air() {
         let (mut w, [keyed, plain, slides]) = workspace(0);
         w.program = Some(keyed);

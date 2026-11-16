@@ -10,14 +10,18 @@
 
 #[cfg(target_os = "macos")]
 pub use mac::{MeterPlace, NativePreview};
+#[cfg(windows)]
+mod win;
+#[cfg(windows)]
+pub use win::NativePreview;
 
 /// The window's native layer, shared by what draws into it (the canvas, the mixer).
 pub type Shared = std::rc::Rc<std::cell::RefCell<Option<NativePreview>>>;
 
-/// Whether the preview is drawn under the UI (macOS; `LIGHTAIR_GPUI_PREVIEW=1` draws it with
-/// GPUI as before).
+/// Whether the preview is drawn under the UI (macOS: Core Animation; Windows: DirectComposition,
+/// `native_preview/win.rs`; `LIGHTAIR_GPUI_PREVIEW=1` draws it with GPUI as before).
 pub fn on() -> bool {
-    cfg!(target_os = "macos") && std::env::var_os("LIGHTAIR_GPUI_PREVIEW").is_none()
+    (cfg!(target_os = "macos") || cfg!(windows)) && std::env::var_os("LIGHTAIR_GPUI_PREVIEW").is_none()
 }
 
 #[cfg(target_os = "macos")]
@@ -664,10 +668,10 @@ impl Drop for NativePreview {
 }
 
 /// Elsewhere GPUI draws the preview.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub struct NativePreview;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 impl NativePreview {
     pub fn attach(_: &gpui_kit::Window, _: gpui_kit::Hsla, _: gpui_kit::Hsla) -> Option<Self> {
         None

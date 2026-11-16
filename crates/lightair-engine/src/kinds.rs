@@ -72,6 +72,9 @@ pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
             }
             CAMERA => {
                 set("video_device_id", device);
+                // nothing off air runs (macOS: crate::on_screen); OBS's DirectShow source has
+                // this itself (display capture already stops while hidden on Windows)
+                set("deactivate_when_not_showing", Some(json!(true)));
                 if let Some(h) = height {
                     // custom resolution, 16:9
                     set("res_type", Some(json!(1)));

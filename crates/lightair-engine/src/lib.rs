@@ -17,6 +17,7 @@ pub mod devices;
 pub mod displays;
 pub mod kinds;
 mod engine;
+pub mod gpu;
 mod log;
 pub mod loudness;
 pub mod media;
