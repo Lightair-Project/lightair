@@ -1198,7 +1198,23 @@ impl StudioWindow {
                     d.child(Button::new("kofi-verify").label(if verified { "New token" } else { "Paste token" }).xsmall().outline().on_click(cx.listener(|this, _, _, cx| this.paste_kofi("verify", cx))))
                 }),
         ));
-        pages().child(tips).child(
+        let heart = self.heart_rate.is_some();
+        let bpm = self.studio.read(cx).widgets.as_ref().map(|w| w.data("heart_rate")).filter(|v| !v.is_null());
+        let devices = group("Devices").child(row(
+            "Heart rate (Pulsoid)",
+            Some(&match (heart, bpm) {
+                (true, Some(b)) => format!("Connected: {b} BPM. Add Widgets › Heart rate; automations read {{{{ vars.heart_rate }}}}."),
+                (true, None) => "Connected, waiting for a reading (is the sensor on?)".to_string(),
+                _ => "Not connected. Its token: pulsoid.net › Keys › Create new key (heart rate, read).".to_string(),
+            }),
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(Button::new("pulsoid-paste").label(if heart { "Paste new token" } else { "Paste token" }).xsmall().outline().on_click(cx.listener(|this, _, _, cx| this.paste_pulsoid(cx))))
+                .when(heart, |d| d.child(Button::new("pulsoid-forget").label("Disconnect").xsmall().ghost().on_click(cx.listener(|this, _, _, cx| this.forget_pulsoid(cx))))),
+        ));
+        pages().child(tips).child(devices).child(
             group("How it works").child(
                 div()
                     .px_3()

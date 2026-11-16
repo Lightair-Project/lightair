@@ -412,6 +412,8 @@ pub struct StudioWindow {
     remote: remote::Remote,
     /// Automations (docs/plans/live-integrations.md, 2.6).
     pub(crate) automations: lightair_automation::Automations,
+    /// Heart rate being read (Pulsoid): set to stop it.
+    heart_rate: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The canvas preview drawn under the UI (macOS: native_preview), the canvases whose
     /// previews show in it, and where each canvas's picture is (window points), as laid out.
     native: std::rc::Rc<RefCell<Option<crate::native_preview::NativePreview>>>,
@@ -715,6 +717,7 @@ impl StudioWindow {
             prefs: crate::prefs::load_from(&crate::prefs::path()),
             remote,
             automations,
+            heart_rate: None,
             automations_panel,
             native,
             native_layers: HashSet::new(),

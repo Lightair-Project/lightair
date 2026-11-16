@@ -18,10 +18,14 @@ impl StudioWindow {
         cx.spawn(async move |this, cx| {
             let found = cx
                 .background_executor()
-                .spawn(async move { SERVICES.iter().map(|(s, _, _)| *s).chain(["kofi"]).filter_map(|s| crate::secrets::connection_token(s).map(|t| (s, t))).collect::<Vec<_>>() })
+                .spawn(async move { SERVICES.iter().map(|(s, _, _)| *s).chain(["kofi", "pulsoid"]).filter_map(|s| crate::secrets::connection_token(s).map(|t| (s, t))).collect::<Vec<_>>() })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 for (service, token) in found {
+                    if service == "pulsoid" {
+                        this.start_heart_rate(token, cx);
+                        continue;
+                    }
                     lightair_live::donations::set_token(service, &token);
                     this.studio.update(cx, |s, _| s.set_service(service, true));
                 }
@@ -110,5 +114,53 @@ impl StudioWindow {
             v["verify"] = serde_json::json!(text);
         }
         self.save_kofi(v, cx);
+    }
+}
+
+impl StudioWindow {
+    /// Heart rate from Pulsoid: to widgets ("heart_rate") and automations' `{{ vars.heart_rate }}`.
+    pub(super) fn start_heart_rate(&mut self, token: String, cx: &mut Context<Self>) {
+        if let Some(old) = self.heart_rate.take() {
+            old.store(true, std::sync::atomic::Ordering::Release);
+        }
+        if token.is_empty() {
+            cx.notify();
+            return;
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (widgets, automations) = (self.studio.read(cx).widgets.clone(), self.automations.clone());
+        let last = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        lightair_live::integrations::pulsoid(
+            token,
+            move |bpm| {
+                if let Some(w) = &widgets {
+                    w.set_data("heart_rate", serde_json::json!(bpm));
+                }
+                // the variable (and its file) only when it changes by more than a little
+                if last.swap(bpm, std::sync::atomic::Ordering::Relaxed).abs_diff(bpm) >= 2 {
+                    automations.set_var("heart_rate", serde_json::json!(bpm));
+                }
+            },
+            stop.clone(),
+        );
+        self.heart_rate = Some(stop);
+        cx.notify();
+    }
+
+    pub(super) fn paste_pulsoid(&mut self, cx: &mut Context<Self>) {
+        let Some(token) = cx.read_from_clipboard().and_then(|c| c.text()).map(|t| t.trim().to_string()).filter(|t| t.len() > 10 && !t.contains(char::is_whitespace)) else {
+            self.studio.update(cx, |s, cx| {
+                s.issue = Some("Copy the token first (the clipboard doesn't hold one).".into());
+                cx.notify();
+            });
+            return;
+        };
+        self.start_heart_rate(token.clone(), cx);
+        cx.background_executor().spawn(async move { crate::secrets::set_connection_token("pulsoid", &token) }).detach();
+    }
+
+    pub(super) fn forget_pulsoid(&mut self, cx: &mut Context<Self>) {
+        self.start_heart_rate(String::new(), cx);
+        cx.background_executor().spawn(async move { crate::secrets::set_connection_token("pulsoid", "") }).detach();
     }
 }
