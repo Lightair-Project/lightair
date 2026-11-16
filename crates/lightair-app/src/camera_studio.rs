@@ -14,7 +14,8 @@ use serde_json::{Value, json};
 pub const KIND: &str = catalog::STUDIO_FILTER;
 
 /// Where the Camera Studio module bundle lives: `target/modules/lightair-camera-fx` in
-/// development (found from the executable, also inside the development `Lightair.app`).
+/// development (found from the executable, also inside the development `Lightair.app`; a copy
+/// of that app elsewhere, in /Applications say, looks in the checkout it was built from).
 pub fn plugin_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // macOS: the .plugin bundle; Windows: OBS's layout (obs-plugins/64bit, data/obs-plugins)
@@ -23,7 +24,8 @@ pub fn plugin_dir() -> Option<PathBuf> {
     } else {
         ("modules/lightair-camera-fx", "lightair-camera-fx.plugin")
     };
-    exe.ancestors().map(|a| a.join(dir)).find(|dir| dir.join(module).exists())
+    let checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    exe.ancestors().chain([checkout.as_path()]).map(|a| a.join(dir)).find(|dir| dir.join(module).exists())
 }
 
 /// The module's data folder (presets, shaders, models).
