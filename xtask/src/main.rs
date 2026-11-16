@@ -112,6 +112,10 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 	<key>NSCameraUsageDescription</key><string>Lightair shows your camera in your scenes and recordings.</string>
 	<key>NSMicrophoneUsageDescription</key><string>Lightair records and streams your microphone.</string>
 	<key>NSAudioCaptureUsageDescription</key><string>Lightair records and streams the sound your Mac and its apps play.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key><string>Signing in to a platform with a passkey on your phone uses Bluetooth to reach it.</string>
+	<key>NSLocationUsageDescription</key><string>A web page in Lightair asked where you are.</string>
+	<key>NSLocationWhenInUseUsageDescription</key><string>A web page in Lightair asked where you are.</string>
+	<key>NSSpeechRecognitionUsageDescription</key><string>A web page in Lightair asked to recognise speech.</string>
 	<key>NSAppleEventsUsageDescription</key><string>Lightair asks Spotify and Music what's playing, for the Now playing widget.</string>
 	<key>NSLocalNetworkUsageDescription</key><string>Lightair finds network video sources and serves the remote control API.</string>
 </dict>
