@@ -256,6 +256,33 @@ impl AutomationsPanel {
         cx.notify();
     }
 
+    /// Brings in the Streamer.bot export on the clipboard: each action an automation; what
+    /// didn't come over, said.
+    fn import_streamerbot(&mut self, cx: &mut Context<Self>) {
+        let text = cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
+        match lightair_automation::streamerbot::import(&text) {
+            Ok(r) => {
+                let n = r.automations.len();
+                for a in r.automations {
+                    self.selected.get_or_insert(a.id.clone());
+                    self.automations.set(a);
+                }
+                let mut said = format!("Imported {n} automation{} from Streamer.bot.", if n == 1 { "" } else { "s" });
+                if !r.notes.is_empty() {
+                    said.push_str(" Not brought over: ");
+                    said.push_str(&r.notes.iter().take(6).cloned().collect::<Vec<_>>().join("; "));
+                    if r.notes.len() > 6 {
+                        said.push_str(&format!("; and {} more", r.notes.len() - 6));
+                    }
+                }
+                self.error = Some(said);
+                self.built_for = None;
+            }
+            Err(e) => self.error = Some(format!("Couldn't import: {e}. In Streamer.bot: select actions › right-click › Export, then copy the string.")),
+        }
+        cx.notify();
+    }
+
     /// Makes (or refreshes) the inputs for the selected automation.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(a) = self.current() else {
@@ -346,7 +373,12 @@ impl AutomationsPanel {
                     }
                 }));
             }
-            menu
+            let me = me.clone();
+            menu.separator().item(PopupMenuItem::new("Import from Streamer.bot (copy its export first)").on_click(move |_, _, cx| {
+                if let Some(me) = me.upgrade() {
+                    me.update(cx, |this, cx| this.import_streamerbot(cx));
+                }
+            }))
         });
         let mut list = div().id("automation-list").flex().flex_col().flex_1().min_h_0().overflow_y_scroll();
         for (i, a) in self.automations.list().into_iter().enumerate() {
