@@ -7,6 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use gpui_kit::component::Sizable;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_live::{ChatEvent, Fragment, Images, Kind, Role, Status};
@@ -26,10 +30,16 @@ pub struct ChatPanel {
     images: Images,
     /// The last event shown (to scroll down when there are newer ones).
     last: u64,
+    /// What to send, and where ("": every connected chat).
+    input: Entity<InputState>,
+    target: String,
+    /// Why the last message didn't go.
+    send_error: Option<String>,
+    _input_events: Subscription,
 }
 
 impl ChatPanel {
-    pub fn new(studio: Entity<Studio>, cx: &mut Context<Self>) -> Self {
+    pub fn new(studio: Entity<Studio>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dirty = Arc::new(AtomicBool::new(true));
         let hub = studio.read(cx).chat.clone();
         {
@@ -53,7 +63,68 @@ impl ChatPanel {
             }
         })
         .detach();
-        ChatPanel { studio, focus: cx.focus_handle(), scroll: ScrollHandle::new(), images, last: 0 }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Send a message…"));
+        let _input_events = cx.subscribe_in(&input, window, |this, state, ev: &InputEvent, window, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. }) {
+                let text = state.read(cx).value().trim().to_string();
+                if text.is_empty() {
+                    return;
+                }
+                state.update(cx, |s, cx| s.set_value("", window, cx));
+                this.send(text, cx);
+            }
+        });
+        ChatPanel { studio, focus: cx.focus_handle(), scroll: ScrollHandle::new(), images, last: 0, input, target: String::new(), send_error: None, _input_events }
+    }
+
+    /// Sends `text` (as the person signed in on each platform), off the main thread.
+    fn send(&mut self, text: String, cx: &mut Context<Self>) {
+        let hub = self.studio.read(cx).chat.clone();
+        let params = serde_json::json!({"text": text, "platform": self.target});
+        self.send_error = None;
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { crate::chat_send::send(&hub, &params) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.send_error = match result {
+                    Ok(v) => v["failed"].as_array().filter(|f| !f.is_empty()).map(|f| f.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("; ")),
+                    Err(e) => Some(e),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The box to send from, and where it sends.
+    fn composer(&self, cx: &mut Context<Self>) -> Div {
+        let mut platforms: Vec<String> = self.studio.read(cx).chat.status().into_keys().map(|c| c.platform).filter(|p| lightair_live::accounts::account(p).is_some()).collect();
+        platforms.sort();
+        platforms.dedup();
+        let label = if self.target.is_empty() { "All".to_string() } else { platforms::by_id(&self.target).map_or(self.target.clone(), |p| p.name.to_string()) };
+        let me = cx.entity().downgrade();
+        let menu = Button::new("chat-target").label(label).xsmall().ghost().dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            for (key, name) in std::iter::once((String::new(), "All".to_string())).chain(platforms.iter().map(|p| (p.clone(), platforms::by_id(p).map_or(p.clone(), |x| x.name.to_string())))) {
+                let me = me.clone();
+                menu = menu.item(PopupMenuItem::new(name).on_click(move |_, _, cx| {
+                    if let Some(me) = me.upgrade() {
+                        me.update(cx, |this, cx| {
+                            this.target = key.clone();
+                            cx.notify();
+                        });
+                    }
+                }));
+            }
+            menu
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .border_t_1()
+            .border_color(tok::border())
+            .when_some(self.send_error.clone(), |d, e| d.child(div().text_size(px(11.)).text_color(tok::error()).child(e)))
+            .child(div().flex().items_center().gap_1().child(menu).child(div().flex_1().child(TextInput::new(&self.input).small())))
     }
 
     fn header(&self, cx: &App) -> Option<Div> {
@@ -343,7 +414,8 @@ impl Render for ChatPanel {
                 .children(rows)
                 .into_any_element()
         };
-        div().flex().flex_col().size_full().bg(tok::bg_panel()).children(header).child(feed)
+        let composer = (!events.is_empty() || !hub.status().is_empty()).then(|| self.composer(cx));
+        div().flex().flex_col().size_full().bg(tok::bg_panel()).children(header).child(feed).children(composer)
     }
 }
 

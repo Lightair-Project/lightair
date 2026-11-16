@@ -107,6 +107,8 @@ fn new_step(kind: &str) -> Step {
         "record" => Step::Call { method: "record.start".into(), params: json!({}) },
         "clip" => Step::Call { method: "clip.save".into(), params: json!({}) },
         "http" => Step::Http { url: "https://".into(), method: "GET".into(), body: String::new() },
+        "vts" => Step::Call { method: "vts.hotkey".into(), params: json!({"hotkey": "Name of the hotkey"}) },
+        "light" => Step::Call { method: "light.set".into(), params: json!({"address": "192.168.1.20", "on": true, "brightness": 60, "temperature": 4500}) },
         _ => Step::Stop,
     }
 }
@@ -122,6 +124,8 @@ const STEP_KINDS: &[(&str, &str)] = &[
     ("clip", "Save a clip"),
     ("var", "Change a variable"),
     ("points", "Give or take points"),
+    ("vts", "VTube Studio hotkey"),
+    ("light", "Elgato Key Light"),
     ("http", "Web request"),
     ("stop", "Stop"),
 ];

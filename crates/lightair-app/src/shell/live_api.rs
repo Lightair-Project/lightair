@@ -24,6 +24,9 @@ pub(super) fn start_automations(hub: &lightair_live::Hub, jobs: super::remote::J
         if method == "chat.send" {
             return crate::chat_send::send(&chat, &params);
         }
+        if let Some(out) = lightair_live::integrations::call(method, &params) {
+            return out;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let call = Call { method: method.to_string(), params, client: "Automation" };
         jobs.unbounded_send((call, tx)).map_err(|_| "Lightair is closing".to_string())?;
@@ -33,6 +36,7 @@ pub(super) fn start_automations(hub: &lightair_live::Hub, jobs: super::remote::J
             Err(_) => Err("Lightair didn't answer in time".into()),
         }
     });
+    lightair_live::integrations::set_dir(lightair_platform::paths::data_dir().join("integrations"));
     Automations::start(hub.clone(), lightair_platform::paths::data_dir().join("automations"), host)
 }
 

@@ -277,6 +277,9 @@ impl StudioWindow {
             if call.method == "chat.send" {
                 return crate::chat_send::send(&chat, &call.params).map_err(|e| ApiError::new(ErrorKind::State, e));
             }
+            if let Some(out) = lightair_live::integrations::call(&call.method, &call.params) {
+                return out.map_err(|e| ApiError::new(ErrorKind::State, e));
+            }
             // asking the system for windows and devices takes a moment: not on the main thread
             if call.method == "capture.targets" {
                 return capture_targets(&call.params, &engine);
