@@ -334,6 +334,59 @@ mod imp {
 
     // ------------------------------------------------------------ the browser process
 
+    /// Where pages look names up: DNS over HTTPS first (Cloudflare's, then Google's), the
+    /// network's own resolver if neither answers. Some networks' resolvers hide sites Lightair
+    /// needs (an Indonesian ISP sends kick.com to a block page).
+    const DNS_OVER_HTTPS: &str = "https://chrome.cloudflare-dns.com/dns-query https://dns.google/dns-query{?dns}";
+    /// Their hosts, looked at before Chromium starts (`probe_dns_over_https`).
+    const DNS_OVER_HTTPS_HOSTS: [&str; 2] = ["chrome.cloudflare-dns.com:443", "dns.google:443"];
+
+    /// Whether a DNS-over-HTTPS server answered: 0 not known yet, 1 yes, 2 no.
+    static DNS_OVER_HTTPS_REACHABLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+    /// Chromium's "secure" mode uses only the servers it's given, so on a network that blocks
+    /// them every page (scene browser sources too) would stay blank; its "automatic" mode ignores
+    /// servers of one's own. So: a connection to each first, off the main thread, and the
+    /// network's resolver if neither answers. Pages wait for the answer (`pump`): tens of ms,
+    /// sooner than Chromium is ready, except where they're blocked (at most 1.5 s, once).
+    fn probe_dns_over_https() {
+        std::thread::spawn(|| {
+            use std::net::ToSocketAddrs;
+            let tries: Vec<_> = DNS_OVER_HTTPS_HOSTS
+                .iter()
+                .map(|host| {
+                    std::thread::spawn(move || {
+                        host.to_socket_addrs()
+                            .ok()
+                            .and_then(|mut a| a.next())
+                            .is_some_and(|addr| std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(1500)).is_ok())
+                    })
+                })
+                .collect();
+            let answers = tries.into_iter().any(|t| t.join().unwrap_or(false));
+            DNS_OVER_HTTPS_REACHABLE.store(if answers { 1 } else { 2 }, Ordering::Relaxed);
+            if !answers {
+                tracing::info!("no DNS-over-HTTPS server answers here: web pages use the network's DNS");
+            }
+            wake();
+        });
+    }
+
+    fn secure_dns() {
+        let Some(prefs) = preference_manager_get_global() else { return };
+        let mode = if DNS_OVER_HTTPS_REACHABLE.load(Ordering::Relaxed) == 1 { "secure" } else { "off" };
+        tracing::debug!(mode, "Chromium's DNS over HTTPS");
+        for (name, value) in [("dns_over_https.templates", DNS_OVER_HTTPS), ("dns_over_https.mode", mode)] {
+            let Some(mut v) = value_create() else { continue };
+            v.set_string(Some(&CefString::from(value)));
+            // (an empty string goes to Chromium as no string at all, and the call is refused)
+            let mut error = CefString::from(" ");
+            if prefs.set_preference(Some(&CefString::from(name)), Some(&mut v), Some(&mut error)) != 1 {
+                tracing::warn!(name, error = %error, "Chromium didn't take a DNS setting");
+            }
+        }
+    }
+
     wrap_browser_process_handler! {
         struct LightairBrowserProcess;
         impl BrowserProcessHandler {
@@ -418,6 +471,7 @@ mod imp {
             tracing::warn!("Chromium isn't bundled here: web pages won't paint");
             return false;
         }
+        probe_dns_over_https();
         #[cfg(target_os = "macos")]
         mac::adopt_app_protocol();
         let args = args::Args::new();
@@ -801,9 +855,13 @@ mod imp {
             DUE.store(u64::MAX, Ordering::Release);
             do_message_loop_work();
         }
-        // pages are made once Chromium's context is ready (macOS insists)
-        if !READY.load(Ordering::Relaxed) {
+        // pages are made once Chromium's context is ready (macOS insists), and its DNS is set
+        if !READY.load(Ordering::Relaxed) || DNS_OVER_HTTPS_REACHABLE.load(Ordering::Relaxed) == 0 {
             return;
+        }
+        static DNS_SET: AtomicBool = AtomicBool::new(false);
+        if !DNS_SET.swap(true, Ordering::Relaxed) {
+            secure_dns();
         }
         let requests = std::mem::take(&mut *REQUESTS.lock());
         for r in requests {
