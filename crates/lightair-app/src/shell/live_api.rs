@@ -41,6 +41,13 @@ pub(super) fn start_automations(hub: &lightair_live::Hub, jobs: super::remote::J
     });
     lightair_live::integrations::set_dir(lightair_platform::paths::data_dir().join("integrations"));
     lightair_live::rules::set_dir(lightair_platform::paths::data_dir().join("rules"));
+    // official sign-ins' tokens: the Keychain
+    lightair_live::oauth::set_store(
+        Box::new(crate::secrets::connection_token),
+        Box::new(|k, v| {
+            let _ = crate::secrets::set_connection_token(k, v);
+        }),
+    );
     Automations::start(hub.clone(), lightair_platform::paths::data_dir().join("automations"), host)
 }
 

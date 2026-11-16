@@ -218,4 +218,49 @@ impl StudioWindow {
         self.hue_note = None;
         cx.notify();
     }
+
+    /// Official sign-in (OAuth) to `provider`, in the person's browser.
+    pub(super) fn official_sign_in(&mut self, provider: &'static str, cx: &mut Context<Self>) {
+        self.oauth_notes.insert(provider.into(), "Opening your browser…".into());
+        cx.notify();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        type Outcome = std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>;
+        let done: Outcome = Default::default();
+        let out = done.clone();
+        std::thread::spawn(move || {
+            let tx = std::sync::Mutex::new(tx);
+            let r = lightair_live::oauth::sign_in(provider, Box::new(move |m| {
+                let _ = tx.lock().map(|t| t.send(m.to_string()));
+            }));
+            *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+        });
+        // what the sign-in asks for (Twitch's code) while it waits, then how it ended
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+            while let Ok(m) = rx.try_recv() {
+                let _ = this.update(cx, |this, cx| {
+                    this.oauth_notes.insert(provider.into(), m);
+                    cx.notify();
+                });
+            }
+            let finished = done.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(result) = finished {
+                let _ = this.update(cx, |this, cx| {
+                    match result {
+                        Ok(_) => this.oauth_notes.remove(provider),
+                        Err(e) => this.oauth_notes.insert(provider.into(), e),
+                    };
+                    cx.notify();
+                });
+                break;
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn official_sign_out(&mut self, provider: &str, cx: &mut Context<Self>) {
+        lightair_live::oauth::forget(provider);
+        self.oauth_notes.remove(provider);
+        cx.notify();
+    }
 }

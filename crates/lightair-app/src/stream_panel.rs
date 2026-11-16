@@ -21,6 +21,8 @@ use crate::studio::Studio;
 use crate::ui::{self, tok};
 
 type Key = (String, String);
+/// A channel being edited: title, category, and description (YouTube).
+type Editing = (Key, Entity<InputState>, Entity<InputState>, Option<Entity<InputState>>);
 
 pub struct StreamPanel {
     studio: Entity<Studio>,
@@ -30,8 +32,8 @@ pub struct StreamPanel {
     drawn: Rc<Cell<Instant>>,
     /// Dashboards open (closed with their windows).
     windows: Vec<Box<dyn lightair_live::pages::Page>>,
-    /// The channel being edited: its title and category fields.
-    editing: Option<(Key, Entity<InputState>, Entity<InputState>)>,
+    /// The channel being edited: its title and category fields, and description (YouTube).
+    editing: Option<Editing>,
     /// What the last change said, per channel.
     notes: HashMap<Key, String>,
 }
@@ -99,24 +101,30 @@ impl StreamPanel {
         let now = self.info.get(&key).and_then(|r| r.as_ref().ok()).cloned().unwrap_or_default();
         let title = cx.new(|cx| InputState::new(window, cx).placeholder("Title").default_value(now.title));
         let category = cx.new(|cx| InputState::new(window, cx).placeholder("Category or game").default_value(now.category));
+        let description = stream_info::can_describe(&key.0).then(|| {
+            let text = now.description.clone().unwrap_or_default();
+            cx.new(|cx| InputState::new(window, cx).placeholder("Description").default_value(text))
+        });
         title.update(cx, |t, cx| t.focus(window, cx));
-        self.editing = Some((key, title, category));
+        self.editing = Some((key, title, category, description));
         cx.notify();
     }
 
     fn save_edit(&mut self, cx: &mut Context<Self>) {
-        let Some((key, title, category)) = self.editing.take() else { return };
+        let Some((key, title, category, description)) = self.editing.take() else { return };
         let (t, c) = (title.read(cx).value().to_string(), category.read(cx).value().to_string());
+        let d = description.map(|d| d.read(cx).value().to_string());
         let before = self.info.get(&key).and_then(|r| r.as_ref().ok()).cloned().unwrap_or_default();
         let t = (t != before.title).then_some(t);
         let c = (c != before.category).then_some(c);
+        let d = d.filter(|d| Some(d) != before.description.as_ref());
         self.notes.insert(key.clone(), "Saving…".into());
         cx.spawn(async move |this, cx| {
             let k = key.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let r = stream_info::edit(&k.0, &k.1, t.as_deref(), c.as_deref());
+                    let r = stream_info::edit(&k.0, &k.1, t.as_deref(), d.as_deref(), c.as_deref());
                     (r, stream_info::info(&k.0, &k.1))
                 })
                 .await;
@@ -186,7 +194,7 @@ impl StreamPanel {
                     d.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(line))
                 })
                 .when_some(info.and_then(|r| r.as_ref().err()).cloned(), |d, e| d.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(e)))
-                .when_some(self.editing.as_ref().filter(|(k, _, _)| k.0 == platform && k.1 == channel), |d, (_, t, c)| {
+                .when_some(self.editing.as_ref().filter(|(k, _, _, _)| k.0 == platform && k.1 == channel), |d, (_, t, c, desc)| {
                     d.child(
                         div()
                             .flex()
@@ -195,6 +203,7 @@ impl StreamPanel {
                             .pt_1()
                             .child(TextInput::new(t).small())
                             .child(TextInput::new(c).small())
+                            .when_some(desc.as_ref(), |d, desc| d.child(TextInput::new(desc).small()))
                             .child(
                                 div()
                                     .flex()

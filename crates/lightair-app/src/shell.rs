@@ -427,6 +427,8 @@ pub struct StudioWindow {
     heart_rate: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// What pairing with a Hue bridge is doing (None: idle).
     hue_note: Option<String>,
+    /// What an official sign-in is doing or said, per platform.
+    oauth_notes: std::collections::HashMap<String, String>,
     /// The canvas preview drawn under the UI (macOS: native_preview), the canvases whose
     /// previews show in it, and where each canvas's picture is (window points), as laid out.
     native: std::rc::Rc<RefCell<Option<crate::native_preview::NativePreview>>>,
@@ -737,6 +739,7 @@ impl StudioWindow {
             automations,
             heart_rate: None,
             hue_note: None,
+            oauth_notes: Default::default(),
             permissions_watch: Default::default(),
             automations_panel,
             native,

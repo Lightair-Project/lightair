@@ -1300,7 +1300,41 @@ impl StudioWindow {
                 .child(Button::new("hue-paste").label("Paste address").xsmall().ghost().disabled(pairing).on_click(cx.listener(|this, _, _, cx| this.paste_hue_address(cx))))
                 .when(hue.is_some(), |d| d.child(Button::new("hue-forget").label("Forget").xsmall().ghost().on_click(cx.listener(|this, _, _, cx| this.forget_hue(cx))))),
         ));
-        pages().child(tips).child(devices).child(
+        let mut official = group("Official sign-in");
+        for (provider, name, does) in [
+            ("youtube", "YouTube", "title, description and category; chat; bans and timeouts; your Private and Unlisted streams"),
+            ("twitch", "Twitch", "title and category; chat; delete, timeouts and bans"),
+            ("kick", "Kick", "title and category; chat; timeouts and bans"),
+        ] {
+            let account = lightair_live::oauth::account(provider);
+            let available = lightair_live::oauth::available(provider);
+            let busy = self.oauth_notes.get(provider).is_some_and(|n| n.ends_with('…') || n.contains("code"));
+            let status = match (self.oauth_notes.get(provider), &account, available) {
+                (Some(n), _, _) => n.clone(),
+                (None, Some((_, who)), _) => format!("Signed in as {who}: Lightair uses {name}'s own API for {does}."),
+                (None, None, true) => format!("Sign in, as with OBS, and Lightair uses {name}'s own API for {does}."),
+                (None, None, false) => format!("This copy of Lightair has no {name} app registered (docs/official-apis.md); the signed-in pages are used."),
+            };
+            official = official.child(row(
+                name,
+                Some(&status),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when(account.is_none(), |d| {
+                        d.child(Button::new(SharedString::from(format!("oauth-in-{provider}"))).label("Sign in").xsmall().outline().disabled(!available || busy).on_click(cx.listener(
+                            move |this, _, _, cx| this.official_sign_in(provider, cx),
+                        )))
+                    })
+                    .when(account.is_some(), |d| {
+                        d.child(Button::new(SharedString::from(format!("oauth-out-{provider}"))).label("Sign out").xsmall().ghost().on_click(cx.listener(
+                            move |this, _, _, cx| this.official_sign_out(provider, cx),
+                        )))
+                    }),
+            ));
+        }
+        pages().child(official).child(tips).child(devices).child(
             group("How it works").child(
                 div()
                     .px_3()

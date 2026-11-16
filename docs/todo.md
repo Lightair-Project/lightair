@@ -79,6 +79,10 @@ with what's known about each. Keep it current: strike items as they land.
 
 ## Integrations
 
+- **Official sign-in** (built: docs/official-apis.md; oauth.rs, official.rs): YouTube (title,
+  description, category, chat, bans; finds Private and Unlisted streams), Twitch (title,
+  category, chat, delete, bans), Kick (title, category, chat, bans), each used first where
+  signed in. Needs Lightair's apps registered (client ids in the build); untested until then.
 - ~~Philips Hue~~ (done: Settings › Connections › Philips Hue, automation step "Philips Hue
   light"; tested against a stand-in bridge only). ~~A Lightair Stream Deck plugin~~ (done:
   streamdeck/, Settings › Remote API › Stream Deck; tested with a stand-in Stream Deck against a
