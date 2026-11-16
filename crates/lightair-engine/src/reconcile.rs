@@ -1667,6 +1667,12 @@ fn transition_source(
 /// own goes, as with the drawn pointer effect).
 fn source_settings(source: &lightair_core::Source, drawn: bool) -> serde_json::Value {
     let mut s = crate::kinds::resolve(&source.kind, &source.settings).map_or_else(|| source.settings.clone(), |(_, s)| s);
+    // media files decode on the GPU's video decoder (VideoToolbox, D3D11VA) unless turned off
+    if source.kind == "ffmpeg_source"
+        && let Some(o) = s.as_object_mut()
+    {
+        o.entry("hw_decode").or_insert(true.into());
+    }
     // Lightair draws the pointer: the capture's own goes (every platform's name for it)
     if (drawn || draws_pointer(source))
         && let Some(o) = s.as_object_mut()

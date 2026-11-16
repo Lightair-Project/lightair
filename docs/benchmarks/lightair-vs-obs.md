@@ -161,10 +161,30 @@ back to back, the same afternoon (same harness, same scenario):
   (Apple deprecated OpenGL; HDR), not for speed today.
 
 Lightair runs on Metal with `LIGHTAIR_GRAPHICS=metal`: the preview's frames are BGRA, copied
-by libobs into IOSurfaces (on OpenGL they're converted to NV12). 18 of the 19 preview tests
-pass on Metal; background removal with macOS's green backdrop (Camera Studio) doesn't key
-yet, and the GPUI-drawn previews (the program monitor, display thumbnails, the Library
-player) show nothing there (GPUI draws NV12 only). Not the default until those are done.
+by libobs into IOSurfaces (on OpenGL they're converted to NV12), and the views GPUI draws (the
+program monitor, display thumbnails, the Library player) get an NV12 copy made by VideoToolbox,
+once per frame and only when one of them is showing. All 20 preview tests pass on both
+renderers. Camera Studio's green key didn't compile on Metal: libobs's Metal shader converter
+breaks a call to a function with no arguments that reads a uniform (`f()` becomes
+`f(, uniforms)`), so the helper takes its value as an argument now.
+
+## Hardware decoding of media files
+
+Media sources now decode on the video decoder (`hw_decode`, off by default in OBS). Measured
+on the Gameplay scene (two videos, 1080p60 and 720p30), 30 s each, on and off alternately:
+
+| | Software (before) | Hardware |
+|---|---|---|
+| CPU, app + helpers | 55.1–57.9 % | 58.0–62.9 % |
+| CPU, main process | 46.9–48.9 % | 41.4–43.8 % |
+| GPU busy | 24.1–25.7 % | 26.1–34.5 % |
+| Render time per frame (libobs) | 0.91–0.93 ms | 2.23–2.60 ms |
+
+The decoding leaves the main process (−6 points) but the total goes up: libobs's media source
+copies each decoded frame back from the decoder into memory and uploads it again, so the work
+moves rather than disappears, and the frames arrive slower to draw. Not a win on this Mac
+(Apple Silicon decodes 1080p H.264 in software cheaply); it may be one for 4K or HEVC, or on
+weaker machines.
 
 ## Reproduce
 
