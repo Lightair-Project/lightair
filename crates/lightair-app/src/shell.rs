@@ -473,7 +473,7 @@ impl StudioWindow {
         window.focus(&focus, cx);
         // Shortcuts that work in any app: registered now, handled as they come.
         let saved = crate::prefs::load_from(&crate::prefs::path());
-        crate::shortcuts::register(&saved.global_shortcuts.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+        crate::shortcuts::register_all(&saved.global_shortcuts.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
         // Face effects' "no face in view" hints.
         cx.spawn(async move |this, cx| {
             loop {
@@ -1042,6 +1042,13 @@ impl StudioWindow {
     fn global_action(&mut self, action: crate::shortcuts::GlobalAction, window: &mut Window, cx: &mut Context<Self>) {
         use crate::shortcuts::GlobalAction as A;
         match action {
+            A::Automation(i) => {
+                if let Some(id) = crate::shortcuts::automation_for(i)
+                    && let Err(e) = self.automations.run(&id, None, &[])
+                {
+                    tracing::warn!(%e, "hotkey automation");
+                }
+            }
             A::ToggleRecording => self.studio.update(cx, |s, cx| s.toggle_recording(cx)),
             A::ToggleLive => {
                 if runtime().any_stream_running() {

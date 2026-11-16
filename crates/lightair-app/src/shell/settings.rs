@@ -223,10 +223,10 @@ impl StudioWindow {
         let mut list = self.prefs.global_shortcuts.clone();
         list.retain(|h| h.action != action && h.keys != keys);
         list.push(crate::prefs::GlobalShortcut { action, keys: keys.clone() });
-        let refused = crate::shortcuts::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+        let refused = crate::shortcuts::register_all(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
         if refused.contains(&action) {
             list.retain(|h| h.action != action);
-            crate::shortcuts::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+            crate::shortcuts::register_all(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
             self.shortcut_note = Some(format!("{} is taken by {} or another app.", crate::shortcuts::display(&keys), ui::OS));
         } else {
             self.shortcut_note = None;
@@ -237,7 +237,7 @@ impl StudioWindow {
     fn clear_shortcut(&mut self, action: crate::shortcuts::GlobalAction, cx: &mut Context<Self>) {
         let mut list = self.prefs.global_shortcuts.clone();
         list.retain(|h| h.action != action);
-        crate::shortcuts::register(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
+        crate::shortcuts::register_all(&list.iter().map(|h| (h.action, h.keys.clone())).collect::<Vec<_>>());
         self.set_pref(|p| p.global_shortcuts = list, cx);
     }
 
