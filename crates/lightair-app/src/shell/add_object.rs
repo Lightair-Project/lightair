@@ -140,6 +140,36 @@ impl StudioWindow {
         self.close_add_object(window, cx);
     }
 
+    /// Adds a widget: a built-in one, or an imported one (`custom`).
+    pub(super) fn add_widget(&mut self, kind: &str, custom: Option<lightair_widgets::Custom>, window: &mut Window, cx: &mut Context<Self>) {
+        let builtin = lightair_widgets::catalog::by_kind(kind);
+        let (w, h) = builtin.map_or((800, 600), |b| b.size);
+        let name = builtin.map_or("Widget", |b| b.name).to_string();
+        let instance = lightair_widgets::Instance::new(kind, custom);
+        let settings = serde_json::json!({"url": instance.address(), "width": w, "height": h, "fps": 30, "widget": instance});
+        let (place, sound) = builtin.map_or(((0.5, 0.5), true), |b| (b.place, b.sound));
+        self.add_placed_object(&name, lightair_engine::web::KIND, settings, (w as f32, h as f32), place, sound, cx);
+        self.close_add_object(window, cx);
+    }
+
+    /// Brings in a StreamElements custom widget from a folder of its files.
+    fn import_widget(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Import widget".into()) });
+        self.close_add_object(window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(dir) = paths.into_iter().next() else { return };
+            let _ = this.update_in(cx, |this, window, cx| match lightair_widgets::import_folder(&dir) {
+                Ok(custom) => this.add_widget("custom", Some(custom), window, cx),
+                Err(e) => this.studio.update(cx, |s, cx| {
+                    s.issue = Some(format!("Couldn't import that widget: {e}").into());
+                    cx.notify();
+                }),
+            });
+        })
+        .detach();
+    }
+
     /// Adds a capture of the display, window or app chosen (`size`: its picture's, if known).
     fn add_screen(&mut self, mode: i64, name: &str, value: &serde_json::Value, size: Option<(u32, u32)>, window: &mut Window, cx: &mut Context<Self>) {
         let settings = super::screen_pick::settings(mode, value);
@@ -283,6 +313,31 @@ impl StudioWindow {
                         );
                     }
                     body = body.child(heading(group)).child(grid);
+                }
+                // widgets: Lightair's own, and StreamElements' brought in
+                let builtins: Vec<_> = lightair_widgets::catalog::BUILTIN
+                    .iter()
+                    .filter(|b| matches(&query, &[b.name, b.about, "widget", "overlay", "alert"]))
+                    .collect();
+                let import = matches(&query, &["StreamElements", "custom widget", "import", "widget"]);
+                if !builtins.is_empty() || import {
+                    let mut grid = div().grid().grid_cols(3).gap_2();
+                    for (i, b) in builtins.into_iter().enumerate() {
+                        let kind = b.kind;
+                        grid = grid.child(
+                            tile(("widget", i).into(), b.icon, b.name)
+                                .tooltip(ui::tip(b.about))
+                                .on_click(cx.listener(move |this, _, window, cx| this.add_widget(kind, None, window, cx))),
+                        );
+                    }
+                    if import {
+                        grid = grid.child(
+                            tile("widget-import".into(), "folder-open", "StreamElements")
+                                .tooltip(ui::tip("A StreamElements custom widget: choose the folder with its HTML, CSS, JS and fields files"))
+                                .on_click(cx.listener(|this, _, window, cx| this.import_widget(window, cx))),
+                        );
+                    }
+                    body = body.child(heading("Widgets")).child(grid);
                 }
             }
             Step::Web => {

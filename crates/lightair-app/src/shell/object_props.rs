@@ -50,6 +50,8 @@ pub(super) struct ObjectProps {
     web: Option<TextEdit>,
     /// Its custom CSS.
     web_css: Option<CssEdit>,
+    /// The selected widget's settings.
+    pub(super) widget: Option<super::widget_props::WidgetEdit>,
 }
 
 pub(super) fn is_text(kind: &str) -> bool {
@@ -204,6 +206,8 @@ impl StudioWindow {
             None => self.props.web_css = None,
         }
 
+        self.sync_widget_props(source.as_deref(), window, cx);
+
         // Timer status, polled the same way.
         match source.as_ref().filter(|i| i.kind == TIMER_KIND) {
             Some(i) => {
@@ -281,6 +285,8 @@ impl StudioWindow {
             Some(self.colour_section(source, cx).into_any_element())
         } else if is_media(&source.kind) {
             Some(self.media_section(source, cx).into_any_element())
+        } else if is_web(&source.kind) && source.settings.get("widget").is_some() {
+            self.widget_section(source, cx)
         } else if is_web(&source.kind) {
             Some(self.web_section(source, cx).into_any_element())
         } else {

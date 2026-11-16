@@ -2,7 +2,10 @@
 
 Status (16 November 2026): research done; being built. The Chat panel reads Twitch, YouTube,
 CHZZK, SOOP and DouYu directly, and Kick and TikTok through hidden pages (crates/lightair-live,
-`pages`: the app gives it Lightair's Chromium). Sending, signed-in pages and the rest are next. It turns
+`pages`: the app gives it Lightair's Chromium). Widgets (crates/lightair-widgets): the local
+server, bridge, alert queue, the alert box, chat box, event list, goal, label, counter and
+subathon timer, StreamElements custom widgets imported unchanged; the Activity panel. Automation,
+sending, signed-in pages and the rest are next. It turns
 [docs/12](../12-chat-alerts-integrations.md) into a design and goes further: everything a
 streamer runs next to OBS today (a chat app, StreamElements or Streamlabs widgets, Streamer.bot,
 Speaker.bot, Restream chat) is part of Lightair, so nobody needs a second app. Lightair doesn't

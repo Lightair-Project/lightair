@@ -169,9 +169,10 @@ impl ChatPanel {
                     ),
                 )
                 .child(body),
-            Kind::Membership | Kind::Notice | Kind::Raid { .. } => {
+            Kind::Membership | Kind::Notice | Kind::Raid { .. } | Kind::Follow => {
                 let line = match &e.kind {
                     Kind::Raid { viewers } => format!("{name} is raiding with {viewers} viewers"),
+                    Kind::Follow => format!("{name} followed"),
                     _ => e.headline.clone().unwrap_or_else(|| format!("{name} became a member")),
                 };
                 div()

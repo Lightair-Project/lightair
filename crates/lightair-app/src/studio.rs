@@ -116,6 +116,8 @@ pub struct Studio {
     /// The chat of the destinations' channels (docs/plans/live-integrations.md), read while the
     /// workspace is open.
     pub chat: lightair_live::Hub,
+    /// The widgets' server (docs/plans/live-integrations.md, 2.5): `None` if it couldn't start.
+    pub widgets: Option<lightair_widgets::Widgets>,
     doc: Document,
     package: Option<Package>,
     engine: Arc<Engine>,
@@ -179,8 +181,11 @@ impl Studio {
             }
         };
         let selected_scene = workspace.program.or(workspace.scenes.first().map(|s| s.id));
+        let chat = lightair_live::Hub::new();
+        let widgets = crate::widgets::start(&chat);
         let mut studio = Self {
-            chat: lightair_live::Hub::new(),
+            chat,
+            widgets,
             doc: Document::new(workspace),
             package,
             engine,
@@ -208,9 +213,10 @@ impl Studio {
             starter,
         };
         studio.migrate();
+        // (before the scene's pages open: a widget's page is served once it's known)
+        studio.sync_chat();
         studio.rebuild_engine();
         studio.sync_clips();
-        studio.sync_chat();
         studio
     }
 
@@ -592,6 +598,9 @@ impl Studio {
             })
             .collect();
         self.chat.set_channels(&channels);
+        if let Some(w) = &self.widgets {
+            w.set_instances(self.workspace().sources.values().filter_map(|s| lightair_widgets::Instance::from_settings(&s.settings)).collect());
+        }
     }
 
     fn sync_clips(&mut self) {
