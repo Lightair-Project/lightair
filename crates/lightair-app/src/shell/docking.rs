@@ -524,9 +524,13 @@ impl StudioWindow {
                     });
                 }
             }
+            Ok(hook) if hook.starts_with("dest-search-") => {
+                self.outputs.update(cx, |o, cx| o.open_picker(window, cx));
+                self.outputs.update(cx, |o, cx| o.type_search(&hook[12..], window, cx));
+            }
             Ok(hook) if hook.starts_with("dest-") => match crate::platforms::by_id(&hook[5..]) {
                 Some(p) => self.outputs.update(cx, |o, cx| o.choose(p, window, cx)),
-                None => self.outputs.update(cx, |o, cx| o.open_picker(cx)),
+                None => self.outputs.update(cx, |o, cx| o.open_picker(window, cx)),
             },
             Ok("rename") => {
                 // Rename the top object to "Renamed" and press Enter, as a person would.

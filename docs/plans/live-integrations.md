@@ -7,6 +7,14 @@ Speaker.bot, Restream chat) is part of Lightair, so nobody needs a second app. L
 depend on, connect to or require any of them; it can import what people already made for them.
 Every part names its macOS and Windows path (docs/plans/windows.md).
 
+**Rule: nothing waits on a platform's approval.** Where an official API needs a review, an
+audit, a partner deal or an enterprise contract (YouTube's quota audit, Meta's App Review, X's
+gated access, TikTok's partner API, LinkedIn's certification, Bilibili's open platform), Lightair
+uses the route that works today without it (section 2.10): the platform's own web pages in a
+hidden view logged in as the user, or the endpoints its web client uses. Official APIs are used
+where they're self-serve (Twitch, TwitCasting) and offered as an option for people who bring
+their own developer credentials.
+
 ## 1. What the research found
 
 ### Platforms (November 2026)
@@ -26,17 +34,15 @@ Every part names its macOS and Windows path (docs/plans/windows.md).
 
 What follows from it:
 
-- **Twitch and YouTube work entirely from the desktop** and are where most streamers are: they
-  come first, fully native.
-- **YouTube's quota** (10,000 units a day per Google Cloud project, shared by every Lightair
-  user) runs out with a few hundred users polling chat; `streamList` keeps chat cheap, but sending
-  (20) and moderation (200 for bans) still cost, and shipping needs Google's compliance audit and
-  OAuth verification. Start the audit early.
-- **Kick needs a small server of Lightair's own**: it requires the client secret at the token
-  exchange and delivers events only to a public webhook. Streamer.bot does the same (its website
-  relays Kick events to the app).
-- **TikTok has no official API.** The unofficial route breaks when TikTok changes and is against
-  its terms: an opt-in "experimental" connector at most, read-only, never with the user's cookie.
+- **Twitch works entirely from the desktop through its official API** with no approval (a
+  registered app, a public client): fully native.
+- **YouTube's official API** needs Google's quota audit and OAuth verification to ship (10,000
+  units a day shared by every user), so it isn't the route: chat is read from the feed youtube.com's
+  own chat page uses, sent from a hidden page logged in as the user, and streams go to the
+  channel's reusable stream key (2.10).
+- **Kick**: read through its chat socket (what every tool uses), sent through a hidden page; its
+  official API (self-serve, but it needs a client secret at the token exchange) is an option.
+- **TikTok, Facebook, Instagram, X, LinkedIn**: hidden logged-in pages (2.10).
 
 ### Context
 
@@ -72,9 +78,11 @@ What follows from it:
   offers "Log in" next to "Paste a key"). Several accounts per platform; each is a **broadcaster**
   or a **bot** account (the bot sends chat and replies; Twitch's bot badge needs the broadcaster to
   grant `channel:bot`).
-- Flows: Twitch device code (a code and a link; no secret in the app), YouTube loopback + PKCE in
-  the user's browser, Facebook device login, Kick through the relay. Never an embedded web view
-  for passwords.
+- Flows: Twitch device code (a code and a link; no secret in the app); every other platform
+  through its own sign-in page in Lightair's browser (a window the user sees, their password
+  typed into the platform's page, never into Lightair), whose session the hidden pages then use
+  (2.10). Optional: a user's own developer credentials for an official API (a Google Cloud
+  project, a Meta app in development mode, a Kick app), used for their own account only.
 - Tokens in the Keychain (Windows: Credential Manager), refreshed in the background, never in the
   workspace, never given to scripts or widgets (they call functions that use them).
 - Scopes asked per feature, with a plain list ("read chat, send chat as you, see subs…"); adding a
@@ -82,12 +90,16 @@ What follows from it:
 
 ### 2.2 Going live without keys
 
-- A logged-in destination fills its server and key itself (Twitch, Kick, YouTube's bound stream,
-  Facebook's live video), so the paste step disappears.
+- A logged-in destination fills its server and key itself where the platform shows them to the
+  user: through Twitch's API, and from the platform's own key page in the logged-in session
+  elsewhere (YouTube Studio's reusable key, Kick's dashboard, Facebook's persistent key; Instagram,
+  TikTok and Niconico make a new key for every stream, read the same way when going live).
+  Pasting stays possible everywhere.
 - **Stream info** per destination in the Outputs panel and the Go live sheet: title, category
   (search), tags, YouTube privacy, description and thumbnail; templates per show; "update all".
-- YouTube: Lightair creates and binds the broadcast and moves it to live when the stream starts
-  (or "auto start"), and ends it when it stops.
+- YouTube: the reusable key starts a broadcast as soon as the stream arrives; title and category
+  are set in YouTube Studio, shown in a Lightair window (or through the user's own Google Cloud
+  project, if they've made one).
 - Health back from the platforms where they say it (YouTube stream health, Twitch's ingest).
 
 ### 2.3 Event bus
@@ -242,23 +254,94 @@ recorded like any sound).
 
 A small service of Lightair's own, the only server any of this needs:
 
-- **Kick**: the OAuth code exchange and refresh (it holds the client secret), and the webhook
-  receiver; **Instagram** comments; donation webhooks (Ko-fi, Throne…); optionally Twitch's code
-  flow for platforms where the device flow is awkward.
+- Donation webhooks (Ko-fi, Throne, Fourthwall…), and Kick's official API for those who choose
+  it (it holds the client secret). Chat on every platform works without it (2.10).
 - Events go to the user's running Lightair over one WebSocket (the account's own channel), and are
   dropped after delivery (or after a short buffer while the app is offline); nothing else is kept.
 - Stateless and small enough for a Cloudflare Worker with Durable Objects (one per account).
-- Lightair works fully without it; only Kick, Instagram and webhooks-only services need it.
+- Lightair works fully without it; only webhook-only services need it.
+
+### 2.10 Approval-free routes
+
+| Platform | Chat in | Chat out | Events | Key |
+|---|---|---|---|---|
+| YouTube | The feed youtube.com's chat page polls (`get_live_chat`, no login for public streams), read by a Rust client; the hidden page finds the live video and the feed's start | Typed into the hidden chat page (YouTube's bot checks pass as for a person) | Super Chats and Stickers, memberships (new, milestones, gifts), Jewels, polls, deletions, pins, raids | The channel's reusable key in YouTube Studio |
+| Facebook | Hidden Live Producer or video page | Typed into it | Comments, Stars, highlighted comments, replies, viewers | Persistent key in Live Producer |
+| Instagram | Hidden live page: its own comment requests, the page as a fallback | Typed into it | Comments, joins, viewers, follows and likes | New per stream: read from Live Producer |
+| X | Hidden broadcast page (its WebSocket frames) | Typed into it | Chat | Live Studio source key |
+| TikTok | Hidden live page: its own signed webcast socket, decoded in Rust from TikTok's protobuf | Typed into it | Chat, gifts with streaks, likes, follows, joins, shares, subs, battles | LIVE Center producer page (new per stream; ~1,000 followers) |
+| LinkedIn | Hidden event page | Typed into it | Comments, reactions | The event's custom stream (eligible accounts only) |
+| Kick | Its chat socket (Pusher), the chatroom found through the hidden page | Typed into the hidden page, or the official API | Chat, subs, gifts, bans, pins | Dashboard |
+| Rumble | The Live Stream API link the user copies from their account (their own key: no approval), polled | Typed into the hidden page | Chat, rants, follows | Get Streamer Configuration |
+
+How the hidden pages work:
+
+- A page per connected platform, in Lightair's Chromium, logged in as the user, never shown
+  unless the user opens it (to log in, or to look). Data is taken from **the page's own network
+  traffic** (Chromium's DevTools protocol: WebSocket frames and response bodies, which the page
+  has already signed and the platform has already let through), with the page's content as the
+  fallback; it survives redesigns better.
+- Sending is **typing into the page's chat box**, as the user would: the platform's bot checks,
+  sessions and anti-forgery tokens are the page's own.
+- Pages kept awake (no background throttling) and watched: no messages for a while on a live
+  stream reloads the page.
+- **Each platform's reading rules are data, updated without an app release**, with a switch to
+  turn a platform's connector off: these routes change when the sites do (YouTube's in October
+  2025, TikTok's signing several times), and fixes need to reach people in days.
+- Risk is lowest as it's used here: the user's own session, on their own stream, at a person's
+  pace. It's highest on LinkedIn and TikTok; Lightair says so where they're connected.
+
+### 2.11 Asian platforms
+
+Streaming (in the Outputs list since 16 November 2026), with where the key is shown in each
+platform's own words:
+
+| Country | Platform | Server | Notes |
+|---|---|---|---|
+| Korea | **CHZZK** (치지직) | `rtmp://global-rtmp.lip2.navercorp.com:8080/relay` | 스튜디오 → 방송 설정; 8 Mbps, 1 s keyframes, no B-frames |
+| | **SOOP** (숲, formerly AfreecaTV) | `rtmp://stream.soop.live/app/` | 외부장치 방송 설정; 8 Mbps |
+| | PandaTV (팬더티비) | `rtmp://rtmp.pandalive.co.kr/app` | 7.5 Mbps |
+| | CIME (씨미) | pasted (Amazon IVS) | new in March 2026 |
+| Japan | **Niconico** (ニコニコ生放送) | `rtmp://liveorigin.dlive.nicovideo.jp/live/input` | key new per broadcast |
+| | **TwitCasting** (ツイキャス) | pasted | ツールとの連携設定 |
+| | 17LIVE (イチナナ) | pasted | vertical; PUSH URL and Push Key |
+| | Mirrativ (ミラティブ) | pasted | vertical; 720p30, ~1 Mbps |
+| | Whowatch (ふわっち) | `rtmps://ingest.global-contribute.live-video.net:443/app` | no B-frames |
+| China | **Bilibili** (哔哩哔哩直播) | four ingests, mainland and overseas | 5,000 followers and real-name for a key; else 直播姬's third-party mode |
+| | **Huya** (虎牙) | `rtmp://al.direct.huya.com/huyalive/` | 开通远程推流 |
+| | **DouYu** (斗鱼) | pasted (per session) | 开始直播 or 第三方转推 |
+| | WeChat Channels (视频号) | pasted (expires in 2 h) | vertical; 500 followers, 10 videos, 3 lives |
+| | Xiaohongshu (小红书) | `rtmp://live-push.xhscdn.com/live` | vertical; a 6-digit code per live |
+
+Not stream targets: Douyin and Kuaishou (only their own PC apps, 直播伴侣, which can take
+Lightair's virtual camera), Pococha (phone only), SHOWROOM (its key resolves to an address
+through its own API: later), and the closed ones (Mildom 2024, Trovo and OPENREC 2026).
+
+Chat, without approval:
+
+| Platform | Read | Send |
+|---|---|---|
+| CHZZK | Its chat socket (`kr-ss*.chat.naver.com`), no login | Hidden logged-in page (the official Open API is an option) |
+| SOOP | Its chat socket (binary protocol), no login for public rooms | Hidden logged-in page |
+| Niconico | Its comment server (protobuf stream), no login | The watch socket, logged in through Niconico's own page |
+| TwitCasting | Its realtime socket; the official API (self-serve) | Official API (self-serve app) |
+| Bilibili | Its danmaku socket (WBI-signed), logged in for real names | Its send endpoint with the logged-in session |
+| Huya, DouYu | Their chat sockets, no login | Hidden logged-in page |
+| SHOWROOM | Its socket, no login | Later |
+| WeChat Channels, Xiaohongshu, 17LIVE, Mirrativ | The platform's own live page, shown in a Lightair panel | The same page |
 
 ## 3. Phases
 
-1. **Accounts and going live.** Twitch (device code) and YouTube (loopback + PKCE) accounts;
-   key-less destinations; stream info per destination; YouTube broadcasts created and moved live.
-   *Done when* a Twitch and a YouTube stream start from a fresh install without pasting anything.
-2. **Event bus and chat.** Event model and schema; Twitch EventSub and YouTube streamList
-   connectors; chat panel (feed, tabs, send to, reply, emotes incl. 7TV/BTTV/FFZ, moderation,
-   history); Activity panel. *Done when* a two-platform stream's chat, follows, subs, cheers and
-   Super Chats arrive in one feed and replies go to the right place.
+1. **Accounts and going live.** Twitch (device code) and the hidden logged-in pages (2.10) with
+   sign-in for every platform; keys filled in from the platforms' own pages; stream info per
+   destination. *Done when* a Twitch and a YouTube stream start from a fresh install without
+   pasting anything.
+2. **Event bus and chat, every platform.** Event model and schema; Twitch EventSub; YouTube's
+   chat feed; Kick's socket; the hidden-page connectors (Facebook, Instagram, X, TikTok,
+   LinkedIn); CHZZK, SOOP, Niconico, TwitCasting, Bilibili, Huya and DouYu readers; reading rules
+   updated without a release; chat panel (feed, tabs, send to, reply, emotes incl.
+   7TV/BTTV/FFZ, moderation, history); Activity panel. *Done when* a stream on four platforms has
+   its chat and paid events in one feed and replies go to the right place.
 3. **Widgets.** Runtime, sandbox, `.lwidget`, editor with fields and test events, local URLs; the
    first-party chat box, alert box, event list, goal, label, counter, subathon timer; the
    StreamElements shim. *Done when* a StreamElements custom widget pasted in runs unchanged and
@@ -269,10 +352,10 @@ A small service of Lightair's own, the only server any of this needs:
    `!so` with a clip, death counter, redemption → scene, timed messages, TTS on donations, points
    and a giveaway, ad-break warning, raid welcome, first-chatter greeting) are built without
    code.
-5. **Kick and the relay.** The relay; Kick accounts, key-less going live, chat and events; donation
-   webhooks. *Done when* a Kick stream's chat and gifts arrive like Twitch's.
-6. **More platforms and integrations.** Facebook; TikTok (experimental, read-only); Spotify,
-   Stream Deck, VTube Studio, lights, heart rate; web-capture chat; Streamer.bot import.
+5. **The relay and donations.** Donation webhooks; Kick's official API as an option. *Done when*
+   a Ko-fi tip arrives as an alert.
+6. **Integrations.** Spotify, Stream Deck, VTube Studio, lights, heart rate; SHOWROOM; the
+   official APIs for people who bring their own credentials; Streamer.bot import.
 
 Every phase lands on macOS and Windows together (accounts and the Keychain have their Windows
 counterparts in `lightair-platform`; the widget runtime and scripting are platform-neutral).
@@ -280,10 +363,9 @@ counterparts in `lightair-platform`; the widget runtime and scripting are platfo
 ## 4. Decisions to make
 
 - **The relay**: host it (Cloudflare Workers is the cheapest and simplest); it's needed from
-  phase 5, and for donation webhooks.
-- **YouTube**: register the Google Cloud project, verify the OAuth consent screen and start the
-  quota audit before phase 1 ships (weeks to months).
-- **TikTok**: leave out, or ship read-only and experimental with the user's own signer key.
+  phase 5, for donation webhooks only.
+- **Updating reading rules**: where they're published from (a signed file Lightair fetches), so
+  a site's change is fixed in days.
 - **Twitch merged chat**: per-output chat overlays default to that output's platform (the
   compliant default); a merged overlay is a choice.
 - **Scripting language**: JavaScript (familiar to every widget author, QuickJS is small and

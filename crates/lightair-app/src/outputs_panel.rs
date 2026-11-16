@@ -7,22 +7,28 @@ use std::time::Instant;
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_core::{Command, Destination, Encoding, Canvas, Id, Workspace, VideoEncoder};
 use lightair_engine::outputs::{OutputKey, OutputState, StreamProtocol, runtime};
 
-use crate::platforms::{self, PLATFORMS, Platform, Shape};
+use crate::platforms::{self, PLATFORMS, Platform, Region, Shape};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 
 /// Adding a destination: first a platform, then its details.
 enum Setup {
-    Pick,
+    Pick(Pick),
     Configure(Configure),
     Edit(Edit),
+}
+
+/// The platform picker: its search field.
+struct Pick {
+    search: Entity<InputState>,
+    _changes: Subscription,
 }
 
 /// A destination's own settings.
@@ -129,7 +135,7 @@ fn canvas_badge(id: impl Into<ElementId>, workspace: &Workspace, canvas: Option<
 
 /// A platform's badge: its colour with its logo (or a short mark).
 pub fn badge(p: &Platform, size: f32) -> Div {
-    let light = matches!(p.id, "kick");
+    let light = matches!(p.id, "kick" | "chzzk");
     let ink: Hsla = if light { rgb(0x0B0B0C).into() } else { rgb(0xFFFFFF).into() };
     div()
         .size(px(size))
@@ -257,8 +263,32 @@ impl OutputsPanel {
         cx.emit(AddVerticalCanvas);
     }
 
-    pub fn open_picker(&mut self, cx: &mut Context<Self>) {
-        self.setup = Some(Setup::Pick);
+    /// Types into the picker's search (screenshot hooks).
+    pub fn type_search(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Setup::Pick(p)) = &self.setup {
+            let text = text.to_string();
+            p.search.update(cx, |s, cx| s.set_value(text, window, cx));
+            cx.notify();
+        }
+    }
+
+    pub fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search platforms: Twitch, 치지직, ニコニコ, 哔哩哔哩…"));
+        let changes = cx.subscribe_in(&search, window, |this, state, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Change => cx.notify(),
+            // Return: the first platform found
+            InputEvent::PressEnter { .. } => {
+                let query = state.read(cx).value().to_string();
+                if !query.trim().is_empty()
+                    && let Some(p) = PLATFORMS.iter().find(|p| p.id != "custom" && platforms::matches(p, &query))
+                {
+                    this.choose(p, window, cx);
+                }
+            }
+            _ => {}
+        });
+        search.update(cx, |s, cx| s.focus(window, cx));
+        self.setup = Some(Setup::Pick(Pick { search, _changes: changes }));
         cx.notify();
     }
 
@@ -735,28 +765,126 @@ impl OutputsPanel {
             )
     }
 
-    /// The grid of platforms to start from.
-    fn picker(&self, cx: &mut Context<Self>) -> Div {
-        let mut grid = div().grid().grid_cols(4).gap_2();
-        for (i, p) in PLATFORMS.iter().enumerate() {
-            grid = grid.child(
+    /// The platforms to start from: a search over every name, then the platforms by region
+    /// (popular, this Mac's own country, the rest), a custom server last.
+    fn picker(&self, search: &Entity<InputState>, cx: &mut Context<Self>) -> Div {
+        let query = search.read(cx).value().to_string();
+        let searching = !query.trim().is_empty();
+        let tile = |p: &'static Platform, cx: &mut Context<Self>| {
+            div()
+                .id(SharedString::from(format!("platform-{}", p.id)))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py(px(7.))
+                .rounded(px(9.))
+                .cursor_pointer()
+                .bg(tok::bg_raised())
+                .border_1()
+                .border_color(tok::border())
+                .hover(|d| d.bg(tok::bg_selected()).border_color(tok::border_strong()))
+                .child(badge(p, 30.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().text_size(px(13.)).text_color(tok::text()).truncate().child(p.name))
+                                .when(p.shape == Shape::Vertical, |d| {
+                                    d.child(
+                                        div()
+                                            .flex_none()
+                                            .px(px(4.))
+                                            .rounded(px(4.))
+                                            .bg(tok::bg_selected())
+                                            .text_size(px(9.))
+                                            .text_color(tok::text_tertiary())
+                                            .child("9:16"),
+                                    )
+                                }),
+                        )
+                        .when(!p.native.is_empty(), |d| {
+                            d.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).truncate().child(p.native))
+                        }),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| this.choose(p, window, cx)))
+        };
+        let grid = |items: Vec<&'static Platform>, cx: &mut Context<Self>| {
+            let mut g = div().grid().grid_cols(3).gap_2();
+            for p in items {
+                g = g.child(tile(p, cx));
+            }
+            g
+        };
+        let custom = platforms::custom();
+        let custom_row = div()
+            .id("platform-custom")
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .rounded(px(9.))
+            .cursor_pointer()
+            .border_1()
+            .border_dashed()
+            .border_color(tok::border_strong())
+            .hover(|d| d.bg(tok::bg_selected()))
+            .child(badge(custom, 30.))
+            .child(
                 div()
-                    .id(("platform", i))
                     .flex()
                     .flex_col()
-                    .items_center()
-                    .gap_2()
-                    .py_3()
-                    .rounded(px(10.))
-                    .cursor_pointer()
-                    .bg(tok::bg_raised())
-                    .border_1()
-                    .border_color(tok::border())
-                    .hover(|d| d.bg(tok::bg_selected()).border_color(tok::border_strong()))
-                    .child(badge(p, 36.))
-                    .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(p.name))
-                    .on_click(cx.listener(move |this, _, window, cx| this.choose(p, window, cx))),
-            );
+                    .child(div().text_size(px(13.)).text_color(tok::text()).child("Custom server"))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(tok::text_tertiary())
+                            .child("Any RTMP, RTMPS, SRT or RIST address, or a WHIP endpoint"),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| this.choose(custom, window, cx)));
+        let mut body = div().flex().flex_col().gap_4();
+        if searching {
+            let found: Vec<&'static Platform> =
+                PLATFORMS.iter().filter(|p| p.id != "custom" && platforms::matches(p, &query)).collect();
+            if found.is_empty() {
+                body = body.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(tok::text_secondary())
+                        .child(format!("No platform called “{}”. Any server works as a custom one:", query.trim())),
+                );
+            } else {
+                body = body.child(grid(found, cx));
+            }
+        } else {
+            for region in platforms::region_order().into_iter().filter(|r| *r != Region::Other) {
+                let items: Vec<&'static Platform> = PLATFORMS.iter().filter(|p| p.region == region).collect();
+                if items.is_empty() {
+                    continue;
+                }
+                body = body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(tok::text_tertiary())
+                                .child(region.title().to_uppercase()),
+                        )
+                        .child(grid(items, cx)),
+                );
+            }
         }
         div()
             .flex()
@@ -764,7 +892,9 @@ impl OutputsPanel {
             .gap_3()
             .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Add a destination"))
             .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child("Where do you want to go live?"))
-            .child(grid)
+            .child(Input::new(search).small().prefix(ui::icon("search").size(px(14.)).text_color(tok::text_tertiary())))
+            .child(body)
+            .child(custom_row)
     }
 
     /// Whether the destination dialog (adding or editing) is open.
@@ -783,8 +913,9 @@ impl OutputsPanel {
             c.canvas = Some(f.id);
             c.want_vertical = false;
         }
+        let wide = matches!(self.setup, Some(Setup::Pick(_)));
         let body = match self.setup.as_ref()? {
-            Setup::Pick => self.picker(cx),
+            Setup::Pick(p) => self.picker(&p.search.clone(), cx),
             Setup::Configure(c) => self.configure(c, &workspace, cx),
             Setup::Edit(e) => self.edit_view(e, &workspace, cx),
         };
@@ -807,7 +938,7 @@ impl OutputsPanel {
                 .child(
                     div()
                         .id("destination-dialog")
-                        .w(px(520.))
+                        .w(px(if wide { 640. } else { 520. }))
                         .max_h(relative(0.88))
                         .overflow_y_scroll()
                         .p_4()
@@ -953,10 +1084,7 @@ impl OutputsPanel {
                             .icon(ui::icon("arrow-left"))
                             .xsmall()
                             .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.setup = Some(Setup::Pick);
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(|this, _, window, cx| this.open_picker(window, cx))),
                     ),
             )
             .child(
@@ -1297,7 +1425,7 @@ impl Render for OutputsPanel {
                         .icon(ui::icon("plus"))
                         .xsmall()
                         .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| this.open_picker(cx))),
+                        .on_click(cx.listener(|this, _, window, cx| this.open_picker(window, cx))),
                 ),
             )
             .child(streams)
@@ -1338,7 +1466,7 @@ impl gpui_kit::component::dock::Panel for OutputsPanel {
                 .ghost()
                 .xsmall()
                 .tooltip("Add destination")
-                .on_click(cx.listener(|this, _, _, cx| this.open_picker(cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.open_picker(window, cx))),
         ])
     }
 
