@@ -114,6 +114,7 @@ fn new_step(kind: &str) -> Step {
         "vts" => Step::Call { method: "vts.hotkey".into(), params: json!({"hotkey": "Name of the hotkey"}) },
         "script" => Step::Script { code: "// ctx has name, message, amount, vars, …\nreturn { greeting: 'Hi ' + ctx.name };".into() },
         "light" => Step::Call { method: "light.set".into(), params: json!({"address": "192.168.1.20", "on": true, "brightness": 60, "temperature": 4500}) },
+        "hue" => Step::Call { method: "hue.set".into(), params: json!({"light": "Name of the light or room", "on": true, "brightness": 80, "colour": "#9146ff"}) },
         _ => Step::Stop,
     }
 }
@@ -131,6 +132,7 @@ const STEP_KINDS: &[(&str, &str)] = &[
     ("points", "Give or take points"),
     ("vts", "VTube Studio hotkey"),
     ("light", "Elgato Key Light"),
+    ("hue", "Philips Hue light"),
     ("http", "Web request"),
     ("script", "JavaScript"),
     ("stop", "Stop"),

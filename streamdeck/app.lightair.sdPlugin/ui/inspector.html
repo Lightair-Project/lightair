@@ -1,0 +1,92 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Lightair</title>
+<style>
+  body { margin: 0; padding: 8px 12px; background: #2d2d2d; color: #d8d8d8; font: 9pt -apple-system, "Segoe UI", sans-serif; }
+  .row { display: flex; align-items: center; margin: 6px 0; gap: 8px; }
+  label { width: 92px; text-align: right; color: #969696; flex: none; }
+  input, select { flex: 1; min-width: 0; background: #3d3d3d; color: #d8d8d8; border: none; border-radius: 3px; padding: 4px 6px; font: inherit; }
+  .note { margin: 4px 0 4px 100px; color: #969696; line-height: 1.4; }
+  .note.bad { color: #e8a33d; }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: #969696; margin-left: 100px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="row" data-for="scene"><label for="scene">Scene</label><input id="scene" list="scenes" placeholder="Name of the scene"></div>
+  <div class="row" data-for="automation"><label for="automation">Automation</label><input id="automation" list="automations" placeholder="Name of the automation"></div>
+  <div class="row" data-for="mute"><label for="track">Track</label><input id="track" list="tracks" placeholder="Microphone, Desktop audio…"></div>
+  <datalist id="scenes"></datalist><datalist id="automations"></datalist><datalist id="tracks"></datalist>
+  <div class="note" id="status">Looking for Lightair…</div>
+
+  <details id="connection">
+    <summary>Connection</summary>
+    <div class="row"><label for="port">Port</label><input id="port" inputmode="numeric" placeholder="4455"></div>
+    <div class="row"><label for="password">Password</label><input id="password" type="password" placeholder="If Lightair asks for one"></div>
+    <div class="note">In Lightair: Settings › Remote API (port, and Copy password).</div>
+  </details>
+
+<script>
+  "use strict";
+  let socket, uuid, action, settings = {}, global = {};
+  const short = () => (action || "").replace("app.lightair.", "");
+  const send = (m) => socket && socket.readyState === 1 && socket.send(JSON.stringify(m));
+
+  function fill(id, list) {
+    const d = document.getElementById(id);
+    d.replaceChildren(...(list || []).map((v) => Object.assign(document.createElement("option"), { value: v })));
+  }
+
+  function connectElgatoStreamDeckSocket(port, inUuid, registerEvent, _info, actionInfo) {
+    uuid = inUuid;
+    const a = JSON.parse(actionInfo);
+    action = a.action;
+    settings = a.payload.settings || {};
+    for (const row of document.querySelectorAll("[data-for]")) row.hidden = row.dataset.for !== short();
+    for (const id of ["scene", "automation", "track"]) {
+      const el = document.getElementById(id);
+      el.value = settings[id] || "";
+      el.addEventListener("change", () => {
+        settings[id] = el.value.trim();
+        send({ event: "setSettings", context: uuid, payload: settings });
+      });
+    }
+    for (const id of ["port", "password"]) {
+      document.getElementById(id).addEventListener("change", (e) => {
+        global[id] = e.target.value.trim();
+        send({ event: "setGlobalSettings", context: uuid, payload: global });
+        setTimeout(() => send({ event: "sendToPlugin", action, context: uuid, payload: { want: "status" } }), 1500);
+      });
+    }
+    socket = new WebSocket("ws://127.0.0.1:" + port);
+    socket.onopen = () => {
+      send({ event: registerEvent, uuid });
+      send({ event: "getGlobalSettings", context: uuid });
+      send({ event: "sendToPlugin", action, context: uuid, payload: { want: "status" } });
+    };
+    socket.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      if (m.event === "didReceiveGlobalSettings") {
+        global = m.payload.settings || {};
+        document.getElementById("port").value = global.port || "";
+        document.getElementById("password").value = global.password || "";
+      } else if (m.event === "sendToPropertyInspector") {
+        const p = m.payload;
+        fill("scenes", p.scenes);
+        fill("automations", p.automations);
+        fill("tracks", p.tracks);
+        const status = document.getElementById("status");
+        status.className = p.connected ? "note" : "note bad";
+        status.textContent = p.connected
+          ? "Connected to Lightair."
+          : "Not connected: " + (p.error || "is Lightair open?") + ". Lightair › Settings › Remote API must be on.";
+        if (!p.connected) document.getElementById("connection").open = true;
+      }
+    };
+  }
+</script>
+</body>
+</html>

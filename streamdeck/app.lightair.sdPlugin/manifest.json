@@ -1,0 +1,132 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "UUID": "app.lightair",
+  "Name": "Lightair",
+  "Version": "0.1.0.0",
+  "Author": "Lightair",
+  "Description": "Switch scenes, go live, record, save clips, run automations and mute tracks in Lightair. Keys light up with what's on.",
+  "Icon": "imgs/plugin",
+  "Category": "Lightair",
+  "CategoryIcon": "imgs/category",
+  "CodePath": "bin/plugin.js",
+  "Nodejs": {
+    "Version": "20"
+  },
+  "PropertyInspectorPath": "ui/inspector.html",
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "6.5"
+  },
+  "OS": [
+    {
+      "Platform": "mac",
+      "MinimumVersion": "12"
+    },
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
+  "Actions": [
+    {
+      "UUID": "app.lightair.scene",
+      "Name": "Switch scene",
+      "Tooltip": "Puts a scene on air. Lights up while it's on air.",
+      "Icon": "imgs/actions/scene",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/keys/scene"
+        },
+        {
+          "Image": "imgs/keys/scene-on"
+        }
+      ],
+      "DisableAutomaticStates": true
+    },
+    {
+      "UUID": "app.lightair.stream",
+      "Name": "Go live",
+      "Tooltip": "Starts or stops streaming. Lights up while live.",
+      "Icon": "imgs/actions/stream",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/keys/stream"
+        },
+        {
+          "Image": "imgs/keys/stream-on"
+        }
+      ],
+      "DisableAutomaticStates": true
+    },
+    {
+      "UUID": "app.lightair.record",
+      "Name": "Record",
+      "Tooltip": "Starts or stops recording. Lights up while recording.",
+      "Icon": "imgs/actions/record",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/keys/record"
+        },
+        {
+          "Image": "imgs/keys/record-on"
+        }
+      ],
+      "DisableAutomaticStates": true
+    },
+    {
+      "UUID": "app.lightair.clip",
+      "Name": "Save clip",
+      "Tooltip": "Saves the last moments (Lightair's clips must be on).",
+      "Icon": "imgs/actions/clip",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/keys/clip"
+        }
+      ]
+    },
+    {
+      "UUID": "app.lightair.automation",
+      "Name": "Run automation",
+      "Tooltip": "Runs one of Lightair's automations.",
+      "Icon": "imgs/actions/automation",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/keys/automation"
+        }
+      ]
+    },
+    {
+      "UUID": "app.lightair.mute",
+      "Name": "Mute",
+      "Tooltip": "Mutes or unmutes a track. Lights up while muted.",
+      "Icon": "imgs/actions/mute",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/keys/mute"
+        },
+        {
+          "Image": "imgs/keys/mute-on"
+        }
+      ],
+      "DisableAutomaticStates": true
+    }
+  ]
+}

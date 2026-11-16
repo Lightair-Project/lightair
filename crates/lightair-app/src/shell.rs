@@ -425,6 +425,8 @@ pub struct StudioWindow {
     permissions_watch: std::cell::Cell<bool>,
     /// Heart rate being read (Pulsoid): set to stop it.
     heart_rate: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// What pairing with a Hue bridge is doing (None: idle).
+    hue_note: Option<String>,
     /// The canvas preview drawn under the UI (macOS: native_preview), the canvases whose
     /// previews show in it, and where each canvas's picture is (window points), as laid out.
     native: std::rc::Rc<RefCell<Option<crate::native_preview::NativePreview>>>,
@@ -734,6 +736,7 @@ impl StudioWindow {
             remote,
             automations,
             heart_rate: None,
+            hue_note: None,
             permissions_watch: Default::default(),
             automations_panel,
             native,
