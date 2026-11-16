@@ -428,6 +428,9 @@ struct Shared {
     queue: Mutex<VecDeque<Frame>>,
     next: Mutex<Option<Next>>,
     shown: Mutex<Shown>,
+    /// Off air, it waits to play (0 no, 1 from the start, 2 on from where it paused): a file
+    /// that doesn't restart on air (`restart_on_activate` off) still costs nothing off air.
+    on_air_play: std::sync::atomic::AtomicU8,
 }
 
 impl Shared {
@@ -878,14 +881,17 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         queue: Mutex::new(VecDeque::new()),
         next: Mutex::new(None),
         shown: Mutex::new(Shown::default()),
+        on_air_play: Default::default(),
     });
     let thread = {
         let shared = shared.clone();
         std::thread::Builder::new().name("lightair-media".into()).spawn(move || reader_thread(shared)).ok()
     };
-    // as OBS's media source: plays from the start now, unless it waits to go on air
-    if !s.restart_on_activate || unsafe { sys::obs_source_active(source) } {
+    // plays once on air (from the start); a private one (the Library's player) at once
+    if unsafe { sys::obs_source_active(source) || sys::obs_obj_is_private(source as *mut c_void) } {
         shared.play_from(0, false);
+    } else if !s.restart_on_activate {
+        shared.on_air_play.store(1, std::sync::atomic::Ordering::Relaxed);
     }
     Box::into_raw(Box::new(Media { shared, thread })) as *mut c_void
 }
@@ -923,6 +929,13 @@ unsafe extern "C" fn activate(data: *mut c_void) {
     if m.shared.control.lock().settings.restart_on_activate {
         m.shared.play_from(0, false);
         unsafe { sys::obs_source_media_started(m.shared.source()) };
+        return;
+    }
+    // on from where it was off air (or from the start, the first time)
+    match m.shared.on_air_play.swap(0, std::sync::atomic::Ordering::AcqRel) {
+        1 => m.shared.play_from(0, false),
+        2 => m.shared.pause(false),
+        _ => {}
     }
 }
 
@@ -930,6 +943,12 @@ unsafe extern "C" fn deactivate(data: *mut c_void) {
     let m = media(data);
     if m.shared.control.lock().settings.restart_on_activate {
         m.shared.stop();
+        return;
+    }
+    // off air: paused (nothing decoded), on again when back on air
+    if m.shared.control.lock().state == sys::OBS_MEDIA_STATE_PLAYING {
+        m.shared.pause(true);
+        m.shared.on_air_play.store(2, std::sync::atomic::Ordering::Release);
     }
 }
 

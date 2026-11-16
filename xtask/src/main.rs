@@ -111,6 +111,7 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 	<key>NSHighResolutionCapable</key><true/>
 	<key>NSCameraUsageDescription</key><string>Lightair shows your camera in your scenes and recordings.</string>
 	<key>NSMicrophoneUsageDescription</key><string>Lightair records and streams your microphone.</string>
+	<key>NSAudioCaptureUsageDescription</key><string>Lightair records and streams the sound your Mac and its apps play.</string>
 	<key>NSLocalNetworkUsageDescription</key><string>Lightair finds network video sources and serves the remote control API.</string>
 </dict>
 </plist>

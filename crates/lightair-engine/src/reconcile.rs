@@ -589,6 +589,9 @@ impl Reconciler {
         let settings = data_from_json(&source_settings(source, false));
         match ObsSource::create(kind, &source.id.to_string(), Some(&settings)) {
             Some(src) => {
+                if kind == "ffmpeg_source" && source.settings.get("restart_on_activate").and_then(serde_json::Value::as_bool) == Some(false) {
+                    unsafe { pause_off_air(src.as_ptr()) };
+                }
                 if timer {
                     self.timers.add(source.id, src.as_ptr(), &source.settings);
                     self.ensure_timers_tick();
@@ -1740,4 +1743,33 @@ fn draws_pointer(source: &lightair_core::Source) -> bool {
 
 fn data_from_json(value: &serde_json::Value) -> Data {
     Data::from_json(value)
+}
+
+/// OBS's media source keeps playing off air when it doesn't restart on air: paused off air (nothing
+/// decoded), played on when back on air (Lightair's own media source does this itself).
+unsafe fn pause_off_air(src: *mut sys::obs_source_t) {
+    static PAUSED: std::sync::LazyLock<parking_lot::Mutex<HashSet<usize>>> = std::sync::LazyLock::new(Default::default);
+    unsafe extern "C" fn on_air(data: *mut std::ffi::c_void, _: *mut sys::calldata_t) {
+        // only what it paused itself (not a pause of the user's)
+        if PAUSED.lock().remove(&(data as usize)) {
+            unsafe { sys::obs_source_media_play_pause(data as *mut sys::obs_source_t, false) };
+        }
+    }
+    unsafe extern "C" fn off_air(data: *mut std::ffi::c_void, _: *mut sys::calldata_t) {
+        let src = data as *mut sys::obs_source_t;
+        if unsafe { sys::obs_source_media_get_state(src) } == sys::OBS_MEDIA_STATE_PLAYING {
+            PAUSED.lock().insert(data as usize);
+            unsafe { sys::obs_source_media_play_pause(src, true) };
+        }
+    }
+    unsafe {
+        let handler = sys::obs_source_get_signal_handler(src);
+        sys::signal_handler_connect(handler, c"activate".as_ptr(), Some(on_air), src as *mut std::ffi::c_void);
+        sys::signal_handler_connect(handler, c"deactivate".as_ptr(), Some(off_air), src as *mut std::ffi::c_void);
+        // made off air: it starts paused (it plays from making it otherwise)
+        if !sys::obs_source_active(src) {
+            PAUSED.lock().insert(src as usize);
+            sys::obs_source_media_play_pause(src, true);
+        }
+    }
 }

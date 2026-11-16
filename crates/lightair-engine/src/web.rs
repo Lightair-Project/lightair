@@ -23,12 +23,19 @@ pub const KIND: &str = "lightair_web";
 #[derive(Clone)]
 struct Target(Arc<Mutex<Option<usize>>>);
 
+/// How long a page stays open once nothing shows it (a scene being rebuilt, a transition's
+/// hand-over).
+const LINGER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A page is open only while something shows it (on air, a preview): off screen it's closed,
+/// costing nothing (OBS's "shut down when not visible"), and opened again when shown.
 struct Web {
-    page: Option<lightair_web::Page>,
-    /// On screen somewhere (libobs's show/hide): a page off screen doesn't paint, as OBS's.
+    page: Mutex<Option<lightair_web::Page>>,
+    /// On screen somewhere (libobs's show/hide).
     showing: std::sync::atomic::AtomicBool,
+    hidden_since: Mutex<Option<std::time::Instant>>,
     target: Target,
-    options: lightair_web::PageOptions,
+    options: Mutex<lightair_web::PageOptions>,
     #[cfg(target_os = "macos")]
     shared: Arc<shared::Frames>,
 }
@@ -112,29 +119,51 @@ fn open(
     Some(lightair_web::Page::open(o.clone(), sink, audio))
 }
 
-/// The page of a web page source (`source` is its libobs source; any other kind: none).
-fn page_of<'a>(source: *mut sys::obs_source_t) -> Option<&'a lightair_web::Page> {
-    unsafe {
+/// Runs `f` on a web page source's open page (`source` is its libobs source; any other kind,
+/// or a page closed off screen: nothing).
+fn with_page(source: *mut sys::obs_source_t, f: impl FnOnce(&lightair_web::Page)) {
+    let web = unsafe {
         let id = sys::obs_source_get_id(source);
         if id.is_null() || CStr::from_ptr(id).to_bytes() != KIND.as_bytes() {
-            return None;
+            return;
         }
-        let data = sys::obs_obj_get_data(source as *mut c_void) as *const Web;
-        data.as_ref().and_then(|web| web.page.as_ref())
+        (sys::obs_obj_get_data(source as *mut c_void) as *const Web).as_ref()
+    };
+    if let Some(web) = web
+        && let Some(page) = web.page.lock().as_ref()
+    {
+        f(page);
     }
 }
 
 /// Loads a web page source's page again.
 pub(crate) fn reload(source: *mut sys::obs_source_t) {
-    if let Some(page) = page_of(source) {
-        page.reload();
-    }
+    with_page(source, |p| p.reload());
 }
 
 /// Restyles a web page source's page now (custom CSS being typed, not yet its setting).
 pub(crate) fn restyle(source: *mut sys::obs_source_t, css: String) {
-    if let Some(page) = page_of(source) {
-        page.restyle(css);
+    with_page(source, |p| p.restyle(css));
+}
+
+impl Web {
+    /// Opens the page if it isn't (shown again).
+    fn ensure_open(&self) {
+        let mut page = self.page.lock();
+        if page.is_none() {
+            let o = self.options.lock().clone();
+            #[cfg(target_os = "macos")]
+            {
+                *page = open(&o, &self.target, Some(self.shared.clone()));
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                *page = open(&o, &self.target);
+            }
+        }
+        if let Some(p) = page.as_ref() {
+            p.set_visible(true);
+        }
     }
 }
 
@@ -147,18 +176,17 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
     // buffering, made for steady video, would hold it for a second or more)
     unsafe { sys::obs_source_set_async_unbuffered(source, true) };
     let target = Target(Arc::new(Mutex::new(Some(source as usize))));
-    let o = options(settings);
-    #[cfg(target_os = "macos")]
-    {
-        let frames = Arc::new(shared::Frames::default());
-        let page = open(&o, &target, Some(frames.clone()));
-        Box::into_raw(Box::new(Web { page, target, options: o, shared: frames, showing: Default::default() })) as *mut c_void
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let page = open(&o, &target);
-        Box::into_raw(Box::new(Web { page, target, options: o, showing: Default::default() })) as *mut c_void
-    }
+    // (opened when something first shows it)
+    let web = Web {
+        page: Mutex::new(None),
+        showing: Default::default(),
+        hidden_since: Mutex::new(None),
+        target,
+        options: Mutex::new(options(settings)),
+        #[cfg(target_os = "macos")]
+        shared: Arc::new(shared::Frames::default()),
+    };
+    Box::into_raw(Box::new(web)) as *mut c_void
 }
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
@@ -169,38 +197,54 @@ unsafe extern "C" fn destroy(data: *mut c_void) {
 }
 
 unsafe extern "C" fn update(data: *mut c_void, settings: *mut sys::obs_data_t) {
-    let web = unsafe { &mut *(data as *mut Web) };
+    let web = unsafe { &*(data as *const Web) };
     let o = options(settings);
-    if o == web.options {
+    if o == *web.options.lock() {
         return;
     }
-    let reopened = web.page.is_none() || o.url.trim().is_empty();
-    match &web.page {
-        Some(page) if !o.url.trim().is_empty() => page.update(o.clone()),
-        #[cfg(target_os = "macos")]
-        _ => web.page = open(&o, &web.target, Some(web.shared.clone())),
-        #[cfg(not(target_os = "macos"))]
-        _ => web.page = open(&o, &web.target),
-    }
-    web.options = o;
-    if reopened && let Some(page) = &web.page {
-        page.set_visible(web.showing.load(std::sync::atomic::Ordering::Relaxed));
+    *web.options.lock() = o.clone();
+    let mut page = web.page.lock();
+    match page.as_ref() {
+        Some(p) if !o.url.trim().is_empty() => p.update(o),
+        // no address now: closed; a closed page opens with these when shown
+        _ => {
+            *page = None;
+            drop(page);
+            if web.showing.load(std::sync::atomic::Ordering::Relaxed) {
+                web.ensure_open();
+            }
+        }
     }
 }
 
 unsafe extern "C" fn show(data: *mut c_void) {
     let web = unsafe { &*(data as *const Web) };
     web.showing.store(true, std::sync::atomic::Ordering::Relaxed);
-    if let Some(page) = &web.page {
-        page.set_visible(true);
-    }
+    *web.hidden_since.lock() = None;
+    web.ensure_open();
 }
 
 unsafe extern "C" fn hide(data: *mut c_void) {
     let web = unsafe { &*(data as *const Web) };
     web.showing.store(false, std::sync::atomic::Ordering::Relaxed);
-    if let Some(page) = &web.page {
+    *web.hidden_since.lock() = Some(std::time::Instant::now());
+    if let Some(page) = web.page.lock().as_ref() {
         page.set_visible(false);
+    }
+}
+
+/// Closes the page once nothing has shown it for a moment.
+unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
+    let web = unsafe { &*(data as *const Web) };
+    if web.showing.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut since = web.hidden_since.lock();
+    if since.is_some_and(|t| t.elapsed() >= LINGER) {
+        *since = None;
+        drop(since);
+        // (closing only asks Chromium's thread to)
+        web.page.lock().take();
     }
 }
 
@@ -236,6 +280,7 @@ pub fn register() {
         info.update = Some(update);
         info.show = Some(show);
         info.hide = Some(hide);
+        info.video_tick = Some(video_tick);
         info.get_defaults = Some(get_defaults);
         sys::obs_register_source_s(&info, std::mem::size_of::<sys::obs_source_info>());
     });
@@ -378,7 +423,12 @@ mod shared {
     fn size(data: *mut c_void) -> (u32, u32) {
         let web = unsafe { &*(data as *const Web) };
         let shown = web.shared.shown.lock().2;
-        if shown.0 > 0 { shown } else { (web.options.width, web.options.height) }
+        if shown.0 > 0 {
+            shown
+        } else {
+            let o = web.options.lock();
+            (o.width, o.height)
+        }
     }
 
     pub unsafe extern "C" fn get_width(data: *mut c_void) -> u32 {
