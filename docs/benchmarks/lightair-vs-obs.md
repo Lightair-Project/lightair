@@ -3,6 +3,41 @@
 November 2026. Lightair (release builds) against OBS Studio 33.0.0, vanilla. Harness:
 [tools/bench](../../tools/bench/README.md).
 
+## Third round: energy, and nothing off air
+
+Measured the same afternoon, Lightair and OBS alternately, two runs each (`quick`, 20 s):
+
+| | Lightair | OBS 33 |
+|---|---|---|
+| CPU energy, Gameplay (app + helpers) | **169 mW** | 1057 mW |
+| Instructions retired, Gameplay | **1.07 G/s** | 3.5 G/s |
+| CPU energy, Desktop (display captured) | **297 mW** | 518 mW |
+| Instructions retired, Desktop | **1.40 G/s** | 1.86 G/s |
+| Window server CPU, Gameplay / Desktop | 40 / 41 % | 36 / 38 % |
+| GPU busy, Gameplay / Desktop | **16 / 28 %** | 28 / 31 % |
+| Memory | **~980 MB** | ~1265 MB |
+
+"CPU %" (time on a core) said Lightair used 5 points more than OBS; it doesn't. It counts time
+on any core at any clock: Lightair's remaining work is light enough that macOS runs it on the
+efficiency cores at low clocks, where it takes longer and costs a sixth of the energy. The
+harness now reports the kernel's own estimate (`power_mw`, `proc_pid_rusage`) and instructions
+retired (`instr_g`) next to CPU %, and those are what to compare. (CPU only: the GPU, the video
+decoder and the window server aren't in it.)
+
+What changed since the second round:
+
+- **Video files are decoded by the hardware decoder straight into textures** (Lightair's own
+  media source for MP4 and QuickTime files): 1.1 W less than OBS's media source on Gameplay.
+- **Nothing off air costs anything.** OBS's screen capture and camera capture run from the
+  moment they're made, shown or not; Lightair now makes them when something shows them and lets
+  them go a second after nothing does. Web pages close off air. A workspace with a display
+  capture in five scenes had kept the window server at 97 % (50 % with nothing running) and the
+  GPU at 64 %, the whole Mac sluggish; now 60 % and 45 %.
+- **Desktop and app audio come from Core Audio process taps**, not ScreenCaptureKit, whose
+  stream had the window server compose the display for audio alone.
+- The benchmark's display capture had captured nothing in OBS (an empty display UUID): fixed,
+  and the Desktop scene is now compared too.
+
 ## Result
 
 Second round (`ec16c73`), both apps measured the same morning, with the Mac in use (so every

@@ -23,7 +23,9 @@ settings folder: `obs-swap.sh in` renames yours to `obs-studio.lightair-bench-ba
 the clean one in its place; `out` puts yours back. Lightair runs on port 4466 with its own
 workspace (`target/bench/la-ws`), never yours.
 
-- `quick APP TAG`: 30 s idle with Gameplay on air (for iterating on a change).
+- `quick APP TAG`: 30 s idle with Gameplay on air (for iterating on a change); `BENCH_SCENE`
+  picks another scene. It reports CPU energy (`power_mw`) and instructions (`instr_g`): compare
+  those, not CPU %, which counts time on any core at any clock.
 - `profile APP TAG`: macOS `sample` of the main process; `prof.py` and the call graph show
   where the time goes per thread.
 - Results land in `target/bench` as JSON (`startup-*.json`, `run-*.json`).
