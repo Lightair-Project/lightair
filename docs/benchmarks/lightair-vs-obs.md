@@ -1,9 +1,31 @@
 # Lightair vs OBS: streamer benchmark
 
-November 2026. Lightair `1ab6b6a` (release build) against OBS Studio 33.0.0, vanilla. Harness:
+November 2026. Lightair (release builds) against OBS Studio 33.0.0, vanilla. Harness:
 [tools/bench](../../tools/bench/README.md).
 
 ## Result
+
+Second round (`ec16c73`), both apps measured the same morning, with the Mac in use (so every
+number sits a little apart from the overnight round's below; compare within a round):
+
+| | OBS 33 (vanilla) | Lightair |
+|---|---|---|
+| Startup to ready (median of 3) | 1.09 s | **1.00 s** |
+| Memory 3 s after launch (all processes) | 1207 MB | **1138 MB** |
+| CPU, idle on Gameplay (app + helpers) | **55.3 %** | 57.5 % |
+| CPU, recording while switching scenes | **57.4 %** | 58.0 % |
+| GPU busy, idle | 26.5 % | **25.4 %** |
+| GPU busy, recording | **26.9 %** | 28.3 % |
+| WindowServer CPU (macOS compositor), idle | 41.4 % | **36.9 %** |
+| WindowServer CPU, recording | 44.0 % | **34.2 %** |
+| Render time per frame (libobs), idle / recording | 1.34 / 3.57 ms | **0.90 / 3.14 ms** |
+| Memory while recording | 1369 MB | **1268 MB** |
+| Frames skipped (render / output) | 0 / 0 | 0 / 0 |
+
+Lightair's UI now costs the compositor less than OBS's: the window redraws about 3 times a
+second while the show plays, the preview and the meters moving on their own (below).
+
+### First round (overnight, `1ab6b6a`)
 
 | | OBS 33 (vanilla) | Lightair before | Lightair after |
 |---|---|---|---|
@@ -24,10 +46,9 @@ the processes' own CPU time, sampled every second for 60 s. GPU is the GPU's "De
 Utilization" (ioreg). Both recordings came out 1920×1080 at 60 fps with every frame
 (3616 frames in 60.27 s for OBS, 3617 in 60.28 s for Lightair).
 
-Lightair now matches OBS on CPU and GPU, starts faster and uses less memory. The one thing it
-still costs more is the macOS compositor (WindowServer, +10 points): GPUI redraws the whole
-window for each preview frame where OBS's Qt window updates only its preview. See
-"What's left".
+After the first round Lightair matched OBS on CPU and GPU, started faster and used less
+memory, but cost the macOS compositor 10 points more: GPUI redrew the whole window for each
+preview frame where OBS's Qt window updates only its preview. The second round fixed that.
 
 ## Machine and scenario
 
@@ -92,24 +113,31 @@ In order of effect, measured along the way (idle CPU / GPU):
    day, the earliest before this work). It now loads first thing in `main`: 20 launches of the
    benchmark workspace in a row, no crash.
 
-Also new: Settings › Canvases › Live preview: **Light** draws the preview at 30 fps (default
-Smooth: every canvas frame). Recordings and streams are unaffected.
+Second round:
+
+6. **The preview drawn by Core Animation** (GPU −24 points against GPUI drawing it, same build).
+   GPUI redraws its whole window for any change, so every preview frame cost a full redraw.
+   The window is now transparent with a view of Lightair's own under GPUI's: it paints the
+   window's background and the canvas well, and each canvas's picture is a layer the preview
+   hands its frames to straight from libobs's graphics thread. GPUI leaves the well unpainted;
+   selection, guides, menus and anything over the canvas draw on top as before. The rest of
+   the window is pixel-for-pixel what it was.
+7. **The meters drawn by Core Animation too.** Each meter is native layers under the strips'
+   holes, moved 60 times a second by a meter thread straight from the audio levels: fluid,
+   and free for the UI. They gained a peak hold (held 1.5 s, then falling at 12 dB/s, as on
+   consoles), and the peak readout shows the held peak, changing at most four times a second
+   instead of every frame.
+8. **Chromium's pump runs when Chromium asks** (CEF's `on_schedule_message_pump_work`), at
+   least every 33 ms, instead of every 8 ms.
+
+Nothing is throttled: the preview runs at the canvas's rate and the meters at 60 fps.
 
 ## What's left
 
-- **WindowServer** works harder for Lightair (55 % vs 45 %), and every preview frame still
-  costs a full GPUI redraw (about 15 points of CPU and 20 of GPU at 60 fps, measured by
-  turning it off). The fix is a compositor: draw the preview in its own Core Animation layer
-  behind GPUI's, so video frames never go through GPUI. GPUI's view already sits in a plain
-  container view where such a layer can go below it, but every view above the canvas (the
-  window root, the dock, the tab panels) paints an opaque background that would have to make
-  way. A change to plan, not to slip in.
-- **Meters** cost a mixer re-layout 30 times a second. Fine now that they share the canvas's
-  redraws; cheaper still if meters were drawn by one canvas element per strip.
-- **Chromium's message pump** runs every 8 ms while pages are open; CEF can schedule it
-  instead (`on_schedule_message_pump_work`).
 - Not measured: a real camera and microphone (generated files stood in for them), streaming
   (no destination), long sessions, other Macs.
+- The native drawing is macOS only; Windows still draws the preview and meters with GPUI
+  (`LIGHTAIR_GPUI_PREVIEW=1` does that on macOS too, for comparison).
 
 ## Reproduce
 
