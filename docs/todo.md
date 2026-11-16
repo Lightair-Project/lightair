@@ -107,9 +107,6 @@ Built, tested (317 tests) and benchmarked on Windows 11 on 17 November 2026
 - **An installer and signing**: `cargo xtask dist` makes the portable app and its zip; an MSIX or
   Inno Setup installer, Authenticode signing (a certificate), the updater.
 - **The virtual camera** (win-dshow's DirectShow camera, or `MFCreateVirtualCamera` on Windows 11).
-- **The remote API starts after the first frame**: a script waiting for it sees Lightair "ready"
-  ~0.6 s after OBS would be, though Lightair's window shows first (deferred `sync_remote`, behind
-  Chromium starting on the UI thread).
 - Windows Studio Effects (Media Foundation extended camera controls); "Now playing" (WinRT media
   sessions); "Use my browser's" sign-in (DPAPI; Chrome's app-bound keys); the zoom badge by the
   pointer; the system pointer's picture; pointer and follow-zoom on a second monitor

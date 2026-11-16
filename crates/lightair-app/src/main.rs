@@ -105,6 +105,10 @@ fn main() {
 
     // This Mac's preferences: the sample rate is fixed once libobs starts.
     let prefs = prefs::load_from(&prefs::path());
+    // the remote API's password, read while libobs starts (the API answers with the window)
+    if prefs.remote.enabled && (prefs.remote.require_password || prefs.remote.lan) && std::env::var_os("LIGHTAIR_REMOTE_OFF").is_none() {
+        secrets::read_remote_password_early();
+    }
     prefs::LOUDNESS_TARGET.store(prefs.loudness_target, std::sync::atomic::Ordering::Relaxed);
     let sample_rate = if prefs.sample_rate == 44_100 { 44_100 } else { 48_000 };
     prefs::RUNNING_SAMPLE_RATE.store(sample_rate, std::sync::atomic::Ordering::Relaxed);

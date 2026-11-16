@@ -24,7 +24,7 @@ scenes every 10 s.
 | Memory the app uses alone (USS), idle | **413 MB** | 617 MB | +49 % |
 | Desktop compositor (dwm.exe) GPU, idle | **2.7 %** | 5.0 % | |
 | Startup: window on screen (median of 5) | 2.09 s | **1.67 s** | |
-| Startup: ready over obs-websocket | **2.10 s** | 2.69 s | |
+| Startup: ready over obs-websocket | **2.10 s** | 2.19 s | |
 | Quit | 30 s (didn't close when asked) | **0.9 s** | |
 
 Both recordings come out 1920×1080 at 60 fps, x264 veryfast at 12 Mbps (ABR), 2 s keyframes,
@@ -32,8 +32,9 @@ AAC 192 kbps, MP4 (~3,610 frames a minute in both).
 
 Where Lightair spends more: memory (the GPU video decoder's surfaces, Lightair's own audio engine
 and a newer Chromium in its process) and a little of the compositor's GPU (the preview and meters
-are composition visuals it blends; OBS's preview is a window of its own). Where it's slower to
-answer: its remote API starts after the window's first frame (docs/todo.md, Windows).
+are composition visuals it blends; OBS's preview is a window of its own). Its remote API used to
+answer 0.6 s after OBS's (2.69 s): the password is now read while libobs starts, and the API
+listens before Chromium starts (2.19 s).
 
 ### With both on software decoding
 
