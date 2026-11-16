@@ -301,7 +301,7 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
         unsafe { sys::obs_add_safe_module(c(name).as_ptr()) };
     }
     let mode = match &cfg.modules {
-        Modules::Auto if runtime.in_bundle => Modules::Bundle,
+        // libobs's modules where libobs is: the app's own PlugIns, or an installed OBS's
         Modules::Auto => Modules::Directory(runtime.plugins.clone()),
         other => other.clone(),
     };

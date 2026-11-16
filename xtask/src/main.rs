@@ -4,6 +4,9 @@
 //!   cargo xtask bundle     assemble target/debug/Lightair.app for development (macOS)
 //!   cargo xtask bundle --release   the same from an optimised build: target/release/Lightair.app
 //!                              (for measuring performance)
+//!   cargo xtask dist       the app to ship: target/dist/Lightair.app and Lightair-<version>.dmg,
+//!                              everything it runs inside it, signed with a Developer ID and
+//!                              notarized (LIGHTAIR_NOTARY_PROFILE) (macOS)
 //!   cargo xtask dev        link OBS's helper programs next to target/debug for `cargo run`
 //!   cargo xtask virtual-camera [--uninstall]  build "Lightair Virtual Camera" (the camera
 //!                          extension and its installer, modules/lightair-virtual-camera),
@@ -22,6 +25,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[cfg(target_os = "macos")]
+mod dist;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
@@ -151,7 +157,7 @@ fn bundle(release: bool) -> anyhow::Result<()> {
             link_file(&entry.path(), &to.join(&name))?;
         }
     }
-    bundle_chromium(&root, &app, profile)?;
+    bundle_chromium(&root, &app, profile, false, "app.lightair.dev")?;
     // Sign the bundle itself so macOS privacy settings identify Lightair. Nested OBS code keeps
     // OBS's own signatures; nothing outside target/ is modified.
     //
@@ -179,7 +185,9 @@ fn bundle(release: bool) -> anyhow::Result<()> {
 /// Lightair's Chromium for web page sources (lightair-web): the pinned CEF framework the cef
 /// crate fetched into target/cef, and Chromium's four helper apps, Lightair's own (each the
 /// lightair-web-helper binary under the name Chromium looks for).
-fn bundle_chromium(root: &Path, app: &Path, profile: &str) -> anyhow::Result<()> {
+/// `copy`: the framework copied in (the shipped app) rather than linked; `id`: the app's bundle
+/// identifier, the helpers' prefix.
+fn bundle_chromium(root: &Path, app: &Path, profile: &str, copy: bool, id: &str) -> anyhow::Result<()> {
     let framework = std::fs::read_dir(root.join("target/cef"))
         .into_iter()
         .flatten()
@@ -188,10 +196,17 @@ fn bundle_chromium(root: &Path, app: &Path, profile: &str) -> anyhow::Result<()>
         .map(|platform| platform.path().join("Chromium Embedded Framework.framework"))
         .find(|p| p.exists());
     let Some(framework) = framework else {
+        anyhow::ensure!(!copy, "no Chromium in target/cef (build lightair-web once)");
         eprintln!("no Chromium in target/cef (build lightair-web once): web pages won't paint");
         return Ok(());
     };
-    link_file(&framework, &app.join("Frameworks/Chromium Embedded Framework.framework"))?;
+    let into = app.join("Frameworks/Chromium Embedded Framework.framework");
+    if copy {
+        run(Command::new("ditto").arg(&framework).arg(&into))?;
+    } else {
+        link_file(&framework, &into)?;
+    }
+    let prefix = id;
     let helper = root.join(format!("target/{profile}/lightair-web-helper"));
     for (suffix, id) in [("", ""), (" (GPU)", ".gpu"), (" (Renderer)", ".renderer"), (" (Plugin)", ".plugin")] {
         let name = format!("Lightair Helper{suffix}");
@@ -207,7 +222,7 @@ fn bundle_chromium(root: &Path, app: &Path, profile: &str) -> anyhow::Result<()>
 <dict>
 	<key>CFBundleName</key><string>{name}</string>
 	<key>CFBundleExecutable</key><string>{name}</string>
-	<key>CFBundleIdentifier</key><string>app.lightair.dev.helper{id}</string>
+	<key>CFBundleIdentifier</key><string>{prefix}.helper{id}</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>0.1.0</string>
 	<key>LSMinimumSystemVersion</key><string>14.0</string>
@@ -244,6 +259,10 @@ fn main() -> anyhow::Result<()> {
         Some("test") => test(std::env::args().skip(2).collect()),
         Some("check") => check(std::env::args().any(|a| a == "--changed")),
         Some("precommit") => precommit(),
+        #[cfg(target_os = "macos")]
+        Some("dist") => dist::dist(),
+        #[cfg(not(target_os = "macos"))]
+        Some("dist") => anyhow::bail!("the shipped app is built on macOS"),
         Some("prune") => {
             be_polite();
             let (files, bytes) = prune(None)?;
@@ -252,7 +271,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask (modules | bundle | dev | virtual-camera [--uninstall] | test [--machine] [filter] | check [--changed] | precommit | prune)"
+                "usage: cargo xtask (modules | bundle | dist | dev | virtual-camera [--uninstall] | test [--machine] [filter] | check [--changed] | precommit | prune)"
             );
             Ok(())
         }

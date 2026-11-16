@@ -115,12 +115,16 @@ pub fn plain_workspace() -> Workspace {
     p
 }
 
-/// The brand icon in the repository, found from the running executable whether it runs from
-/// `target/debug` or inside the development app bundle.
+/// The brand icon: the app's own (Contents/Resources), or the repository's, found from the
+/// running executable whether it runs from `target/debug` or inside the development app bundle.
 fn brand_icon() -> std::path::PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|exe| {
+            let own = exe.parent()?.parent()?.join("Resources/lightair-icon-512.png");
+            if own.exists() {
+                return Some(own);
+            }
             exe.ancestors().map(|a| a.join("branding/final/icon/lightair-icon-512.png")).find(|p| p.exists())
         })
         .unwrap_or_default()

@@ -13,19 +13,29 @@ use serde_json::{Value, json};
 /// The libobs filter all face effects run on.
 pub const KIND: &str = catalog::STUDIO_FILTER;
 
-/// Where the Camera Studio module bundle lives: `target/modules/lightair-camera-fx` in
-/// development (found from the executable, also inside the development `Lightair.app`; a copy
-/// of that app elsewhere, in /Applications say, looks in the checkout it was built from).
+/// Where the Camera Studio module bundle lives: the app's own `Contents/PlugIns` (the shipped
+/// app, `cargo xtask dist`), or `target/modules/lightair-camera-fx` in development (found from
+/// the executable, also inside the development `Lightair.app`).
 pub fn plugin_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
+    if let Some(plugins) = bundled_plugins() {
+        return Some(plugins);
+    }
     // macOS: the .plugin bundle; Windows: OBS's layout (obs-plugins/64bit, data/obs-plugins)
     let (dir, module) = if cfg!(windows) {
         ("modules/lightair-camera-fx/obs-plugins/64bit", "lightair-camera-fx.dll")
     } else {
         ("modules/lightair-camera-fx", "lightair-camera-fx.plugin")
     };
-    let checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
-    exe.ancestors().chain([checkout.as_path()]).map(|a| a.join(dir)).find(|dir| dir.join(module).exists())
+    exe.ancestors().map(|a| a.join(dir)).find(|dir| dir.join(module).exists())
+}
+
+/// The shipped app's `Contents/PlugIns`, when the module is in it (macOS): libobs loads it with
+/// the app's other modules.
+pub fn bundled_plugins() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let plugins = exe.parent()?.parent()?.join("PlugIns");
+    (cfg!(target_os = "macos") && plugins.join("lightair-camera-fx.plugin").exists()).then_some(plugins)
 }
 
 /// The module's data folder (presets, shaders, models).
