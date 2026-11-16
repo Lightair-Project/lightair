@@ -1,15 +1,26 @@
 # Live integrations: accounts, chat, widgets and automation in one app
 
-Status (16 November 2026): research done; being built. The Chat panel reads Twitch, YouTube,
-CHZZK, SOOP and DouYu directly, and Kick and TikTok through hidden pages (crates/lightair-live,
-`pages`: the app gives it Lightair's Chromium). Widgets (crates/lightair-widgets): the local
-server, bridge, alert queue, the alert box, chat box, event list, goal, label, counter and
-subathon timer, StreamElements custom widgets imported unchanged; the Activity panel.
-Automations (crates/lightair-automation): triggers (alerts, chat commands with permissions, chat
-messages, first-time chatters, timers), conditions, steps (any Lightair method, chat, voice,
-sound, wait, variables, points, if, random, other automations, web requests), queues, cooldowns,
-viewers and points, run history, ten recipes, the Automations panel, and remote/MCP methods.
-Sending chat, signed-in pages and the rest are next. It turns
+Status (16 November 2026), built:
+- **Chat in**: Twitch (and its follows), YouTube, Kick (and Kicks gifts), TikTok (comments,
+  gifts with combos, follows, shares, from the room's own connection), CHZZK (and
+  subscriptions), SOOP, DouYu, TwitCasting, SHOWROOM, Bilibili; tips from Streamlabs,
+  StreamElements and Ko-fi (through `relay/`); history kept across restarts.
+- **Chat out**: sign in on each platform's own page in a Lightair window (Outputs ›
+  Sending); Twitch, YouTube, Kick and TikTok send as you; the Chat panel's send box.
+- **Widgets** (crates/lightair-widgets): alert box, chat box, event list, goal, label,
+  counter, subathon timer, now playing, emote wall, credits, social rotator, poll, wheel,
+  leaderboard, heart rate; StreamElements widgets unchanged; `.lwidget` packages.
+- **Automations** (crates/lightair-automation): triggers, conditions, steps (every Lightair
+  method, chat, voice, sound, variables, points, branches, JavaScript, web requests, VTube
+  Studio, Elgato Key Lights), queues, cooldowns, viewers and points, run history, recipes,
+  remote API and MCP.
+- **Integrations**: Spotify / Apple Music now playing, VTube Studio, Key Lights, Pulsoid;
+  Stream Deck through obs-websocket compatibility.
+
+Left: Facebook, Instagram, X and LinkedIn (signed-in pages: need a signed-in session to
+build against), Huya and Niconico readers, SOOP subscriptions and YouTube raids, reading
+rules updated without a release, Philips Hue, a Stream Deck plugin of Lightair's own,
+Streamer.bot import, bring-your-own official API credentials; deploying the relay. It turns
 [docs/12](../12-chat-alerts-integrations.md) into a design and goes further: everything a
 streamer runs next to OBS today (a chat app, StreamElements or Streamlabs widgets, Streamer.bot,
 Speaker.bot, Restream chat) is part of Lightair, so nobody needs a second app. Lightair doesn't
