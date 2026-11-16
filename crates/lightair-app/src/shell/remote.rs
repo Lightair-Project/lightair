@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 use super::StudioWindow;
 
 type Job = (Call, std::sync::mpsc::Sender<Reply>);
+/// Where calls go to be answered on the main thread.
+pub(super) type JobSender = futures_channel::mpsc::UnboundedSender<Job>;
 
 /// How long a client waits for the app to answer.
 const ANSWER_WITHIN: Duration = Duration::from_secs(20);
@@ -50,6 +52,11 @@ struct Shot {
 }
 
 impl Remote {
+    /// A way in for the app's own callers (automations).
+    pub(super) fn jobs(&self) -> JobSender {
+        self.jobs.clone()
+    }
+
     pub fn running(&self) -> Option<&Server> {
         self.server.as_ref()
     }
@@ -396,6 +403,9 @@ impl StudioWindow {
     fn remote_call(&mut self, call: &Call, cx: &mut Context<Self>) -> Reply {
         // what this call changes is told against how things were before it
         self.tell_remote(cx);
+        if let Some(reply) = self.live_call(call, cx) {
+            return reply;
+        }
         let p = &call.params;
         let who = call.client;
         let w = self.studio.read(cx).workspace().clone();

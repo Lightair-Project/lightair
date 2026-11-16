@@ -2,8 +2,10 @@
 
 mod activity_panel;
 mod assets;
+mod automations_panel;
 mod camera_studio;
 mod chat_panel;
+mod chat_send;
 mod editor;
 mod effect_drag;
 mod encoding;

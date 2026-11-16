@@ -29,6 +29,7 @@ mod golive;
 mod hierarchy;
 mod inspector;
 mod object_props;
+mod live_api;
 mod widget_props;
 mod menus;
 pub(crate) mod mixer_props;
@@ -285,6 +286,8 @@ pub struct StudioWindow {
     chat: Entity<crate::chat_panel::ChatPanel>,
     /// Follows, subs, donations and raids (a tab beside Chat).
     activity: Entity<crate::activity_panel::ActivityPanel>,
+    /// Automations (a tab beside the mixer).
+    automations_panel: Entity<crate::automations_panel::AutomationsPanel>,
     /// First click on "End stream" arms it; a second click within 3 s ends the stream.
     confirm_end: Option<Instant>,
     /// One preview per canvas (the primary one renders the main canvas).
@@ -406,6 +409,8 @@ pub struct StudioWindow {
     prefs: crate::prefs::Preferences,
     /// The remote API (obs-websocket, JSON-RPC, MCP).
     remote: remote::Remote,
+    /// Automations (docs/plans/live-integrations.md, 2.6).
+    pub(crate) automations: lightair_automation::Automations,
     /// The canvas preview drawn under the UI (macOS: native_preview), the canvases whose
     /// previews show in it, and where each canvas's picture is (window points), as laid out.
     native: std::rc::Rc<RefCell<Option<crate::native_preview::NativePreview>>>,
@@ -602,6 +607,11 @@ impl StudioWindow {
         })
         .detach();
         let remote = Self::new_remote(window, cx);
+        let automations = live_api::start_automations(&studio.read(cx).chat, remote.jobs());
+        let automations_panel = {
+            let a = automations.clone();
+            cx.new(|cx| crate::automations_panel::AutomationsPanel::new(a, cx))
+        };
         cx.defer_in(window, |this, _, cx| this.sync_remote(cx));
         Self {
             previews: HashMap::from([(primary, preview)]),
@@ -699,6 +709,8 @@ impl StudioWindow {
             dock: None,
             prefs: crate::prefs::load_from(&crate::prefs::path()),
             remote,
+            automations,
+            automations_panel,
             native,
             native_layers: HashSet::new(),
             native_rects: Default::default(),
