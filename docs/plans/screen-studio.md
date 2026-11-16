@@ -1,6 +1,7 @@
 # Screen Studio in Lightair: research and integration plan
 
-Status: research done, nothing built yet. Goal: every **offline** Screen Studio capability exists
+Status: built, phases 1 to 5 (14 November 2026; see the notes under each phase in section 5);
+the Editor has since grown into a full video editor (docs/plans/video-editor.md). Goal: every **offline** Screen Studio capability exists
 in Lightair, done the Lightair way (live-first, multi-format, on-device), with an original design
 and none of Screen Studio's assets, wording or branding, **on macOS and Windows alike**
 (docs/plans/windows.md): every part below names how it works on each. Lightair becomes three places: the
