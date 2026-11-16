@@ -83,6 +83,8 @@ pub struct OutputsPanel {
     disk: crate::storage::DiskWatch,
     /// Signed in on each platform (for sending chat), as last looked up.
     signed_in: std::collections::HashMap<String, bool>,
+    /// What bringing a sign-in over from a browser said.
+    import_note: Option<String>,
     /// Platforms looked up already (or being).
     asked: std::cell::RefCell<std::collections::HashSet<String>>,
     /// A sign-in window open: its platform, the page, and whether it was closed.
@@ -325,6 +327,54 @@ impl OutputsPanel {
         cx.notify();
     }
 
+    /// Brings the sign-in over from a browser on this Mac (when Lightair's own window can't do
+    /// it: a passkey with Touch ID).
+    fn import_button(&self, platform: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let browsers = crate::browser_import::installed();
+        if browsers.is_empty() || crate::browser_import::domains(platform).is_empty() {
+            return None;
+        }
+        let me = cx.entity().downgrade();
+        let p = platform.to_string();
+        Some(
+            Button::new("sign-in-import")
+                .label("Use my browser's")
+                .small()
+                .ghost()
+                .dropdown_menu(move |mut menu, _, _| {
+                    for b in &browsers {
+                        let (me, p, b) = (me.clone(), p.clone(), *b);
+                        menu = menu.item(PopupMenuItem::new(format!("{b}: its {p} sign-in")).on_click(move |_, _, cx| {
+                            if let Some(me) = me.upgrade() {
+                                me.update(cx, |this, cx| this.import_sign_in(b, &p, cx));
+                            }
+                        }));
+                    }
+                    menu
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn import_sign_in(&mut self, browser: &'static str, platform: &str, cx: &mut Context<Self>) {
+        let p = platform.to_string();
+        self.import_note = Some(format!("Asking macOS for {browser}'s key…"));
+        cx.spawn(async move |this, cx| {
+            let q = p.clone();
+            let result = cx.background_executor().spawn(async move { crate::browser_import::import(browser, &q) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.import_note = Some(match result {
+                    Ok(_) => format!("Signed in with {browser}'s sign-in"),
+                    Err(e) => e,
+                });
+                this.check_signed_in(&p, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// "Sending": signed in or not, and the button to sign in (platforms Lightair can send to).
     fn sending_row(&self, platform: &'static str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let account = lightair_live::accounts::account(platform)?;
@@ -338,7 +388,7 @@ impl OutputsPanel {
         let status = div()
             .text_size(px(12.))
             .text_color(if yes { tok::ok() } else { tok::text_tertiary() })
-            .child(if yes { "Signed in" } else { "Not signed in" });
+            .child(self.import_note.clone().unwrap_or_else(|| if yes { "Signed in".into() } else { "Not signed in".into() }));
         let k = key.clone();
         Some(
             form_row(
@@ -351,6 +401,7 @@ impl OutputsPanel {
                     .gap_2()
                     .child(status)
                     .child(Button::new("sign-in").label(label).small().outline().disabled(open).on_click(cx.listener(move |this, _, _, cx| this.open_sign_in(&k, cx))))
+                    .children(self.import_button(&key, cx))
                     .into_any_element(),
             )
             .into_any_element(),
@@ -371,7 +422,7 @@ impl OutputsPanel {
             }
         })
         .detach();
-        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default(), signed_in: Default::default(), asked: Default::default(), sign_in: None }
+        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default(), signed_in: Default::default(), asked: Default::default(), sign_in: None, import_note: None }
     }
 
     /// Asks for a vertical canvas, to send once it's there.

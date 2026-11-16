@@ -46,6 +46,12 @@ raw-window-handle = "0.6"
 
 # Plugin editor windows, the macOS camera effects panel.
 [target.'cfg(target_os = "macos")'.dependencies]
+# importing a sign-in from Chrome and its kin (Chrome's cookie encryption)
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha1 = "0.10"
+sha2 = "0.10"
+aes = "0.8"
+cbc = "0.1"
 keyring = { version = "3", features = ["apple-native"] }
 objc2 = "0.6"
 block2 = "0.6"

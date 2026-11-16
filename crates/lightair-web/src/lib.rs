@@ -40,6 +40,28 @@ pub type OnClosed = Arc<dyn Fn() + Send + Sync>;
 /// Gets the cookies asked for: (name, value).
 pub type CookiesDone = Box<dyn FnOnce(Vec<(String, String)>) + Send>;
 
+/// A cookie to give Chromium (a sign-in brought over from another browser).
+#[derive(Debug, Clone)]
+pub struct CookieSpec {
+    /// The address it's for ("https://www.twitch.tv").
+    pub url: String,
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub secure: bool,
+    pub http_only: bool,
+    /// Chromium's own time: microseconds since 1601 (0: for this session only).
+    pub expires: i64,
+    /// 0 unspecified, 1 none, 2 lax, 3 strict (Chromium's numbers + 1).
+    pub same_site: i32,
+}
+
+/// Gives Chromium these cookies; `done` with how many it took.
+pub fn set_cookies(list: Vec<CookieSpec>, done: impl FnOnce(usize) + Send + 'static) {
+    imp::request(imp::Request::SetCookies { list, done: Box::new(done) });
+}
+
 static PROFILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 /// Where Chromium keeps its profile (cookies, storage), so sign-ins last (set once, before the
@@ -234,7 +256,7 @@ pub fn set_waker(wake: impl Fn() + Send + Sync + 'static) {
 
 #[cfg(any(target_os = "macos", all(windows, not(lightair_cross_check))))]
 mod imp {
-    use super::{AudioSink, CookiesDone, FrameSink, MessageSink, OnClosed, PageOptions, TextureSink};
+    use super::{AudioSink, CookieSpec, CookiesDone, FrameSink, MessageSink, OnClosed, PageOptions, TextureSink};
     use cef::*;
     use parking_lot::Mutex;
     use std::cell::RefCell;
@@ -255,6 +277,7 @@ mod imp {
             window: Option<(String, OnClosed)>,
         },
         Cookies { url: String, done: CookiesDone },
+        SetCookies { list: Vec<CookieSpec>, done: Box<dyn FnOnce(usize) + Send> },
         Update { id: u64, options: PageOptions },
         Eval { id: u64, code: String },
         Navigate { id: u64, url: String },
@@ -809,6 +832,37 @@ mod imp {
         }
     }
 
+    fn set_cookies(list: Vec<CookieSpec>, done: Box<dyn FnOnce(usize) + Send>) {
+        let Some(manager) = cookie_manager_get_global_manager(None) else {
+            done(0);
+            return;
+        };
+        let mut taken = 0;
+        for c in list {
+            let cookie = Cookie {
+                name: CefString::from(c.name.as_str()),
+                value: CefString::from(c.value.as_str()),
+                domain: CefString::from(c.domain.as_str()),
+                path: CefString::from(c.path.as_str()),
+                secure: c.secure as i32,
+                httponly: c.http_only as i32,
+                has_expires: (c.expires > 0) as i32,
+                expires: Basetime { val: c.expires },
+                same_site: match c.same_site {
+                    1 => CookieSameSite::NO_RESTRICTION,
+                    2 => CookieSameSite::LAX_MODE,
+                    3 => CookieSameSite::STRICT_MODE,
+                    _ => CookieSameSite::UNSPECIFIED,
+                },
+                ..Default::default()
+            };
+            if manager.set_cookie(Some(&CefString::from(c.url.as_str())), Some(&cookie), None) == 1 {
+                taken += 1;
+            }
+        }
+        done(taken);
+    }
+
     fn cookies(url: String, done: CookiesDone) {
         let jar = Arc::new(CookieJar { found: Mutex::new(Vec::new()), done: Mutex::new(Some(done)) });
         if let Some(manager) = cookie_manager_get_global_manager(None) {
@@ -1008,6 +1062,7 @@ mod imp {
             match r {
                 Request::Open { id, options, sink, texture, audio, agent, window } => open(id, options, sink, texture, audio, agent, window),
                 Request::Cookies { url, done } => cookies(url, done),
+                Request::SetCookies { list, done } => set_cookies(list, done),
                 Request::Eval { id, code } => PAGES.with(|pages| {
                     if let Some(frame) = pages.borrow().get(&id).and_then(|l| l.browser.as_ref()).and_then(|b| b.main_frame()) {
                         frame.execute_java_script(Some(&CefString::from(code.as_str())), Some(&CefString::from("lightair://agent")), 0);
@@ -1083,12 +1138,13 @@ mod imp {
 /// No Chromium here (the Windows check made from a Mac): pages never paint.
 #[cfg(not(any(target_os = "macos", all(windows, not(lightair_cross_check)))))]
 mod imp {
-    use super::{AudioSink, CookiesDone, FrameSink, MessageSink, OnClosed, PageOptions, TextureSink};
+    use super::{AudioSink, CookieSpec, CookiesDone, FrameSink, MessageSink, OnClosed, PageOptions, TextureSink};
 
     #[allow(dead_code)] // (asked for, never made here)
     pub enum Request {
         Open { id: u64, options: PageOptions, sink: FrameSink, texture: Option<TextureSink>, audio: AudioSink, agent: Option<(String, String, MessageSink)>, window: Option<(String, OnClosed)> },
         Cookies { url: String, done: CookiesDone },
+        SetCookies { list: Vec<CookieSpec>, done: Box<dyn FnOnce(usize) + Send> },
         Update { id: u64, options: PageOptions },
         Eval { id: u64, code: String },
         Navigate { id: u64, url: String },
@@ -1103,8 +1159,10 @@ mod imp {
     }
 
     pub fn request(r: Request) {
-        if let Request::Cookies { done, .. } = r {
-            done(Vec::new());
+        match r {
+            Request::Cookies { done, .. } => done(Vec::new()),
+            Request::SetCookies { done, .. } => done(0),
+            _ => {}
         }
     }
 

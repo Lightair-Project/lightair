@@ -19,6 +19,7 @@ pub fn run(engine: &Engine, what: &str) {
         "agent-page" => agent_page(),
         "script" => script(),
         "cookies" => cookies(),
+        "cookie-set" => cookie_set(),
         "twitch-login" => twitch_login(),
         "displays" => displays(engine),
         // puts Lightair's Backgrounds back: LIGHTAIR_BG_PICTURE and LIGHTAIR_BG_ON (0/1)
@@ -333,6 +334,52 @@ fn twitch_login() {
         }
     }
     println!("SELFTEST twitch-login: no answer");
+}
+
+/// `LIGHTAIR_SELFTEST=cookie-set`: what bringing a sign-in over from a browser does last: hands
+/// Lightair's browser a cookie, read back as sending reads sign-ins.
+fn cookie_set() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject};
+        let _app: *mut AnyObject = unsafe { msg_send![AnyClass::get(c"NSApplication").unwrap(), sharedApplication] };
+    }
+    let _page = lightair_web::Page::open_agent("https://example.com/", String::new(), std::sync::Arc::new(|_| {}));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let start = std::time::Instant::now();
+    let mut sent = false;
+    while start.elapsed() < Duration::from_secs(30) {
+        lightair_web::pump();
+        std::thread::sleep(Duration::from_millis(8));
+        if !sent && start.elapsed() > Duration::from_secs(2) {
+            sent = true;
+            let tx = tx.clone();
+            // an hour from now, in µs since 1601
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
+            let spec = lightair_web::CookieSpec {
+                url: "https://example.com/".into(),
+                name: "lightair_set".into(),
+                value: "brought".into(),
+                domain: String::new(),
+                path: "/".into(),
+                secure: true,
+                http_only: true,
+                expires: now + 11_644_473_600_000_000 + 3_600_000_000,
+                same_site: 2,
+            };
+            lightair_web::set_cookies(vec![spec], move |n| {
+                std::thread::spawn(move || {
+                    let _ = tx.send((n, lightair_live::pages::cookie("https://example.com", "lightair_set")));
+                });
+            });
+        }
+        if let Ok((n, v)) = rx.try_recv() {
+            println!("SELFTEST cookie-set: took {n}, read back {v:?}");
+            return;
+        }
+    }
+    println!("SELFTEST cookie-set: timed out");
 }
 
 /// `LIGHTAIR_SELFTEST=cookies`: a cookie a page sets, read back as sending reads sign-ins.
