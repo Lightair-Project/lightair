@@ -168,9 +168,11 @@ float3 keyed(float3 c)
 // lowers the point where it counts as all green). d_person: about 0 (lo) away from the green;
 // next to it, the person's own from a few pixels inward (skin is below 0, so a slight green
 // mix in it would otherwise not show), which takes the faint green cast out of the inner rim.
-float key_hi()
+// (A parameter, not none: libobs's Metal converter breaks calls to a function with no
+// arguments that reads a uniform.)
+float key_hi(float softness)
 {
-	return 0.88 - 0.2 * (1.0 - key_softness);
+	return 0.88 - 0.2 * (1.0 - softness);
 }
 
 float dominance(float3 c)
@@ -180,7 +182,7 @@ float dominance(float3 c)
 
 float key_alpha_with(float d, float d_person)
 {
-	return saturate((key_hi() - d) / (key_hi() - min(0.03, d_person)));
+	return saturate((key_hi(key_softness) - d) / (key_hi(key_softness) - min(0.03, d_person)));
 }
 
 float key_alpha(float3 c)
