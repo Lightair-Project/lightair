@@ -15,6 +15,7 @@ lightair-engine.workspace = true
 lightair-automation.workspace = true
 lightair-live.workspace = true
 lightair-widgets.workspace = true
+getrandom = "0.3"
 lightair-preview.workspace = true
 lightair-web.workspace = true
 lightair-core.workspace = true
