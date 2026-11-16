@@ -290,6 +290,8 @@ pub struct StudioWindow {
     chat: Entity<crate::chat_panel::ChatPanel>,
     /// Follows, subs, donations and raids (a tab beside Chat).
     activity: Entity<crate::activity_panel::ActivityPanel>,
+    /// How each platform shows the stream (a tab beside Activity).
+    stream: Entity<crate::stream_panel::StreamPanel>,
     /// Automations (a tab beside the mixer).
     automations_panel: Entity<crate::automations_panel::AutomationsPanel>,
     /// First click on "End stream" arms it; a second click within 3 s ends the stream.
@@ -580,6 +582,7 @@ impl StudioWindow {
         let outputs = cx.new(|cx| OutputsPanel::new(studio.clone(), cx));
         let chat = cx.new(|cx| crate::chat_panel::ChatPanel::new(studio.clone(), window, cx));
         let activity = cx.new(|cx| crate::activity_panel::ActivityPanel::new(studio.clone(), cx));
+        let stream = cx.new(|cx| crate::stream_panel::StreamPanel::new(studio.clone(), cx));
         // Its Add destination dialog is drawn over the whole window.
         cx.observe(&outputs, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&outputs, |this, _, _: &crate::outputs_panel::AddVerticalCanvas, cx| {
@@ -647,6 +650,7 @@ impl StudioWindow {
             outputs,
             chat,
             activity,
+            stream,
             confirm_end: None,
             studio,
             focus,

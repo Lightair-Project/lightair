@@ -37,6 +37,7 @@ mod selftest;
 mod shell;
 mod starter;
 mod storage;
+mod stream_panel;
 mod studio;
 #[cfg(target_os = "macos")]
 mod system_effects;

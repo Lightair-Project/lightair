@@ -204,6 +204,7 @@ impl StudioWindow {
         let assets = panel(Region::Assets, cx);
         let (mixer, outputs, chat) = (self.mixer_dock.clone(), self.outputs.clone(), self.chat.clone());
         let activity = self.activity.clone();
+        let stream = self.stream.clone();
         let automations = self.automations_panel.clone();
         // Every group shows a tab bar, even with one panel, so any panel can be dropped onto
         // any header to join it as a tab (and the canvas gets a header like the rest).
@@ -247,9 +248,11 @@ impl StudioWindow {
                             .panel_view(panel_handle(outputs), cx)
                             .panel_view(panel_handle(chat), cx)
                             .panel_view(panel_handle(activity), cx)
+                            .panel_view(panel_handle(stream), cx)
                             .active_index(match std::env::var("LIGHTAIR_OPEN").as_deref() {
                                 Ok("chat") => 1,
                                 Ok(h) if h.starts_with("activity") => 2,
+                                Ok("stream") => 3,
                                 _ => 0,
                             }),
                         Some(px(320.)),
