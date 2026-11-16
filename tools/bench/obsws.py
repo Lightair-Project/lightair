@@ -72,3 +72,30 @@ class ObsWs:
                 return m["d"].get("responseData", {}) if st["result"] else st
             if m["op"] == 5:
                 self.events.append(m["d"])
+
+
+class Rpc(ObsWs):
+    """Lightair's own JSON-RPC (ws://…/rpc), for what obs-websocket can't say."""
+
+    def __init__(self, host="127.0.0.1", port=4466, password=None, timeout=30):
+        self.s = socket.create_connection((host, port), timeout=timeout)
+        key = base64.b64encode(os.urandom(16)).decode()
+        auth = f"Authorization: Bearer {password}\r\n" if password else ""
+        self.s.sendall((f"GET /rpc HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                        f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n{auth}\r\n").encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            head += self.s.recv(1)
+        assert b" 101 " in head.split(b"\r\n")[0], head
+        self.buf = b""
+        self.n = 0
+
+    def call(self, method, params=None):
+        self.n += 1
+        self.send({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params or {}})
+        while True:
+            m = self.recv()
+            if m.get("id") == self.n:
+                if "error" in m:
+                    raise RuntimeError(f"{method}: {m['error']}")
+                return m["result"]
