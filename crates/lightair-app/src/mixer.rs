@@ -88,11 +88,8 @@ pub struct MixerPanel {
     panel_h: Rc<std::cell::Cell<f32>>,
     /// A strip's name being edited.
     renaming: Option<crate::rows::Renaming>,
-    /// Displayed (decaying) peak per track and channel, plus the time of the last frame.
-    display: HashMap<Id, [f32; 2]>,
-    last_frame: Instant,
-    /// When the meters last moved.
-    meters_at: Instant,
+    /// Where each strip's meter is drawn (the meter overlay paints the levels there).
+    spots: Spots,
     add_track_menu: bool,
     /// When a click outside last closed the add menu (that click on + mustn't reopen it).
     menu_closed: Option<Instant>,
@@ -102,24 +99,6 @@ pub struct MixerPanel {
 impl MixerPanel {
     pub fn new(studio: Entity<Studio>, cx: &mut Context<Self>) -> Self {
         cx.observe(&studio, |_, _, cx| cx.notify()).detach();
-        // Meters move at about 30 frames a second, in step with the canvas's frames when it shows
-        // a live picture (`tick_meters`: one window redraw for both, not two); on their own
-        // when it doesn't (docs/16, "Performance budgets").
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(std::time::Duration::from_millis(33)).await;
-                let alive = this.update(cx, |m, cx| {
-                    if m.meters_at.elapsed() >= std::time::Duration::from_millis(50) {
-                        m.meters_at = Instant::now();
-                        cx.notify();
-                    }
-                });
-                if alive.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
         Self {
             studio,
             faders: Rc::default(),
@@ -129,9 +108,7 @@ impl MixerPanel {
             sections: Rc::default(),
             panel_h: Rc::default(),
             renaming: None,
-            display: HashMap::new(),
-            last_frame: Instant::now(),
-            meters_at: Instant::now(),
+            spots: Rc::default(),
             add_track_menu: false,
             menu_closed: None,
             focus: cx.focus_handle(),
@@ -184,22 +161,8 @@ impl MixerPanel {
     }
 }
 
-impl MixerPanel {
-    /// The canvas drew a frame: the meters move with it if they're due (same redraw).
-    pub fn tick_meters(&mut self, cx: &mut Context<Self>) {
-        if self.meters_at.elapsed() >= std::time::Duration::from_millis(30) {
-            self.meters_at = Instant::now();
-            cx.notify();
-        }
-    }
-}
-
 impl Render for MixerPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = Instant::now();
-        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
-        self.last_frame = now;
-
         let workspace = self.studio.read(cx).workspace().clone();
         let mut strips = Vec::new();
         // Program, pinned to the right edge (the others scroll beside it)
@@ -208,16 +171,7 @@ impl Render for MixerPanel {
         self.sections.borrow_mut().retain(|id, _| views.iter().any(|v| v.id == *id));
         let layout = Layout::fit(self.panel_h.get(), self.sections.borrow().values().copied().fold(0.0, f32::max));
         for (i, view) in views.iter().enumerate() {
-            // Meter ballistics: rise instantly, fall at 24 dB/s.
-            let levels = meters().get(view.id).map(|c| c.levels());
-            let shown = self.display.entry(view.id).or_insert([f32::NEG_INFINITY; 2]);
-            for (c, value) in shown.iter_mut().enumerate() {
-                let target = levels.map_or(f32::NEG_INFINITY, |l| l.peak[c]);
-                let fallen = if value.is_finite() { *value - 24.0 * dt } else { f32::NEG_INFINITY };
-                *value = if target > fallen { target } else { fallen.max(-90.0) };
-            }
-            let shown = *shown;
-            let strip = self.strip(i, view, shown, layout, cx);
+            let strip = self.strip(i, view, layout, cx);
             let menu = StripMenu::of(&workspace, view);
             let is_master = view.kind == MixerStrip::Master;
             if i > 0 && !is_master && views[i - 1].kind_order() != view.kind_order() {
@@ -251,7 +205,7 @@ impl Render for MixerPanel {
                 strips.push(el);
             }
         }
-        self.display.retain(|id, _| MixerStrip::find(&workspace, *id).is_some());
+        self.spots.borrow_mut().retain(|id, _| views.iter().any(|v| v.id == *id));
 
         let panel_h = self.panel_h.clone();
         div()
@@ -910,7 +864,6 @@ impl MixerPanel {
         &self,
         i: usize,
         view: &StripView,
-        shown: [f32; 2],
         layout: Layout,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1154,24 +1107,27 @@ impl MixerPanel {
                 }),
         );
 
-        // ---- the stereo meter: two bars, a dB scale beside them, the peak above
-        let bar = |db: f32| {
-            let frac = meter_frac(db);
-            // green below −20, yellow −20…−9, red above −9 dBFS
-            let (g_end, y_end) = (meter_frac(-20.0), meter_frac(-9.0));
-            let seg = |from: f32, to: f32, color: Hsla| {
-                let h = (frac.min(to) - from).max(0.0);
-                div().absolute().left_0().right_0().bottom(relative(from)).h(relative(h)).bg(color)
-            };
-            div()
-                .relative()
-                .w(px(6.))
-                .h_full()
-                .bg(tok::bg_panel())
-                .child(seg(0.0, g_end, tok::ok()))
-                .child(seg(g_end, y_end, tok::warn()))
-                .child(seg(y_end, 1.0, tok::error()))
+        // ---- the stereo meter: two bars, a dB scale beside them, the peak above. The levels
+        // themselves are painted by the meter overlay (MeterOverlay) where these say: they move
+        // 30 times a second without the strips being laid out again.
+        let spot = |what: Spot| {
+            let spots = self.spots.clone();
+            canvas(
+                move |b, window, _| {
+                    let mut spots = spots.borrow_mut();
+                    let s = spots.entry(id).or_default();
+                    match what {
+                        Spot::Bar(c) => s.bars[c] = Some(b),
+                        Spot::Readout => s.readout = Some(b),
+                    }
+                    s.clip = Some(window.content_mask().bounds);
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full()
         };
+        let bar = |c: usize| div().relative().w(px(6.)).h_full().bg(tok::bg_panel()).child(spot(Spot::Bar(c)));
         let mut scale = div().relative().flex_1().h_full();
         // a label every 6 dB when the meter is tall enough to read them, every 12 when it's short
         // (its height: the fader's, beside it, from the last frame)
@@ -1189,7 +1145,7 @@ impl MixerPanel {
                     .child(if db == 0 { "0".to_string() } else { format!("{db}") }),
             );
         }
-        let peak = shown[0].max(shown[1]);
+        let peak_readout = div().relative().h(px(18.)).rounded(px(3.)).bg(tok::bg_app()).child(spot(Spot::Readout));
         let readout = |text: String| {
             div()
                 .flex()
@@ -1207,11 +1163,7 @@ impl MixerPanel {
             .gap_1()
             .w(px(50.))
             .h_full()
-            .child(
-                readout(if peak > -90.0 { format!("{peak:.1}") } else { "-inf".into() })
-                    .bg(tok::bg_app())
-                    .text_color(if peak > -1.0 { tok::error() } else { tok::text_secondary() }),
-            )
+            .child(peak_readout)
             .child(
                 div()
                     .flex()
@@ -1221,8 +1173,8 @@ impl MixerPanel {
                     .p(px(3.))
                     .rounded(px(3.))
                     .bg(tok::bg_app())
-                    .child(bar(shown[0]))
-                    .child(bar(shown[1]))
+                    .child(bar(0))
+                    .child(bar(1))
                     .child(scale),
             );
 
@@ -1493,7 +1445,7 @@ impl MixerPanel {
 
 /// Stream loudness (EBU R128): short-term and integrated, against the common −14 LUFS target.
 /// Click to start integrated loudness over.
-fn loudness_readout(cx: &mut Context<MixerPanel>) -> Option<impl IntoElement> {
+fn loudness_readout<T: 'static>(cx: &mut Context<T>) -> Option<impl IntoElement> {
     let r = lightair_engine::loudness::stream_loudness()?;
     let show = |v: f64| if v.is_finite() { format!("{v:.1}") } else { "—".into() };
     // Against the loudness target (Settings › Audio): within 2 LU is on target; well below
@@ -1535,13 +1487,164 @@ fn loudness_readout(cx: &mut Context<MixerPanel>) -> Option<impl IntoElement> {
 }
 
 // ---------------------------------------------------------------- dock panel
-impl gpui_kit::component::dock::BasePanel for MixerPanel {
+/// Where a strip's meter is: its two bars, the peak readout above them, and the area that clips
+/// them (the strips scroll), in window pixels, as the strip was last laid out.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct MeterSpot {
+    bars: [Option<Bounds<Pixels>>; 2],
+    readout: Option<Bounds<Pixels>>,
+    clip: Option<Bounds<Pixels>>,
+}
+
+pub(crate) type Spots = Rc<RefCell<HashMap<Id, MeterSpot>>>;
+
+#[derive(Clone, Copy)]
+enum Spot {
+    Bar(usize),
+    Readout,
+}
+
+/// The meters' levels, painted over the mixer where its strips left room for them. Only this
+/// redraws 30 times a second; the strips (cached) are laid out again only when they change. In
+/// GPUI a view that redraws takes its parents with it, but not their other children.
+pub struct MeterOverlay {
+    spots: Spots,
+    /// Displayed (decaying) peak per strip and channel.
+    display: HashMap<Id, [f32; 2]>,
+    last_frame: Instant,
+    /// When the meters last moved.
+    moved: Instant,
+}
+
+impl MeterOverlay {
+    fn new(spots: Spots, cx: &mut Context<Self>) -> Self {
+        // about 30 times a second, in step with the canvas's frames when it shows a live picture
+        // (`tick`: one window redraw for both); on its own when it doesn't
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(33)).await;
+                let alive = this.update(cx, |m, cx| {
+                    if m.moved.elapsed() >= std::time::Duration::from_millis(50) {
+                        m.moved = Instant::now();
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        Self { spots, display: HashMap::new(), last_frame: Instant::now(), moved: Instant::now() }
+    }
+
+    /// The canvas drew a frame: the meters move with it if they're due (same redraw).
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        if self.moved.elapsed() >= std::time::Duration::from_millis(30) {
+            self.moved = Instant::now();
+            cx.notify();
+        }
+    }
+}
+
+impl Render for MeterOverlay {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+        self.last_frame = now;
+        let spots: Vec<(Id, MeterSpot)> = self.spots.borrow().iter().map(|(id, s)| (*id, *s)).collect();
+        self.display.retain(|id, _| spots.iter().any(|(s, _)| s == id));
+        let mut paint = Vec::with_capacity(spots.len());
+        for (id, spot) in spots {
+            // Meter ballistics: rise instantly, fall at 24 dB/s.
+            let levels = meters().get(id).map(|c| c.levels());
+            let shown = self.display.entry(id).or_insert([f32::NEG_INFINITY; 2]);
+            for (c, value) in shown.iter_mut().enumerate() {
+                let target = levels.map_or(f32::NEG_INFINITY, |l| l.peak[c]);
+                let fallen = if value.is_finite() { *value - 24.0 * dt } else { f32::NEG_INFINITY };
+                *value = if target > fallen { target } else { fallen.max(-90.0) };
+            }
+            paint.push((spot, *shown));
+        }
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, cx| {
+                // green below −20, yellow −20…−9, red above −9 dBFS
+                let (g_end, y_end) = (meter_frac(-20.0), meter_frac(-9.0));
+                for (spot, shown) in &paint {
+                    let clip = spot.clip.map(|bounds| ContentMask { bounds });
+                    window.with_content_mask(clip, |window| {
+                        for (c, b) in spot.bars.iter().enumerate() {
+                            let Some(b) = b else { continue };
+                            let frac = meter_frac(shown[c]);
+                            for (from, to, colour) in [(0.0, g_end, tok::ok()), (g_end, y_end, tok::warn()), (y_end, 1.0, tok::error())] {
+                                let top = frac.min(to);
+                                if top <= from {
+                                    continue;
+                                }
+                                let h = b.size.height;
+                                let y0 = b.origin.y + h * (1.0 - top);
+                                let y1 = b.origin.y + h * (1.0 - from);
+                                window.paint_quad(fill(Bounds::from_corners(point(b.origin.x, y0), point(b.origin.x + b.size.width, y1)), colour));
+                            }
+                        }
+                        if let Some(b) = spot.readout {
+                            let peak = shown[0].max(shown[1]);
+                            let text: SharedString = if peak > -90.0 { format!("{peak:.1}").into() } else { "-inf".into() };
+                            let colour = if peak > -1.0 { tok::error() } else { tok::text_secondary() };
+                            let run = TextRun { len: text.len(), font: font("Menlo"), color: colour, background_color: None, underline: None, strikethrough: None };
+                            let size = px(10.);
+                            let line = window.text_system().shape_line(text, size, &[run], None);
+                            let line_h = px(12.);
+                            let origin = point(b.origin.x, b.origin.y + (b.size.height - line_h) / 2.0);
+                            let _ = line.paint(origin, line_h, TextAlign::Center, Some(b.size.width), window, cx);
+                        }
+                    });
+                }
+            },
+        )
+        .size_full()
+    }
+}
+
+/// The mixer as a dock panel: its strips (cached: redrawn only when they change) and the meter
+/// overlay above them.
+pub struct MixerDock {
+    body: Entity<MixerPanel>,
+    overlay: Entity<MeterOverlay>,
+}
+
+impl MixerDock {
+    pub fn new(body: Entity<MixerPanel>, cx: &mut Context<Self>) -> Self {
+        let spots = body.read(cx).spots.clone();
+        let overlay = cx.new(|cx| MeterOverlay::new(spots, cx));
+        Self { body, overlay }
+    }
+
+    /// The canvas drew a frame: the meters move with it if they're due.
+    pub fn tick_meters(this: &Entity<Self>, cx: &mut App) {
+        let overlay = this.read(cx).overlay.clone();
+        overlay.update(cx, |m, cx| m.tick(cx));
+    }
+}
+
+impl Render for MixerDock {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .relative()
+            .size_full()
+            .child(self.body.clone().cached(StyleRefinement::default().size_full()))
+            .child(div().absolute().inset_0().child(self.overlay.clone()))
+    }
+}
+
+impl gpui_kit::component::dock::BasePanel for MixerDock {
     fn panel_name(&self) -> &'static str {
         "mixer"
     }
 }
 
-impl gpui_kit::component::dock::Panel for MixerPanel {
+impl gpui_kit::component::dock::Panel for MixerDock {
     /// None: the tab shows `title` (icon and name).
     fn tab_name(&self, _: &App) -> Option<SharedString> {
         None
@@ -1558,17 +1661,18 @@ impl gpui_kit::component::dock::Panel for MixerPanel {
     fn toolbar_buttons(
         &mut self,
         _: &mut Window,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> Option<Vec<gpui_kit::component::button::Button>> {
         use gpui_kit::component::Sizable;
         use gpui_kit::component::button::ButtonVariants;
+        let body = self.body.clone();
         Some(vec![
             gpui_kit::component::button::Button::new("mixer-add")
                 .icon(ui::icon("plus"))
                 .ghost()
                 .xsmall()
                 .tooltip("Add a track, bus or mix")
-                .on_click(cx.listener(|this, _, window, cx| this.toggle_add_track(window, cx))),
+                .on_click(move |_, window, cx| body.update(cx, |m, cx| m.toggle_add_track(window, cx))),
         ])
     }
 
@@ -1583,13 +1687,19 @@ impl gpui_kit::component::dock::Panel for MixerPanel {
     fn inner_padding(&self, _: &App) -> bool {
         false
     }
+
+    /// Not cached as a whole: the meter overlay moves 30 times a second and would take the
+    /// strips with it; the strips are cached on their own.
+    fn cached(&self, _: &App) -> bool {
+        false
+    }
 }
 
-impl EventEmitter<gpui_kit::component::dock::PanelEvent> for MixerPanel {}
+impl EventEmitter<gpui_kit::component::dock::PanelEvent> for MixerDock {}
 
-impl Focusable for MixerPanel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+impl Focusable for MixerDock {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.body.read(cx).focus.clone()
     }
 }
 

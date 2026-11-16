@@ -146,6 +146,14 @@ pub trait Panel: gpui_base::dock::Panel {
     fn title_bar(&self, cx: &App) -> bool {
         true
     }
+
+    /// Lightair patch: whether the tab group draws this panel as a cached view (redrawn only
+    /// when it's notified). `false` for a panel that keeps a fast-moving child of its own
+    /// beside a cached body: a cached view redraws everything inside it, caches and all, when
+    /// anything in it changes.
+    fn cached(&self, cx: &App) -> bool {
+        true
+    }
 }
 
 /// Object-safe counterpart of [`Panel`], and the presentation half of the
@@ -160,6 +168,7 @@ pub trait PanelView: gpui_base::dock::PanelView {
     fn zoom_control(&self, cx: &App) -> Option<PanelControl>;
     fn inner_padding(&self, cx: &App) -> bool;
     fn title_bar(&self, cx: &App) -> bool;
+    fn cached(&self, cx: &App) -> bool;
 }
 
 impl<T: Panel> PanelView for Entity<T> {
@@ -200,6 +209,10 @@ impl<T: Panel> PanelView for Entity<T> {
 
     fn title_bar(&self, cx: &App) -> bool {
         self.read(cx).title_bar(cx)
+    }
+
+    fn cached(&self, cx: &App) -> bool {
+        self.read(cx).cached(cx)
     }
 }
 

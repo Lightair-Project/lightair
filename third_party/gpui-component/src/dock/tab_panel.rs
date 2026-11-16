@@ -791,18 +791,25 @@ impl TabGroupRenderer for TabGroupSkin {
         panel: AnyView,
         group: &TabGroupContext,
         _: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> AnyElement {
         if group.is_collapsed() {
             return Empty.into_any_element();
         }
 
+        // Lightair patch: a panel may ask not to be cached (`Panel::cached`)
+        let cached = group.active_panel().and_then(PanelHandle::of).is_none_or(|h| h.cached(cx));
+        let content = if cached {
+            panel.cached(StyleRefinement::default().absolute().size_full()).into_any_element()
+        } else {
+            div().absolute().size_full().child(panel).into_any_element()
+        };
         div()
             .id("tab-content")
             .overflow_y_scroll()
             .overflow_x_hidden()
             .flex_1()
-            .child(panel.cached(StyleRefinement::default().absolute().size_full()))
+            .child(content)
             .into_any_element()
     }
 
