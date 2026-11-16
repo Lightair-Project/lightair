@@ -552,7 +552,8 @@ impl StudioWindow {
             }
         })
         .detach();
-        let mixer = cx.new(|cx| MixerPanel::new(studio.clone(), cx));
+        let native: crate::native_preview::Shared = Default::default();
+        let mixer = cx.new(|cx| MixerPanel::new(studio.clone(), native.clone(), cx));
         let mixer_dock = cx.new(|cx| MixerDock::new(mixer.clone(), cx));
         let outputs = cx.new(|cx| OutputsPanel::new(studio.clone(), cx));
         // Its Add destination dialog is drawn over the whole window.
@@ -689,7 +690,7 @@ impl StudioWindow {
             dock: None,
             prefs: crate::prefs::load_from(&crate::prefs::path()),
             remote,
-            native: Default::default(),
+            native,
             native_layers: HashSet::new(),
             native_rects: Default::default(),
         }

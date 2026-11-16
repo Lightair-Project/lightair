@@ -90,6 +90,8 @@ pub struct MixerPanel {
     renaming: Option<crate::rows::Renaming>,
     /// Where each strip's meter is drawn (the meter overlay paints the levels there).
     spots: Spots,
+    /// The window's native layer (macOS: meters drawn there, under the UI).
+    native: crate::native_preview::Shared,
     add_track_menu: bool,
     /// When a click outside last closed the add menu (that click on + mustn't reopen it).
     menu_closed: Option<Instant>,
@@ -97,7 +99,7 @@ pub struct MixerPanel {
 }
 
 impl MixerPanel {
-    pub fn new(studio: Entity<Studio>, cx: &mut Context<Self>) -> Self {
+    pub fn new(studio: Entity<Studio>, native: crate::native_preview::Shared, cx: &mut Context<Self>) -> Self {
         cx.observe(&studio, |_, _, cx| cx.notify()).detach();
         Self {
             studio,
@@ -109,6 +111,7 @@ impl MixerPanel {
             panel_h: Rc::default(),
             renaming: None,
             spots: Rc::default(),
+            native,
             add_track_menu: false,
             menu_closed: None,
             focus: cx.focus_handle(),
@@ -208,15 +211,24 @@ impl Render for MixerPanel {
         self.spots.borrow_mut().retain(|id, _| views.iter().any(|v| v.id == *id));
 
         let panel_h = self.panel_h.clone();
+        let native = crate::native_preview::on();
+        let (spots, holes_spots) = (self.spots.clone(), self.spots.clone());
+        let native_ref = self.native.clone();
         div()
             .id("mixer")
             .flex()
             .flex_col()
             .size_full()
             .child(
-                canvas(move |b, _, _| panel_h.set(f32::from(b.size.height)), |_, _, _, _| {})
-                    .absolute()
-                    .size_full(),
+                canvas(move |b, _, _| panel_h.set(f32::from(b.size.height)), move |b, _, window, _| {
+                    // the panel's own background, around the natively drawn meters
+                    if native {
+                        let holes: Vec<Bounds<Pixels>> = holes_spots.borrow().values().flat_map(|s| s.holes()).collect();
+                        paint_except(window, b, &holes, tok::bg_panel(), px(0.));
+                    }
+                })
+                .absolute()
+                .size_full(),
             )
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 if ev.pressed_button != Some(MouseButton::Left) {
@@ -239,6 +251,23 @@ impl Render for MixerPanel {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
             .relative()
+            // last laid out: the meters go where the strips left room for them
+            .when(native, |d| {
+                d.child(
+                    canvas(
+                        move |_, _, _| {
+                            let places: Vec<(Id, crate::native_preview::MeterPlace)> =
+                                spots.borrow().iter().filter_map(|(id, s)| s.place().map(|p| (*id, p))).collect();
+                            if let Some(n) = native_ref.borrow_mut().as_mut() {
+                                n.place_meters(&places);
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_0(),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -1119,6 +1148,7 @@ impl MixerPanel {
                     match what {
                         Spot::Bar(c) => s.bars[c] = Some(b),
                         Spot::Readout => s.readout = Some(b),
+                        Spot::Box => s.boxed = Some(b),
                     }
                     s.clip = Some(window.content_mask().bounds);
                 },
@@ -1127,7 +1157,9 @@ impl MixerPanel {
             .absolute()
             .size_full()
         };
-        let bar = |c: usize| div().relative().w(px(6.)).h_full().bg(tok::bg_panel()).child(spot(Spot::Bar(c)));
+        // natively drawn meters (native_preview): the strip leaves holes for them
+        let native = crate::native_preview::on();
+        let bar = |c: usize| div().relative().w(px(6.)).h_full().when(!native, |d| d.bg(tok::bg_panel())).child(spot(Spot::Bar(c)));
         let mut scale = div().relative().flex_1().h_full();
         // a label every 6 dB when the meter is tall enough to read them, every 12 when it's short
         // (its height: the fader's, beside it, from the last frame)
@@ -1145,7 +1177,7 @@ impl MixerPanel {
                     .child(if db == 0 { "0".to_string() } else { format!("{db}") }),
             );
         }
-        let peak_readout = div().relative().h(px(18.)).rounded(px(3.)).bg(tok::bg_app()).child(spot(Spot::Readout));
+        let peak_readout = div().relative().h(px(18.)).rounded(px(3.)).when(!native, |d| d.bg(tok::bg_app())).child(spot(Spot::Readout));
         let readout = |text: String| {
             div()
                 .flex()
@@ -1166,13 +1198,15 @@ impl MixerPanel {
             .child(peak_readout)
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .gap(px(2.))
                     .p(px(3.))
                     .rounded(px(3.))
-                    .bg(tok::bg_app())
+                    .when(!native, |d| d.bg(tok::bg_app()))
+                    .child(spot(Spot::Box))
                     .child(bar(0))
                     .child(bar(1))
                     .child(scale),
@@ -1324,7 +1358,21 @@ impl MixerPanel {
             ))
             .rounded(px(8.))
             .overflow_hidden()
-            .bg(tok::bg_raised())
+            .when(!native, |d| d.bg(tok::bg_raised()))
+            .when(native, |d| {
+                let spots = self.spots.clone();
+                d.child(
+                    canvas(
+                        |_, _, _| {},
+                        move |b, _, window, _| {
+                            let holes: Vec<Bounds<Pixels>> = spots.borrow().get(&id).map(|s| s.holes().collect()).unwrap_or_default();
+                            paint_except(window, b, &holes, tok::bg_raised(), px(8.));
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+            })
             .border_1()
             .border_color(if selected { tok::accent_primary() } else { tok::border() })
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1494,6 +1542,89 @@ pub(crate) struct MeterSpot {
     bars: [Option<Bounds<Pixels>>; 2],
     readout: Option<Bounds<Pixels>>,
     clip: Option<Bounds<Pixels>>,
+    /// The box the bars are in (drawn natively: native_preview).
+    boxed: Option<Bounds<Pixels>>,
+}
+
+impl MeterSpot {
+    /// Where the native meter goes, once all of it is laid out.
+    fn place(&self) -> Option<crate::native_preview::MeterPlace> {
+        Some(crate::native_preview::MeterPlace {
+            boxed: self.boxed?,
+            bars: [self.bars[0]?, self.bars[1]?],
+            readout: self.readout?,
+            clip: self.clip?,
+        })
+    }
+
+    /// The holes the strip leaves for it (the box and the readout).
+    fn holes(&self) -> impl Iterator<Item = Bounds<Pixels>> {
+        self.boxed.into_iter().chain(self.readout)
+    }
+}
+
+/// Paints `bounds` (corners rounded `radius`) in `colour` except where `holes` are: where a
+/// native meter under the window shows through (native_preview).
+fn paint_except(window: &mut Window, bounds: Bounds<Pixels>, holes: &[Bounds<Pixels>], colour: Hsla, radius: Pixels) {
+    let holes: Vec<Bounds<Pixels>> = holes.iter().filter_map(|h| h.intersect(&bounds).filter_empty()).collect();
+    if holes.is_empty() {
+        window.paint_quad(fill(bounds, colour).corner_radii(radius));
+        return;
+    }
+    // bands between the holes' top and bottom edges; in each, what the holes leave of the width
+    let mut ys = vec![bounds.top(), bounds.bottom()];
+    for h in &holes {
+        ys.push(h.top());
+        ys.push(h.bottom());
+    }
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ys.dedup();
+    for w in ys.windows(2) {
+        let (y0, y1) = (w[0], w[1]);
+        if y1 <= y0 {
+            continue;
+        }
+        let mut xs: Vec<(Pixels, Pixels)> = holes
+            .iter()
+            .filter(|h| h.top() < y1 && h.bottom() > y0)
+            .map(|h| (h.left(), h.right()))
+            .collect();
+        xs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut x = bounds.left();
+        let mut pieces = vec![];
+        for (l, r) in xs {
+            if l > x {
+                pieces.push((x, l));
+            }
+            x = x.max(r);
+        }
+        if x < bounds.right() {
+            pieces.push((x, bounds.right()));
+        }
+        for (l, r) in pieces {
+            let piece = Bounds::from_corners(point(l, y0), point(r, y1));
+            // the outer corners stay round
+            let top = y0 == bounds.top();
+            let bottom = y1 == bounds.bottom();
+            let corners = Corners {
+                top_left: if top && l == bounds.left() { radius } else { px(0.) },
+                top_right: if top && r == bounds.right() { radius } else { px(0.) },
+                bottom_left: if bottom && l == bounds.left() { radius } else { px(0.) },
+                bottom_right: if bottom && r == bounds.right() { radius } else { px(0.) },
+            };
+            window.paint_quad(fill(piece, colour).corner_radii(corners));
+        }
+    }
+}
+
+trait FilterEmpty: Sized {
+    fn filter_empty(self) -> Option<Self>;
+}
+
+impl FilterEmpty for Bounds<Pixels> {
+    fn filter_empty(self) -> Option<Self> {
+        (self.size.width > px(0.) && self.size.height > px(0.)).then_some(self)
+    }
 }
 
 pub(crate) type Spots = Rc<RefCell<HashMap<Id, MeterSpot>>>;
@@ -1502,13 +1633,29 @@ pub(crate) type Spots = Rc<RefCell<HashMap<Id, MeterSpot>>>;
 enum Spot {
     Bar(usize),
     Readout,
+    Box,
 }
 
-/// How often the meters move (ms): 30 times a second; 15 with Settings › Canvases › Live
-/// preview › Light. Each move redraws the window (GPUI draws it whole), so it's most of what
-/// the UI costs while nothing else changes.
+/// How often the meters move (ms): 30 times a second, always (they must stay fluid).
 fn meter_ms() -> u64 {
-    if crate::prefs::LIGHT_PREVIEW.load(std::sync::atomic::Ordering::Relaxed) { 66 } else { 33 }
+    33
+}
+
+/// Peak hold (the marker every console leaves at the recent peak): held this long, then it
+/// falls this fast.
+const HOLD_S: f32 = 1.5;
+const HOLD_FALL_DB_S: f32 = 12.0;
+/// The peak readout: the held peak, changing at most this often (a number that moved every
+/// frame couldn't be read).
+const READOUT_S: f32 = 0.25;
+
+/// One strip's meter as displayed: the bars (rise at once, fall at 24 dB/s), each channel's
+/// peak hold and when it was set, and the readout's number and when it last changed.
+#[derive(Clone, Copy)]
+struct Shown {
+    bars: [f32; 2],
+    hold: [(f32, Instant); 2],
+    readout: (f32, Instant),
 }
 
 /// The meters' levels, painted over the mixer where its strips left room for them. Only this
@@ -1516,8 +1663,8 @@ fn meter_ms() -> u64 {
 /// GPUI a view that redraws takes its parents with it, but not their other children.
 pub struct MeterOverlay {
     spots: Spots,
-    /// Displayed (decaying) peak per strip and channel.
-    display: HashMap<Id, [f32; 2]>,
+    /// Each strip's meter as displayed.
+    display: HashMap<Id, Shown>,
     last_frame: Instant,
     /// When the meters last moved.
     moved: Instant,
@@ -1563,13 +1710,30 @@ impl Render for MeterOverlay {
         self.display.retain(|id, _| spots.iter().any(|(s, _)| s == id));
         let mut paint = Vec::with_capacity(spots.len());
         for (id, spot) in spots {
-            // Meter ballistics: rise instantly, fall at 24 dB/s.
             let levels = meters().get(id).map(|c| c.levels());
-            let shown = self.display.entry(id).or_insert([f32::NEG_INFINITY; 2]);
-            for (c, value) in shown.iter_mut().enumerate() {
-                let target = levels.map_or(f32::NEG_INFINITY, |l| l.peak[c]);
-                let fallen = if value.is_finite() { *value - 24.0 * dt } else { f32::NEG_INFINITY };
+            let quiet = f32::NEG_INFINITY;
+            let shown = self.display.entry(id).or_insert(Shown { bars: [quiet; 2], hold: [(quiet, now); 2], readout: (quiet, now) });
+            for c in 0..2 {
+                let target = levels.map_or(quiet, |l| l.peak[c]);
+                // the bar: rises at once, falls at 24 dB/s
+                let value = &mut shown.bars[c];
+                let fallen = if value.is_finite() { *value - 24.0 * dt } else { quiet };
                 *value = if target > fallen { target } else { fallen.max(-90.0) };
+                // the hold: set by a new peak, kept a while, then falling slowly, never below the bar
+                let (level, since) = &mut shown.hold[c];
+                if target >= *level {
+                    (*level, *since) = (target, now);
+                } else if now.duration_since(*since).as_secs_f32() > HOLD_S {
+                    *level = (*level - HOLD_FALL_DB_S * dt).max(shown.bars[c]);
+                    if *level <= -90.0 {
+                        *level = quiet;
+                    }
+                }
+            }
+            // the readout: the held peak, a few times a second
+            let held = shown.hold[0].0.max(shown.hold[1].0);
+            if now.duration_since(shown.readout.1).as_secs_f32() >= READOUT_S || held > shown.readout.0 {
+                shown.readout = (held, now);
             }
             paint.push((spot, *shown));
         }
@@ -1581,9 +1745,17 @@ impl Render for MeterOverlay {
                 for (spot, shown) in &paint {
                     let clip = spot.clip.map(|bounds| ContentMask { bounds });
                     window.with_content_mask(clip, |window| {
+                        let colour_at = |frac: f32| if frac > y_end { tok::error() } else if frac > g_end { tok::warn() } else { tok::ok() };
                         for (c, b) in spot.bars.iter().enumerate() {
                             let Some(b) = b else { continue };
-                            let frac = meter_frac(shown[c]);
+                            // the peak hold: a 2-pixel line where the recent peak was
+                            let held = shown.hold[c].0;
+                            if held > -90.0 {
+                                let f = meter_frac(held);
+                                let y = b.origin.y + b.size.height * (1.0 - f);
+                                window.paint_quad(fill(Bounds::from_corners(point(b.origin.x, y), point(b.origin.x + b.size.width, (y + px(2.)).min(b.origin.y + b.size.height))), colour_at(f)));
+                            }
+                            let frac = meter_frac(shown.bars[c]);
                             for (from, to, colour) in [(0.0, g_end, tok::ok()), (g_end, y_end, tok::warn()), (y_end, 1.0, tok::error())] {
                                 let top = frac.min(to);
                                 if top <= from {
@@ -1596,7 +1768,7 @@ impl Render for MeterOverlay {
                             }
                         }
                         if let Some(b) = spot.readout {
-                            let peak = shown[0].max(shown[1]);
+                            let peak = shown.readout.0;
                             let text: SharedString = if peak > -90.0 { format!("{peak:.1}").into() } else { "-inf".into() };
                             let colour = if peak > -1.0 { tok::error() } else { tok::text_secondary() };
                             let run = TextRun { len: text.len(), font: font("Menlo"), color: colour, background_color: None, underline: None, strikethrough: None };
@@ -1618,20 +1790,22 @@ impl Render for MeterOverlay {
 /// overlay above them.
 pub struct MixerDock {
     body: Entity<MixerPanel>,
-    overlay: Entity<MeterOverlay>,
+    /// GPUI's meters (where they aren't drawn natively).
+    overlay: Option<Entity<MeterOverlay>>,
 }
 
 impl MixerDock {
     pub fn new(body: Entity<MixerPanel>, cx: &mut Context<Self>) -> Self {
         let spots = body.read(cx).spots.clone();
-        let overlay = cx.new(|cx| MeterOverlay::new(spots, cx));
+        let overlay = (!crate::native_preview::on()).then(|| cx.new(|cx| MeterOverlay::new(spots, cx)));
         Self { body, overlay }
     }
 
     /// The canvas drew a frame: the meters move with it if they're due.
     pub fn tick_meters(this: &Entity<Self>, cx: &mut App) {
-        let overlay = this.read(cx).overlay.clone();
-        overlay.update(cx, |m, cx| m.tick(cx));
+        if let Some(overlay) = this.read(cx).overlay.clone() {
+            overlay.update(cx, |m, cx| m.tick(cx));
+        }
     }
 }
 
@@ -1641,13 +1815,21 @@ impl Render for MixerDock {
             .relative()
             .size_full()
             .child(self.body.clone().cached(StyleRefinement::default().size_full()))
-            .child(div().absolute().inset_0().child(self.overlay.clone()))
+            .children(self.overlay.clone().map(|o| div().absolute().inset_0().child(o)))
     }
 }
 
 impl gpui_kit::component::dock::BasePanel for MixerDock {
     fn panel_name(&self) -> &'static str {
         "mixer"
+    }
+
+    /// The natively drawn meters show with the mixer's tab.
+    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
+        let native = self.body.read(cx).native.clone();
+        if let Some(n) = native.borrow_mut().as_mut() {
+            n.show_meters(active);
+        }
     }
 }
 
@@ -1699,6 +1881,11 @@ impl gpui_kit::component::dock::Panel for MixerDock {
     /// strips with it; the strips are cached on their own.
     fn cached(&self, _: &App) -> bool {
         false
+    }
+
+    /// Meters drawn under the window (native_preview) show through the mixer's holes.
+    fn transparent(&self, _: &App) -> bool {
+        crate::native_preview::on()
     }
 }
 

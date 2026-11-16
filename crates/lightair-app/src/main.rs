@@ -82,7 +82,6 @@ fn main() {
     // This Mac's preferences: the sample rate is fixed once libobs starts.
     let prefs = prefs::load_from(&prefs::path());
     prefs::LOUDNESS_TARGET.store(prefs.loudness_target, std::sync::atomic::Ordering::Relaxed);
-    prefs::LIGHT_PREVIEW.store(prefs.preview_fps == 30, std::sync::atomic::Ordering::Relaxed);
     let sample_rate = if prefs.sample_rate == 44_100 { 44_100 } else { 48_000 };
     prefs::RUNNING_SAMPLE_RATE.store(sample_rate, std::sync::atomic::Ordering::Relaxed);
     let engine = Arc::new(
