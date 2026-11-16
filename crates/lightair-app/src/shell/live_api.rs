@@ -40,6 +40,24 @@ pub(super) fn start_automations(hub: &lightair_live::Hub, jobs: super::remote::J
     Automations::start(hub.clone(), lightair_platform::paths::data_dir().join("automations"), host)
 }
 
+/// The points leaderboard and the giveaway's entrants, for the widgets that show them (only
+/// while one exists).
+pub(super) fn feed_widgets(automations: Automations, widgets: Option<lightair_widgets::Widgets>) {
+    let Some(widgets) = widgets else { return };
+    let _ = std::thread::Builder::new().name("lightair-widget-feed".into()).spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(4));
+            if widgets.has_kind("leaderboard") {
+                let top: Vec<Value> = automations.top_viewers(20).into_iter().map(|v| json!({"name": v.name, "points": v.points, "platform": v.platform})).collect();
+                widgets.set_data("leaderboard", Value::Array(top));
+            }
+            if widgets.has_kind("wheel") {
+                widgets.set_data("giveaway", automations.vars().get("giveaway").cloned().unwrap_or(json!([])));
+            }
+        }
+    });
+}
+
 impl StudioWindow {
     /// LIGHTAIR_TEST_EVENTS ("sub,paid,…"), sent 4 s apart (the screenshot hooks).
     pub(super) fn send_test_events(&mut self, window: &mut Window, cx: &mut Context<Self>) {
