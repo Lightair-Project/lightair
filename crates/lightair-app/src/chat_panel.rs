@@ -144,6 +144,12 @@ impl ChatPanel {
             };
             let tip: SharedString = match &s {
                 Status::Error { message } => format!("{}: {message}", channel.channel).into(),
+                // YouTube only says a channel is live when its stream is public and started
+                Status::Offline if channel.platform.starts_with("youtube") && !channel.channel.contains("v=") && !channel.channel.contains("/live/") => format!(
+                    "{}: YouTube shows no public live stream there. A Private stream can't be read; an Unlisted one can, from its own link (youtube.com/live/…) in the destination's Chat field. Still in Preview in YouTube Studio?",
+                    channel.channel
+                )
+                .into(),
                 _ => channel.channel.clone().into(),
             };
             let Some(p) = platforms::by_id(&channel.platform) else { continue };
