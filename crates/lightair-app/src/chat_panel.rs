@@ -251,6 +251,14 @@ impl lightair_live::pages::Host for HiddenPages {
     fn open(&self, url: &str, script: &str, on_message: lightair_live::pages::OnMessage) -> Box<dyn lightair_live::pages::Page> {
         Box::new(HiddenPage(lightair_web::Page::open_agent(url, script.into(), on_message)))
     }
+
+    fn open_window(&self, url: &str, title: &str, on_closed: Arc<dyn Fn() + Send + Sync>) -> Box<dyn lightair_live::pages::Page> {
+        Box::new(HiddenPage(lightair_web::Page::open_window(url, title, (1000, 760), on_closed)))
+    }
+
+    fn cookies(&self, url: &str, done: lightair_live::pages::CookiesDone) {
+        lightair_web::cookies(url, done);
+    }
 }
 
 impl lightair_live::pages::Page for HiddenPage {
@@ -261,6 +269,11 @@ impl lightair_live::pages::Page for HiddenPage {
     fn navigate(&self, url: &str) {
         self.0.navigate(url);
     }
+}
+
+/// A page in a window of its own (tests).
+pub fn window_page(url: &str, closed: Arc<dyn Fn() + Send + Sync>) -> Box<dyn lightair_live::pages::Page> {
+    Box::new(HiddenPage(lightair_web::Page::open_window(url, "Lightair", (1000, 760), closed)))
 }
 
 /// A name colour made readable on the dark panel.

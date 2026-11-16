@@ -73,6 +73,8 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("LIGHTAIR_LOG").unwrap_or_else(|_| "info,libobs=warn".into()))
         .init();
+    // Chromium's profile (cookies: platforms signed in to) kept with Lightair's data
+    lightair_web::set_profile_dir(lightair_platform::paths::data_dir().join("Chromium"));
     // the chat readers that need a browser (Kick, the signed-in platforms) use Lightair's
     lightair_live::pages::set_host(Arc::new(chat_panel::HiddenPages));
 
