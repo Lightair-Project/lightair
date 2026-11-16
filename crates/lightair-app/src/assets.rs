@@ -18,6 +18,10 @@ const OWN: &[(&str, &[u8])] = &[
     ("icons/platforms/instagram.svg", include_bytes!("../assets/icons/platforms/instagram.svg")),
     ("icons/platforms/x.svg", include_bytes!("../assets/icons/platforms/x.svg")),
     ("icons/platforms/linkedin.svg", include_bytes!("../assets/icons/platforms/linkedin.svg")),
+    ("icons/platforms/bilibili.svg", include_bytes!("../assets/icons/platforms/bilibili.svg")),
+    ("icons/platforms/niconico.svg", include_bytes!("../assets/icons/platforms/niconico.svg")),
+    ("icons/platforms/xiaohongshu.svg", include_bytes!("../assets/icons/platforms/xiaohongshu.svg")),
+    ("icons/platforms/rumble.svg", include_bytes!("../assets/icons/platforms/rumble.svg")),
 ];
 
 pub struct Assets;
