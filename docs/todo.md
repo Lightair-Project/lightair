@@ -98,6 +98,26 @@ with what's known about each. Keep it current: strike items as they land.
 - Pulsoid and Elgato Key Lights are untested without a token / a light; VTube Studio was tested
   against a stand-in server only.
 
+## Windows
+
+Built, tested (317 tests) and benchmarked on Windows 11 on 17 November 2026
+([plans/windows.md](plans/windows.md) §6 says what that took; numbers in
+[benchmarks/lightair-vs-obs-windows.md](benchmarks/lightair-vs-obs-windows.md)). Left:
+
+- **An installer and signing**: `cargo xtask dist` makes the portable app and its zip; an MSIX or
+  Inno Setup installer, Authenticode signing (a certificate), the updater.
+- **The virtual camera** (win-dshow's DirectShow camera, or `MFCreateVirtualCamera` on Windows 11).
+- **The remote API starts after the first frame**: a script waiting for it sees Lightair "ready"
+  ~0.6 s after OBS would be, though Lightair's window shows first (deferred `sync_remote`, behind
+  Chromium starting on the UI thread).
+- Windows Studio Effects (Media Foundation extended camera controls); "Now playing" (WinRT media
+  sessions); "Use my browser's" sign-in (DPAPI; Chrome's app-bound keys); the zoom badge by the
+  pointer; the system pointer's picture; pointer and follow-zoom on a second monitor
+  (`display_frame`); virtual cameras labelled as such in Add object.
+- The Editor player reads frames back (as the preview did before its DirectComposition path).
+- NVENC needs a newer NVIDIA driver than 560 for OBS 33's encoder (OBS says so too); Lightair
+  falls back to Quick Sync or x264 as OBS does. Worth a note in the Encoders choice.
+
 ## Known issues
 
 - ~~**`cargo xtask dist` sometimes leaves an invalid signature**~~ (found: the bad app was what
