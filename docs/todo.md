@@ -71,8 +71,9 @@ with what's known about each. Keep it current: strike items as they land.
   phrases left.
 - Platform steps: title, category, ads, polls, predictions, rewards, raids, shoutouts with a clip,
   clips, markers, moderation (need the platform's session or official API).
-- A block editor beyond the current list (nested if/random editing in place; today they're in
-  the JSON).
+- ~~A block editor beyond the current list~~ (done: If's conditions, Then and Otherwise, and
+  Random's choices edited in place, nested to any depth; moving a step between lists is still
+  delete and add).
 - Streamer.bot import; Twitch channel-point redemptions (EventSub with a user token).
 
 ## Integrations

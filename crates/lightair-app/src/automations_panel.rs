@@ -13,7 +13,7 @@ use gpui_kit::component::input::{Editor, EditorState, Input as TextInput, InputE
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_automation::{Automation, Automations, Step, Trigger, Who, recipes};
+use lightair_automation::{Automation, Automations, Condition, Step, Trigger, Who, recipes};
 use serde_json::{Value, json};
 
 use crate::ui::{self, tok};
@@ -54,25 +54,69 @@ fn fields(a: &Automation) -> Vec<(String, &'static str, bool)> {
         Trigger::Controller { .. } => f.push(("trigger.button".into(), "Button (South, East, Start, DPadUp, LeftTrigger…; empty: any)", false)),
         Trigger::Manual | Trigger::Output { .. } | Trigger::Start => {}
     }
-    for (i, s) in a.steps.iter().enumerate() {
-        let (key, label, num) = match s {
-            Step::Chat { .. } | Step::Speak { .. } => ("text", "Text", false),
-            Step::Sound { .. } => ("file", "Sound file", false),
-            Step::Wait { .. } => ("seconds", "Seconds", true),
-            Step::Var { .. } => ("value", "Value", false),
-            Step::Points { .. } => ("amount", "Points (− to take)", false),
-            Step::Run { .. } => ("automation", "Automation", false),
-            Step::Http { .. } => ("url", "Address", false),
-            Step::Call { .. } => ("method", "Method", false),
-            Step::Script { .. } => ("code", "Code (one line here; the JSON for more)", false),
-            _ => continue,
-        };
-        f.push((format!("step.{i}.{key}"), label, num));
-    }
+    step_fields(&a.steps, "steps", &mut f);
     f.push(("cooldown".into(), "Cooldown (seconds)", true));
     f.push(("user_cooldown".into(), "Per-person cooldown (seconds)", true));
     f.push(("queue".into(), "Queue (runs in one wait their turn)", false));
     f
+}
+
+/// A step's one field edited in its row: (field, label, number?).
+fn step_field(s: &Step) -> Option<(&'static str, &'static str, bool)> {
+    Some(match s {
+        Step::Chat { .. } | Step::Speak { .. } => ("text", "Text", false),
+        Step::Sound { .. } => ("file", "Sound file", false),
+        Step::Wait { .. } => ("seconds", "Seconds", true),
+        Step::Var { .. } => ("value", "Value", false),
+        Step::Points { .. } => ("amount", "Points (− to take)", false),
+        Step::Run { .. } => ("automation", "Automation", false),
+        Step::Http { .. } => ("url", "Address", false),
+        Step::Call { .. } => ("method", "Method", false),
+        Step::Script { .. } => ("code", "Code (one line here; the JSON for more)", false),
+        _ => return None,
+    })
+}
+
+/// The fields of `steps` (at `path`, like "steps" or "steps.2.then"), and of the steps inside
+/// If and Random steps.
+fn step_fields(steps: &[Step], path: &str, f: &mut Vec<(String, &'static str, bool)>) {
+    for (i, s) in steps.iter().enumerate() {
+        let here = format!("{path}.{i}");
+        if let Some((k, label, num)) = step_field(s) {
+            f.push((format!("{here}.{k}"), label, num));
+        }
+        match s {
+            Step::If { when, then, otherwise } => {
+                for c in 0..when.len() {
+                    for k in ["left", "op", "right"] {
+                        f.push((format!("{here}.when.{c}.{k}"), "Condition", false));
+                    }
+                }
+                step_fields(then, &format!("{here}.then"), f);
+                step_fields(otherwise, &format!("{here}.else"), f);
+            }
+            Step::Random { choices } => {
+                for (k, c) in choices.iter().enumerate() {
+                    step_fields(c, &format!("{here}.choices.{k}"), f);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Changes the list of steps at `path` ("steps", "steps.2.then", "steps.3.choices.1").
+fn edit_list(a: &Automation, path: &str, f: impl FnOnce(&mut Vec<Value>)) -> Option<Automation> {
+    let mut v = serde_json::to_value(a).ok()?;
+    let mut cur = &mut v;
+    for part in path.split('.') {
+        cur = match part.parse::<usize>() {
+            Ok(i) => cur.get_mut(i)?,
+            Err(_) => cur.get_mut(part)?,
+        };
+    }
+    f(cur.as_array_mut()?);
+    serde_json::from_value(v).ok()
 }
 
 fn get(a: &Automation, key: &str) -> String {
@@ -80,8 +124,7 @@ fn get(a: &Automation, key: &str) -> String {
     let mut cur = &v;
     for part in key.split('.') {
         cur = match part.parse::<usize>() {
-            Ok(i) => &cur["steps"][i],
-            Err(_) if part == "step" => cur,
+            Ok(i) => &cur[i],
             Err(_) => &cur[part],
         };
     }
@@ -102,12 +145,15 @@ fn set(a: &Automation, key: &str, text: &str, number: bool) -> Option<Automation
         _ => json!(text),
     };
     let parts: Vec<&str> = key.split('.').collect();
-    match parts.as_slice() {
-        ["step", i, k] => v["steps"][i.parse::<usize>().ok()?][*k] = value,
-        ["trigger", k] => v["trigger"][*k] = value,
-        [k] => v[*k] = value,
-        _ => return None,
+    let (last, within) = parts.split_last()?;
+    let mut cur = &mut v;
+    for part in within {
+        cur = match part.parse::<usize>() {
+            Ok(i) => cur.get_mut(i)?,
+            Err(_) => cur.get_mut(*part)?,
+        };
     }
+    *cur.get_mut(*last)? = value;
     serde_json::from_value(v).ok()
 }
 
@@ -127,6 +173,12 @@ fn new_step(kind: &str) -> Step {
         "vts" => Step::Call { method: "vts.hotkey".into(), params: json!({"hotkey": "Name of the hotkey"}) },
         "script" => Step::Script { code: "// ctx has name, message, amount, vars, …\nreturn { greeting: 'Hi ' + ctx.name };".into() },
         "light" => Step::Call { method: "light.set".into(), params: json!({"address": "192.168.1.20", "on": true, "brightness": 60, "temperature": 4500}) },
+        "if" => Step::If {
+            when: vec![Condition { left: "{{ amount }}".into(), op: ">=".into(), right: "100".into() }],
+            then: vec![],
+            otherwise: vec![],
+        },
+        "random" => Step::Random { choices: vec![vec![], vec![]] },
         "hue" => Step::Call { method: "hue.set".into(), params: json!({"light": "Name of the light or room", "on": true, "brightness": 80, "colour": "#9146ff"}) },
         _ => Step::Stop,
     }
@@ -148,6 +200,8 @@ const STEP_KINDS: &[(&str, &str)] = &[
     ("hue", "Philips Hue light"),
     ("http", "Web request"),
     ("script", "JavaScript"),
+    ("if", "If… (then, otherwise)"),
+    ("random", "One at random"),
     ("stop", "Stop"),
 ];
 
@@ -209,7 +263,13 @@ impl AutomationsPanel {
             self.built_for = None;
             return;
         };
-        let shape = (a.id.clone(), a.steps.len() * 100 + matches!(a.trigger, Trigger::Timer { .. }) as usize * 10 + matches!(a.trigger, Trigger::Command { .. }) as usize);
+        // rebuilt when the fields change (steps added, moved into an If, a trigger changed)
+        let shape = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            fields(&a).iter().for_each(|(k, _, _)| k.hash(&mut h));
+            (a.id.clone(), h.finish() as usize)
+        };
         if self.built_for.as_ref() != Some(&shape) {
             self.inputs.clear();
             self._events.clear();
@@ -416,11 +476,28 @@ impl AutomationsPanel {
     }
 
     fn steps(&self, a: &Automation, cx: &mut Context<Self>) -> Div {
+        self.step_list(a, &a.steps, "steps", cx)
+    }
+
+    /// Saves `a` with the list at `path` changed.
+    fn change_list(&mut self, a: &Automation, path: &str, f: impl FnOnce(&mut Vec<Value>), cx: &mut Context<Self>) {
+        if let Some(next) = edit_list(a, path, f) {
+            self.built_for = None;
+            self.save(next, cx);
+        }
+    }
+
+    /// A list of steps (the automation's, or inside an If or a Random), each with its own field,
+    /// and the lists inside them, indented.
+    fn step_list(&self, a: &Automation, steps: &[Step], path: &str, cx: &mut Context<Self>) -> Div {
         let mut col = div().flex().flex_col().gap_1();
-        for (i, s) in a.steps.iter().enumerate() {
-            let field = ["text", "file", "seconds", "value", "amount", "automation", "url", "method", "code"].iter().find_map(|k| self.input(&format!("step.{i}.{k}")));
+        let n = steps.len();
+        for (i, s) in steps.iter().enumerate() {
+            let here = format!("{path}.{i}");
+            let field = step_field(s).and_then(|(k, _, _)| self.input(&format!("{here}.{k}")));
+            let id = |what: &str| SharedString::from(format!("step-{what}-{here}"));
             let (up, down, del) = (a.clone(), a.clone(), a.clone());
-            let n = a.steps.len();
+            let (p_up, p_down, p_del) = (path.to_string(), path.to_string(), path.to_string());
             col = col.child(
                 div()
                     .flex()
@@ -432,48 +509,112 @@ impl AutomationsPanel {
                     .child(div().w(px(18.)).text_size(px(11.)).text_color(tok::text_tertiary()).child(format!("{}", i + 1)))
                     .child(div().w(px(150.)).flex_none().text_size(px(12.)).text_color(tok::text_secondary()).truncate().child(s.label().split(':').next().unwrap_or("").to_string()))
                     .child(div().flex_1().min_w_0().when_some(field, |d, f| d.child(TextInput::new(&f).small())))
-                    .child(ui::icon_button(("step-up", i), "chevron-up", tok::text_tertiary()).when(i > 0, |d| {
-                        d.on_click(cx.listener(move |this, _, _, cx| {
-                            let mut a = up.clone();
-                            a.steps.swap(i, i - 1);
-                            this.built_for = None;
-                            this.save(a, cx);
-                        }))
+                    .child(ui::icon_button(id("up"), "chevron-up", tok::text_tertiary()).when(i > 0, |d| {
+                        d.on_click(cx.listener(move |this, _, _, cx| this.change_list(&up, &p_up, |l| l.swap(i, i - 1), cx)))
                     }))
-                    .child(ui::icon_button(("step-down", i), "chevron-down", tok::text_tertiary()).when(i + 1 < n, |d| {
-                        d.on_click(cx.listener(move |this, _, _, cx| {
-                            let mut a = down.clone();
-                            a.steps.swap(i, i + 1);
-                            this.built_for = None;
-                            this.save(a, cx);
-                        }))
+                    .child(ui::icon_button(id("down"), "chevron-down", tok::text_tertiary()).when(i + 1 < n, |d| {
+                        d.on_click(cx.listener(move |this, _, _, cx| this.change_list(&down, &p_down, |l| l.swap(i, i + 1), cx)))
                     }))
-                    .child(ui::icon_button(("step-del", i), "trash", tok::text_tertiary()).on_click(cx.listener(move |this, _, _, cx| {
-                        let mut a = del.clone();
-                        a.steps.remove(i);
-                        this.built_for = None;
-                        this.save(a, cx);
+                    .child(ui::icon_button(id("del"), "trash", tok::text_tertiary()).on_click(cx.listener(move |this, _, _, cx| {
+                        this.change_list(&del, &p_del, |l| {
+                            l.remove(i);
+                        }, cx)
                     }))),
             );
+            let nested = |label: &str, inner: Div| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .ml(px(18.))
+                    .pl_2()
+                    .border_l_1()
+                    .border_color(tok::border())
+                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(label.to_string()))
+                    .child(inner)
+            };
+            match s {
+                Step::If { when, then, otherwise } => {
+                    col = col.child(nested("When all of these hold", self.conditions(a, when.len(), &here, cx)));
+                    col = col.child(nested("Then", self.step_list(a, then, &format!("{here}.then"), cx)));
+                    col = col.child(nested("Otherwise", self.step_list(a, otherwise, &format!("{here}.else"), cx)));
+                }
+                Step::Random { choices } => {
+                    for (k, c) in choices.iter().enumerate() {
+                        let (base, list) = (a.clone(), format!("{here}.choices"));
+                        let head = div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(div().flex_1().child(self.step_list(a, c, &format!("{here}.choices.{k}"), cx)))
+                            .when(choices.len() > 1, |d| {
+                                d.child(ui::icon_button(SharedString::from(format!("choice-del-{here}-{k}")), "x", tok::text_tertiary()).tooltip(ui::tip("Remove this choice")).on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.change_list(&base, &list, |l| {
+                                            l.remove(k);
+                                        }, cx)
+                                    },
+                                )))
+                            });
+                        col = col.child(nested(&format!("Choice {}", k + 1), head));
+                    }
+                    let (base, list) = (a.clone(), format!("{here}.choices"));
+                    col = col.child(div().ml(px(18.)).child(Button::new(SharedString::from(format!("choice-add-{here}"))).label("Add choice").icon(ui::icon("plus")).xsmall().ghost().on_click(
+                        cx.listener(move |this, _, _, cx| this.change_list(&base, &list, |l| l.push(json!([])), cx)),
+                    )));
+                }
+                _ => {}
+            }
         }
         let me = cx.entity().downgrade();
-        let base = a.clone();
-        col.child(Button::new("step-add").label("Add step").icon(ui::icon("plus")).xsmall().ghost().dropdown_menu(move |mut menu, _, _| {
+        let (base, list) = (a.clone(), path.to_string());
+        col.child(Button::new(SharedString::from(format!("step-add-{path}"))).label("Add step").icon(ui::icon("plus")).xsmall().ghost().dropdown_menu(move |mut menu, _, _| {
             for (kind, label) in STEP_KINDS {
-                let (me, base) = (me.clone(), base.clone());
+                let (me, base, list) = (me.clone(), base.clone(), list.clone());
                 menu = menu.item(PopupMenuItem::new(*label).on_click(move |_, _, cx| {
-                    let mut a = base.clone();
-                    a.steps.push(new_step(kind));
+                    let step = serde_json::to_value(new_step(kind)).unwrap_or_default();
                     if let Some(me) = me.upgrade() {
-                        me.update(cx, |this, cx| {
-                            this.built_for = None;
-                            this.save(a, cx);
-                        });
+                        me.update(cx, |this, cx| this.change_list(&base, &list, |l| l.push(step), cx));
                     }
                 }));
             }
             menu
         }))
+    }
+
+    /// An If's conditions: left, how, right, each editable; add and remove.
+    fn conditions(&self, a: &Automation, count: usize, step: &str, cx: &mut Context<Self>) -> Div {
+        let mut col = div().flex().flex_col().gap_1();
+        let list = format!("{step}.when");
+        for c in 0..count {
+            let input = |k: &str| self.input(&format!("{list}.{c}.{k}"));
+            let (base, l) = (a.clone(), list.clone());
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .children(["left", "op", "right"].into_iter().filter_map(|k| {
+                        input(k).map(|f| div().when(k == "op", |d| d.w(px(110.)).flex_none()).when(k != "op", |d| d.flex_1().min_w_0()).child(TextInput::new(&f).small()))
+                    }))
+                    .child(ui::icon_button(SharedString::from(format!("cond-del-{list}-{c}")), "x", tok::text_tertiary()).on_click(cx.listener(move |this, _, _, cx| {
+                        this.change_list(&base, &l, |l| {
+                            l.remove(c);
+                        }, cx)
+                    }))),
+            );
+        }
+        let (base, l) = (a.clone(), list.clone());
+        col.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(Button::new(SharedString::from(format!("cond-add-{list}"))).label("Add condition").icon(ui::icon("plus")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
+                    this.change_list(&base, &l, |l| l.push(json!({"left": "{{ amount }}", "op": ">=", "right": "100"})), cx)
+                })))
+                .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("How: is, is not, >, >=, <, <=, contains, starts with, chance (left a percentage)")),
+        )
     }
 
     fn runs(&self, a: &Automation) -> Div {
@@ -614,7 +755,10 @@ fn switch(id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
 
 impl Render for AutomationsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.selected.as_ref().is_some_and(|id| self.automations.get(id).is_none()) {
+        // a deleted one: the first instead; none chosen (opened by the screenshot hook): the first
+        let gone = self.selected.as_ref().is_some_and(|id| self.automations.get(id).is_none());
+        let hook = self.selected.is_none() && std::env::var("LIGHTAIR_OPEN").is_ok_and(|h| h.starts_with("automations-"));
+        if gone || hook {
             self.selected = self.automations.list().first().map(|a| a.id.clone());
         }
         self.sync(window, cx);
@@ -677,5 +821,46 @@ impl EventEmitter<gpui_kit::component::dock::PanelEvent> for AutomationsPanel {}
 impl Focusable for AutomationsPanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+#[cfg(test)]
+mod checks {
+    use super::{edit_list, fields, get, set};
+    use lightair_automation::{Automation, Condition, Step, Trigger};
+    use serde_json::json;
+
+    fn sample() -> Automation {
+        serde_json::from_value(json!({
+            "id": "a", "name": "Big tips", "enabled": true, "trigger": {"on": "manual"},
+            "steps": [{"do": "if", "when": [{"left": "{{ amount }}", "op": ">=", "right": "100"}], "then": [{"do": "chat", "text": "Wow"}], "else": []},
+                      {"do": "random", "choices": [[{"do": "speak", "text": "a"}], []]}]
+        }))
+        .unwrap()
+    }
+
+    #[std::prelude::v1::test]
+    fn nested_steps_are_edited_in_place() {
+        let a = sample();
+        let keys: Vec<String> = fields(&a).into_iter().map(|f| f.0).collect();
+        for k in ["steps.0.when.0.left", "steps.0.when.0.op", "steps.0.then.0.text", "steps.1.choices.0.0.text"] {
+            assert!(keys.contains(&k.to_string()), "{k} in {keys:?}");
+        }
+        assert_eq!(get(&a, "steps.0.then.0.text"), "Wow");
+        let a = set(&a, "steps.0.then.0.text", "Thank you!", false).unwrap();
+        let a = set(&a, "steps.0.when.0.right", "500", false).unwrap();
+        let Step::If { when, then, .. } = &a.steps[0] else { panic!() };
+        assert_eq!((when[0].clone(), then[0].clone()), (Condition { left: "{{ amount }}".into(), op: ">=".into(), right: "500".into() }, Step::Chat { text: "Thank you!".into(), platform: String::new() }));
+        // a step added into Otherwise, a choice removed
+        let a = edit_list(&a, "steps.0.else", |l| l.push(json!({"do": "wait", "seconds": 2.0}))).unwrap();
+        let a = edit_list(&a, "steps.1.choices", |l| {
+            l.remove(1);
+        })
+        .unwrap();
+        let Step::If { otherwise, .. } = &a.steps[0] else { panic!() };
+        assert_eq!(otherwise, &vec![Step::Wait { seconds: 2.0 }]);
+        let Step::Random { choices } = &a.steps[1] else { panic!() };
+        assert_eq!(choices.len(), 1);
+        assert!(matches!(a.trigger, Trigger::Manual));
     }
 }
