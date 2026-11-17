@@ -53,10 +53,29 @@ extern "system" fn DllGetClassObject(clsid: *const GUID, riid: *const GUID, ppv:
     unsafe { factory.query(riid, ppv) }
 }
 
+/// The activators, sources and streams alive: the DLL can go (and a newer one be installed)
+/// once there are none.
+static ALIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts an object alive while it is.
+struct Alive;
+
+impl Alive {
+    fn new() -> Self {
+        ALIVE.fetch_add(1, Ordering::AcqRel);
+        Alive
+    }
+}
+
+impl Drop for Alive {
+    fn drop(&mut self) {
+        ALIVE.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 #[unsafe(no_mangle)]
 extern "system" fn DllCanUnloadNow() -> HRESULT {
-    // stays loaded: the Frame Server keeps sources about
-    S_FALSE
+    if ALIVE.load(Ordering::Acquire) == 0 { S_OK } else { S_FALSE }
 }
 
 /// The DLL's own path (what the registry points at).
@@ -160,11 +179,12 @@ impl IClassFactory_Impl for Factory_Impl {
 struct Activate {
     attrs: IMFAttributes,
     source: Mutex<Option<IMFMediaSourceEx>>,
+    _alive: Alive,
 }
 
 impl Activate {
     fn new() -> Result<Self> {
-        Ok(Self { attrs: attributes(4)?, source: Mutex::new(None) })
+        Ok(Self { attrs: attributes(4)?, source: Mutex::new(None), _alive: Alive::new() })
     }
 }
 
@@ -328,6 +348,7 @@ impl IMFActivate_Impl for Activate_Impl {
 #[implement(IMFMediaSourceEx, IMFGetService, IKsControl)]
 struct Source {
     st: Mutex<SourceState>,
+    _alive: Alive,
 }
 
 struct SourceState {
@@ -352,6 +373,11 @@ fn media_type() -> Result<IMFMediaType> {
         t.SetUINT32(&MF_MT_SAMPLE_SIZE, p::FRAME_SIZE as u32)?;
         t.SetUINT32(&MF_MT_DEFAULT_STRIDE, p::WIDTH)?;
         t.SetUINT32(&MF_MT_AVG_BITRATE, p::FRAME_SIZE as u32 * 8 * p::FPS)?;
+        // the colours as Lightair writes them (protocol.rs)
+        t.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601.0 as u32)?;
+        t.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)?;
+        t.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32)?;
+        t.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32)?;
     }
     Ok(t)
 }
@@ -368,7 +394,11 @@ fn new_source() -> Result<IMFMediaSourceEx> {
     let pd = unsafe { MFCreatePresentationDescriptor(Some(&[Some(sd.clone())]))? };
     unsafe { pd.SelectStream(0)? };
     let source: IMFMediaSourceEx =
-        Source { st: Mutex::new(SourceState { queue: Some(unsafe { MFCreateEventQueue()? }), pd, attrs, stream: None, started: false }) }.into();
+        Source {
+            st: Mutex::new(SourceState { queue: Some(unsafe { MFCreateEventQueue()? }), pd, attrs, stream: None, started: false }),
+            _alive: Alive::new(),
+        }
+        .into();
     let stream: IMFMediaStream2 = Stream::new(source.cast()?, sd)?.into();
     unsafe { source.as_impl() }.st.lock().unwrap().stream = Some(stream);
     Ok(source)
@@ -526,6 +556,7 @@ impl IKsControl_Impl for Source_Impl {
 struct Stream {
     attrs: IMFAttributes,
     st: Mutex<StreamState>,
+    _alive: Alive,
 }
 
 struct StreamState {
@@ -550,6 +581,7 @@ impl Stream {
         }
         Ok(Self {
             attrs,
+            _alive: Alive::new(),
             st: Mutex::new(StreamState {
                 queue: Some(unsafe { MFCreateEventQueue()? }),
                 source: Some(source),

@@ -19,7 +19,8 @@ pub const NAME: &str = "Lightair Virtual Camera";
 pub const MEMORY_GLOBAL: &str = r"Global\LightairVirtualCamera";
 pub const MEMORY_LOCAL: &str = r"Local\LightairVirtualCamera";
 
-/// The camera's picture: 1080p NV12 at 30 frames a second.
+/// The camera's picture: 1080p NV12 at 30 frames a second, BT.601 limited range (what apps
+/// assume of a webcam's NV12 when they don't read the media type's colour flags; it says so too).
 pub const WIDTH: u32 = 1920;
 pub const HEIGHT: u32 = 1080;
 pub const FPS: u32 = 30;

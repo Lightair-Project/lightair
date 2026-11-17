@@ -71,12 +71,12 @@ fn the_program_reaches_the_cameras_memory() {
     assert!((2 * 30..=2 * 48).contains(&seq), "frames written: {}", seq / 2);
     let frame = unsafe { std::slice::from_raw_parts((view.Value as *const u8).add(p::HEADER_SIZE), p::FRAME_SIZE) };
     let (w, h) = (p::WIDTH as usize, p::HEIGHT as usize);
-    // red, in BT.709 limited range: Y about 63, Cb about 102, Cr 240
+    // red, in BT.601 limited range: Y about 81, Cb about 90, Cr 240
     let y = frame[(h / 2) * w + w / 2];
     let uv = &frame[w * h + (h / 4) * w + w / 2..][..2];
     eprintln!("centre: Y {y}, Cb {}, Cr {}", uv[0], uv[1]);
-    assert!((55..72).contains(&y), "Y {y}");
-    assert!(uv[1] > 220 && uv[0] < 120, "CbCr {uv:?}");
+    assert!((75..88).contains(&y), "Y {y}");
+    assert!(uv[1] > 230 && (80..100).contains(&uv[0]), "CbCr {uv:?}");
 
     engine.call(|s| s.outputs.stop_virtual_camera());
     drop(engine);
