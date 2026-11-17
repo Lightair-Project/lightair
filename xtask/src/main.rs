@@ -305,7 +305,7 @@ const WINDOWS_MODULES: &[&str] = &[
 #[cfg(windows)]
 fn dist_windows() -> anyhow::Result<()> {
     let root = root();
-    run(cargo().current_dir(&root).args(["build", "--release", "-p", "lightair-app", "-p", "lightair-web-helper"]))?;
+    run(cargo().current_dir(&root).args(["build", "--release", "-p", "lightair-app", "-p", "lightair-web-helper", "-p", "lightair-camera-win"]))?;
     modules()?;
     let obs = PathBuf::from(std::env::var("OBS_DIR").unwrap_or_else(|_| r"C:\Program Files\obs-studio".into()));
     anyhow::ensure!(obs.join(r"bin\64bit\obs.dll").exists(), "no OBS at {} (set OBS_DIR)", obs.display());
@@ -314,7 +314,9 @@ fn dist_windows() -> anyhow::Result<()> {
     let bin = out.join(r"bin\64bit");
     std::fs::create_dir_all(&bin)?;
     let release = root.join(r"target\release");
-    for exe in ["lightair.exe", "lightair-web-helper.exe"] {
+    // (and Lightair Virtual Camera's media source: the Frame Server loads it from here once
+    // it's registered, crates/lightair-camera-win)
+    for exe in ["lightair.exe", "lightair-web-helper.exe", "lightair_camera.dll"] {
         std::fs::copy(release.join(exe), bin.join(exe))?;
     }
     // libobs, its graphics backend, its DLLs and helper programs (not OBS's own UI: Qt, scripting)
