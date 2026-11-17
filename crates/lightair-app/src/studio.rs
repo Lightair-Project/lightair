@@ -656,6 +656,15 @@ impl Studio {
         cx.notify();
     }
 
+    /// Windows: installs the virtual camera (Windows asks for administrator approval); it's
+    /// there from Lightair's next start (libobs lists outputs as it loads its modules).
+    pub fn install_virtual_camera(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = lightair_engine::vcam::install() {
+            tracing::warn!(%e, "virtual camera install");
+        }
+        cx.notify();
+    }
+
     fn start_virtual_camera(&mut self) {
         self.virtual_camera_name = virtual_camera_name();
         let choice = self.workspace().outputs.virtual_camera;
@@ -1453,6 +1462,10 @@ const VIRTUAL_CAMERAS: [&str; 1] = ["2DF109AC-DE07-42DF-A0D7-098033FFE986"];
 pub const VIRTUAL_CAMERA_NAMES: [&str; 2] = ["Lightair Virtual Camera", "OBS Virtual Camera"];
 
 fn virtual_camera_name() -> &'static str {
+    // Windows: OBS's DirectShow camera, by the name its DLL gives it
+    if cfg!(windows) {
+        return VIRTUAL_CAMERA_NAMES[1];
+    }
     let ours = lightair_engine::kinds::cameras().iter().any(|(_, uid)| VIRTUAL_CAMERAS.iter().any(|v| uid.eq_ignore_ascii_case(v)));
     VIRTUAL_CAMERA_NAMES[usize::from(!ours)]
 }

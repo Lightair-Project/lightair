@@ -18,6 +18,7 @@ pub mod displays;
 pub mod kinds;
 mod engine;
 pub mod gpu;
+pub mod vcam;
 mod log;
 pub mod loudness;
 pub mod media;
