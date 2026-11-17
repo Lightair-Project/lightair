@@ -78,6 +78,11 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_DirectComposition",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT",
+    # Now playing: the system's media sessions
+    "Foundation",
+    "Media_Control",
+    "Storage_Streams",
 ] }
 windows-numerics = "0.3"
 windows-sys = { version = "0.61", features = [

@@ -889,9 +889,16 @@ impl Outputs {
         };
         let key = OutputKey::VirtualCamera;
         unsafe {
-            let output = sys::obs_output_create(c"lightair_virtualcam".as_ptr(), c"Virtual camera".as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
+            // macOS: Lightair's camera extension (lightair-camera-fx's output); Windows: OBS's
+            // DirectShow camera ("OBS Virtual Camera"), registered only where it's installed
+            let id = if cfg!(windows) { c"virtualcam_output" } else { c"lightair_virtualcam" };
+            let output = sys::obs_output_create(id.as_ptr(), c"Virtual camera".as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
             if output.is_null() {
-                let err = "The virtual camera isn't available on this system.".to_string();
+                let err = if cfg!(windows) {
+                    crate::vcam::NOT_INSTALLED.to_string()
+                } else {
+                    "The virtual camera isn't available on this system.".to_string()
+                };
                 runtime().update(key, |s| s.state = OutputState::Failed(err.clone()));
                 return Err(err);
             }
