@@ -119,6 +119,9 @@ mod win {
         String::from_utf8(plain.to_vec()).map_err(|_| false)
     }
 
+    /// A cookie row: host, name, encrypted value, path, expiry, secure, http-only, same-site, value.
+    type Row = (String, String, Vec<u8>, String, i64, bool, bool, i64, String);
+
     /// `platform`'s cookies from `browser`.
     pub fn read(browser: &str, platform: &str) -> Result<Vec<lightair_web::CookieSpec>, String> {
         let (name, folder) = *BROWSERS.iter().find(|b| b.0 == browser).ok_or("unknown browser")?;
@@ -131,7 +134,7 @@ mod win {
         // a copy: the browser keeps its own open (while it runs, Windows may refuse even that)
         let copy = std::env::temp_dir().join(format!("lightair-cookies-{}.db", std::process::id()));
         std::fs::copy(&db, &copy).map_err(|_| format!("{name} is using its cookies: close {name} and try again"))?;
-        let rows = (|| -> rusqlite::Result<Vec<(String, String, Vec<u8>, String, i64, bool, bool, i64, String)>> {
+        let rows = (|| -> rusqlite::Result<Vec<Row>> {
             let conn = rusqlite::Connection::open_with_flags(&copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             let filter = wanted.iter().map(|d| format!("host_key = '{d}' OR host_key LIKE '%.{d}'")).collect::<Vec<_>>().join(" OR ");
             let sql = format!(

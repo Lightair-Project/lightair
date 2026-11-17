@@ -242,8 +242,25 @@ real bug a Windows user would have hit:
 **Left** (by impact)
 - Distribution: an installer (MSIX or Inno Setup), Authenticode signing, updates, and the app laid
   out as OBS's (`bin\64bit\lightair.exe` beside libobs, `core\`, `data\`), with CEF beside it.
-- The virtual camera (`win-dshow`'s DirectShow camera, or Windows 11's `MFCreateVirtualCamera`).
-- Windows Studio Effects; the "Now playing" widget (WinRT media sessions); importing a sign-in
-  from Chrome/Edge (DPAPI, app-bound keys); the zoom badge by the pointer; the system pointer's
-  picture; display capture's pointer and follow-zoom on a second monitor (`display_frame`).
-- The Editor player still reads frames back (as the preview did).
+- Windows Studio Effects: Windows applies them in the camera driver (so OBS's capture already has
+  them) and the button opens Settings › Camera; reading or switching them from Lightair
+  (KSPROPERTY_CAMERACONTROL_EXTENDED_BACKGROUNDSEGMENTATION) needs a Copilot+ PC to try on.
+- Google sign-ins from Chrome/Edge 127+: their cookies use app-bound encryption, which only the
+  browser itself can open; Lightair says so and asks for signing in in its own window (on
+  purpose: getting around it is what cookie-stealing malware does).
+- The virtual camera's install (`regsvr32` as administrator, from the menu) is untested here:
+  this PC already had OBS's camera registered.
+- The zoom badge by the pointer; the system pointer's picture; display capture's pointer and
+  follow-zoom on a second monitor (`display_frame`).
+
+**Done since** (17 November 2026)
+- The virtual camera: OBS's own (`win-dshow`'s `virtualcam_output`, "OBS Virtual Camera"), with
+  "Install virtual camera…" in the menu when it isn't registered. Checked: ffmpeg reads the
+  1920×1080 program from it.
+- "Now playing" from Windows' media sessions (WinRT `GlobalSystemMediaTransportControls`): title,
+  artist, album, app and artwork. Checked with Media Player.
+- "Use my browser's" sign-in from Chrome, Edge and Brave (the key unsealed with DPAPI, cookies
+  AES-GCM). Checked on this PC's Chrome and Edge.
+- The Editor player is presented under the UI (wgpu on Direct3D 12 into a DirectComposition
+  visual), no read back; paced to the clock as it's drawn. `LIGHTAIR_EDITOR_VULKAN=1` goes back to
+  Vulkan and read back.

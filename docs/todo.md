@@ -106,12 +106,15 @@ Built, tested (317 tests) and benchmarked on Windows 11 on 17 November 2026
 
 - **An installer and signing**: `cargo xtask dist` makes the portable app and its zip; an MSIX or
   Inno Setup installer, Authenticode signing (a certificate), the updater.
-- **The virtual camera** (win-dshow's DirectShow camera, or `MFCreateVirtualCamera` on Windows 11).
-- Windows Studio Effects (Media Foundation extended camera controls); "Now playing" (WinRT media
-  sessions); "Use my browser's" sign-in (DPAPI; Chrome's app-bound keys); the zoom badge by the
-  pointer; the system pointer's picture; pointer and follow-zoom on a second monitor
-  (`display_frame`); virtual cameras labelled as such in Add object.
-- The Editor player reads frames back (as the preview did before its DirectComposition path).
+- ~~The virtual camera~~, ~~"Now playing"~~, ~~"Use my browser's" sign-in~~ and ~~the Editor player
+  without read back~~: done (plans/windows.md §6). Left there: Google's app-bound cookies (sign in
+  in Lightair's window instead), the camera's admin install untested.
+- Windows Studio Effects from Lightair itself (the camera's extended controls): needs a Copilot+
+  PC to try on; Settings › Camera works meanwhile.
+- The zoom badge by the pointer; the system pointer's picture; pointer and follow-zoom on a second
+  monitor (`display_frame`); virtual cameras labelled as such in Add object.
+- `media_on_air` failed once in the full parallel run (an off-air video still Playing) and passed
+  alone three times: a timing margin under load to look at.
 - NVENC needs a newer NVIDIA driver than 560 for OBS 33's encoder (OBS says so too); Lightair
   falls back to Quick Sync or x264 as OBS does. Worth a note in the Encoders choice.
 
