@@ -272,10 +272,6 @@ impl NativePreview {
     /// Core Animation scales the layer to its frame itself: nothing to follow.
     pub fn refit(&mut self) {}
 
-    /// The Editor's player draws its own IOSurfaces with GPUI here.
-    pub fn player_visual(&mut self) -> *mut c_void {
-        std::ptr::null_mut()
-    }
     pub fn place_player(&mut self, _: Option<(Bounds<Pixels>, (u32, u32))>) {}
     pub fn show_player(&mut self, _: bool) {}
 
