@@ -248,11 +248,11 @@ real bug a Windows user would have hit:
 - Google sign-ins from Chrome/Edge 127+: their cookies use app-bound encryption, which only the
   browser itself can open; Lightair says so and asks for signing in in its own window (on
   purpose: getting around it is what cookie-stealing malware does).
-- Lightair Virtual Camera through Windows' Frame Server: the camera's source works through Media
-  Foundation in-process (crates/lightair-camera-win's test) and Lightair writes the program into
-  its memory (lightair-preview's virtual_camera test), but the camera has to be registered in
-  HKLM (`regsvr32 lightair_camera.dll` as administrator; the Frame Server refuses a per-user
-  registration, "path not found"), which this PC's account can't do: not yet seen in an app.
+- Lightair Virtual Camera in Teams, Zoom or a browser (checked with ffmpeg through DirectShow,
+  `LIGHTAIR_SELFTEST=virtual-camera`: 20 frames of the magenta program, 247/0/244 back). It
+  has to be registered in HKLM once (`regsvr32 lightair_camera.dll` as administrator: the Frame
+  Server refuses a per-user registration, "path not found"); an installer should do that.
+  Windows lists it as "Lightair Virtual Camera (Windows Virtual Camera)".
 - The zoom badge by the pointer; the system pointer's picture; display capture's pointer and
   follow-zoom on a second monitor (`display_frame`).
 
@@ -262,7 +262,8 @@ real bug a Windows user would have hit:
   with `MFCreateVirtualCamera`; 1080p30 NV12 through shared memory, written only while an app
   reads it), installed from the menu ("Install Lightair Virtual Camera…", one administrator
   approval). Where it can't be (Windows 10, not installed): OBS's (`win-dshow`'s
-  `virtualcam_output`), which ffmpeg read the 1920×1080 program from.
+  `virtualcam_output`), which ffmpeg read the 1920×1080 program from. Colours: BT.601 limited
+  range, said in the media type (what apps assume of a webcam's NV12 when they don't look).
 - "Now playing" from Windows' media sessions (WinRT `GlobalSystemMediaTransportControls`): title,
   artist, album, app and artwork. Checked with Media Player.
 - "Use my browser's" sign-in from Chrome, Edge and Brave (the key unsealed with DPAPI, cookies

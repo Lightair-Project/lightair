@@ -109,8 +109,9 @@ Built, tested (317 tests) and benchmarked on Windows 11 on 17 November 2026
 - ~~The virtual camera~~ (Lightair's own on Windows 11, OBS's elsewhere), ~~"Now playing"~~,
   ~~"Use my browser's" sign-in~~ and ~~the Editor player without read back~~: done
   (plans/windows.md §6). Left there: Google's app-bound cookies (sign in in Lightair's window
-  instead); Lightair Virtual Camera seen in a real app (needs `regsvr32 lightair_camera.dll` as
-  administrator once, or the menu's "Install Lightair Virtual Camera…"); the camera at sizes
+  instead); Lightair Virtual Camera in Teams/Zoom/a browser (seen through Windows' Frame Server with ffmpeg;
+  needs `regsvr32 lightair_camera.dll` as administrator once, or the menu's "Install Lightair
+  Virtual Camera…"); the camera at sizes
   other than 1080p (a canvas of another shape is stretched to 16:9); an installer that registers
   it.
 - Windows Studio Effects from Lightair itself (the camera's extended controls): needs a Copilot+

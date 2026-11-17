@@ -204,7 +204,11 @@ mod win {
             if let Some(a) = d.take() {
                 let (mut s, mut n) = (windows::core::PWSTR::null(), 0u32);
                 if unsafe { a.GetAllocatedString(&MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &mut s, &mut n) }.is_ok() {
-                    found |= unsafe { s.to_string() }.is_ok_and(|have| have == name);
+                    // (as added; or as Windows lists it: "<name> (Windows Virtual Camera)")
+                    found |= unsafe { s.to_string() }.is_ok_and(|have| {
+                        tracing::debug!(%have, "camera");
+                        have == name || have.strip_prefix(name).is_some_and(|rest| rest.starts_with(" ("))
+                    });
                     unsafe { CoTaskMemFree(Some(s.0 as *const c_void)) };
                 }
             }
@@ -373,13 +377,14 @@ mod win {
             unsafe { sys::obs_output_set_last_error(o.output, msg.as_ptr()) };
             return false;
         }
-        // the camera's picture: 1080p NV12 (libobs scales the canvas to it)
+        // the camera's picture: 1080p NV12, BT.601 limited (libobs scales and converts the
+        // canvas to it; protocol.rs)
         let conversion = sys::video_scale_info {
             format: sys::VIDEO_FORMAT_NV12,
             width: p::WIDTH,
             height: p::HEIGHT,
             range: sys::VIDEO_RANGE_PARTIAL,
-            colorspace: sys::VIDEO_CS_709,
+            colorspace: sys::VIDEO_CS_601,
         };
         unsafe {
             sys::obs_output_set_video_conversion(o.output, &conversion);
