@@ -2605,6 +2605,7 @@ impl StudioWindow {
         let on = matches!(state, OutputState::Active { .. });
         let busy = matches!(state, OutputState::Starting | OutputState::Stopping);
         let installed = lightair_engine::vcam::installed();
+        let ours_installable = lightair_engine::vcam::lightair_installable();
         let failed = match &state {
             OutputState::Failed(e) => Some(e.clone()),
             _ => None,
@@ -2614,7 +2615,7 @@ impl StudioWindow {
         } else if busy {
             "Virtual camera starting…".into()
         } else if let Some(e) = failed.as_ref().filter(|e| e.as_str() == lightair_engine::vcam::NOT_INSTALLED) {
-            format!("Virtual camera: {e} Install it from the menu (⌄): Windows asks for an administrator's approval, and it's there when Lightair next starts.").into()
+            format!("Virtual camera: {e} Install it from the menu (⌄): Windows asks for an administrator's approval.").into()
         } else if let Some(e) = &failed {
             format!("Virtual camera: {e} Click to try again.").into()
         } else {
@@ -2661,10 +2662,10 @@ impl StudioWindow {
                     .icon(ui::icon(if on || busy { "square" } else { "play" }))
                     .on_click(act(|s, cx| s.toggle_virtual_camera(cx))),
             );
-            // Windows: the camera isn't installed (no OBS here): install the one Lightair ships
-            if cfg!(windows) && !installed {
+            // Windows: Lightair's camera isn't installed (OBS's may be): install it
+            if cfg!(windows) && (!installed || ours_installable) {
                 menu = menu.item(
-                    PopupMenuItem::new("Install virtual camera…")
+                    PopupMenuItem::new(if ours_installable { "Install Lightair Virtual Camera…" } else { "Install virtual camera…" })
                         .icon(ui::icon("download"))
                         .on_click(act(|s, cx| s.install_virtual_camera(cx))),
                 );

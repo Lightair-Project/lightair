@@ -343,6 +343,7 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
     crate::pointer::register();
     crate::backdrop::register();
     crate::web::register();
+    crate::vcam::register();
     #[cfg(target_os = "macos")]
     crate::media_source::register();
     #[cfg(target_os = "macos")]

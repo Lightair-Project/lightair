@@ -889,9 +889,13 @@ impl Outputs {
         };
         let key = OutputKey::VirtualCamera;
         unsafe {
-            // macOS: Lightair's camera extension (lightair-camera-fx's output); Windows: OBS's
-            // DirectShow camera ("OBS Virtual Camera"), registered only where it's installed
-            let id = if cfg!(windows) { c"virtualcam_output" } else { c"lightair_virtualcam" };
+            // Lightair's camera (macOS: the camera extension, lightair-camera-fx's output;
+            // Windows 11: lightair_camera.dll, crate::vcam's output), else OBS's DirectShow camera
+            // ("OBS Virtual Camera"), registered only where it's installed
+            let id = match crate::vcam::camera() {
+                Some(crate::vcam::Camera::Obs) => c"virtualcam_output",
+                _ => c"lightair_virtualcam",
+            };
             let output = sys::obs_output_create(id.as_ptr(), c"Virtual camera".as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
             if output.is_null() {
                 let err = if cfg!(windows) {
