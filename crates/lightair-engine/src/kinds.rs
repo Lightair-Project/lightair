@@ -78,14 +78,19 @@ pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
                 "window_capture"
             }
             CAMERA => {
+                let id = device.as_ref().and_then(|d| d.as_str()).map(str::to_owned);
                 set("video_device_id", device);
                 // nothing off air runs (macOS: crate::on_screen); OBS's DirectShow source has
                 // this itself (display capture already stops while hidden on Windows)
                 set("deactivate_when_not_showing", Some(json!(true)));
-                if let Some(h) = height {
-                    // custom resolution, 16:9
-                    set("res_type", Some(json!(1)));
-                    set("resolution", Some(json!(format!("{}x{h}", h * 16 / 9))));
+                // the camera's own format nearest the height asked for (DirectShow shows nothing
+                // at all when asked for one the camera doesn't have); none: the camera's default
+                match height.zip(id).and_then(|(h, id)| camera_resolution(&id, h)) {
+                    Some(res) => {
+                        set("res_type", Some(json!(1)));
+                        set("resolution", Some(json!(res)));
+                    }
+                    None => set("res_type", Some(json!(0))),
                 }
                 "dshow_input"
             }
@@ -159,6 +164,49 @@ pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
         }
     };
     Some((id, Value::Object(out)))
+}
+
+/// Windows: the resolution ("1280x720") of the camera `device` (DirectShow's device id) that
+/// best gives `height`: the tallest it has up to that height, 16:9 first; `None` when its formats
+/// can't be read. DirectShow's own properties list them without opening the camera; remembered
+/// per camera and height (sources are resolved often).
+#[cfg(windows)]
+fn camera_resolution(device: &str, height: u64) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    /// (device, height) → the resolution chosen
+    type Seen = HashMap<(String, u64), Option<String>>;
+    static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    if let Some(r) = seen.lock().ok()?.get(&(device.to_string(), height)) {
+        return r.clone();
+    }
+    let sizes: Vec<(u64, u64)> = crate::obs::property_items_with("dshow_input", "resolution", &json!({"video_device_id": device}))
+        .into_iter()
+        .filter_map(|(_, v)| {
+            let (w, h) = v.split_once('x')?;
+            Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+        })
+        .collect();
+    let wide = |&(w, h): &(u64, u64)| w * 9 == h * 16;
+    let fits: Vec<(u64, u64)> = sizes.iter().copied().filter(|&(_, h)| h <= height).collect();
+    let best = fits
+        .iter()
+        .copied()
+        .max_by_key(|s| (s.1, wide(s), s.0))
+        // nothing that small: the smallest it has
+        .or_else(|| sizes.iter().copied().min_by_key(|s| (s.1, !wide(s))));
+    let found = best.map(|(w, h)| format!("{w}x{h}"));
+    if let Ok(mut s) = seen.lock() {
+        s.insert((device.to_string(), height), found.clone());
+    }
+    found
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+fn camera_resolution(_: &str, _: u64) -> Option<String> {
+    None
 }
 
 /// The cameras and capture cards: (name, the `device` setting). Call on the engine thread.
