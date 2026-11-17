@@ -115,6 +115,18 @@ pub struct NativePreview {
     meters: Arc<parking_lot::Mutex<Meters>>,
     meter_thread: bool,
     meters_active: bool,
+    /// The Editor's player (its frames presented by its renderer), and whether the Editor shows.
+    player: Option<Player>,
+    player_shown: bool,
+}
+
+/// The Editor's player under the UI: a container clipping to the player, black behind, and the
+/// visual the renderer presents into.
+struct Player {
+    root: IDCompositionVisual,
+    back: Solid,
+    picture: IDCompositionVisual,
+    placed: Option<(Bounds<Pixels>, (u32, u32))>,
 }
 
 impl NativePreview {
@@ -170,6 +182,8 @@ impl NativePreview {
             meters: Default::default(),
             meter_thread: false,
             meters_active: true,
+            player: None,
+            player_shown: false,
         })
     }
 
@@ -259,10 +273,92 @@ impl NativePreview {
     }
 
     /// Places the pictures again when a swap chain changed size since (libobs's thread resizes
-    /// it to the size it's shown at, a frame after it's asked): called on a timer, cheap.
+    /// it to the size it's shown at, a frame after it's asked): called on a timer, cheap. Shows
+    /// the Editor player's new swap chain (the renderer made one: it shows once committed).
     pub fn refit(&mut self) {
         if self.pictures.values().any(|p| p.layer.size() != p.sized) {
             self.apply();
+        }
+        if lightair_render::compose::VISUAL_CHANGED.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            let _comp = self.meters.lock();
+            unsafe {
+                let _ = self.device.Commit();
+            }
+        }
+    }
+
+    /// The visual the Editor's renderer presents its frames into (`IDCompositionVisual*`,
+    /// borrowed: it lives as long as this does), made the first time.
+    pub fn player_visual(&mut self) -> *mut std::ffi::c_void {
+        if self.player.is_none() {
+            let made = (|| -> windows::core::Result<Player> {
+                let root = unsafe { self.device.CreateVisual()? };
+                let back = Solid::rgb(&self.device, 0x000000)?;
+                let picture = unsafe { self.device.CreateVisual()? };
+                unsafe {
+                    root.AddVisual(&back.visual, false, None)?;
+                    root.AddVisual(&picture, false, None)?;
+                    picture.SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR)?;
+                    // over everything else under the UI (in the Editor nothing else shows)
+                    self.underlay.AddVisual(&root, false, None)?;
+                }
+                clip(&root, 0.0, 0.0);
+                Ok(Player { root, back, picture, placed: None })
+            })();
+            match made {
+                Ok(p) => {
+                    let _comp = self.meters.lock();
+                    unsafe {
+                        let _ = self.device.Commit();
+                    }
+                    self.player = Some(p);
+                }
+                Err(e) => {
+                    tracing::warn!("the player's visual: {e}");
+                    return std::ptr::null_mut();
+                }
+            }
+        }
+        self.player.as_ref().map_or(std::ptr::null_mut(), |p| p.picture.as_raw())
+    }
+
+    /// Where the Editor's player is (window points) and the size of the frames presented into
+    /// it (fitted in, as the player fits its picture); `None`: not shown.
+    pub fn place_player(&mut self, place: Option<(Bounds<Pixels>, (u32, u32))>) {
+        let s = self.scale;
+        let Some(p) = self.player.as_mut() else { return };
+        let place = place.filter(|_| self.player_shown);
+        if p.placed == place {
+            return;
+        }
+        p.placed = place;
+        let _comp = self.meters.lock();
+        match place {
+            None => clip(&p.root, 0.0, 0.0),
+            Some((b, (fw, fh))) => {
+                let (x, y) = ((f32::from(b.origin.x) * s).round(), (f32::from(b.origin.y) * s).round());
+                let (w, h) = ((f32::from(b.size.width) * s).round(), (f32::from(b.size.height) * s).round());
+                transform(&p.root, 1.0, 1.0, x, y);
+                clip(&p.root, w, h);
+                transform(&p.back.visual, w, h, 0.0, 0.0);
+                // the frame fitted in, centred
+                let k = (w / fw.max(1) as f32).min(h / fh.max(1) as f32);
+                let (pw, ph) = (fw as f32 * k, fh as f32 * k);
+                transform(&p.picture, k, k, ((w - pw) / 2.0).round(), ((h - ph) / 2.0).round());
+            }
+        }
+        unsafe {
+            let _ = self.device.Commit();
+        }
+    }
+
+    /// The Editor is the place shown (its player may show) or not.
+    pub fn show_player(&mut self, shown: bool) {
+        if self.player_shown != shown {
+            self.player_shown = shown;
+            if !shown {
+                self.place_player(None);
+            }
         }
     }
 

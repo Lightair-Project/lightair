@@ -646,8 +646,12 @@ impl StudioWindow {
             place: Place::Live,
             library,
             editor: {
-                let s = studio.clone();
-                cx.new(|_| crate::editor::Editor::new(s))
+                let (s, n) = (studio.clone(), native.clone());
+                cx.new(|_| {
+                    let mut e = crate::editor::Editor::new(s);
+                    e.native = n;
+                    e
+                })
             },
             thumbnail_shot: None,
             studio_take_countdown: None,
@@ -1883,6 +1887,7 @@ impl StudioWindow {
             n.forget(id);
         }
         n.set_visible(self.place == Place::Live);
+        n.show_player(self.place == Place::Editor);
         true
     }
 
