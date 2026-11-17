@@ -213,6 +213,8 @@ real bug a Windows user would have hit:
 - A display capture with no display chosen (new, or a project from a Mac) captured nothing: it
   takes the primary monitor, as macOS takes the main display. Lists of choices skipped nothing,
   so OBS's disabled "[Select a display to capture]" placeholder was offered as a display.
+- A camera asked for a height it has no format for showed nothing ("video format match failed"):
+  its formats are read from DirectShow's properties and the nearest one it has is used.
 - Camera Studio's face maps (makeup, liner, light) never loaded: libobs's `GS_BUILD_MIPMAPS` asks
   Direct3D 11 for a whole mip chain with one level's data, which D3D11 refuses; and the module
   crashed about one run in three. The mip levels are made on the CPU now (every backend).
