@@ -67,6 +67,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+# importing a sign-in from Chrome and its kin (their cookie store, AES-GCM under a DPAPI key)
+rusqlite = { version = "0.37", features = ["bundled"] }
+aes-gcm = "0.10"
+sha2 = "0.10"
 # The preview under the UI: DirectComposition visuals in GPUI's window (its underlay, patched in
 # third_party/gpui-pre-windows).
 gpui-pre-windows = "=0.3.12"
@@ -93,4 +97,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_ProcessStatus",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
 ] }
