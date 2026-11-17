@@ -358,7 +358,7 @@ impl OutputsPanel {
 
     fn import_sign_in(&mut self, browser: &'static str, platform: &str, cx: &mut Context<Self>) {
         let p = platform.to_string();
-        self.import_note = Some(format!("Asking macOS for {browser}'s key…"));
+        self.import_note = Some(if cfg!(windows) { format!("Reading {browser}'s sign-in…") } else { format!("Asking macOS for {browser}'s key…") });
         cx.spawn(async move |this, cx| {
             let q = p.clone();
             let result = cx.background_executor().spawn(async move { crate::browser_import::import(browser, &q) }).await;
