@@ -65,10 +65,14 @@ block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString"] }
 
 
+# SQLite (the browsers' cookie stores) builds C: the Windows check run from a Mac
+# (`lightair_cross_check`, xtask precommit) leaves it out, as lightair-web leaves Chromium.
+[target.'cfg(all(windows, not(lightair_cross_check)))'.dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
 # importing a sign-in from Chrome and its kin (their cookie store, AES-GCM under a DPAPI key)
-rusqlite = { version = "0.37", features = ["bundled"] }
 aes-gcm = "0.10"
 sha2 = "0.10"
 # The preview under the UI: DirectComposition visuals in GPUI's window (its underlay, patched in
@@ -100,3 +104,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Cryptography",
     "Win32_System_Memory",
 ] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lightair_cross_check)'] }

@@ -73,6 +73,13 @@ fn main() {
         // OBS install (or the submodule's build) of the pinned version links as it is.
         code = code.replace("unsafe extern \"C\" {", "#[link(name = \"obs\", kind = \"raw-dylib\")]\nunsafe extern \"C\" {");
     }
+    if cross_check {
+        // libobs's Windows-only functions (inside `#ifdef _WIN32`, unseen when the headers are
+        // read as macOS) that Lightair's Windows code calls
+        code.push_str(
+            "\nunsafe extern \"C\" {\n    pub fn gs_texture_open_nt_shared(handle: u32) -> *mut gs_texture_t;\n}\n",
+        );
+    }
     if fs::read_to_string(out.join("bindings.rs")).ok().as_deref() != Some(code.as_str()) {
         fs::write(out.join("bindings.rs"), code).expect("write bindings");
     }

@@ -134,6 +134,9 @@ mod win {
         // a copy: the browser keeps its own open (while it runs, Windows may refuse even that)
         let copy = std::env::temp_dir().join(format!("lightair-cookies-{}.db", std::process::id()));
         std::fs::copy(&db, &copy).map_err(|_| format!("{name} is using its cookies: close {name} and try again"))?;
+        #[cfg(lightair_cross_check)]
+        let rows: Result<Vec<Row>, String> = Err("this build has no SQLite".into());
+        #[cfg(not(lightair_cross_check))]
         let rows = (|| -> rusqlite::Result<Vec<Row>> {
             let conn = rusqlite::Connection::open_with_flags(&copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             let filter = wanted.iter().map(|d| format!("host_key = '{d}' OR host_key LIKE '%.{d}'")).collect::<Vec<_>>().join(" OR ");
