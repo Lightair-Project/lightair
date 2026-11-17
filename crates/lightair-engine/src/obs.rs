@@ -289,11 +289,21 @@ fn list_items(src: *mut sys::obs_source_t, property: &str) -> Vec<(String, serde
 /// Items of a list property of a source type, as (label, value) — e.g. the camera devices of
 /// `av_capture_source_v2`'s `device` property. Call on the engine thread.
 pub fn property_items(source_type: &str, property: &str) -> Vec<(String, String)> {
+    property_items_with(source_type, property, &serde_json::Value::Null)
+}
+
+/// As [`property_items`], with `settings` applied to the properties first: lists that depend on
+/// another choice (a camera's resolutions on its device) fill in for it.
+pub fn property_items_with(source_type: &str, property: &str, settings: &serde_json::Value) -> Vec<(String, String)> {
     let mut out = Vec::new();
     unsafe {
         let props = sys::obs_get_source_properties(cstr(source_type).as_ptr());
         if props.is_null() {
             return out;
+        }
+        if settings.is_object() {
+            let data = Data::from_json(settings);
+            sys::obs_properties_apply_settings(props, data.as_ptr());
         }
         let p = sys::obs_properties_get(props, cstr(property).as_ptr());
         if !p.is_null() {
