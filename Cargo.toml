@@ -24,16 +24,16 @@ lightair-web = { path = "crates/lightair-web" }
 # (`cargo xtask core-pin <rev>` moves it). To work on lightair-core and the desktop together,
 # `cargo xtask core-link` builds against the checkout beside this repo (`../lightair-core`) until
 # `cargo xtask core-unlink`; `cargo xtask check` refuses while it's linked.
-lightair-model = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "3bca0ecd2504cd3a256e10332bd75c9df59d3c04" }
-lightair-store = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "3bca0ecd2504cd3a256e10332bd75c9df59d3c04" }
-lightair-audio = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "3bca0ecd2504cd3a256e10332bd75c9df59d3c04" }
-lightair-render = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "3bca0ecd2504cd3a256e10332bd75c9df59d3c04" }
-lightair-fonts = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "3bca0ecd2504cd3a256e10332bd75c9df59d3c04" }
-lightair-live = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "3bca0ecd2504cd3a256e10332bd75c9df59d3c04" }
-lightair-widgets = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "3bca0ecd2504cd3a256e10332bd75c9df59d3c04" }
-lightair-automation = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "3bca0ecd2504cd3a256e10332bd75c9df59d3c04" }
-lightair-remote = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "3bca0ecd2504cd3a256e10332bd75c9df59d3c04" }
-lightair-platform = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "3bca0ecd2504cd3a256e10332bd75c9df59d3c04" }
+lightair-model = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "f10282a7787228f8b318de3b6aaeb4983f243c3b" }
+lightair-store = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "f10282a7787228f8b318de3b6aaeb4983f243c3b" }
+lightair-audio = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "f10282a7787228f8b318de3b6aaeb4983f243c3b" }
+lightair-render = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "f10282a7787228f8b318de3b6aaeb4983f243c3b" }
+lightair-fonts = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "f10282a7787228f8b318de3b6aaeb4983f243c3b" }
+lightair-live = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "f10282a7787228f8b318de3b6aaeb4983f243c3b" }
+lightair-widgets = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "f10282a7787228f8b318de3b6aaeb4983f243c3b" }
+lightair-automation = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "f10282a7787228f8b318de3b6aaeb4983f243c3b" }
+lightair-remote = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "f10282a7787228f8b318de3b6aaeb4983f243c3b" }
+lightair-platform = { git = "https://github.com/MoonGoblinDev/lightair-core", rev = "f10282a7787228f8b318de3b6aaeb4983f243c3b" }
 
 anyhow = "1"
 thiserror = "2"
