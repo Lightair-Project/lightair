@@ -270,6 +270,9 @@ pub struct EncoderConfig {
     /// bitrate). Such an encoder is its own: its output changes the bitrate, so others on it
     /// would change too.
     pub adaptive: bool,
+    /// Encode every this many canvas frames (1: all of them; 2: half the canvas's rate). Part
+    /// of what decides whether destinations share an encoder.
+    pub fps_divisor: u32,
 }
 
 impl EncoderConfig {
@@ -292,6 +295,8 @@ impl EncoderConfig {
             Some("B-frames")
         } else if self.constant_bitrate != other.constant_bitrate {
             Some("rate control")
+        } else if self.fps_divisor != other.fps_divisor {
+            Some("frame rate")
         } else if self.adaptive != other.adaptive {
             Some("adaptive bitrate")
         } else {
@@ -714,6 +719,10 @@ unsafe fn create_encoders(
         sys::obs_encoder_set_video(video, if video_output.is_null() { sys::obs_get_video() } else { video_output });
         if let Some((w, h)) = cfg.scaled {
             sys::obs_encoder_set_scaled_size(video, w & !1, h & !1);
+        }
+        // a destination's own frame rate: every Nth canvas frame
+        if cfg.fps_divisor > 1 {
+            sys::obs_encoder_set_frame_rate_divisor(video, cfg.fps_divisor);
         }
         sys::obs_encoder_set_audio(audio, sys::obs_get_audio());
         Ok((video, audio))
@@ -1139,6 +1148,7 @@ impl Outputs {
                         scaled: None,
                         audio_mix: 0,
                         adaptive: false,
+                        fps_divisor: 1,
                     },
                 ),
                 extra: Vec::new(),
@@ -1361,6 +1371,7 @@ pub fn default_encoders(available: &[String], video_bitrate_kbps: u32, constant_
         scaled: None,
         audio_mix: 0,
         adaptive: false,
+        fps_divisor: 1,
     }
 }
 

@@ -892,6 +892,17 @@ impl OutputsPanel {
                         m / 1000
                     )))
                 });
+            // frame rates the canvas allows: its own, and every second, third or fourth frame
+            let canvas_fps =
+                e.canvas.and_then(|f| workspace.canvas(f)).unwrap_or(workspace.primary_canvas()).fps();
+            let mut rates = seg();
+            for (i, (div, rate)) in Encoding::frame_rates(canvas_fps).into_iter().enumerate() {
+                let text = if (rate - rate.round()).abs() < 0.05 { format!("{} fps", rate.round()) } else { format!("{rate:.1} fps") };
+                rates = rates.child(
+                    chip(("edit-fps", i), text, crate::encoding::fps_divisor_label(enc.fps_divisor, canvas_fps) == div, true)
+                        .on_click(set(Box::new(move |e| e.fps_divisor = div))),
+                );
+            }
             let mut heights = seg();
             for (i, h) in [None, Some(1080), Some(720), Some(480), Some(360)].into_iter().enumerate() {
                 heights = heights.child(
@@ -934,6 +945,11 @@ impl OutputsPanel {
                 ))
                 .child(row("Bitrate", None, bitrate.into_any_element()))
                 .child(row("Resolution", None, heights.into_any_element()))
+                .child(row(
+                    "Frame rate",
+                    Some("Sends every frame of the canvas, or every second, third or fourth: 60 fps becomes 30. A lower rate is lighter on the encoder and the connection; a destination at its own rate has an encoder of its own."),
+                    rates.into_any_element(),
+                ))
                 .child(row("Keyframes", Some("How often a full picture is sent: 2 s is what most platforms ask for."), keys.into_any_element()))
                 .child(row("Audio bitrate", None, audio.into_any_element()));
         }

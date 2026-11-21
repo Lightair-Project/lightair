@@ -79,7 +79,7 @@ fn identical_destinations_share_an_encoder() {
         engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     }
 
-    let ports = [19361u16, 19362, 19363, 19364, 19365, 19366];
+    let ports = [19361u16, 19362, 19363, 19364, 19365, 19366, 19367, 19368];
     let files: Vec<PathBuf> = ports.iter().map(|p| dir.join(format!("{p}.flv"))).collect();
     let servers: Vec<Child> = ports.iter().zip(&files).map(|(p, f)| server(*p, f)).collect();
     std::thread::sleep(Duration::from_millis(800));
@@ -139,6 +139,24 @@ fn identical_destinations_share_an_encoder() {
     assert!(status.current_kbps > 0 && status.current_kbps <= 2500, "reports its bitrate: {}", status.current_kbps);
     engine.call(move |s| s.outputs.stop_stream(d_id));
     engine.call(move |s| s.outputs.stop_stream(e_id));
+
+    // A frame rate of its own: every second frame of the canvas, on an encoder of its own.
+    let full = config(ports[6], 2500);
+    let mut half = config(ports[7], 2500);
+    half.encoders.fps_divisor = 2;
+    let (full_id, half_id) = (full.id, half.id);
+    for cfg in [full, half] {
+        engine.call(move |s| s.outputs.start_stream(&cfg, None)).expect("stream starts");
+    }
+    assert!(wait_active(full_id) && wait_active(half_id), "frame-rate streams active");
+    assert_ne!(enc(full_id), enc(half_id), "a different frame rate never shares an encoder");
+    std::thread::sleep(Duration::from_millis(3000));
+    engine.call(|s| s.outputs.sample());
+    let (all, some) = (runtime().get(OutputKey::Stream(full_id)).total_frames, runtime().get(OutputKey::Stream(half_id)).total_frames);
+    eprintln!("frames sent in 3 s: {all} at the canvas rate, {some} at half");
+    assert!(all > 20 && some * 10 > all * 4 && some * 10 < all * 6, "about half the frames: {some} of {all}");
+    engine.call(move |s| s.outputs.stop_stream(full_id));
+    engine.call(move |s| s.outputs.stop_stream(half_id));
 
     // Stopping the first leaves the shared encoder running for the second.
     std::thread::sleep(Duration::from_millis(1200));

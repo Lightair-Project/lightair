@@ -44,6 +44,18 @@ pub fn scaled(canvas: &Canvas, height: Option<u32>) -> Option<(u32, u32)> {
     (sw < canvas.width || sh < canvas.height).then_some((sw, sh))
 }
 
+/// The divisor to encode with: the one asked for if the canvas's rate allows it (nothing under
+/// 10 frames a second), else the nearest that does.
+pub fn fps_divisor(canvas: &Canvas, asked: u32) -> u32 {
+    fps_divisor_label(asked, canvas.fps())
+}
+
+/// The divisor a destination's frame-rate chips show as chosen for a canvas at `fps` (the one
+/// that's really used).
+pub fn fps_divisor_label(asked: u32, fps: f64) -> u32 {
+    Encoding::frame_rates(fps).iter().map(|(d, _)| *d).filter(|d| *d <= asked.max(1)).max().unwrap_or(1)
+}
+
 /// What Automatic means for a destination: the shared bitrate, capped at what its platform
 /// takes; H.264, 2-second keyframes, the canvas's size.
 pub fn automatic(workspace: &Workspace, d: &Destination) -> Encoding {
@@ -70,6 +82,8 @@ pub fn for_stream(caps: &[String], workspace: &Workspace, d: &Destination) -> En
         // dynamic bitrate is RTMP's: the others handle congestion themselves
         adaptive: d.options.adaptive_bitrate
             && matches!(StreamProtocol::of(&d.server), Some(StreamProtocol::Rtmp)),
+        // every Nth canvas frame, within what the canvas's rate allows
+        fps_divisor: fps_divisor(canvas, e.fps_divisor),
     }
 }
 
@@ -133,6 +147,7 @@ pub fn for_recording(caps: &[String], settings: &RecordingSettings, canvas: &Can
         scaled: scaled(canvas, settings.height),
         audio_mix: 0,
         adaptive: false,
+        fps_divisor: 1,
     }
 }
 
@@ -231,6 +246,23 @@ mod tests {
             chat: None,
             options: lightair_model::StreamOptions { adaptive_bitrate: false, ..Default::default() },
         }
+    }
+
+    #[test]
+    fn a_destinations_frame_rate_is_part_of_what_it_shares() {
+        let workspace = Workspace::new("P");
+        let canvas = workspace.primary_canvas().clone();
+        assert_eq!(canvas.fps(), 60.0);
+        assert_eq!(fps_divisor(&canvas, 1), 1);
+        assert_eq!(fps_divisor(&canvas, 2), 2, "60 to 30");
+        assert_eq!(fps_divisor(&canvas, 9), 4, "no lower than the canvas allows (15 fps)");
+        let slow = Canvas { fps_num: 24, fps_den: 1, ..Canvas::landscape() };
+        assert_eq!(fps_divisor(&slow, 4), 2, "24 fps: 12 is as low as it goes (nothing under 10)");
+        let (a, mut b) = (dest("A", Some(6000)), dest("B", Some(6000)));
+        assert_eq!(why_apart(&mac(), &workspace, &a, &b), None);
+        b.encoding = Some(Encoding { fps_divisor: 2, ..b.encoding.unwrap() });
+        assert_eq!(for_stream(&mac(), &workspace, &b).fps_divisor, 2);
+        assert_eq!(why_apart(&mac(), &workspace, &a, &b), Some("frame rate"));
     }
 
     #[test]
