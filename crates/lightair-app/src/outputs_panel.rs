@@ -97,8 +97,6 @@ pub struct OutputsPanel {
     asked: std::cell::RefCell<std::collections::HashSet<String>>,
     /// A sign-in window open: its platform, the page, and whether it was closed.
     sign_in: Option<SignIn>,
-    /// The list of which destinations share an encoder is showing.
-    encoders_open: bool,
 }
 
 pub fn elapsed(since: Instant) -> String {
@@ -452,7 +450,7 @@ impl OutputsPanel {
             }
         })
         .detach();
-        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default(), signed_in: Default::default(), asked: Default::default(), sign_in: None, import_note: None, encoders_open: false }
+        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default(), signed_in: Default::default(), asked: Default::default(), sign_in: None, import_note: None }
     }
 
     /// Asks for a vertical canvas, to send once it's there.
@@ -1011,6 +1009,12 @@ impl OutputsPanel {
                         tok::ok(),
                     )
                 };
+                // what this destination's encoder is (once the Outputs list's detail)
+                let encoder = {
+                    let cfg = crate::encoding::for_stream(&caps, workspace, &draft);
+                    let canvas = draft.canvas.and_then(|f| workspace.canvas(f)).unwrap_or(workspace.primary_canvas());
+                    describe_encoder(&cfg, canvas)
+                };
                 let me = cx.entity().downgrade();
                 let (ws, names) = (workspace.clone(), others.clone());
                 let match_menu = Button::new("edit-match")
@@ -1054,6 +1058,7 @@ impl OutputsPanel {
                                 .flex_col()
                                 .child(div().text_size(px(13.)).child("Encoder sharing"))
                                 .child(div().text_size(px(11.)).text_color(colour).child(note))
+                                .child(div().text_size(px(11.)).text_color(tok::text_secondary()).child(encoder))
                                 .child(
                                     div().text_size(px(11.)).text_color(tok::text_tertiary()).child(
                                         "Destinations with the same canvas, quality and audio share one encoder; a separate one costs another encode.",
@@ -1951,99 +1956,7 @@ impl Render for OutputsPanel {
 
         // ---- Streaming
         let mut streams = div().flex().flex_col().gap_0p5();
-        // Which destinations share an encoder: from the engine while live, from the settings before.
-        {
-            let live_ids: Vec<Id> = workspace
-                .outputs
-                .destinations
-                .iter()
-                .filter(|d| runtime().get(OutputKey::Stream(d.id)).state.is_running())
-                .map(|d| d.id)
-                .collect();
-            let live = !live_ids.is_empty();
-            let caps = studio.engine().capabilities.encoders.clone();
-            let groups: Vec<Vec<Id>> = if live {
-                let mut g = studio.engine().call(|s| s.outputs.stream_share_groups());
-                // in the order of the list
-                let place = |ids: &Vec<Id>| {
-                    ids.iter().filter_map(|id| workspace.outputs.destinations.iter().position(|d| d.id == *id)).min()
-                };
-                for ids in &mut g {
-                    ids.sort_by_key(|id| workspace.outputs.destinations.iter().position(|d| d.id == *id));
-                }
-                g.sort_by_key(place);
-                g
-            } else {
-                let enabled: Vec<&Destination> = workspace.outputs.destinations.iter().filter(|d| d.enabled).collect();
-                crate::encoding::share_groups(&caps, &workspace, &enabled)
-            };
-            let members: usize = groups.iter().map(Vec::len).sum();
-            // said only when it costs something: destinations that don't share an encoder (the
-            // groups are in each destination's sheet and the summary's list)
-            if members >= 2 && groups.len() > 1 {
-                let heading = "Not every destination shares an encoder".to_string();
-                let open = self.encoders_open;
-                streams = streams.child(
-                    div()
-                        .id("encoders-summary")
-                        .px_4()
-                        .pb_1()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .cursor_pointer()
-                        .text_size(px(11.))
-                        .text_color(tok::text_tertiary())
-                        .hover(|d| d.text_color(tok::text_secondary()))
-                        .tooltip(ui::tip("Which destinations share an encoder"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.encoders_open = !this.encoders_open;
-                            cx.notify();
-                        }))
-                        .child(heading)
-                        .child(ui::icon(if open { "chevron-down" } else { "chevron-right" }).size(px(11.))),
-                );
-                if open {
-                    let name_of = |id: Id| {
-                        workspace.outputs.destinations.iter().find(|d| d.id == id).map(|d| d.name.clone()).unwrap_or_default()
-                    };
-                    let mut list = div().mx_4().mb_1().p_2().rounded(px(6.)).bg(tok::bg_raised()).flex().flex_col().gap_1p5();
-                    for (n, ids) in groups.iter().enumerate() {
-                        let d = workspace.outputs.destinations.iter().find(|d| d.id == ids[0]);
-                        let detail = d
-                            .map(|d| {
-                                let cfg = crate::encoding::for_stream(&caps, &workspace, d);
-                                let canvas =
-                                    d.canvas.and_then(|f| workspace.canvas(f)).unwrap_or(workspace.primary_canvas());
-                                describe_encoder(&cfg, canvas)
-                            })
-                            .unwrap_or_default();
-                        list = list.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(tok::text_tertiary())
-                                        .child(format!("Encoder {} · {detail}", n + 1)),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .child(ids.iter().map(|id| name_of(*id)).collect::<Vec<_>>().join(", ")),
-                                ),
-                        );
-                    }
-                    if groups.len() > 1 {
-                        list = list.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(
-                            "Each extra encoder costs another encode. Destinations with the same canvas, quality and audio share one: open a destination and choose \"Match settings\".",
-                        ));
-                    }
-                    streams = streams.child(list);
-                }
-            }
-        }
+        // (which destinations share an encoder is in each one's sheet, docs/ui-sweep.md §6)
         let count = workspace.outputs.destinations.len();
         for (i, d) in workspace.outputs.destinations.iter().enumerate() {
             let id = d.id;

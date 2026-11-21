@@ -305,7 +305,7 @@ impl Render for MixerPanel {
                                     }),
                             )
                             // a fade at the edge, for when the strips scroll
-                            .child(div().absolute().top_0().bottom_0().right_0().w(px(12.)).bg(linear_gradient(
+                            .child(div().absolute().top_0().bottom_0().right_0().w(px(32.)).bg(linear_gradient(
                                 90.,
                                 linear_color_stop(tok::bg_panel().opacity(0.), 0.),
                                 linear_color_stop(tok::bg_panel(), 1.),
@@ -867,7 +867,8 @@ impl MixerPanel {
         layout: Layout,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let Layout { fx_h, routing, section, foot, knobs } = layout;
+        // (the foot's room isn't used: a track's input is in its header menu now)
+        let Layout { fx_h, routing, section, foot: _, knobs } = layout;
         let compact = fx_h <= 0.0;
         let top_h = fx_h + if routing { section } else { 0.0 };
         let id = view.id;
@@ -891,9 +892,9 @@ impl MixerPanel {
         let menu = strip_menu(self.studio.downgrade(), cx.entity().downgrade(), StripMenu::of(&workspace, view));
         // the colour dot, tag and effect count, then the name, then the menu
         let fx_chip = compact && !view.effects.is_empty();
-        // every header neutral (docs/ui-sweep.md §5); a strip's colour is a dot beside its name
+        // every header neutral, no colour on the strip: red is only for live (docs/ui-sweep.md
+        // §0, §5); a strip's colour is kept, and shown, in its menu
         let (head_bg, head_fg): (Option<Hsla>, Hsla) = (None, tok::text());
-        let dot = view.color.map(strip_colour);
         let name_el = match self.renaming.as_ref().filter(|r| r.target == crate::rows::RowTarget::Strip(kind)) {
             Some(r) => div()
                 .id(("strip-rename", i))
@@ -932,9 +933,6 @@ impl MixerPanel {
                 .into_any_element(),
         };
         let mut left = div().flex().items_center().gap_1().pl_1();
-        if let Some(c) = dot {
-            left = left.child(div().flex_none().ml_1().size(px(7.)).rounded_full().bg(c));
-        }
         if let Some(b) = view.badge {
             left = left.child(
                 div()
@@ -1130,7 +1128,7 @@ impl MixerPanel {
                 .border_color(tok::border())
                 .cursor_pointer()
                 .hover(|d| d.bg(tok::bg_selected()))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).text_color(tok::text_secondary()).child(text))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(tok::text_secondary()).child(text))
                 .child(ui::icon(if fx_open { "chevron-up" } else { "chevron-down" }).size(px(12.)).text_color(tok::text_tertiary()))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
@@ -1401,7 +1399,7 @@ impl MixerPanel {
             .w_full()
             .h_full()
             .min_h(px(
-                30. + top_h + LEVELS_MIN + if knobs { PAN_TRIM_H } else { 0. } + BUTTONS_H + if foot { FOOT_H } else { 0. },
+                30. + top_h + LEVELS_MIN + if knobs { PAN_TRIM_H } else { 0. } + BUTTONS_H,
             ))
             .rounded(px(8.))
             .overflow_hidden()
@@ -1449,96 +1447,9 @@ impl MixerPanel {
             .child(levels)
             .when(knobs, |d| d.child(pan_trim))
             .child(buttons)
-            // full width, centred in its row
-            .when(foot, |d| {
-                d.child(
-                    div().flex().flex_col().flex_none().justify_center().h(px(FOOT_H)).px_2().pb_1().child(self.strip_source(i, view, cx)),
-                )
-            })
+
     }
 
-    /// The strip's foot: a track's device (pick another here), or what the strip is.
-    fn strip_source(&self, i: usize, view: &StripView, cx: &mut Context<Self>) -> AnyElement {
-        let chip = |icon: &'static str, label: String| {
-            div()
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .h(px(28.))
-                .px_2()
-                .rounded(px(6.))
-                .border_1()
-                .border_color(tok::border_strong())
-                .text_size(px(11.5))
-                .text_color(tok::text_secondary())
-                .child(ui::icon(icon).size(px(13.)).flex_none())
-                .child(div().flex_1().min_w_0().truncate().child(label))
-        };
-        match &view.source {
-            Some(src) => {
-                let (track, current) = (view.id, src.current.clone());
-                let me = cx.entity().downgrade();
-                gpui_kit::component::button::Button::new(("strip-source", i))
-                    .icon(ui::icon(src.icon))
-                    .label(src.label.clone())
-                    .small()
-                    .outline()
-                    .w_full()
-                    .dropdown_caret(true)
-                    .dropdown_menu(move |menu, window, cx| {
-                        use gpui_kit::component::menu::PopupMenuItem;
-                        let pick = move |to: TrackSource, app: String, label: String, me: WeakEntity<MixerPanel>, on: bool| {
-                            source_item(track, to, app, label, me, on)
-                        };
-                        let mut menu = menu.item(PopupMenuItem::label("Microphones and interfaces"));
-                        let mut devices = vec![(String::new(), SYSTEM_DEFAULT.to_string())];
-                        devices.extend(lightair_engine::devices::input_devices().into_iter().map(|d| {
-                            let n = if d.channels == 1 { "1 input".to_string() } else { format!("{} inputs", d.channels) };
-                            (d.id.clone(), format!("{} · {n}", d.name))
-                        }));
-                        for (value, label) in devices {
-                            let to = TrackSource::Device(value);
-                            let on = to == current;
-                            menu = menu.item(pick(to, String::new(), label, me.clone(), on));
-                        }
-                        menu = menu.separator().item(pick(
-                            TrackSource::Desktop,
-                            String::new(),
-                            "Desktop audio".into(),
-                            me.clone(),
-                            current == TrackSource::Desktop,
-                        ));
-                        let (me2, current2) = (me.clone(), current.clone());
-                        menu.submenu("App", window, cx, move |mut sub, _, _| {
-                            let apps = running_apps();
-                            if apps.is_empty() {
-                                sub = sub.item(PopupMenuItem::new("No apps open").disabled(true));
-                            }
-                            for (name, bundle) in apps {
-                                let to = TrackSource::App(bundle);
-                                let on = to == current2;
-                                sub = sub.item(source_item(track, to, name.clone(), name, me2.clone(), on));
-                            }
-                            sub
-                        })
-                    })
-                    .into_any_element()
-            }
-            None => chip(
-                match view.kind {
-                    MixerStrip::Bus(_) => "group",
-                    MixerStrip::Mix(_) => "split",
-                    _ => "radio",
-                },
-                match view.kind {
-                    MixerStrip::Bus(_) => "Bus".into(),
-                    MixerStrip::Mix(_) => "Mix".into(),
-                    _ => "Stream & recording".into(),
-                },
-            )
-            .into_any_element(),
-        }
-    }
 }
 
 /// Stream loudness (EBU R128): short-term and integrated, against the common −14 LUFS target.
@@ -1978,6 +1889,8 @@ struct StripMenu {
     rename: Option<MixerStrip>,
     strip: MixerStrip,
     color: Option<u32>,
+    /// A track's input (the device, desktop audio or an app), picked here.
+    input: Option<(Id, TrackSource)>,
 }
 
 impl StripMenu {
@@ -1996,6 +1909,7 @@ impl StripMenu {
             rename: (v.kind != MixerStrip::Master).then_some(v.kind),
             strip: v.kind,
             color: v.color,
+            input: v.source.as_ref().map(|s| (v.id, s.current.clone())),
         }
     }
 }
@@ -2023,6 +1937,38 @@ fn strip_menu(
                 }
             }
         };
+        // the input: microphones and interfaces, desktop audio, an app
+        if let Some((track, current)) = m.input.clone() {
+            let me = me.clone();
+            menu = menu
+                .submenu_with_icon(Some(crate::ui::icon("mic")), "Input", window, cx, move |mut sub, _, _| {
+                    sub = sub.item(PopupMenuItem::label("Microphones and interfaces"));
+                    let mut devices = vec![(String::new(), SYSTEM_DEFAULT.to_string())];
+                    devices.extend(lightair_engine::devices::input_devices().into_iter().map(|d| {
+                        let n = if d.channels == 1 { "1 input".to_string() } else { format!("{} inputs", d.channels) };
+                        (d.id.clone(), format!("{} · {n}", d.name))
+                    }));
+                    for (value, label) in devices {
+                        let to = TrackSource::Device(value);
+                        let on = to == current;
+                        sub = sub.item(source_item(track, to, String::new(), label, me.clone(), on));
+                    }
+                    let on = current == TrackSource::Desktop;
+                    sub = sub.separator().item(source_item(track, TrackSource::Desktop, String::new(), "Desktop audio".into(), me.clone(), on));
+                    let apps = running_apps();
+                    sub = sub.separator().item(PopupMenuItem::label("Apps"));
+                    if apps.is_empty() {
+                        sub = sub.item(PopupMenuItem::new("No apps open").disabled(true));
+                    }
+                    for (name, bundle) in apps {
+                        let to = TrackSource::App(bundle);
+                        let on = to == current;
+                        sub = sub.item(source_item(track, to, name.clone(), name, me.clone(), on));
+                    }
+                    sub
+                })
+                .separator();
+        }
         if let Some(cmd) = m.mute.clone() {
             menu = menu.item(
                 PopupMenuItem::new(if m.muted { "Unmute" } else { "Mute" })
@@ -2135,7 +2081,9 @@ struct Layout {
     /// The routing section (output, switches, sends) is shown, this tall.
     routing: bool,
     section: f32,
-    /// The source at the foot.
+    /// Room for the source at the foot (measured still; the strip no longer draws a foot: a
+    /// track's input is in its header menu).
+    #[allow(dead_code)]
     foot: bool,
     /// The pan and trim knobs.
     knobs: bool,
@@ -2277,7 +2225,6 @@ fn strip_update(p: &Workspace, id: Id, f: impl FnOnce(StripFields)) -> Option<Co
 
 /// What a track listens to, for the strip's foot.
 struct StripSource {
-    icon: &'static str,
     label: String,
     current: TrackSource,
 }
@@ -2409,14 +2356,28 @@ fn strip_views(p: &Workspace) -> Vec<StripView> {
     let source = |t: &Track| {
         let i = p.sources.get(&t.source)?;
         let current = TrackSource::of(i);
-        let (icon, label) = match &current {
-            TrackSource::Device(d) => ("mic", lightair_engine::devices::device_name(d).unwrap_or_else(|| SYSTEM_DEFAULT.into())),
-            TrackSource::Desktop => ("volume-2", "Desktop audio".into()),
-            TrackSource::App(b) if b.is_empty() => ("app-window", "Pick an app".into()),
-            TrackSource::App(_) => ("app-window", i.name.clone()),
-            TrackSource::Other => (ui::source_icon(&i.kind), i.name.clone()),
+        let label = match &current {
+            TrackSource::Device(d) => lightair_engine::devices::device_name(d).unwrap_or_else(|| SYSTEM_DEFAULT.into()),
+            TrackSource::Desktop => "Desktop audio".into(),
+            TrackSource::App(b) if b.is_empty() => "Pick an app".into(),
+            TrackSource::App(_) | TrackSource::Other => i.name.clone(),
         };
-        Some(StripSource { icon, label, current })
+        Some(StripSource { label, current })
+    };
+    // A name Lightair gave (the device's or "Desktop audio") reads short: "Microphone", "Desktop"
+    // (docs/ui-sweep.md §0); a name someone typed is kept. Two or more microphones keep their
+    // devices' names, to tell them apart.
+    let mics = p.tracks.iter().filter(|t| source(t).is_some_and(|s| matches!(s.current, TrackSource::Device(_)))).count();
+    let short = |t: &Track| -> String {
+        match source(t) {
+            Some(StripSource { current: TrackSource::Device(_), label, .. })
+                if mics == 1 && (t.name == label || t.name == SYSTEM_DEFAULT) =>
+            {
+                "Microphone".into()
+            }
+            Some(StripSource { current: TrackSource::Desktop, label, .. }) if t.name == label => "Desktop".into(),
+            _ => t.name.clone(),
+        }
     };
     let mut v: Vec<StripView> = p
         .tracks
@@ -2424,7 +2385,7 @@ fn strip_views(p: &Workspace) -> Vec<StripView> {
         .map(|t| StripView {
             id: t.id,
             kind: MixerStrip::Track(t.id),
-            name: t.name.clone(),
+            name: short(t),
             volume_db: t.volume_db,
             muted: t.muted,
             cue: Some(t.cue),

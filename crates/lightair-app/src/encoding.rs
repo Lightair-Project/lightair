@@ -89,7 +89,9 @@ pub fn for_stream(caps: &[String], workspace: &Workspace, d: &Destination) -> En
 
 /// Destinations whose streams would share one encoder: same canvas, same settings, none on
 /// adaptive bitrate (its output changes the bitrate). One list per encoder, in the destinations'
-/// order.
+/// order. (The Outputs list no longer shows the groups; each destination's sheet says whom it
+/// shares with. Kept for its tests and as the settings-side rule.)
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn share_groups(caps: &[String], workspace: &Workspace, destinations: &[&Destination]) -> Vec<Vec<lightair_model::Id>> {
     let canvas_of = |d: &Destination| d.canvas.unwrap_or(workspace.primary_canvas().id);
     let mut groups: Vec<(lightair_model::Id, EncoderConfig, Vec<lightair_model::Id>)> = Vec::new();
