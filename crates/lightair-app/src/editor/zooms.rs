@@ -349,6 +349,7 @@ impl Editor {
                 }
             }),
         );
+        let hidden = self.seq().is_some_and(|s| s.zooms_hidden);
         let header = div()
             .flex()
             .items_center()
@@ -361,6 +362,11 @@ impl Editor {
             .border_color(tok::border())
             .child(ui::icon("zoom-in").size(px(13.)).text_color(tok::text_tertiary()))
             .child(div().flex_1().text_size(px(11.)).text_color(tok::text_tertiary()).child("Zoom"))
+            // the zoom track switched off (its zooms kept, not drawn) or on
+            .child(
+                ui::icon_button("ed-zoom-hide", if hidden { "eye-off" } else { "eye" }, tok::text_secondary())
+                    .on_click(cx.listener(|this, _, _, cx| this.change(|s| s.zooms_hidden = !s.zooms_hidden, cx))),
+            )
             .child(ui::icon_button("ed-zoom-add", "plus", tok::text_secondary()).on_click(cx.listener(
                 |this, _, _, cx| {
                     let t = this.playhead;
@@ -375,7 +381,8 @@ impl Editor {
                 .border_color(tok::border())
                 .bg(rgba(0x7C3AED10))
                 .child(header)
-                .child(lane),
+                // switched off: kept, faded
+                .child(lane.when(hidden, |l| l.opacity(0.4))),
         )
     }
 
