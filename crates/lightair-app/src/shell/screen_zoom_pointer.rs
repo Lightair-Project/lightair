@@ -65,7 +65,20 @@ impl StudioWindow {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.exec(Command::SetScreenZoomPointer { scene: sid, screen: if on { None } else { Some(ScreenZoomPointer::default()) } }, cx)
             }));
-        let mut body = self.section("Screen zoom & pointer", Some(toggle.into_any_element()), cx);
+        // off: one plain row; on: its settings in a section under the same words
+        if !on {
+            return div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .min_h(px(40.))
+                .px_3()
+                .rounded(px(8.))
+                .bg(tok::bg_raised())
+                .child(div().flex_1().min_w_0().text_size(px(13.)).child("Zoom and pointer on screen shares"))
+                .child(toggle);
+        }
+        let mut body = self.section("Zoom and pointer on screen shares", Some(toggle.into_any_element()), cx);
         let screens = scene
             .objects
             .iter()

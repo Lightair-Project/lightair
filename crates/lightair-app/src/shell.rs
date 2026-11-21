@@ -375,6 +375,8 @@ pub struct StudioWindow {
     interfaces: RefCell<(std::time::Instant, Vec<lightair_engine::devices::DeviceInfo>)>,
     /// The transition tile playing its preview (under the pointer), and since when.
     transition_hover: Option<(usize, Instant)>,
+    /// The scene inspector's transition menu (the kinds with their previews, and their settings).
+    transition_menu: bool,
     /// The object showing crop handles instead of resize handles.
     crop_mode: Option<Id>,
     crop_preview_sent: Option<(Id, Id, Id)>,
@@ -767,6 +769,7 @@ impl StudioWindow {
             interfaces: RefCell::new((std::time::Instant::now(), Vec::new())),
             crop_mode: None,
             transition_hover: None,
+            transition_menu: false,
             crop_preview_sent: None,
             rotate_tool: false,
             gizmo_hover: None,
@@ -3246,9 +3249,10 @@ impl StudioWindow {
         cx.notify();
     }
 
-    /// How scenes change on air: a tile per kind, then its settings as rows (duration;
-    /// direction for Slide and Wipe; the video and its cut point for Stinger).
-    fn transition_picker(&self, workspace: &Workspace, scene: &Scene, cx: &mut Context<Self>) -> impl IntoElement {
+    /// How scenes change on air: a row ("Fade · 0.3 s") whose menu has a preview per kind and its
+    /// settings (duration; direction for Slide and Wipe; the video and its cut point for
+    /// Stinger), and "Same for every scene" (off: this scene has its own).
+    fn transition_picker(&self, workspace: &Workspace, scene: &Scene, cx: &mut Context<Self>) -> Div {
         // this scene's own, or the default every switch uses (what the tiles below change)
         let own = scene.transition.is_some();
         let current = scene.transition.unwrap_or(workspace.transition);
@@ -3256,15 +3260,12 @@ impl StudioWindow {
         let set = move |settings: TransitionSettings| {
             if own { Command::SetSceneTransition { scene: sid, transition: Some(settings) } } else { Command::SetTransition { settings } }
         };
-        let scope = self.segmented(
-            "tr-scope",
-            vec![
-                ("All scenes", Command::SetSceneTransition { scene: sid, transition: None }, !own),
-                // its own starts as a copy of the default
-                ("This scene", Command::SetSceneTransition { scene: sid, transition: Some(current) }, own),
-            ],
-            cx,
-        );
+        // on: the show's default; off: its own, starting as a copy of the default
+        let same_cmd = if own {
+            Command::SetSceneTransition { scene: sid, transition: None }
+        } else {
+            Command::SetSceneTransition { scene: sid, transition: Some(current) }
+        };
         // the kinds, as tiles
         let tile = |i: usize, kind: TransitionKind| {
             let on = current.kind == kind;
@@ -3325,13 +3326,7 @@ impl StudioWindow {
         let hint = (!own && others > 0).then(|| {
             format!("Except switching to the {others} scene{} with {} own", if others == 1 { "" } else { "s" }, if others == 1 { "its" } else { "their" })
         });
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(scope)
-            .children(hint.map(|h| div().text_size(px(11.)).text_color(tok::text_tertiary()).child(h)))
-            .child(grid);
+        let mut body = div().flex().flex_col().gap_2().child(grid);
         // duration (a cut has none)
         if current.kind != TransitionKind::Cut {
             let durations: Vec<(&'static str, Command, bool)> = [(300u32, "0.3 s"), (500, "0.5 s"), (800, "0.8 s"), (1200, "1.2 s")]
@@ -3407,7 +3402,72 @@ impl StudioWindow {
                 ));
             }
         }
-        body
+        let label = if current.kind == TransitionKind::Cut {
+            current.kind.label().to_string()
+        } else {
+            format!("{} · {:.1} s", current.kind.label(), current.duration_ms as f32 / 1000.0)
+        };
+        let open = self.transition_menu;
+        let card_row = |name: &'static str| {
+            div().flex().items_center().gap_2().min_h(px(40.)).px_3().child(div().flex_1().min_w_0().text_size(px(13.)).child(name))
+        };
+        let same_tip = hint.unwrap_or_else(|| {
+            "On: switching to this scene uses the show's transition. Off: this scene has its own, used whenever you switch to it.".into()
+        });
+        div()
+            .flex()
+            .flex_col()
+            .rounded(px(8.))
+            .bg(tok::bg_raised())
+            .child(
+                card_row("Transition")
+                    .relative()
+                    .child(
+                        Button::new("tr-menu")
+                            .label(label)
+                            .small()
+                            .ghost()
+                            .dropdown_caret(true)
+                            .tooltip("How switching to this scene looks on air")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.transition_menu = !this.transition_menu;
+                                cx.notify();
+                            })),
+                    )
+                    .when(open, |d| {
+                        d.child(
+                            deferred(
+                                div()
+                                    .id("tr-menu-body")
+                                    .absolute()
+                                    .top(px(40.))
+                                    .left_0()
+                                    .right_0()
+                                    .p_2()
+                                    .rounded(px(8.))
+                                    .bg(tok::bg_header())
+                                    .border_1()
+                                    .border_color(tok::border_header())
+                                    .shadow_lg()
+                                    .occlude()
+                                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                        this.transition_menu = false;
+                                        cx.notify();
+                                    }))
+                                    .child(body),
+                            )
+                            .with_priority(1),
+                        )
+                    }),
+            )
+            .child(div().h(px(1.)).mx_3().bg(tok::border()))
+            .child(
+                card_row("Same for every scene").child(
+                    settings::switch("tr-same", !own)
+                        .tooltip(ui::tip(same_tip))
+                        .on_click(cx.listener(move |this, _, _, cx| this.exec(same_cmd.clone(), cx))),
+                ),
+            )
     }
 
     fn scenes_panel(&self, workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3596,11 +3656,11 @@ impl StudioWindow {
                     .justify_center()
                     .rounded(px(4.))
                     .cursor_pointer()
-                    .text_size(px(11.))
-                    .font_family(crate::ui::MONO)
+                    .text_size(px(12.))
                     .text_color(if fitted { tok::text_secondary() } else { tok::text() })
                     .hover(|d| d.bg(tok::bg_raised()))
-                    .child(format!("{percent:.0}%"))
+                    // "Fit" while it fits; zoomed, the percentage
+                    .child(if fitted { "Fit".to_string() } else { format!("{percent:.0}%") })
                     .tooltip(|w, cx| Tooltip::new(crate::ui::keys_label("Fit (⌘0) · double-click: 100% (⌥⌘0)").into_owned()).build(w, cx))
                     .on_click(cx.listener(|this, ev: &ClickEvent, _, cx| {
                         if ev.click_count() == 2 { this.zoom_to_actual(cx) } else { this.zoom_to_fit(cx) }
@@ -3677,7 +3737,12 @@ impl StudioWindow {
                     .when(is_active, |d| d.bg(tok::bg_selected()))
                     .hover(|d| d.bg(tok::bg_raised()))
                     .child(div().w(px(gw)).h(px(gh)).rounded(px(2.)).border_1().border_color(tok::text_secondary()))
-                    .child(format!("{} {}×{}", f.name, f.width, f.height))
+                    // "Landscape · 1080p"; the exact size and rate in the tooltip
+                    .child(format!("{} · {}p", f.name, f.width.min(f.height)))
+                    .tooltip({
+                        let detail = format!("{}×{} at {} fps", f.width, f.height, f.fps_num / f.fps_den.max(1));
+                        move |w, cx| Tooltip::new(detail.clone()).build(w, cx)
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.active_canvas = Some(id);
                         this.side_by_side = false;
@@ -4615,19 +4680,7 @@ impl StudioWindow {
                             ),
                     );
                 // How switching to this scene looks on air: the show's default, or its own.
-                let transition = self
-                    .section(
-                        "Transition",
-                        Some(
-                            ui::info(
-                                "transition-info",
-                                "How switching to this scene looks on air. All scenes: the default every switch uses. This scene: its own, used whenever you switch to it.",
-                            )
-                            .into_any_element(),
-                        ),
-                        cx,
-                    )
-                    .child(self.transition_picker(workspace, &scene, cx));
+                let transition = self.transition_picker(workspace, &scene, cx);
                 let screen = self.screen_zoom_pointer_section(workspace, &scene, cx);
                 body.child(header).child(transition).child(screen).into_any_element()
             }
