@@ -92,6 +92,9 @@ pub struct MixerPanel {
     sections: Rc<RefCell<HashMap<Id, f32>>>,
     /// The panel's height (measured as it's drawn): short panels get compact strips.
     panel_h: Rc<std::cell::Cell<f32>>,
+    /// The strip row's width (measured as it's drawn), to show only whole strips when they
+    /// don't all fit.
+    strips_w: Rc<std::cell::Cell<f32>>,
     /// A strip's name being edited.
     renaming: Option<crate::rows::Renaming>,
     /// Where each strip's meter is drawn (the meter overlay paints the levels there).
@@ -117,6 +120,7 @@ impl MixerPanel {
             knob_drag: None,
             sections: Rc::default(),
             panel_h: Rc::default(),
+            strips_w: Rc::default(),
             renaming: None,
             spots: Rc::default(),
             native,
@@ -182,6 +186,18 @@ impl Render for MixerPanel {
         let views = strip_views(&workspace);
         self.sections.borrow_mut().retain(|id, _| views.iter().any(|v| v.id == *id));
         let layout = Layout::fit(self.panel_h.get(), self.sections.borrow().values().copied().fold(0.0, f32::max));
+        // the strips and group dividers in the scrolling row (Master is pinned beside it)
+        let row: Vec<bool> = {
+            let mut row = Vec::new();
+            for (i, view) in views.iter().enumerate().filter(|(_, v)| v.kind != MixerStrip::Master) {
+                if i > 0 && views[i - 1].kind_order() != view.kind_order() {
+                    row.push(false);
+                }
+                row.push(true);
+            }
+            row
+        };
+        let strip_w = whole_strips(&row, self.strips_w.get());
         for (i, view) in views.iter().enumerate() {
             let strip = self.strip(i, view, layout, cx);
             let menu = StripMenu::of(&workspace, view);
@@ -193,7 +209,11 @@ impl Render for MixerPanel {
             let el = div()
                     .id(("strip-menu", i))
                     .when(is_master, |d| d.flex_none().w(px(MASTER_W)))
-                    .when(!is_master, |d| d.flex_1().min_w(px(STRIP_MIN)))
+                    .when(!is_master, |d| match strip_w {
+                        // too many to share the width: only whole ones show, the next starting at the edge
+                        Some(w) => d.flex_none().w(px(w)),
+                        None => d.flex_1().min_w(px(STRIP_MIN)),
+                    })
                     .h_full()
                     .child(strip)
                     .on_mouse_down(MouseButton::Right, {
@@ -221,6 +241,7 @@ impl Render for MixerPanel {
         self.spots.borrow_mut().retain(|id, _| views.iter().any(|v| v.id == *id));
 
         let panel_h = self.panel_h.clone();
+        let strips_w = self.strips_w.clone();
         let native = crate::native_preview::on();
         let (spots, holes_spots) = (self.spots.clone(), self.spots.clone());
         let native_ref = self.native.clone();
@@ -290,6 +311,11 @@ impl Render for MixerPanel {
                             .flex_1()
                             .min_w_0()
                             .child(
+                                canvas(move |b, _, _| strips_w.set(f32::from(b.size.width)), |_, _, _, _| {})
+                                    .absolute()
+                                    .size_full(),
+                            )
+                            .child(
                                 div()
                                     .id("strips")
                                     .flex()
@@ -304,12 +330,14 @@ impl Render for MixerPanel {
                                         d.child(div().text_color(tok::text_tertiary()).child("No tracks"))
                                     }),
                             )
-                            // a fade at the edge, for when the strips scroll
-                            .child(div().absolute().top_0().bottom_0().right_0().w(px(32.)).bg(linear_gradient(
-                                90.,
-                                linear_color_stop(tok::bg_panel().opacity(0.), 0.),
-                                linear_color_stop(tok::bg_panel(), 1.),
-                            ))),
+                            // a fade at the edge, while more strips are scrolled out of sight
+                            .when(strip_w.is_some(), |d| {
+                                d.child(div().absolute().top_0().bottom_0().right_0().w(px(16.)).bg(linear_gradient(
+                                    90.,
+                                    linear_color_stop(tok::bg_panel().opacity(0.), 0.),
+                                    linear_color_stop(tok::bg_panel(), 1.),
+                                )))
+                            }),
                     )
                     .when_some(master, |d, m| {
                         d.child(
@@ -1496,6 +1524,44 @@ fn loudness_readout<T: 'static>(cx: &mut Context<T>) -> Option<impl IntoElement>
                 cx.notify();
             })),
     )
+}
+
+/// The strip width that shows only whole strips when the row (`row`: strips `true`, group
+/// dividers `false`) doesn't fit `avail` at the strips' least width: as many as fit from the
+/// left, widened so the next one starts exactly at the edge (it shows once the row scrolls).
+/// `None`: they all fit and share the width.
+fn whole_strips(row: &[bool], avail: f32) -> Option<f32> {
+    // the row's padding (px_3) and gap (gap_2), and a divider's width
+    const PAD: f32 = 12.0;
+    const GAP: f32 = 8.0;
+    const DIVIDER: f32 = 1.0;
+    let least = |b: bool| if b { STRIP_MIN } else { DIVIDER };
+    let all = 2.0 * PAD + row.iter().map(|b| least(*b)).sum::<f32>() + GAP * row.len().saturating_sub(1) as f32;
+    if avail < 1.0 || all <= avail {
+        return None;
+    }
+    // walk from the left: (strips, items, dividers' width) up to the last strip that fits with
+    // the next item still starting at or past the edge
+    let (mut used, mut items, mut strips, mut dividers) = (PAD, 0usize, 0usize, 0.0f32);
+    let mut best = None;
+    for &is_strip in row {
+        let start = if items == 0 { used } else { used + GAP };
+        let end = start + least(is_strip);
+        if end + GAP > avail {
+            break;
+        }
+        used = end;
+        items += 1;
+        if is_strip {
+            strips += 1;
+            best = Some((strips, items, dividers));
+        } else {
+            dividers += DIVIDER;
+        }
+    }
+    let (k, n, dividers) = best?;
+    // the visible items fill from the padding to one gap before the edge
+    Some((avail - PAD - GAP - GAP * (n - 1) as f32 - dividers) / k as f32)
 }
 
 // ---------------------------------------------------------------- dock panel
