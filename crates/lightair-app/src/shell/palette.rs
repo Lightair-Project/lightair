@@ -9,7 +9,7 @@ use lightair_model::{Command, Id, Workspace, TransitionKind, TransitionSettings}
 use super::StudioWindow;
 use crate::ui::{self, tok};
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub(super) enum PaletteAction {
     Scene(Id),
     Take,
@@ -36,6 +36,10 @@ pub(super) enum PaletteAction {
     Redo,
     Settings,
     Mics,
+    /// A layout by name: Edit, Live, Minimal, or one saved.
+    Layout(String),
+    SaveLayout,
+    DeleteLayout(String),
 }
 
 pub(super) struct Entry {
@@ -120,7 +124,7 @@ fn entries(workspace: &Workspace, cue_scenes: bool) -> Vec<Entry> {
         label: label.to_string(),
         hint,
         icon,
-        action: *action,
+        action: action.clone(),
     }));
     out.extend(TransitionKind::ALL.iter().map(|k| Entry {
         label: format!("Transition: {}", k.label()),
@@ -132,9 +136,46 @@ fn entries(workspace: &Workspace, cue_scenes: bool) -> Vec<Entry> {
 }
 
 /// Entries matching `query`, best first.
+#[cfg(test)]
 pub(super) fn matches(workspace: &Workspace, cue_scenes: bool, query: &str) -> Vec<Entry> {
+    matches_with(workspace, cue_scenes, Vec::new(), query)
+}
+
+/// The layouts as palette entries: the presets, the ones saved (to switch to or delete), and
+/// saving the panels as they are.
+fn layout_entries(saved: &[String]) -> Vec<Entry> {
+    let mut out: Vec<Entry> = super::modes::Preset::ALL
+        .iter()
+        .map(|p| Entry {
+            label: format!("Layout: {}", p.name()),
+            hint: "",
+            icon: "layout-dashboard",
+            action: PaletteAction::Layout(p.name().to_string()),
+        })
+        .collect();
+    for name in saved {
+        out.push(Entry {
+            label: format!("Layout: {name}"),
+            hint: "",
+            icon: "layout-dashboard",
+            action: PaletteAction::Layout(name.clone()),
+        });
+        out.push(Entry {
+            label: format!("Delete layout: {name}"),
+            hint: "",
+            icon: "trash",
+            action: PaletteAction::DeleteLayout(name.clone()),
+        });
+    }
+    out.push(Entry { label: "Save panels as a new layout".into(), hint: "", icon: "plus", action: PaletteAction::SaveLayout });
+    out
+}
+
+/// `matches` with more entries (the layouts) among the rest.
+pub(super) fn matches_with(workspace: &Workspace, cue_scenes: bool, extra: Vec<Entry>, query: &str) -> Vec<Entry> {
     let mut scored: Vec<(u32, usize, Entry)> = entries(workspace, cue_scenes)
         .into_iter()
+        .chain(extra)
         .enumerate()
         .filter_map(|(i, e)| score(query, &e.label).map(|s| (s, i, e)))
         .collect();
@@ -174,7 +215,7 @@ impl StudioWindow {
     fn palette_matches(&self, cx: &App) -> Vec<Entry> {
         let Some(p) = &self.palette else { return vec![] };
         let query = p.input.read(cx).value().to_string();
-        matches(self.studio.read(cx).workspace(), self.cue_scenes, &query)
+        matches_with(self.studio.read(cx).workspace(), self.cue_scenes, layout_entries(&self.saved_modes(cx)), &query)
     }
 
     fn run_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -206,6 +247,9 @@ impl StudioWindow {
             SplitRecording => self.studio.update(cx, |s, cx| s.split_recording(cx)),
             GoLive => self.open_go_live(cx),
             Clip => self.studio.update(cx, |s, cx| s.save_clip(cx)),
+            Layout(name) => self.switch_mode(&name, window, cx),
+            SaveLayout => self.save_layout_as_mode(cx),
+            DeleteLayout(name) => self.delete_mode(&name, cx),
             Replay => self.studio.update(cx, |s, cx| s.replay_last_clip(cx)),
             AddScene => self.add_scene(cx),
             AddImage => self.add_image(window, cx),
@@ -250,7 +294,7 @@ impl StudioWindow {
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.close_palette(window, cx);
-                    this.run_palette_action(action, window, cx);
+                    this.run_palette_action(action.clone(), window, cx);
                 }))
                 .child(ui::icon(e.icon).size(px(15.)).text_color(tok::text_secondary()))
                 .child(div().flex_1().child(e.label))

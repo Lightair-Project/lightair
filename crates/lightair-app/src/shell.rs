@@ -41,6 +41,7 @@ mod panel_window;
 mod live_api;
 mod widget_props;
 mod menus;
+mod modes;
 pub(crate) mod mixer_props;
 mod palette;
 mod screen_zoom_pointer;
@@ -109,6 +110,10 @@ actions!(
         Scene8,
         Scene9,
         ShowLibrary,
+        LayoutEdit,
+        LayoutLive,
+        LayoutMinimal,
+        SaveLayoutMode,
         ShowLive,
         ShowEditor
     ]
@@ -137,6 +142,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(PLACE_KEYS[0], ShowLibrary, Some("Studio")),
         KeyBinding::new(PLACE_KEYS[1], ShowLive, Some("Studio")),
         KeyBinding::new(PLACE_KEYS[2], ShowEditor, Some("Studio")),
+    ]);
+    // layouts (modes): ⌘⌥1 Edit, ⌘⌥2 Live, ⌘⌥3 Minimal (Ctrl+Alt on Windows)
+    cx.bind_keys([
+        KeyBinding::new(crate::ui::key("cmd-alt-1"), LayoutEdit, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-alt-2"), LayoutLive, Some("Studio")),
+        KeyBinding::new(crate::ui::key("cmd-alt-3"), LayoutMinimal, Some("Studio")),
     ]);
     cx.bind_keys([
         KeyBinding::new(crate::ui::key("cmd-z"), Undo, Some("Studio")),
@@ -472,6 +483,8 @@ pub struct StudioWindow {
     native_rects: std::rc::Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     /// Resizable, collapsible, rearrangeable panels (built on first render).
     dock: Option<Entity<gpui_kit::component::dock::DockArea>>,
+    /// The panels the dock arranges, kept so modes can arrange them again.
+    dock_panels: Option<docking::DockPanels>,
     canvas_menu:
         Option<(Entity<gpui_kit::component::input::InputState>, Entity<gpui_kit::component::input::InputState>)>,
 }
@@ -797,6 +810,7 @@ impl StudioWindow {
             shortcut_note: None,
             headphones_devices: Vec::new(),
             dock: None,
+            dock_panels: None,
             prefs: crate::prefs::load_from(&crate::prefs::path()),
             remote,
             automations,
@@ -2355,6 +2369,10 @@ impl Render for StudioWindow {
                     this.take(cx)
                 }
             }))
+            .on_action(cx.listener(|this, _: &LayoutEdit, window, cx| this.switch_mode("Edit", window, cx)))
+            .on_action(cx.listener(|this, _: &LayoutLive, window, cx| this.switch_mode("Live", window, cx)))
+            .on_action(cx.listener(|this, _: &LayoutMinimal, window, cx| this.switch_mode("Minimal", window, cx)))
+            .on_action(cx.listener(|this, _: &SaveLayoutMode, _, cx| this.save_layout_as_mode(cx)))
             .on_action(cx.listener(|this, _: &ShowLibrary, _, cx| this.show_place(Place::Library, cx)))
             .on_action(cx.listener(|this, _: &ShowLive, _, cx| this.show_place(Place::Live, cx)))
             .on_action(cx.listener(|this, _: &ShowEditor, _, cx| this.show_place(Place::Editor, cx)))

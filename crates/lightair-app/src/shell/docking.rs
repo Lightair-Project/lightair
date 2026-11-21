@@ -21,6 +21,139 @@ pub(super) enum Region {
     Assets,
 }
 
+/// Every panel the dock arranges (kept so a layout can be built again around them).
+#[derive(Clone)]
+pub(super) struct DockPanels {
+    objects: Entity<ShellPanel>,
+    scenes: Entity<ShellPanel>,
+    canvas: Entity<ShellPanel>,
+    inspector: Entity<ShellPanel>,
+    assets: Entity<ShellPanel>,
+    mixer: Entity<crate::mixer::MixerDock>,
+    outputs: Entity<crate::outputs_panel::OutputsPanel>,
+    chat: Entity<crate::chat_panel::ChatPanel>,
+    activity: Entity<crate::activity_panel::ActivityPanel>,
+    stream: Entity<crate::stream_panel::StreamPanel>,
+    automations: Entity<crate::automations_panel::AutomationsPanel>,
+}
+
+impl DockPanels {
+    /// Registers each panel under its name, so a saved layout can be loaded onto these very
+    /// panels (rather than new ones).
+    fn register(&self, cx: &mut App) {
+        use gpui_kit::component::dock::register_panel;
+        macro_rules! reg {
+            ($name:expr, $entity:expr) => {{
+                let e = $entity.clone();
+                register_panel(cx, $name, move |_, _, _| panel_handle(e.clone()));
+            }};
+        }
+        reg!("layers", self.objects);
+        reg!("scenes", self.scenes);
+        reg!("canvas", self.canvas);
+        reg!("inspector", self.inspector);
+        reg!("assets", self.assets);
+        reg!("mixer", self.mixer);
+        reg!("outputs", self.outputs);
+        reg!("chat", self.chat);
+        reg!("activity", self.activity);
+        reg!("stream", self.stream);
+        reg!("automations", self.automations);
+    }
+}
+
+/// Arranges the panels as a mode wants (shell/modes.rs): Edit is the layout the window opens
+/// with; Live puts Chat and Activity first and large with the mixer alone below; Minimal
+/// leaves the canvas with no side docks.
+pub(super) fn populate_dock(
+    panels: &DockPanels,
+    preset: super::modes::Preset,
+    area: &mut gpui_kit::component::dock::DockArea,
+    window: &mut Window,
+    cx: &mut Context<gpui_kit::component::dock::DockArea>,
+) {
+    use super::modes::Preset;
+    let hook = std::env::var("LIGHTAIR_OPEN").ok();
+    let open_hook = |h: &str| hook.as_deref().is_some_and(|v| v.starts_with(h));
+    area.set_center(DockLayout::tabs().panel_view(panel_handle(panels.canvas.clone()), cx), window, cx);
+    // the mixer and assets: a dock of their own, so they hide like the side panels
+    let mut bottom = DockLayout::tabs().panel_view(panel_handle(panels.mixer.clone()), cx);
+    if preset != Preset::Live {
+        bottom = bottom
+            .panel_view(panel_handle(panels.assets.clone()), cx)
+            .panel_view(panel_handle(panels.automations.clone()), cx)
+            .active_index(match hook.as_deref() {
+                Some(h) if h.starts_with("assets") => 1,
+                Some(h) if h.starts_with("automations") => 2,
+                _ => 0,
+            });
+    }
+    area.set_dock(DockPlacement::Bottom, bottom, window, cx);
+    // tall enough for a full channel strip (taller for the audio screenshot hooks); compact when live
+    let bottom_h = match preset {
+        Preset::Live => 260.,
+        _ if open_hook("audio") => 600.,
+        _ => 420.,
+    };
+    area.set_dock_size(DockPlacement::Bottom, px(bottom_h), window, cx);
+    area.set_dock(
+        DockPlacement::Left,
+        DockLayout::v_split()
+            .child(DockLayout::tabs().panel_view(panel_handle(panels.objects.clone()), cx), None)
+            .child(DockLayout::tabs().panel_view(panel_handle(panels.scenes.clone()), cx), Some(px(300.))),
+        window,
+        cx,
+    );
+    // the right dock: Edit has Outputs first and a tall Inspector; Live has Chat first and large
+    let right_tabs = match preset {
+        Preset::Live => DockLayout::tabs()
+            .panel_view(panel_handle(panels.chat.clone()), cx)
+            .panel_view(panel_handle(panels.activity.clone()), cx)
+            .panel_view(panel_handle(panels.outputs.clone()), cx)
+            .panel_view(panel_handle(panels.stream.clone()), cx),
+        _ => DockLayout::tabs()
+            .panel_view(panel_handle(panels.outputs.clone()), cx)
+            .panel_view(panel_handle(panels.chat.clone()), cx)
+            .panel_view(panel_handle(panels.activity.clone()), cx)
+            .panel_view(panel_handle(panels.stream.clone()), cx)
+            .active_index(match hook.as_deref() {
+                Some("chat") => 1,
+                Some(h) if h.starts_with("activity") => 2,
+                Some("stream") => 3,
+                _ => 0,
+            }),
+    };
+    area.set_dock(
+        DockPlacement::Right,
+        match preset {
+            // Live: the stream's panels fill the dock; the Inspector steps aside as a tab
+            Preset::Live => DockLayout::tabs()
+                .panel_view(panel_handle(panels.chat.clone()), cx)
+                .panel_view(panel_handle(panels.activity.clone()), cx)
+                .panel_view(panel_handle(panels.outputs.clone()), cx)
+                .panel_view(panel_handle(panels.stream.clone()), cx)
+                .panel_view(panel_handle(panels.inspector.clone()), cx),
+            _ => DockLayout::v_split()
+                .child(right_tabs, Some(px(320.)))
+                .child(DockLayout::tabs().panel_view(panel_handle(panels.inspector.clone()), cx), None),
+        },
+        window,
+        cx,
+    );
+    area.set_dock_size(DockPlacement::Left, px(260.), window, cx);
+    area.set_dock_size(DockPlacement::Right, px(if preset == Preset::Live { 440. } else { 320. }), window, cx);
+    // which docks are showing: Edit all of them; Live the right and the bottom; Minimal none
+    for (placement, wanted) in [
+        (DockPlacement::Left, preset == Preset::Edit),
+        (DockPlacement::Right, preset != Preset::Minimal),
+        (DockPlacement::Bottom, preset != Preset::Minimal),
+    ] {
+        if area.is_dock_open(placement) != wanted {
+            area.toggle_dock(placement, window, cx);
+        }
+    }
+}
+
 pub(super) struct ShellPanel {
     shell: WeakEntity<StudioWindow>,
     region: Region,
@@ -210,13 +343,19 @@ impl StudioWindow {
         }
         let me = cx.entity();
         let panel = |region: Region, cx: &mut Context<Self>| cx.new(|cx| ShellPanel::new(me.clone(), region, cx));
-        let (objects, scenes) = (panel(Region::Hierarchy, cx), panel(Region::Scenes, cx));
-        let (canvas, inspector) = (panel(Region::Canvas, cx), panel(Region::Inspector, cx));
-        let assets = panel(Region::Assets, cx);
-        let (mixer, outputs, chat) = (self.mixer_dock.clone(), self.outputs.clone(), self.chat.clone());
-        let activity = self.activity.clone();
-        let stream = self.stream.clone();
-        let automations = self.automations_panel.clone();
+        let panels = DockPanels {
+            objects: panel(Region::Hierarchy, cx),
+            scenes: panel(Region::Scenes, cx),
+            canvas: panel(Region::Canvas, cx),
+            inspector: panel(Region::Inspector, cx),
+            assets: panel(Region::Assets, cx),
+            mixer: self.mixer_dock.clone(),
+            outputs: self.outputs.clone(),
+            chat: self.chat.clone(),
+            activity: self.activity.clone(),
+            stream: self.stream.clone(),
+            automations: self.automations_panel.clone(),
+        };
         // Every group shows a tab bar, even with one panel, so any panel can be dropped onto
         // any header to join it as a tab (and the canvas gets a header like the rest).
         let (dock, skin) = DockSkin::dock_area("lightair-studio", Some(1), window, cx);
@@ -225,59 +364,44 @@ impl StudioWindow {
         skin.set_menu_button_visible(false, cx);
         // a tab's right-click: its panel in a window of its own (shell/panel_window)
         skin.set_tab_menu(Self::tab_menu(cx.entity().downgrade()), cx);
-        dock.update(cx, |area, cx| {
-            area.set_center(DockLayout::tabs().panel_view(panel_handle(canvas), cx), window, cx);
-            // the mixer and assets: a dock of their own, so they hide like the side panels
-            area.set_dock(
-                DockPlacement::Bottom,
-                DockLayout::tabs()
-                    .panel_view(panel_handle(mixer), cx)
-                    .panel_view(panel_handle(assets), cx)
-                    .panel_view(panel_handle(automations), cx)
-                    .active_index(match std::env::var("LIGHTAIR_OPEN").as_deref() {
-                        Ok(h) if h.starts_with("assets") => 1,
-                        Ok(h) if h.starts_with("automations") => 2,
-                        _ => 0,
-                    }),
-                window,
-                cx,
-            );
-            // tall enough for a full channel strip (taller for the audio screenshot hooks)
-            let bottom = if std::env::var("LIGHTAIR_OPEN").is_ok_and(|h| h.starts_with("audio")) { 600. } else { 420. };
-            area.set_dock_size(DockPlacement::Bottom, px(bottom), window, cx);
-            area.set_dock(
-                DockPlacement::Left,
-                DockLayout::v_split()
-                    .child(DockLayout::tabs().panel_view(panel_handle(objects), cx), None)
-                    .child(DockLayout::tabs().panel_view(panel_handle(scenes), cx), Some(px(300.))),
-                window,
-                cx,
-            );
-            area.set_dock(
-                DockPlacement::Right,
-                DockLayout::v_split()
-                    .child(
-                        DockLayout::tabs()
-                            .panel_view(panel_handle(outputs), cx)
-                            .panel_view(panel_handle(chat), cx)
-                            .panel_view(panel_handle(activity), cx)
-                            .panel_view(panel_handle(stream), cx)
-                            .active_index(match std::env::var("LIGHTAIR_OPEN").as_deref() {
-                                Ok("chat") => 1,
-                                Ok(h) if h.starts_with("activity") => 2,
-                                Ok("stream") => 3,
-                                _ => 0,
-                            }),
-                        Some(px(320.)),
-                    )
-                    .child(DockLayout::tabs().panel_view(panel_handle(inspector), cx), None),
-                window,
-                cx,
-            );
-            area.set_dock_size(DockPlacement::Left, px(260.), window, cx);
-            area.set_dock_size(DockPlacement::Right, px(320.), window, cx);
-        });
+        // the panels a saved layout can name (shell/modes.rs loads them back by name)
+        panels.register(cx);
+        dock.update(cx, |area, cx| populate_dock(&panels, super::modes::Preset::Edit, area, window, cx));
+        self.dock_panels = Some(panels);
         self.dock = Some(dock);
+        // The layout last used on these displays comes back (a hook can ask for one to look at).
+        match std::env::var("LIGHTAIR_OPEN").ok().as_deref().and_then(|h| h.strip_prefix("mode:")) {
+            Some(name) => {
+                let name = name.to_string();
+                // "roundtrip": Live saved as a layout, Edit, then the saved layout back
+                if name == "roundtrip" {
+                    self.switch_mode("Live", window, cx);
+                    self.save_layout_as_mode(cx);
+                    self.switch_mode("Edit", window, cx);
+                    self.switch_mode("Layout 1", window, cx);
+                } else {
+                    self.switch_mode(&name, window, cx);
+                }
+                if let Some(area) = &self.dock {
+                    let a = area.read(cx);
+                    tracing::info!(
+                        mode = name,
+                        left = a.is_dock_open(DockPlacement::Left),
+                        right = a.is_dock_open(DockPlacement::Right),
+                        bottom = a.is_dock_open(DockPlacement::Bottom),
+                        right_size = ?a.dock_size(DockPlacement::Right),
+                        "CHECK mode"
+                    );
+                }
+            }
+            None if std::env::var_os("LIGHTAIR_OPEN").is_none() => {
+                let mode = self.current_mode(cx);
+                if mode != "Edit" {
+                    self.switch_mode(&mode, window, cx);
+                }
+            }
+            None => {}
+        }
         // Development: open a dialog on launch for screenshots (no clicking needed).
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
             Ok("add-object") => self.open_add_object(window, cx),
