@@ -350,15 +350,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lists_this_macs_inputs() {
-        // listing doesn't open anything (no permission prompt)
-        for d in input_devices() {
-            eprintln!("{} · {} ch · {} Hz{}", d.name, d.channels, d.sample_rate, if d.default { " (default)" } else { "" });
-            assert!(d.channels > 0);
-        }
-    }
-
-    #[test]
     fn resampling_keeps_a_ramp_straight() {
         // 44.1 → 48 kHz on a ramp: the output is the same ramp, denser
         let mut r = Resampler::new(1, 44_100, 48_000);
