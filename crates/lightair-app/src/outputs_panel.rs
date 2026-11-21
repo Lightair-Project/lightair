@@ -104,6 +104,11 @@ pub fn elapsed(since: Instant) -> String {
 fn status_of(st: &lightair_engine::outputs::OutputStatus) -> (String, Hsla) {
     match (&st.state, st.reconnect) {
         (OutputState::Reconnecting { .. }, Some(r)) => (reconnect_text(&r), tok::warn()),
+        // a delayed stream keeps sending what it held back
+        (OutputState::Stopping, _) if st.delay_s > 0 && st.stopping_since.is_some() => {
+            let left = (st.delay_s as u64).saturating_sub(st.stopping_since.map_or(0, |t| t.elapsed().as_secs()));
+            (format!("Ending in {left} s"), tok::text_secondary())
+        }
         (state, _) => status_text(state),
     }
 }
@@ -634,7 +639,7 @@ impl OutputsPanel {
             encoding: d.encoding,
             audio_mix: d.audio_mix,
             vod_mix: d.vod_mix,
-            options: d.options,
+            options: d.options.clone(),
             error: None,
         }));
         cx.notify();
@@ -669,7 +674,7 @@ impl OutputsPanel {
             encoding: e.encoding,
             audio_mix: e.audio_mix,
             vod_mix: e.vod_mix,
-            options: e.options,
+            options: e.options.clone(),
             chat: Some(e.chat.read(cx).value().trim().to_string()).filter(|c| !c.is_empty()),
             ..old
         };
@@ -993,7 +998,7 @@ impl OutputsPanel {
                 draft.canvas = e.canvas;
                 draft.encoding = e.encoding;
                 draft.audio_mix = e.audio_mix;
-                draft.options = e.options;
+                draft.options = e.options.clone();
                 let sharing: Vec<&Destination> =
                     others.iter().filter(|o| crate::encoding::why_apart(&caps, workspace, &draft, o).is_none()).collect();
                 let (note, colour) = if sharing.is_empty() {
@@ -1125,6 +1130,152 @@ impl OutputsPanel {
                 .child(row("Reconnect", Some("How many times to try again when the server drops the connection. The row counts down to each try and can cancel or try now."), tries.into_any_element()))
                 .child(row("Between tries", None, delays.into_any_element()));
         }
+        // Which way out, and a delay.
+        let set_opts = {
+            let me = cx.entity().downgrade();
+            move |f: Box<dyn Fn(&mut StreamOptions)>| {
+                let me = me.clone();
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    if let Some(me) = me.upgrade() {
+                        me.update(cx, |this, cx| {
+                            if let Some(Setup::Edit(e)) = &mut this.setup {
+                                f(&mut e.options);
+                            }
+                            cx.notify();
+                        });
+                    }
+                }
+            }
+        };
+        let network = {
+            // (RTMP and RTMPS can choose; the others say so)
+            let note = (!rtmp).then_some("Choosing a connection or address type works for RTMP and RTMPS only.");
+            let current = e.options.network.interface.clone();
+            let connected = lightair_platform::net::interfaces();
+            let mut names: Vec<String> = Vec::new();
+            for i in &connected {
+                if !names.contains(&i.name) {
+                    names.push(i.name.clone());
+                }
+            }
+            let label = match &current {
+                None => "Automatic".to_string(),
+                Some(n) if names.contains(n) => lightair_platform::net::interface_label(n),
+                Some(n) => format!("{} (not connected)", lightair_platform::net::interface_label(n)),
+            };
+            let menu_opts = set_opts.clone();
+            let conn_menu = Button::new("edit-interface").label(label).small().outline().w_full().dropdown_caret(true).disabled(!rtmp).dropdown_menu({
+                let names = names.clone();
+                let current = current.clone();
+                move |mut menu, _, _| {
+                    menu = menu.item(PopupMenuItem::new("Automatic (the system's choice)").on_click(menu_opts(Box::new(|o| o.network.interface = None))));
+                    // the saved one stays listed when its cable is out, so it can be seen and changed
+                    let mut all = names.clone();
+                    if let Some(c) = &current
+                        && !all.contains(c)
+                    {
+                        all.push(c.clone());
+                    }
+                    for n in all {
+                        let pick = n.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(lightair_platform::net::interface_label(&n))
+                                .on_click(menu_opts(Box::new(move |o| o.network.interface = Some(pick.clone())))),
+                        );
+                    }
+                    menu
+                }
+            });
+            let mut families = seg();
+            for (i, (fam, text)) in [
+                (lightair_model::IpFamily::Auto, "Either"),
+                (lightair_model::IpFamily::V4, "IPv4"),
+                (lightair_model::IpFamily::V6, "IPv6"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                families = families.child(
+                    chip(("edit-ipfamily", i), text.to_string(), e.options.network.ip_family == fam, rtmp)
+                        .on_click(set_opts(Box::new(move |o| o.network.ip_family = fam))),
+                );
+            }
+            card("Network")
+                .child(row(
+                    "Connection",
+                    Some("Send over one connection, such as the Ethernet cable, whatever else is on. It's found again by name each time you go live."),
+                    div().flex_1().child(conn_menu).into_any_element(),
+                ))
+                .child(row("Address type", None, families.into_any_element()))
+                .when_some(note, |d, n| d.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(n)))
+        };
+        let delay = {
+            let current = e.options.delay;
+            let mbps = match e.encoding {
+                Some(enc) => enc.bitrate_kbps,
+                None => destination.as_ref().map(|d| crate::encoding::automatic(workspace, d).bitrate_kbps).unwrap_or(6000),
+            };
+            let mut card_ = card("Delay").child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Hold the stream back")).child(
+                        div().text_size(px(11.)).text_color(tok::text_tertiary()).child(match current {
+                            None => "Off: viewers see it as it happens.".to_string(),
+                            Some(d) => format!(
+                                "Viewers see it {} s late. It uses about {} MB of memory while live.",
+                                d.seconds,
+                                (mbps as u64 * d.seconds as u64 / 8000).max(1)
+                            ),
+                        }),
+                    ))
+                    .child(toggle("edit-delay", current.is_some()).on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(Setup::Edit(e)) = &mut this.setup {
+                            e.options.delay = match e.options.delay {
+                                Some(_) => None,
+                                None => Some(lightair_model::StreamDelay { seconds: 30, preserve_cutoff: false }),
+                            };
+                        }
+                        cx.notify();
+                    }))),
+            );
+            if let Some(d) = current {
+                let mut secs = seg();
+                for (i, n) in [10u32, 30, 60, 120].into_iter().enumerate() {
+                    secs = secs.child(
+                        chip(("edit-delay-s", i), format!("{n} s"), d.seconds == n, true)
+                            .on_click(set_opts(Box::new(move |o| {
+                                if let Some(x) = &mut o.delay {
+                                    x.seconds = n
+                                }
+                            }))),
+                    );
+                }
+                card_ = card_
+                    .child(div().h(px(1.)).bg(tok::border()))
+                    .child(row("Seconds", None, secs.into_any_element()))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Carry on after a drop")).child(
+                                div().text_size(px(11.)).text_color(tok::text_tertiary()).child(
+                                    "After a dropped connection, resume where it stopped instead of skipping ahead. Uses more memory while it reconnects.",
+                                ),
+                            ))
+                            .child(toggle("edit-delay-preserve", d.preserve_cutoff).on_click(set_opts(Box::new(|o| {
+                                if let Some(x) = &mut o.delay {
+                                    x.preserve_cutoff = !x.preserve_cutoff
+                                }
+                            })))),
+                    );
+            }
+            card_
+        };
         let id = e.id;
         let connection = card("Connection")
             .child(server)
@@ -1173,6 +1324,8 @@ impl OutputsPanel {
             .child(picture_sound)
             .child(quality)
             .child(reconnect)
+            .child(network)
+            .child(delay)
             .when_some(e.error.clone(), |d, err| d.child(div().text_size(px(12.)).text_color(tok::error()).child(err)))
             .child(
                 div()
@@ -1823,6 +1976,7 @@ impl Render for OutputsPanel {
             let st = runtime().get(OutputKey::Stream(id));
             let running = st.state.is_running();
             let reconnecting = matches!(st.state, OutputState::Reconnecting { .. });
+            let stopping_delayed = st.state == OutputState::Stopping && st.delay_s > 0;
             let live_now = runtime().any_stream_running();
             let state = if enabled || st.state.is_running() {
                 status_of(&st)
@@ -1849,6 +2003,11 @@ impl Render for OutputsPanel {
                 .find(|(_, url)| *url == d.server)
                 .map(|(label, _)| format!("{label} · {}", StreamProtocol::label(&d.server)))
                 .unwrap_or_else(|| format!("{} · {}", host_of(&d.server), StreamProtocol::label(&d.server)));
+            let where_ = if st.state.is_running() && st.delay_s > 0 {
+                format!("{where_} · delayed {} s", st.delay_s)
+            } else {
+                where_
+            };
             // Drops while live, by cause: the connection's and the encoder's (render lag is global).
             let where_ = if st.state.is_running() && (st.dropped_frames > 0 || st.encoder_skipped > 0) {
                 format!(
@@ -1992,7 +2151,9 @@ impl Render for OutputsPanel {
                                     }
                                 }
                             };
-                            let menu = if reconnecting {
+                            let menu = if stopping_delayed {
+                                menu.item(PopupMenuItem::new("Stop now (drop what's held back)").on_click(act(Studio::force_stop_destination)))
+                            } else if reconnecting {
                                 menu.item(PopupMenuItem::new("Try again now").on_click(act(Studio::restart_destination)))
                                     .item(PopupMenuItem::new("Cancel reconnecting").on_click(act(Studio::stop_destination)))
                             } else if running {

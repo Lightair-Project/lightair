@@ -144,6 +144,53 @@ pub enum StartChoice {
 /// How long a destination may take to come up before the sequence calls it failed.
 const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// How a destination is sent: the address of its network connection (found by name now, since
+/// addresses change), its address family, and its delay. Err: why it can't be (the connection is
+/// gone, or the protocol can't choose).
+fn stream_net(
+    d: &lightair_model::Destination,
+    interfaces: &[lightair_platform::net::Interface],
+) -> Result<lightair_engine::outputs::StreamNet, String> {
+    use lightair_engine::outputs::StreamProtocol;
+    use lightair_model::IpFamily;
+    let net = &d.options.network;
+    let rtmp = matches!(StreamProtocol::of(&d.server), Some(StreamProtocol::Rtmp));
+    if (net.interface.is_some() || net.ip_family != IpFamily::Auto) && !rtmp {
+        return Err(format!(
+            "{}: choosing a network connection or address type works for RTMP and RTMPS only.",
+            d.name
+        ));
+    }
+    let bind_ip = match &net.interface {
+        None => None,
+        Some(name) => {
+            let family = match net.ip_family {
+                IpFamily::Auto => None,
+                IpFamily::V4 => Some(false),
+                IpFamily::V6 => Some(true),
+            };
+            let address = lightair_platform::net::address_of(interfaces, name, family).ok_or_else(|| {
+                format!(
+                    "{}: {} isn't connected{}.",
+                    d.name,
+                    lightair_platform::net::interface_label(name),
+                    match net.ip_family {
+                        IpFamily::Auto => "",
+                        IpFamily::V4 => " over IPv4",
+                        IpFamily::V6 => " over IPv6",
+                    }
+                )
+            })?;
+            Some(address.to_string())
+        }
+    };
+    Ok(lightair_engine::outputs::StreamNet {
+        bind_ip,
+        ip_family: net.ip_family,
+        delay: d.options.delay.filter(|x| x.seconds > 0).map(|x| (x.seconds, x.preserve_cutoff)),
+    })
+}
+
 /// Where a destination being started has got to.
 #[derive(Debug, PartialEq, Eq)]
 enum StartCheck {
@@ -1350,7 +1397,9 @@ impl Studio {
         };
         // its own tries and delay, else the workspace's
         let reconnect = d.options.reconnect.unwrap_or(workspace.outputs.reconnect);
+        let net = stream_net(d, &lightair_platform::net::interfaces())?;
         let cfg = StreamConfig {
+            net,
             id: d.id,
             server: d.server.clone(),
             key,
@@ -1459,6 +1508,12 @@ impl Studio {
     /// Stops one destination; the others carry on (a shared encoder stays while one still uses it).
     pub fn stop_destination(&mut self, id: Id, cx: &mut Context<Self>) {
         self.engine.post(move |s| s.outputs.stop_stream(id));
+        cx.notify();
+    }
+
+    /// Ends a delayed destination now instead of letting its delay drain.
+    pub fn force_stop_destination(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.engine.post(move |s| s.outputs.force_stop_stream(id));
         cx.notify();
     }
 
@@ -1815,5 +1870,59 @@ mod start_sequence_tests {
         assert!(matches!(check_start(&OutputState::Idle, secs(1)), StartCheck::Failed(_)), "stopped without coming up");
         assert!(matches!(check_start(&OutputState::Starting, secs(16)), StartCheck::Failed(_)), "too slow");
         assert_eq!(check_start(&OutputState::Starting, secs(14)), StartCheck::Waiting);
+    }
+}
+
+#[cfg(test)]
+mod stream_net_tests {
+    use super::stream_net;
+    use lightair_model::{Destination, IpFamily, StreamDelay};
+    use lightair_platform::net::Interface;
+
+    fn dest(server: &str) -> Destination {
+        Destination {
+            id: lightair_model::Id::new(),
+            name: "Kick".into(),
+            server: server.into(),
+            enabled: true,
+            canvas: None,
+            platform: None,
+            encoding: None,
+            audio_mix: None,
+            vod_mix: None,
+            chat: None,
+            options: Default::default(),
+        }
+    }
+
+    fn iface(name: &str, ip: &str) -> Interface {
+        Interface { name: name.into(), address: ip.parse().unwrap() }
+    }
+
+    #[test]
+    fn a_destination_binds_to_its_connection_by_name() {
+        let list = [iface("en0", "192.168.1.20"), iface("en5", "10.0.0.7")];
+        let mut d = dest("rtmps://example.com/live");
+        assert_eq!(stream_net(&d, &list).unwrap().bind_ip, None, "the system's choice");
+        d.options.network.interface = Some("en5".into());
+        assert_eq!(stream_net(&d, &list).unwrap().bind_ip.as_deref(), Some("10.0.0.7"));
+        d.options.network.interface = Some("en7".into());
+        assert!(stream_net(&d, &list).unwrap_err().contains("isn't connected"), "the cable is out");
+    }
+
+    #[test]
+    fn other_protocols_say_they_cannot_choose() {
+        let mut d = dest("srt://example.com:9000");
+        d.options.network.ip_family = IpFamily::V6;
+        assert!(stream_net(&d, &[]).unwrap_err().contains("RTMP and RTMPS only"));
+    }
+
+    #[test]
+    fn a_delay_carries_its_cutoff_choice() {
+        let mut d = dest("rtmp://example.com/live");
+        d.options.delay = Some(StreamDelay { seconds: 30, preserve_cutoff: true });
+        assert_eq!(stream_net(&d, &[]).unwrap().delay, Some((30, true)));
+        d.options.delay = Some(StreamDelay { seconds: 0, preserve_cutoff: true });
+        assert_eq!(stream_net(&d, &[]).unwrap().delay, None, "zero seconds is no delay");
     }
 }

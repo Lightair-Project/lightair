@@ -78,6 +78,10 @@ pub struct OutputStatus {
     pub retries: u32,
     /// Streams: while reconnecting, the try coming and when.
     pub reconnect: Option<ReconnectInfo>,
+    /// Streams with a delay: the delay in force, seconds (while live or draining).
+    pub delay_s: u32,
+    /// Streams: when it was asked to stop (a delayed stream goes on sending for a while).
+    pub stopping_since: Option<Instant>,
     /// Streams with adaptive bitrate: the encoder's bitrate now and what it is set to (kbps).
     pub current_kbps: u32,
     pub target_kbps: u32,
@@ -113,6 +117,8 @@ impl Default for OutputStatus {
             encoder_skipped: 0,
             retries: 0,
             reconnect: None,
+            delay_s: 0,
+            stopping_since: None,
             current_kbps: 0,
             target_kbps: 0,
             saved_clips: 0,
@@ -389,6 +395,19 @@ pub struct StreamConfig {
     pub reconnect: Option<(u32, u32)>,
     /// A second audio track (Twitch's VOD track): the libobs mix it carries (RTMP only).
     pub vod_mix: Option<usize>,
+    /// Which way out it goes, and any delay.
+    pub net: StreamNet,
+}
+
+/// How a stream is sent: over which address, and held back how long.
+#[derive(Debug, Clone, Default)]
+pub struct StreamNet {
+    /// The local address to send from (an interface's); `None`: the system's choice. RTMP only.
+    pub bind_ip: Option<String>,
+    pub ip_family: lightair_model::IpFamily,
+    /// Seconds to hold the stream back, and whether a dropped connection carries on from where
+    /// it stopped (libobs's "preserve cutoff point").
+    pub delay: Option<(u32, bool)>,
 }
 
 // ---------------------------------------------------------------- libobs objects
@@ -630,6 +649,11 @@ fn skipped_of(encoder: *mut sys::obs_encoder_t) -> u32 {
     }
 }
 
+/// The delay a stream is holding its data back by, seconds (0: none).
+fn obs_delay(output: *mut sys::obs_output_t) -> u32 {
+    unsafe { sys::obs_output_get_active_delay(output) }
+}
+
 /// The bitrate an encoder is set to now, kbps (dynamic bitrate changes it while live).
 fn encoder_kbps(encoder: *mut sys::obs_encoder_t) -> u32 {
     if encoder.is_null() {
@@ -739,6 +763,7 @@ unsafe fn start(
     video_output: *mut sys::video_t,
     shared: Option<(*mut sys::obs_encoder_t, *mut sys::obs_encoder_t)>,
     extra_mixes: &[usize],
+    delay: Option<(u32, bool)>,
 ) -> Result<Running, String> {
     let name = match key {
         OutputKey::Recording(canvas) => format!("Recording {canvas}"),
@@ -799,6 +824,10 @@ unsafe fn start(
         }
         if !service.is_null() {
             sys::obs_output_set_service(output, service);
+        }
+        // held back before it goes out (must be set before the output starts)
+        if let Some((seconds, preserve)) = delay.filter(|(s, _)| *s > 0) {
+            sys::obs_output_set_delay(output, seconds, if preserve { sys::OBS_OUTPUT_DELAY_PRESERVE } else { 0 });
         }
         let signal_param = Box::into_raw(Box::new(key));
         let handler = sys::obs_output_get_signal_handler(output);
@@ -869,6 +898,7 @@ impl Outputs {
                 video_output,
                 None,
                 &cfg.extra_mixes,
+                None,
             )?
         };
         runtime().update(key, |s| {
@@ -994,6 +1024,20 @@ impl Outputs {
         // RTMP's dynamic bitrate: the output lowers its encoder's bitrate when the connection
         // backs up and raises it again. The other protocols manage congestion themselves.
         output_settings.set_bool("dyn_bitrate", encoders.adaptive && protocol == StreamProtocol::Rtmp);
+        // which way out (RTMP's own options; the other protocols don't have them yet)
+        if protocol == StreamProtocol::Rtmp {
+            if let Some(ip) = &cfg.net.bind_ip {
+                output_settings.set_str("bind_ip", ip);
+            }
+            output_settings.set_str(
+                "ip_family",
+                match cfg.net.ip_family {
+                    lightair_model::IpFamily::Auto => "IPv4+IPv6",
+                    lightair_model::IpFamily::V4 => "IPv4",
+                    lightair_model::IpFamily::V6 => "IPv6",
+                },
+            );
+        }
         // On failure `start` releases everything it was given, the service included.
         // Destinations with identical encoder settings on the same canvas share one encoder pair.
         // (An adaptive destination's encoder is its own: its output changes the bitrate.)
@@ -1005,8 +1049,9 @@ impl Outputs {
         let shared = shared.filter(|(v, a)| !v.is_null() && !a.is_null());
         // Twitch's VOD track: a second audio track, as OBS sends it (RTMP's multitrack audio)
         let vod: Vec<usize> = cfg.vod_mix.filter(|_| protocol == StreamProtocol::Rtmp).into_iter().collect();
-        let running =
-            unsafe { start(key, output_type, &output_settings, &encoders, service, video_output, shared, &vod)? };
+        let running = unsafe {
+            start(key, output_type, &output_settings, &encoders, service, video_output, shared, &vod, cfg.net.delay)?
+        };
         if let Some((retries, delay)) = cfg.reconnect {
             unsafe { sys::obs_output_set_reconnect_settings(running.output, retries as i32, delay as i32) };
             runtime().update(key, |s| s.retries = retries);
@@ -1057,11 +1102,20 @@ impl Outputs {
     pub fn stop_stream(&mut self, id: Id) {
         if let Some(r) = self.streams.get(&id) {
             runtime().update(OutputKey::Stream(id), |s| {
-                if s.state.is_running() {
-                    s.state = OutputState::Stopping
+                if s.state.is_running() && s.state != OutputState::Stopping {
+                    s.state = OutputState::Stopping;
+                    s.stopping_since = Some(Instant::now());
                 }
             });
             unsafe { sys::obs_output_stop(r.output) };
+        }
+    }
+
+    /// Ends a stream at once, without letting its delay drain (the viewers lose what was still
+    /// held back).
+    pub fn force_stop_stream(&mut self, id: Id) {
+        if let Some(r) = self.streams.get(&id) {
+            unsafe { sys::obs_output_force_stop(r.output) };
         }
     }
 
@@ -1213,6 +1267,7 @@ impl Outputs {
                 video_output,
                 None,
                 &[],
+                None,
             )?
         };
         *CLIPS_OUTPUT.lock() = Some(OutputPtr(running.output));
@@ -1261,10 +1316,12 @@ impl Outputs {
                 sys::obs_output_get_total_frames(r.output),
             );
             let skipped = skipped_of(r.video).saturating_sub(r.skipped_base);
+            let delay = obs_delay(r.output);
             let (current, target) = if r.adaptive { (encoder_kbps(r.video), r.share.1.video_bitrate_kbps) } else { (0, 0) };
             runtime().update(key, |s| {
                 s.current_kbps = current;
                 s.target_kbps = target;
+                s.delay_s = delay;
                 s.bytes = bytes;
                 s.dropped_frames = dropped;
                 s.total_frames = total;

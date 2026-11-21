@@ -55,6 +55,7 @@ fn a_dropped_stream_counts_down_and_cancel_stops_the_retries() {
         // three tries, five seconds apart: long enough to see the countdown
         reconnect: Some((3, 5)),
         vod_mix: None,
+        net: Default::default(),
     };
     engine.call(move |s| s.outputs.start_stream(&cfg, None)).expect("stream starts");
     assert!(wait(Duration::from_secs(6), || matches!(runtime().get(OutputKey::Stream(id)).state, OutputState::Active { .. })));

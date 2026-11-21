@@ -22,6 +22,7 @@ mod reconcile;
 mod recording_tools;
 mod smoke;
 mod stems;
+mod stream_options;
 mod stream_protocols;
 mod stream_reconnect;
 mod stream_sharing;
