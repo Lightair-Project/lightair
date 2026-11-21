@@ -11,6 +11,7 @@ use lightair_model::{Command, Id};
 
 use super::StudioWindow;
 use crate::preflight::{self, Level};
+use crate::studio::StartChoice;
 use crate::ui::{self, tok};
 
 pub(super) struct GoLiveSheet {
@@ -47,6 +48,80 @@ impl StudioWindow {
                 s.toggle_recording(cx);
             }
         });
+    }
+
+    /// The sheet shown while an ordered start waits on a destination that didn't come up.
+    pub(super) fn start_failure_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let studio = self.studio.read(cx);
+        let failure = studio.sequence.as_ref()?.failure.clone()?;
+        let answer = |choice: StartChoice| {
+            cx.listener(move |this, _, _, cx| this.studio.update(cx, |s, cx| s.answer_start_failure(choice, cx)))
+        };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(tok::scrim())
+                .occlude()
+                .child(
+                    div()
+                        .id("start-failure")
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .w(px(420.))
+                        .p_5()
+                        .rounded(px(14.))
+                        .bg(tok::bg_panel())
+                        .border_1()
+                        .border_color(tok::border_strong())
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .text_size(px(16.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(format!("{} didn't start", failure.name)),
+                        )
+                        .child(div().text_color(tok::text_secondary()).child(failure.reason))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(tok::text_tertiary())
+                                .child("The destinations before it are live. The ones after it haven't started."),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("start-stop-all")
+                                        .label("Stop all")
+                                        .small()
+                                        .ghost()
+                                        .on_click(answer(StartChoice::StopAll)),
+                                )
+                                .child(
+                                    Button::new("start-retry")
+                                        .label("Try again")
+                                        .small()
+                                        .ghost()
+                                        .on_click(answer(StartChoice::Retry)),
+                                )
+                                .child(
+                                    Button::new("start-continue")
+                                        .label("Continue without it")
+                                        .small()
+                                        .primary()
+                                        .on_click(answer(StartChoice::Continue)),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     pub(super) fn go_live_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

@@ -449,6 +449,13 @@ impl StudioWindow {
                         ),
                     ))
                     .child(row(
+                        "Start every destination together",
+                        Some("Off: they start one at a time in the order of the list, each checked before the next, and you choose what to do about one that fails."),
+                        switch("pref-start-together", self.prefs.start_together).on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_pref(|p| p.start_together = !p.start_together, cx)
+                        })),
+                    ))
+                    .child(row(
                         "Ask before ending a stream",
                         Some("Ending takes a second click on the Live button."),
                         switch("pref-confirm-end", confirm).on_click(

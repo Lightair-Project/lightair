@@ -208,6 +208,18 @@ impl OutputsRuntime {
     }
 }
 
+/// Marks an output as starting before the engine thread has got to it (the UI waits on the
+/// state: Starting, then Active or Failed).
+pub fn mark_starting(key: OutputKey) {
+    runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
+}
+
+/// Marks an output as failed with a reason the user should see (a start that never reached
+/// libobs, such as a bad address, would otherwise leave no trace).
+pub fn mark_failed(key: OutputKey, reason: &str) {
+    runtime().update(key, |s| s.state = OutputState::Failed(reason.to_string()));
+}
+
 pub fn runtime() -> &'static OutputsRuntime {
     static RUNTIME: OnceLock<OutputsRuntime> = OnceLock::new();
     RUNTIME.get_or_init(OutputsRuntime::default)

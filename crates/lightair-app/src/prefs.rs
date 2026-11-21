@@ -12,6 +12,9 @@ pub struct Preferences {
     pub review_before_live: bool,
     /// Ending a stream takes a second click.
     pub confirm_end_stream: bool,
+    /// Going live starts every destination at once, instead of one at a time in order with a
+    /// check that each came up.
+    pub start_together: bool,
     /// Audio sample rate (Hz); used when Lightair starts.
     pub sample_rate: u32,
     /// "Listen in headphones" device: (name, id); `None`: the system default.
@@ -114,6 +117,7 @@ impl Default for Preferences {
         Self {
             review_before_live: true,
             confirm_end_stream: true,
+            start_together: false,
             sample_rate: 48_000,
             headphones_device: None,
             low_latency_headphones: true,

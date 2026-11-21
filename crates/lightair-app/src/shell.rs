@@ -2352,6 +2352,7 @@ impl Render for StudioWindow {
             .children(self.source_picker_overlay(cx))
             .children(self.outputs.update(cx, |o, cx| o.dialog(cx)))
             .children(self.go_live_overlay(cx))
+            .children(self.start_failure_overlay(cx))
             .children(self.settings_overlay(cx))
             .children(self.palette_overlay(cx))
             .children(self.studio_take_countdown_overlay())

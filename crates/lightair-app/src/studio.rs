@@ -4,7 +4,7 @@
 //! applied to the document, appended to the workspace journal, and the resulting diff is sent to
 //! the engine thread for reconciliation (docs/03-architecture.md, "Document flow").
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -112,6 +112,57 @@ pub enum UiRequest {
     AddEffect(lightair_model::MixerStrip),
 }
 
+/// Going live in order: each enabled destination starts, and the next waits until it is on air
+/// (docs/11-outputs-streaming-recording.md, "Go Live review").
+pub struct StartSequence {
+    queue: VecDeque<Id>,
+    /// The destination being started and when it began.
+    current: Option<(Id, std::time::Instant)>,
+    /// A destination that didn't start: the sequence waits for the user's choice.
+    pub failure: Option<StartFailure>,
+}
+
+/// A destination that didn't start, for the sheet that asks what to do.
+#[derive(Clone)]
+pub struct StartFailure {
+    pub id: Id,
+    pub name: String,
+    pub reason: String,
+}
+
+/// What to do about a destination that didn't start.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StartChoice {
+    /// Go on with the rest.
+    Continue,
+    /// Try this one again.
+    Retry,
+    /// Stop everything started so far.
+    StopAll,
+}
+
+/// How long a destination may take to come up before the sequence calls it failed.
+const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Where a destination being started has got to.
+#[derive(Debug, PartialEq, Eq)]
+enum StartCheck {
+    Waiting,
+    Up,
+    Failed(String),
+}
+
+/// Reads a started destination's state, `elapsed` after it began.
+fn check_start(state: &OutputState, elapsed: std::time::Duration) -> StartCheck {
+    match state {
+        OutputState::Active { .. } => StartCheck::Up,
+        OutputState::Failed(reason) => StartCheck::Failed(reason.clone()),
+        OutputState::Idle => StartCheck::Failed("It stopped before it came up.".into()),
+        _ if elapsed > START_TIMEOUT => StartCheck::Failed("The server didn't answer in 15 seconds.".into()),
+        _ => StartCheck::Waiting,
+    }
+}
+
 pub struct Studio {
     /// The chat of the destinations' channels (docs/plans/live-integrations.md), read while the
     /// workspace is open.
@@ -141,6 +192,8 @@ pub struct Studio {
     pub recent_lagged: u32,
     /// Destinations to start again once they've stopped (a restart from the Outputs panel).
     restart: Vec<Id>,
+    /// Going live one destination at a time, while it runs.
+    pub sequence: Option<StartSequence>,
     /// The newest saved clip, and replays playing on the canvas (scene, object, source).
     pub last_clip: Option<PathBuf>,
     /// What the virtual camera was started on (the workspace's choice then): it restarts when
@@ -208,6 +261,7 @@ impl Studio {
             clips_seen: 0,
             recent_lagged: 0,
             restart: Vec::new(),
+            sequence: None,
             refit: None,
             timers_asked: false,
             pending: None,
@@ -1236,7 +1290,8 @@ impl Studio {
         self.go_live_to(None, cx);
     }
 
-    /// Starts every enabled destination, or just `only` (a destination that failed, again).
+    /// Starts every enabled destination (in order, each confirmed before the next, unless
+    /// "Start together" is on), or just `only` (a destination that failed, again).
     pub fn go_live_to(&mut self, only: Option<Id>, cx: &mut Context<Self>) {
         let workspace = self.workspace().clone();
         // One named destination starts whether or not it's included in going live (it was asked
@@ -1259,33 +1314,140 @@ impl Studio {
         if !runtime().any_stream_running() {
             lightair_engine::loudness::reset_stream_loudness();
         }
-        for d in enabled {
-            let Some(key) = crate::secrets::stream_key(d.id) else {
-                self.issue = Some(format!("No stream key saved for {}.", d.name).into());
-                continue;
-            };
-            // its own tries and delay, else the workspace's
-            let reconnect = d.options.reconnect.unwrap_or(workspace.outputs.reconnect);
-            let cfg = StreamConfig {
-                id: d.id,
-                server: d.server.clone(),
-                key,
-                encoders: crate::encoding::for_stream(&self.engine.capabilities.encoders, &workspace, &d),
-                reconnect: Some((reconnect.retries, reconnect.delay_s)),
-                // Twitch's VOD track
-                vod_mix: d
-                    .vod_mix
-                    .filter(|_| crate::platforms::takes_vod_track(&d))
-                    .and_then(|m| crate::encoding::libobs_mix(&workspace, m)),
-            };
-            let canvas = d.canvas;
-            self.engine.post(move |s| {
-                let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
-                if let Err(e) = s.outputs.start_stream(&cfg, video) {
-                    tracing::error!(%e, "stream failed to start");
-                }
+        let together = crate::prefs::load_from(&crate::prefs::path()).start_together;
+        if only.is_none() && enabled.len() > 1 && !together {
+            self.sequence = Some(StartSequence {
+                queue: enabled.iter().map(|d| d.id).collect(),
+                current: None,
+                failure: None,
             });
+            self.advance_sequence(cx);
+            // a quick timer, so the next one follows as soon as this one is up
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                    let Ok(done) = this.update(cx, |s, cx| s.advance_sequence(cx)) else { break };
+                    if done {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        } else {
+            for d in enabled {
+                if let Err(reason) = self.start_one(&d, &workspace) {
+                    self.issue = Some(reason.into());
+                }
+            }
         }
+        cx.notify();
+    }
+
+    /// Posts one destination's start to the engine. Err: why it couldn't even be tried.
+    fn start_one(&mut self, d: &lightair_model::Destination, workspace: &Workspace) -> Result<(), String> {
+        let Some(key) = crate::secrets::stream_key(d.id) else {
+            return Err(format!("No stream key saved for {}.", d.name));
+        };
+        // its own tries and delay, else the workspace's
+        let reconnect = d.options.reconnect.unwrap_or(workspace.outputs.reconnect);
+        let cfg = StreamConfig {
+            id: d.id,
+            server: d.server.clone(),
+            key,
+            encoders: crate::encoding::for_stream(&self.engine.capabilities.encoders, workspace, d),
+            reconnect: Some((reconnect.retries, reconnect.delay_s)),
+            // Twitch's VOD track
+            vod_mix: d
+                .vod_mix
+                .filter(|_| crate::platforms::takes_vod_track(d))
+                .and_then(|m| crate::encoding::libobs_mix(workspace, m)),
+        };
+        let canvas = d.canvas;
+        let id = d.id;
+        lightair_engine::outputs::mark_starting(OutputKey::Stream(id));
+        self.engine.post(move |s| {
+            let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
+            if let Err(e) = s.outputs.start_stream(&cfg, video) {
+                tracing::error!(%e, "stream failed to start");
+                lightair_engine::outputs::mark_failed(OutputKey::Stream(id), &e);
+            }
+        });
+        Ok(())
+    }
+
+    /// Moves an ordered start along: starts the next destination once the current one is on
+    /// air, and stops to ask when one fails. True when there's nothing left to do.
+    pub fn advance_sequence(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(seq) = &mut self.sequence else { return true };
+        if seq.failure.is_some() {
+            return false;
+        }
+        let name_of = |ws: &Workspace, id: Id| {
+            ws.outputs.destinations.iter().find(|d| d.id == id).map(|d| d.name.clone()).unwrap_or_default()
+        };
+        if let Some((id, began)) = seq.current {
+            let state = runtime().get(OutputKey::Stream(id)).state;
+            let fail = match check_start(&state, began.elapsed()) {
+                StartCheck::Waiting => return false,
+                StartCheck::Up => {
+                    seq.current = None;
+                    None
+                }
+                StartCheck::Failed(reason) => Some(reason),
+            };
+            if let Some(reason) = fail {
+                let name = name_of(self.workspace(), id);
+                if let Some(seq) = &mut self.sequence {
+                    seq.current = None;
+                    seq.failure = Some(StartFailure { id, name, reason });
+                }
+                // (one still trying to connect is let go)
+                self.engine.post(move |s| s.outputs.stop_stream(id));
+                cx.notify();
+                return false;
+            }
+        }
+        let Some(next) = self.sequence.as_mut().and_then(|s| s.queue.pop_front()) else {
+            self.sequence = None;
+            cx.notify();
+            return true;
+        };
+        let workspace = self.workspace().clone();
+        match workspace.outputs.destinations.iter().find(|d| d.id == next).cloned() {
+            Some(d) => match self.start_one(&d, &workspace) {
+                Ok(()) => {
+                    if let Some(seq) = &mut self.sequence {
+                        seq.current = Some((next, std::time::Instant::now()));
+                    }
+                }
+                Err(reason) => {
+                    if let Some(seq) = &mut self.sequence {
+                        seq.failure = Some(StartFailure { id: next, name: d.name, reason });
+                    }
+                }
+            },
+            // removed while the sequence ran: on to the next
+            None => {}
+        }
+        cx.notify();
+        false
+    }
+
+    /// The user's answer to a destination that didn't start.
+    pub fn answer_start_failure(&mut self, choice: StartChoice, cx: &mut Context<Self>) {
+        let Some(seq) = &mut self.sequence else { return };
+        let Some(failure) = seq.failure.take() else { return };
+        match choice {
+            StartChoice::Continue => {}
+            StartChoice::Retry => seq.queue.push_front(failure.id),
+            StartChoice::StopAll => {
+                self.sequence = None;
+                self.end_stream(cx);
+                return;
+            }
+        }
+        self.advance_sequence(cx);
+        // (the quick timer is still running unless the sequence had ended)
         cx.notify();
     }
 
@@ -1308,6 +1470,8 @@ impl Studio {
     }
 
     pub fn end_stream(&mut self, cx: &mut Context<Self>) {
+        // ending while destinations are still coming up stops the sequence too
+        self.sequence = None;
         self.engine.post(|s| s.outputs.stop_all_streams());
         cx.notify();
     }
@@ -1630,5 +1794,26 @@ mod page_cleanup {
         doc.undo().unwrap();
         assert_eq!(doc.workspace().tracks.len(), 1, "one undo brings both back");
         assert!(doc.workspace().sources.contains_key(&pid));
+    }
+}
+
+#[cfg(test)]
+mod start_sequence_tests {
+    use super::{StartCheck, check_start};
+    use lightair_engine::outputs::OutputState;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_destination_is_up_failed_or_still_waiting() {
+        let secs = Duration::from_secs;
+        assert_eq!(check_start(&OutputState::Starting, secs(2)), StartCheck::Waiting);
+        assert_eq!(check_start(&OutputState::Active { since: Instant::now() }, secs(1)), StartCheck::Up);
+        assert_eq!(
+            check_start(&OutputState::Failed("The server rejected the stream key.".into()), secs(1)),
+            StartCheck::Failed("The server rejected the stream key.".into())
+        );
+        assert!(matches!(check_start(&OutputState::Idle, secs(1)), StartCheck::Failed(_)), "stopped without coming up");
+        assert!(matches!(check_start(&OutputState::Starting, secs(16)), StartCheck::Failed(_)), "too slow");
+        assert_eq!(check_start(&OutputState::Starting, secs(14)), StartCheck::Waiting);
     }
 }
