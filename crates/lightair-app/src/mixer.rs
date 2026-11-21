@@ -21,14 +21,20 @@ use crate::studio::Studio;
 const EVERYTHING: &str = if cfg!(windows) { "Everything the PC plays" } else { "Everything the Mac plays" };
 use crate::ui::{self, tok};
 
-const STRIP_W: f32 = 166.0;
-/// The effects list's height on a strip (the routing below it is added to this), and the least
-/// it's shown at (a row and the +).
-const FX_H: f32 = 76.0;
-const FX_MIN: f32 = 50.0;
-/// The meter area's height with the knobs, and without.
-const LEVELS_H: f32 = 196.0;
-const LEVELS_MIN: f32 = 110.0;
+/// Strips share the mixer's width, none narrower than this (then the row scrolls, a fade at its
+/// edge); Master is pinned at the right, this wide.
+const STRIP_MIN: f32 = 120.0;
+const MASTER_W: f32 = 150.0;
+/// The effects line on a strip ("3 effects · 1 on": its chain opens in a popover under it, so the
+/// meter and fader keep their height). The routing below it is added to this.
+const FX_H: f32 = 28.0;
+const FX_MIN: f32 = FX_H;
+/// The pan and trim row ("Pan C · Trim +0.0").
+const PAN_TRIM_H: f32 = 22.0;
+/// Cue and Mute, side by side under it.
+const BUTTONS_H: f32 = 36.0;
+/// The meter and fader's least height.
+const LEVELS_MIN: f32 = 190.0;
 /// The source row at the foot.
 const FOOT_H: f32 = 40.0;
 const DB_MIN: f32 = -60.0;
@@ -93,6 +99,8 @@ pub struct MixerPanel {
     /// The window's native layer (macOS: meters drawn there, under the UI).
     native: crate::native_preview::Shared,
     add_track_menu: bool,
+    /// The strip whose effect chain is open (a popover under its effects line).
+    fx_open: Option<MixerStrip>,
     /// When a click outside last closed the add menu (that click on + mustn't reopen it).
     menu_closed: Option<Instant>,
     focus: FocusHandle,
@@ -113,6 +121,7 @@ impl MixerPanel {
             spots: Rc::default(),
             native,
             add_track_menu: false,
+            fx_open: None,
             menu_closed: None,
             focus: cx.focus_handle(),
         }
@@ -183,7 +192,8 @@ impl Render for MixerPanel {
             }
             let el = div()
                     .id(("strip-menu", i))
-                    .flex_none()
+                    .when(is_master, |d| d.flex_none().w(px(MASTER_W)))
+                    .when(!is_master, |d| d.flex_1().min_w(px(STRIP_MIN)))
                     .h_full()
                     .child(strip)
                     .on_mouse_down(MouseButton::Right, {
@@ -275,18 +285,31 @@ impl Render for MixerPanel {
                     .min_h_0()
                     .child(
                         div()
-                            .id("strips")
+                            .relative()
                             .flex()
                             .flex_1()
                             .min_w_0()
-                            .gap_2()
-                            .px_3()
-                            .py_2()
-                            .overflow_scroll()
-                            .children(strips)
-                            .when(workspace.tracks.is_empty(), |d| {
-                                d.child(div().text_color(tok::text_tertiary()).child("No tracks"))
-                            }),
+                            .child(
+                                div()
+                                    .id("strips")
+                                    .flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .px_3()
+                                    .py_2()
+                                    .overflow_scroll()
+                                    .children(strips)
+                                    .when(workspace.tracks.is_empty(), |d| {
+                                        d.child(div().text_color(tok::text_tertiary()).child("No tracks"))
+                                    }),
+                            )
+                            // a fade at the edge, for when the strips scroll
+                            .child(div().absolute().top_0().bottom_0().right_0().w(px(12.)).bg(linear_gradient(
+                                90.,
+                                linear_color_stop(tok::bg_panel().opacity(0.), 0.),
+                                linear_color_stop(tok::bg_panel(), 1.),
+                            ))),
                     )
                     .when_some(master, |d, m| {
                         d.child(
@@ -609,70 +632,25 @@ impl MixerPanel {
 
     /// A rotary knob: its name, the knob (an arc from its centre or left end to the value, and
     /// a pointer), and the value. Drag up or down to turn; double-click resets.
-    fn rotary(&self, id: usize, knob: Knob, value: f32, name: &'static str, text: String, cx: &mut Context<Self>) -> Div {
-        let (lo, hi) = knob.range();
-        let frac = ((value - lo) / (hi - lo)).clamp(0.0, 1.0);
-        let origin = if knob.centred() { ((0.0 - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 0.0 };
-        let (track, fill, pointer) = (tok::bg_app(), tok::accent_primary(), tok::text());
-        let sweep = 135f32.to_radians();
-        let angle = move |f: f32| -sweep + f * 2.0 * sweep;
-        let dial = div()
-            .id(("knob", id))
-            .relative()
-            .size(px(32.))
+    /// A pan or trim value as words ("Pan C"): drag up or down to change it; Option-click (or a
+    /// double click) resets it.
+    fn value_drag(&self, id: usize, knob: Knob, value: f32, name: &'static str, text: String, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id(("pan-trim", id))
+            .flex()
+            .items_baseline()
+            .gap_1()
+            .px_1()
+            .rounded(px(3.))
             .cursor(CursorStyle::ResizeUpDown)
-            .child(
-                div()
-                    .absolute()
-                    .top(px(5.))
-                    .left(px(5.))
-                    .size(px(22.))
-                    .rounded_full()
-                    .bg(tok::bg_panel())
-                    .border_1()
-                    .border_color(tok::border_strong()),
-            )
-            .child(
-                canvas(
-                    |_, _, _| {},
-                    move |b, _, window, _| {
-                        let (cx0, cy0) = (
-                            f32::from(b.origin.x) + f32::from(b.size.width) / 2.0,
-                            f32::from(b.origin.y) + f32::from(b.size.height) / 2.0,
-                        );
-                        let at = |a: f32, r: f32| point(px(cx0 + r * a.sin()), px(cy0 - r * a.cos()));
-                        let arc = |from: f32, to: f32, colour: Hsla, window: &mut Window| {
-                            let (a, z) = (angle(from.min(to)), angle(from.max(to)));
-                            let steps = (((z - a) / 0.08).ceil() as usize).max(1);
-                            let mut path = PathBuilder::stroke(px(2.5));
-                            path.move_to(at(a, 14.5));
-                            for k in 1..=steps {
-                                path.line_to(at(a + (z - a) * k as f32 / steps as f32, 14.5));
-                            }
-                            if let Ok(path) = path.build() {
-                                window.paint_path(path, colour);
-                            }
-                        };
-                        arc(0.0, 1.0, track, window);
-                        if (frac - origin).abs() > 0.002 {
-                            arc(origin, frac, fill, window);
-                        }
-                        let mut path = PathBuilder::stroke(px(2.));
-                        path.move_to(at(angle(frac), 3.0));
-                        path.line_to(at(angle(frac), 10.0));
-                        if let Ok(path) = path.build() {
-                            window.paint_path(path, pointer);
-                        }
-                    },
-                )
-                .absolute()
-                .size_full(),
-            )
+            .hover(|d| d.bg(tok::bg_selected()))
+            .child(div().text_color(tok::text_tertiary()).child(name))
+            .child(div().text_color(tok::text()).child(text))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
-                    if ev.click_count >= 2 {
+                    if ev.modifiers.alt || ev.click_count >= 2 {
                         this.knob_value(knob, knob.reset(), cx);
                         return;
                     }
@@ -681,19 +659,12 @@ impl MixerPanel {
                 }),
             )
             .tooltip(move |w, cx| {
-                gpui_kit::component::tooltip::Tooltip::new("Drag up or down; double-click resets").build(w, cx)
-            });
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(div().text_size(px(8.5)).font_weight(FontWeight::BOLD).text_color(tok::text_tertiary()).child(name))
-            .child(dial)
-            .child(div().text_size(px(9.5)).font_family(crate::ui::MONO).text_color(tok::text_secondary()).child(text))
+                gpui_kit::component::tooltip::Tooltip::new(format!("{name}: drag up or down; Option-click resets")).build(w, cx)
+            })
     }
 
     /// A track's or bus's place in the mix, on the strip: output, polarity, mono, recording,
-    /// sends (pan and trim are knobs by the fader).
+    /// sends (pan and trim are a row under the fader).
     fn channel(&self, i: usize, view: &StripView, ch: &Channel, workspace: &Workspace, cx: &mut Context<Self>) -> Div {
         let id = view.id;
         let label = |text: &'static str| {
@@ -918,18 +889,11 @@ impl MixerPanel {
 
         // ---- header: the name, and its menu
         let menu = strip_menu(self.studio.downgrade(), cx.entity().downgrade(), StripMenu::of(&workspace, view));
-        // the name is centred on the strip; the tag, effect count (left) and menu (right) sit
-        // over equal margins either side of it
+        // the colour dot, tag and effect count, then the name, then the menu
         let fx_chip = compact && !view.effects.is_empty();
-        let left_w: f32 = if view.badge.is_some() { 26.0 } else { 0.0 } + if fx_chip { 34.0 } else { 0.0 };
-        let side = left_w.max(24.0) + 6.0;
-        let (head_bg, head_fg) = match view.color {
-            Some(c) => {
-                let bg = strip_colour(c);
-                (Some(bg), if luminance(c) > 0.6 { tok::bg_app() } else { gpui_kit::white() })
-            }
-            None => (None, tok::text()),
-        };
+        // every header neutral (docs/ui-sweep.md §5); a strip's colour is a dot beside its name
+        let (head_bg, head_fg): (Option<Hsla>, Hsla) = (None, tok::text());
+        let dot = view.color.map(strip_colour);
         let name_el = match self.renaming.as_ref().filter(|r| r.target == crate::rows::RowTarget::Strip(kind)) {
             Some(r) => div()
                 .id(("strip-rename", i))
@@ -945,13 +909,18 @@ impl MixerPanel {
                 .into_any_element(),
             None => div()
                 .id(("strip-name", i))
+                .flex_1()
                 .min_w_0()
-                .text_center()
                 .text_size(px(12.5))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(head_fg)
                 .truncate()
+                .when(muted, |d| d.opacity(0.4))
                 .child(view.name.clone())
+                .tooltip({
+                    let full = view.name.clone();
+                    move |w, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(w, cx)
+                })
                 .when(kind != MixerStrip::Master, |d| {
                     d.on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                         if ev.click_count() == 2 {
@@ -963,6 +932,9 @@ impl MixerPanel {
                 .into_any_element(),
         };
         let mut left = div().flex().items_center().gap_1().pl_1();
+        if let Some(c) = dot {
+            left = left.child(div().flex_none().ml_1().size(px(7.)).rounded_full().bg(c));
+        }
         if let Some(b) = view.badge {
             left = left.child(
                 div()
@@ -1008,18 +980,10 @@ impl MixerPanel {
             // the strip's corners (8, inside its 1 px border): a colour doesn't poke out of them
             .rounded_t(px(7.))
             .when_some(head_bg, |d, bg| d.bg(bg))
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .px(px(side))
-                    .child(name_el),
-            )
+            // the dot, tag and effect count, then the name (left, as wide as the strip allows)
+            .gap_1()
             .child(left)
-            .child(div().flex_1())
+            .child(name_el)
             .child(
                 gpui_kit::component::button::Button::new(("strip-chevron", i))
                     .icon(ui::icon("chevron-down").text_color(head_fg))
@@ -1028,17 +992,10 @@ impl MixerPanel {
                     .dropdown_menu(move |m, window, cx| menu(m, window, cx)),
             );
 
-        // ---- effects: a dot to switch each on or off, its name, a button to open it; + adds one
-        // gives way to the meter in a short panel
-        let mut fx = div()
-            .id(("strip-fx", i))
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .border_b_1()
-            .border_color(tok::border());
+        // ---- effects: one line ("3 effects · 1 on"); its chain opens in a popover under it (each
+        // effect's dot switches it on or off, its name opens it; + adds one), so the meter and
+        // fader keep their height. Master's line is where it goes.
+        let mut fx = div().id(("strip-fx", i)).flex().flex_col().max_h(px(8. * 26. + 28.)).overflow_y_scroll();
         let home = crate::effect_drag::Home::Strip(kind);
         let drop_at = move |before: Option<Id>| {
             move |this: &mut MixerPanel, d: &crate::effect_drag::DraggedEffect, _: &mut Window, cx: &mut Context<MixerPanel>| {
@@ -1064,11 +1021,11 @@ impl MixerPanel {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .h(px(24.))
+                    .h(px(26.))
                     .px_1()
                     .gap_1()
-                    .border_b_1()
-                    .border_color(tok::border())
+                    .rounded(px(4.))
+                    .hover(|d| d.bg(tok::bg_selected()))
                     .child(
                         div()
                             .id(("fx-dot", i * 64 + n))
@@ -1077,7 +1034,13 @@ impl MixerPanel {
                             .justify_center()
                             .size(px(18.))
                             .cursor_pointer()
-                            .child(div().size(px(8.)).rounded_full().bg(if on { tok::ok() } else { tok::text_tertiary() }))
+                            .child(
+                                div()
+                                    .size(px(8.))
+                                    .rounded_full()
+                                    .when(on, |d| d.bg(tok::control_on()))
+                                    .when(!on, |d| d.border_1().border_color(tok::text_tertiary())),
+                            )
                             .tooltip(move |w, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new(if on { "Bypass" } else { "Turn on" }).build(w, cx)
                             })
@@ -1086,16 +1049,22 @@ impl MixerPanel {
                                 this.exec(cmd.clone(), cx);
                             })),
                     )
-                    .child(
+                    .child({
+                        let open = open.clone();
                         div()
+                            .id(("fx-name", i * 64 + n))
                             .flex_1()
                             .min_w_0()
-                            .text_center()
                             .text_size(px(11.5))
-                            .text_color(if on { tok::text() } else { tok::text_tertiary() })
+                            .text_color(if on { tok::text() } else { tok::text_secondary() })
                             .truncate()
-                            .child(name),
-                    )
+                            .cursor_pointer()
+                            .child(name)
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                open(crate::studio::UiRequest::OpenEffect(kind, eid), cx);
+                            })
+                    })
                     .child(
                         div()
                             .id(("fx-edit", i * 64 + n))
@@ -1129,12 +1098,71 @@ impl MixerPanel {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|d| d.bg(tok::bg_selected()))
-                .child(ui::icon("plus").size(px(14.)).text_color(tok::text_secondary()))
+                .gap_1()
+                .text_size(px(11.5))
+                .text_color(tok::text_secondary())
+                .child(ui::icon("plus").size(px(12.)).text_color(tok::text_secondary()))
+                .child("Add an effect")
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     add(crate::studio::UiRequest::AddEffect(kind), cx);
                 }),
         );
+        let fx_open = self.fx_open == Some(kind);
+        let fx_line = {
+            let n = view.effects.len();
+            let on = view.effects.iter().filter(|e| e.2).count();
+            let text = match (kind == MixerStrip::Master, n) {
+                (true, 0) => "Stream and recording".to_string(),
+                (_, 0) => "No effects".to_string(),
+                (_, n) => format!("{n} effect{} · {on} on", if n == 1 { "" } else { "s" }),
+            };
+            div()
+                .id(("fx-line", i))
+                .relative()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .h(px(FX_H))
+                .px_2()
+                .border_b_1()
+                .border_color(tok::border())
+                .cursor_pointer()
+                .hover(|d| d.bg(tok::bg_selected()))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).text_color(tok::text_secondary()).child(text))
+                .child(ui::icon(if fx_open { "chevron-up" } else { "chevron-down" }).size(px(12.)).text_color(tok::text_tertiary()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.fx_open = if this.fx_open == Some(kind) { None } else { Some(kind) };
+                    cx.notify();
+                }))
+                .when(fx_open, |d| {
+                    d.child(
+                        deferred(
+                            div()
+                                .id(("fx-popover", i))
+                                .absolute()
+                                .top(px(FX_H))
+                                .left(px(4.))
+                                .right(px(4.))
+                                .p_1()
+                                .rounded(px(6.))
+                                .bg(tok::bg_header())
+                                .border_1()
+                                .border_color(tok::border_header())
+                                .shadow_lg()
+                                .occlude()
+                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                    this.fx_open = None;
+                                    cx.notify();
+                                }))
+                                .child(fx),
+                        )
+                        .with_priority(1),
+                    )
+                })
+        };
 
         // ---- the stereo meter: two bars, a dB scale beside them, the peak above. The levels
         // themselves are painted by the meter overlay (MeterOverlay) where these say: they move
@@ -1159,22 +1187,23 @@ impl MixerPanel {
         };
         // natively drawn meters (native_preview): the strip leaves holes for them
         let native = crate::native_preview::on();
-        let bar = |c: usize| div().relative().w(px(6.)).h_full().when(!native, |d| d.bg(tok::bg_panel())).child(spot(Spot::Bar(c)));
+        // muted: the meter shows no level (no spot for the overlay to paint)
+        let bar = |c: usize| {
+            div().relative().w(px(6.)).h_full().when(!native, |d| d.bg(tok::bg_panel())).when(!muted, |d| d.child(spot(Spot::Bar(c))))
+        };
         let mut scale = div().relative().flex_1().h_full();
-        // a label every 6 dB when the meter is tall enough to read them, every 12 when it's short
-        // (its height: the fader's, beside it, from the last frame)
-        let tall = self.faders.borrow().get(&id).is_none_or(|b| f32::from(b.size.height) >= 190.0);
-        for db in (0..10).map(|k| -6 * k).filter(|db| tall || db % 12 == 0) {
+        // a faint scale: 0, −12, −24, −36, −48, each with a tick
+        for db in [0, -12, -24, -36, -48] {
             // each label centred on its level; the top one (0) sits inside the meter's edge
-            let label = div().absolute().right(px(2.));
+            let label = div().absolute().right(px(2.)).flex().items_center().gap(px(2.));
             let label = if db == 0 { label.top(px(-1.)) } else { label.bottom(relative(meter_frac(db as f32))).mb(px(-6.)) };
             scale = scale.child(
                 label
-                    .text_size(px(8.5))
-                    .font_family(crate::ui::MONO)
+                    .text_size(px(9.))
                     .whitespace_nowrap()
-                    .text_color(tok::text_tertiary())
-                    .child(if db == 0 { "0".to_string() } else { format!("{db}") }),
+                    .text_color(tok::text_faint())
+                    .child(if db == 0 { "0".to_string() } else { format!("−{}", -db) })
+                    .child(div().w(px(3.)).h(px(1.)).bg(tok::text_faint())),
             );
         }
         let peak_readout = div().relative().h(px(18.)).rounded(px(3.)).when(!native, |d| d.bg(tok::bg_app())).child(spot(Spot::Readout));
@@ -1195,6 +1224,7 @@ impl MixerPanel {
             .gap_1()
             .w(px(50.))
             .h_full()
+            .when(muted, |d| d.opacity(0.4))
             .child(peak_readout)
             .child(
                 div()
@@ -1273,25 +1303,34 @@ impl MixerPanel {
             .items_center()
             .gap_1()
             .h_full()
-            .child(readout(if volume.is_finite() { format!("{volume:.1}") } else { "-inf".into() }).w(px(36.)).text_color(tok::text()))
-            .child(fader);
+            .child(if muted {
+                readout("Muted".into()).w(px(44.)).font_family(".SystemUIFont").text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_secondary())
+            } else {
+                readout(if volume.is_finite() { format!("{volume:.1}") } else { "−inf".into() })
+                    .w(px(44.))
+                    .font_family(".SystemUIFont")
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(tok::text())
+            })
+            .child(fader.when(muted, |d| d.opacity(0.4)));
 
         // ---- the buttons
         let button = |key: &'static str, label: &'static str, on: bool, on_bg: Hsla| {
             div()
                 .id((key, i))
                 .flex()
+                .flex_1()
                 .items_center()
                 .justify_center()
-                .w(px(44.))
                 .h(px(26.))
                 .rounded(px(5.))
                 .border_1()
                 .border_color(if on { on_bg } else { tok::border_strong() })
                 .bg(if on { on_bg } else { tok::bg_app() })
-                .text_size(px(10.5))
-                .font_weight(FontWeight::BOLD)
-                .text_color(if on { tok::text_inverse() } else { tok::text_secondary() })
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(if on { tok::text_inverse() } else { tok::text() })
                 .cursor_pointer()
                 .hover(|d| d.opacity(0.85))
                 .child(label)
@@ -1305,21 +1344,29 @@ impl MixerPanel {
                 format!("R{:.0}", pan * 100.0)
             }
         };
+        let pan_trim = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(PAN_TRIM_H))
+            .px_1()
+            .text_size(px(11.5))
+            .when_some(view.pan, |d, pan| d.child(self.value_drag(i * 4, Knob::Pan(id), pan, "Pan", pan_text(pan), cx)))
+            .child(div().flex_1())
+            .when_some(view.trim, |d, t| {
+                let text = if t < 0.0 { format!("−{:.1}", -t) } else { format!("+{t:.1}") };
+                d.child(self.value_drag(i * 4 + 1, Knob::Trim(id), t, "Trim", text, cx))
+            });
         let buttons = div()
             .flex()
-            .flex_col()
+            .flex_none()
             .items_center()
-            .gap_1p5()
-            .h_full()
-            .when_some(view.pan.filter(|_| knobs), |d, pan| {
-                d.child(self.rotary(i * 4, Knob::Pan(id), pan, "PAN", pan_text(pan), cx))
-            })
-            .when_some(view.trim.filter(|_| knobs), |d, t| {
-                d.child(self.rotary(i * 4 + 1, Knob::Trim(id), t, "TRIM", format!("{t:+.1}"), cx))
-            })
-            .child(div().flex_1())
+            .gap_2()
+            .h(px(BUTTONS_H))
+            .px_2()
+            .pb_1()
             .when_some(cue, |d, cue| {
-                d.child(button("cue", "CUE", cue, tok::text()).on_click(cx.listener(move |this, _, _, cx| {
+                d.child(button("cue", "Cue", cue, tok::text()).on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     let p = this.studio.read(cx).workspace().clone();
                     if let Some(cmd) = cue_cmd(&p, kind, !cue) {
@@ -1327,7 +1374,7 @@ impl MixerPanel {
                     }
                 })))
             })
-            .child(button("mute", "MUTE", muted, tok::live()).on_click(cx.listener(move |this, _, _, cx| {
+            .child(button("mute", "Mute", muted, tok::text()).on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 if let Some(cmd) = mute.clone() {
                     this.exec(cmd, cx);
@@ -1337,24 +1384,24 @@ impl MixerPanel {
         let levels = div()
             .flex()
             .flex_1()
-            .min_h(px(if knobs { LEVELS_H } else { LEVELS_MIN }))
+            .min_h(px(LEVELS_MIN))
             .gap_2()
             .px_2()
             .py_2()
             .child(meter)
-            .child(fader_col)
             .child(div().flex_1())
-            .child(buttons);
+            .child(fader_col)
+            .child(div().flex_1());
 
         div()
             .id(("strip", i))
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(STRIP_W))
+            .w_full()
             .h_full()
             .min_h(px(
-                30. + top_h + if knobs { LEVELS_H } else { LEVELS_MIN } + if foot { FOOT_H } else { 0. },
+                30. + top_h + LEVELS_MIN + if knobs { PAN_TRIM_H } else { 0. } + BUTTONS_H + if foot { FOOT_H } else { 0. },
             ))
             .rounded(px(8.))
             .overflow_hidden()
@@ -1373,8 +1420,9 @@ impl MixerPanel {
                     .size_full(),
                 )
             })
-            .border_1()
-            .border_color(if selected { tok::accent_primary() } else { tok::border() })
+            // the selected strip: a 2 px outline
+            .when(selected, |d| d.border_2().border_color(tok::text()))
+            .when(!selected, |d| d.border_1().border_color(tok::border()))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.studio.update(cx, |s, cx| {
                     s.selected_object = None;
@@ -1390,7 +1438,7 @@ impl MixerPanel {
                     .flex_col()
                     .flex_none()
                     .h(px(top_h))
-                    .when(!compact, |d| d.child(fx))
+                    .when(!compact, |d| d.child(fx_line))
                     .when_some(view.channel.as_ref().filter(|_| routing), |d, ch| {
                         d.child(self.measured(id, self.channel(i, view, ch, &workspace, cx)))
                     })
@@ -1399,7 +1447,9 @@ impl MixerPanel {
                     }),
             ))
             .child(levels)
-                        // full width, centred in its row
+            .when(knobs, |d| d.child(pan_trim))
+            .child(buttons)
+            // full width, centred in its row
             .when(foot, |d| {
                 d.child(
                     div().flex().flex_col().flex_none().justify_center().h(px(FOOT_H)).px_2().pb_1().child(self.strip_source(i, view, cx)),
@@ -1499,34 +1549,37 @@ fn loudness_readout<T: 'static>(cx: &mut Context<T>) -> Option<impl IntoElement>
     // Against the loudness target (Settings › Audio): within 2 LU is on target; well below
     // sounds quiet; above gets turned down by the platform.
     let target = crate::prefs::LOUDNESS_TARGET.load(std::sync::atomic::Ordering::Relaxed) as f64;
-    let colour = match r.short_term {
+    let colour = match r.integrated {
         v if !v.is_finite() || v < target - 10.0 => tok::text_tertiary(),
         v if v > target + 4.0 => tok::warn(),
         v if (v - target).abs() <= 2.0 => tok::ok(),
         _ => tok::text_secondary(),
     };
+    // "Loudness −17 LUFS · target −14": the integrated loudness against the target; the short-term
+    // and integrated readouts in the tooltip (docs/ui-sweep.md §5)
+    let minus = |v: f64| if v.is_finite() { format!("{v:.0}").replace('-', "−") } else { "—".into() };
+    let (short, whole) = (show(r.short_term), show(r.integrated));
+    let detail = format!(
+        "Stream loudness: short-term (3 s) {short}, integrated {whole} LUFS, green on your target (Settings › Audio). Click to reset integrated."
+    )
+    .replace('-', "−");
     Some(
         div()
             .id("loudness")
             .flex()
             .items_baseline()
-            .gap_2()
+            .gap_1()
             .px_2()
             .py_0p5()
             .rounded(px(5.))
             .cursor_pointer()
             .hover(|d| d.bg(tok::bg_raised()))
-            .font_family(crate::ui::MONO)
-            .text_size(px(11.))
-            .child(div().text_color(tok::text_tertiary()).child("LUFS"))
-            .child(div().text_color(colour).child(format!("S {}", show(r.short_term))))
-            .child(div().text_color(tok::text_secondary()).child(format!("I {}", show(r.integrated))))
-            .tooltip(|w, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(
-                    "Stream loudness: short-term (3 s) and integrated, green on your target (Settings › Audio). Click to reset integrated.",
-                )
-                .build(w, cx)
-            })
+            .text_size(px(12.))
+            .text_color(tok::text_secondary())
+            .child("Loudness")
+            .child(div().text_color(colour).child(format!("{} LUFS", minus(r.integrated))))
+            .child(format!("· target {}", minus(target)))
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(detail.clone()).build(w, cx))
             .on_click(cx.listener(|_, _, _, cx| {
                 lightair_engine::loudness::reset_stream_loudness();
                 cx.notify();
@@ -2096,7 +2149,7 @@ impl Layout {
             return full;
         }
         // the panel's padding and the strip's border, and the header; the meter's least
-        let mut room = height - 18.0 - 30.0 - LEVELS_MIN;
+        let mut room = height - 18.0 - 30.0 - LEVELS_MIN - BUTTONS_H;
         // the effects first (what's on a voice matters more than where it's sent)
         // (and nothing else shows before them: a strip too short for them is meter and fader)
         if room < FX_MIN {
@@ -2104,9 +2157,9 @@ impl Layout {
         }
         let mut fx_h = FX_MIN;
         room -= FX_MIN;
-        let knobs = room >= LEVELS_H - LEVELS_MIN;
+        let knobs = room >= PAN_TRIM_H;
         if knobs {
-            room -= LEVELS_H - LEVELS_MIN;
+            room -= PAN_TRIM_H;
         }
         let foot = room >= FOOT_H;
         if foot {
@@ -2477,15 +2530,6 @@ const STRIP_COLOURS: &[(&str, u32)] = &[
 fn strip_colour(c: u32) -> Hsla {
     Rgba { r: ((c >> 16) & 0xff) as f32 / 255.0, g: ((c >> 8) & 0xff) as f32 / 255.0, b: (c & 0xff) as f32 / 255.0, a: 1.0 }
         .into()
-}
-
-/// Relative luminance (0..1): above about 0.6, dark text reads better on it.
-fn luminance(c: u32) -> f32 {
-    let ch = |v: u32| {
-        let x = (v & 0xff) as f32 / 255.0;
-        if x <= 0.04045 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
-    };
-    0.2126 * ch(c >> 16) + 0.7152 * ch(c >> 8) + 0.0722 * ch(c)
 }
 
 /// The command that puts a strip in headphones (the cue) or takes it out.
