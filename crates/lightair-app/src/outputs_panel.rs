@@ -173,32 +173,6 @@ fn aspect_label(f: &Canvas) -> String {
     format!("{}:{}", f.width / g, f.height / g)
 }
 
-/// The canvas after `current` in the workspace's list (wrapping), for the badge's click.
-fn next_canvas(workspace: &Workspace, current: Option<Id>) -> Option<Id> {
-    let cur = current.unwrap_or(workspace.primary_canvas().id);
-    let i = workspace.canvases.iter().position(|f| f.id == cur).unwrap_or(0);
-    let next = &workspace.canvases[(i + 1) % workspace.canvases.len()];
-    (next.id != workspace.primary_canvas().id).then_some(next.id)
-}
-
-fn canvas_badge(id: impl Into<ElementId>, workspace: &Workspace, canvas: Option<Id>) -> Stateful<Div> {
-    let f = canvas.and_then(|id| workspace.canvas(id)).unwrap_or(workspace.primary_canvas());
-    div()
-        .id(id)
-        .px_1p5()
-        .h(px(18.))
-        .flex()
-        .items_center()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(tok::border_strong())
-        .text_size(px(10.))
-        .font_family(crate::ui::MONO)
-        .text_color(tok::text_secondary())
-        .when(workspace.canvases.len() > 1, |d| d.cursor_pointer().hover(|d| d.bg(tok::bg_selected())))
-        .child(aspect_label(f))
-}
-
 /// A platform's badge: its colour with its logo (or a short mark).
 pub fn badge(p: &Platform, size: f32) -> Div {
     let light = matches!(p.id, "kick" | "chzzk");
@@ -1848,14 +1822,24 @@ impl Render for OutputsPanel {
         let several = workspace.canvases.len() > 1;
         let container = settings.container.to_uppercase();
         let folder_name = folder.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        // The recording drive: free space, moving live while recording.
+        let recording = workspace.canvases.iter().any(|f| runtime().get(OutputKey::Recording(f.id)).state.is_running());
+        self.disk.poll(&folder, recording, Instant::now(), lightair_platform::files::space);
+        let free_text = self.disk.space.map(|(free, _)| format!("{} free", crate::storage::bytes(free, false)));
         let mut recordings = div().flex().flex_col().gap_0p5();
         for (i, f) in workspace.canvases.iter().enumerate() {
             let fid = f.id;
             let on = targets.contains(&fid);
             let st = runtime().get(OutputKey::Recording(fid));
             let running = st.state.is_running();
-            let state =
-                if on || running { status_text(&st.state) } else { ("Not recorded".into(), tok::text_tertiary()) };
+            // idle: nothing to say (the switch, or Record, says it)
+            let state = if running || st.state != OutputState::Idle {
+                Some(status_text(&st.state))
+            } else if !on {
+                Some(("Not recorded".into(), tok::text_tertiary()))
+            } else {
+                None
+            };
             recordings = recordings.child(
                 card(("out-rec", i).into())
                     .when(!on && !running, |d| d.opacity(0.6))
@@ -1880,10 +1864,11 @@ impl Render for OutputsPanel {
                         if running && st.bytes > 0 {
                             format!("{container} · {}", crate::storage::bytes(st.bytes, true))
                         } else {
-                            format!("{container} · {folder_name}")
+                            format!("{container} · {}", free_text.clone().unwrap_or_else(|| folder_name.clone()))
                         },
                     ))
-                    .child(status(state))
+                    .tooltip(ui::tip(format!("Recordings are saved to {}", folder.display())))
+                    .children(state.map(status))
                     .when(several, |d| {
                         let s2 = settings.clone();
                         let p2 = workspace.clone();
@@ -1907,10 +1892,8 @@ impl Render for OutputsPanel {
                     }),
             );
         }
-        // The recording drive: free space, moving live while recording.
-        let recording = workspace.canvases.iter().any(|f| runtime().get(OutputKey::Recording(f.id)).state.is_running());
-        self.disk.poll(&folder, recording, Instant::now(), lightair_platform::files::space);
-        let storage = self.disk.space.map(|(free, total)| {
+        // While recording: the drive's space as a bar, moving live (idle, it's in the row's words).
+        let storage = self.disk.space.filter(|_| recording).map(|(free, total)| {
             let low = |bytes: u64| recording && free < bytes;
             let colour = if low(2_000_000_000) {
                 tok::error()
@@ -1995,13 +1978,10 @@ impl Render for OutputsPanel {
                 crate::encoding::share_groups(&caps, &workspace, &enabled)
             };
             let members: usize = groups.iter().map(Vec::len).sum();
-            if members >= 2 || (live && members >= 1) {
-                let plural = |n: usize| if n == 1 { "" } else { "s" };
-                let heading = if live {
-                    format!("Live on {members} · {} encoder{}", groups.len(), plural(groups.len()))
-                } else {
-                    format!("{members} destinations · {} encoder{}", groups.len(), plural(groups.len()))
-                };
+            // said only when it costs something: destinations that don't share an encoder (the
+            // groups are in each destination's sheet and the summary's list)
+            if members >= 2 && groups.len() > 1 {
+                let heading = "Not every destination shares an encoder".to_string();
                 let open = self.encoders_open;
                 streams = streams.child(
                     div()
@@ -2073,10 +2053,13 @@ impl Render for OutputsPanel {
             let reconnecting = matches!(st.state, OutputState::Reconnecting { .. });
             let stopping_delayed = st.state == OutputState::Stopping && st.delay_s > 0;
             let live_now = runtime().any_stream_running();
-            let state = if enabled || st.state.is_running() {
+            // one state line: "Singapore · ready", "Primary · live", "Connecting…"
+            let state = if st.state == OutputState::Idle {
+                (if enabled { "ready" } else { "skipped" }.to_string(), tok::text_tertiary())
+            } else if enabled || st.state.is_running() {
                 status_of(&st)
             } else {
-                ("Skipped".into(), tok::text_tertiary())
+                ("skipped".into(), tok::text_tertiary())
             };
             // Adaptive bitrate has stepped down: say how far, so a thin picture isn't a mystery.
             let state = match st.state {
@@ -2095,17 +2078,19 @@ impl Render for OutputsPanel {
             let where_ = if platforms::is_auto(&d.server) {
                 // Automatic: which ingest it chose lately, if it has
                 match platforms::last_choice() {
-                    Some(c) => format!("Automatic · {} · RTMP", c.name),
-                    None => "Automatic (nearest) · RTMP".to_string(),
+                    Some(c) => format!("Automatic · {}", c.name),
+                    None => "Automatic (nearest)".to_string(),
                 }
             } else {
                 platform
                     .servers
                     .iter()
                     .find(|(_, url)| *url == d.server)
-                    .map(|(label, _)| format!("{label} · {}", StreamProtocol::label(&d.server)))
-                    .unwrap_or_else(|| format!("{} · {}", host_of(&d.server), StreamProtocol::label(&d.server)))
+                    .map(|(label, _)| label.to_string())
+                    .unwrap_or_else(|| host_of(&d.server))
             };
+            // the protocol one step away, in the row's tooltip
+            let protocol = StreamProtocol::label(&d.server);
             let where_ = if st.state.is_running() && st.delay_s > 0 {
                 format!("{where_} · delayed {} s", st.delay_s)
             } else {
@@ -2143,19 +2128,15 @@ impl Render for OutputsPanel {
                     }))
                     .on_click(cx.listener(move |this, _, window, cx| this.open_edit(id, window, cx)))
                     .child(badge(platform, 28.))
-                    .child(two_lines(d.name.clone(), where_))
-                    .child(canvas_badge(("dest-canvas", i), &workspace, d.canvas).on_click(cx.listener({
-                        let workspace = workspace.clone();
-                        let current = d.canvas;
-                        move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            let canvas = next_canvas(&workspace, current);
-                            this.studio.update(cx, |s, cx| {
-                                let _ = s.execute(Command::SetDestinationCanvas { destination: id, canvas }, cx);
-                            })
-                        }
-                    })))
-                    .child(status(state))
+                    .child({
+                        let line = if st.state.is_running() && matches!(st.state, OutputState::Active { .. }) {
+                            format!("{where_} · live {}", state.0)
+                        } else {
+                            format!("{where_} · {}", state.0)
+                        };
+                        two_lines(d.name.clone(), line)
+                    })
+                    .tooltip(ui::tip(format!("{} over {protocol}. Click for its settings: the canvas it sends, its quality and sound.", d.name)))
                     .when(reconnecting, |d| {
                         d.child(
                             ui::icon_button(("dest-retry", i), "refresh-cw", tok::text_secondary())
@@ -2166,12 +2147,15 @@ impl Render for OutputsPanel {
                                 })),
                         )
                     })
-                    .child(
+                    .child({
+                        let only = format!("Go live on {} only", d.name);
                         ui::icon_button(
                             ("dest-go", i),
                             if running { "circle-stop" } else { "play" },
-                            if running { tok::live() } else { tok::text_secondary() },
+                            if running { tok::live() } else { tok::text() },
                         )
+                        .border_1()
+                        .border_color(tok::border_strong())
                         .tooltip(move |w, cx| {
                             gpui_kit::component::tooltip::Tooltip::new(if reconnecting {
                                 "Cancel reconnecting (the others carry on)"
@@ -2180,7 +2164,7 @@ impl Render for OutputsPanel {
                             } else if live_now {
                                 "Start this destination now"
                             } else {
-                                "Go live to this destination only"
+                                only.as_str()
                             })
                             .build(w, cx)
                         })
@@ -2193,8 +2177,8 @@ impl Render for OutputsPanel {
                                     s.start_destination(id, cx)
                                 }
                             })
-                        })),
-                    )
+                        }))
+                    })
                     .child(
                         toggle(("dest-toggle", i), enabled)
                             .tooltip(move |w, cx| {
@@ -2335,17 +2319,16 @@ impl Render for OutputsPanel {
             )
             .child(recordings)
             .children(storage)
-            .child(
-                div().flex().items_center().justify_between().pr_3().child(section_label("STREAMING")).child(
-                    Button::new("add-destination")
-                        .label("Add")
-                        .icon(ui::icon("plus"))
-                        .xsmall()
-                        .ghost()
-                        .on_click(cx.listener(|this, _, window, cx| this.open_picker(window, cx))),
-                ),
-            )
             .child(streams)
+            .child(
+                card("add-destination".into())
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .text_color(tok::text_secondary())
+                    .child(ui::icon("plus").size(px(14.)).text_color(tok::text_secondary()))
+                    .child("Add a destination")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_picker(window, cx))),
+            )
     }
 }
 
