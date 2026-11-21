@@ -96,7 +96,7 @@ cargo xtask bundle    # target/debug/Lightair.app
 open target/debug/Lightair.app
 ```
 
-On Windows, install OBS 33.0.0 and point `OBS_DIR` at it, then `cargo xtask dev` and `cargo run` (see [docs/plans/windows.md](docs/plans/windows.md)). `cargo xtask` lists everything else: `test`, `precommit`, `dist` (the signed release build) and more. Releases are cut by tagging: see [docs/releasing.md](docs/releasing.md).
+On Windows, install OBS 33.0.0 and point `OBS_DIR` at it, then `cargo xtask dev` and `cargo run` (see [docs/plans/windows.md](docs/plans/windows.md)). `cargo xtask tidy` frees `target/` space (incremental caches and stale hashed copies; `--dry-run` first). `cargo xtask` lists everything else: `test`, `precommit`, `dist` (the signed release build) and more. Releases are cut by tagging: see [docs/releasing.md](docs/releasing.md).
 
 ## Learn more
 

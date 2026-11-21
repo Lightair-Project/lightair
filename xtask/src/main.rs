@@ -22,6 +22,9 @@
 //!   cargo xtask precommit      clippy for macOS and for Windows, then `cargo xtask test`: what a
 //!                              commit needs (0 warnings, 0 failures)
 //!   cargo xtask prune          delete object files no program in target/debug/deps uses
+//!   cargo xtask tidy [--dry-run]  free space in target/: every incremental directory, and all
+//!                              but the newest 3 hashed copies of each crate (--dry-run lists
+//!                              them; refuses while a cargo build holds the lock)
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,6 +32,7 @@ use std::process::Command;
 #[cfg(target_os = "macos")]
 mod dist;
 mod rules;
+mod tidy;
 mod update;
 
 fn root() -> PathBuf {
@@ -546,6 +550,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some("ci-secrets") => update::ci_secrets(),
         Some("rules-sign") => rules::sign(&std::env::args().nth(2).ok_or_else(|| anyhow::anyhow!("usage: cargo xtask rules-sign <rules.json>"))?),
+        Some("tidy") => tidy::tidy(&root(), std::env::args().any(|a| a == "--dry-run")).map_err(anyhow::Error::msg),
         Some("prune") => {
             be_polite();
             let (files, bytes) = prune(None)?;
@@ -554,7 +559,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask (modules | bundle | dist | dev | virtual-camera [--uninstall] | test [--machine] [filter] | check [--changed] | precommit | prune | rules-key | rules-sign <file> | update-key | update-manifest <version> <folder> [notes] | ci-secrets)"
+                "usage: cargo xtask (modules | bundle | dist | dev | virtual-camera [--uninstall] | test [--machine] [filter] | check [--changed] | precommit | prune | tidy [--dry-run] | rules-key | rules-sign <file> | update-key | update-manifest <version> <folder> [notes] | ci-secrets)"
             );
             Ok(())
         }
