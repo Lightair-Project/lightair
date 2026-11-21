@@ -65,6 +65,60 @@
       "DisableAutomaticStates": true
     },
     {
+      "UUID": "app.lightair.stream-start",
+      "Name": "Start all destinations",
+      "Tooltip": "Goes live to every included destination, one after another. Lights up while live.",
+      "Icon": "imgs/actions/stream",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/keys/stream"
+        },
+        {
+          "Image": "imgs/keys/stream-on"
+        }
+      ],
+      "DisableAutomaticStates": true
+    },
+    {
+      "UUID": "app.lightair.stream-stop",
+      "Name": "Stop all destinations",
+      "Tooltip": "Ends every destination. Lights up while any is live.",
+      "Icon": "imgs/actions/stream",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/keys/stream"
+        },
+        {
+          "Image": "imgs/keys/stream-on"
+        }
+      ],
+      "DisableAutomaticStates": true
+    },
+    {
+      "UUID": "app.lightair.destination",
+      "Name": "Destination",
+      "Tooltip": "Starts or stops one destination, the others untouched. Lights up while it is live; its title shows when it is reconnecting.",
+      "Icon": "imgs/actions/stream",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/keys/stream"
+        },
+        {
+          "Image": "imgs/keys/stream-on"
+        }
+      ],
+      "DisableAutomaticStates": true
+    },
+    {
       "UUID": "app.lightair.record",
       "Name": "Record",
       "Tooltip": "Starts or stops recording. Lights up while recording.",

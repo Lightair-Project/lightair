@@ -18,7 +18,7 @@ const keys = new Map();
 let global = {};
 
 // What Lightair has on (from state.get, kept current by its events).
-const state = { connected: false, error: "", program: null, streaming: false, recording: false, tracks: [], scenes: [], automations: [] };
+const state = { connected: false, error: "", program: null, streaming: false, recording: false, tracks: [], scenes: [], automations: [], destinations: [] };
 
 // ---- Stream Deck ----
 
@@ -74,6 +74,7 @@ function tellInspector(action, context) {
     scenes: state.scenes.map((s) => s.name),
     tracks: state.tracks.map((t) => t.name),
     automations: state.automations,
+    destinations: state.destinations.map((d) => d.name),
   });
   void action;
 }
@@ -99,7 +100,7 @@ function connect() {
     state.connected = true;
     state.error = "";
     try {
-      await call("events.subscribe", { events: ["scene.program", "scene.list", "record.state", "stream.state", "audio.mute", "workspace.changed"] });
+      await call("events.subscribe", { events: ["scene.program", "scene.list", "record.state", "stream.state", "output.changed", "audio.mute", "workspace.changed"] });
       await refresh();
     } catch (e) {
       state.error = e.message;
@@ -152,6 +153,7 @@ async function refresh() {
   state.scenes = (s.scenes || []).map((x) => ({ id: x.id, name: x.name }));
   state.tracks = (s.tracks || []).map((t) => ({ id: t.id, name: t.name, source: t.source, muted: t.muted }));
   state.streaming = !!(s.outputs && s.outputs.streaming && s.outputs.streaming.active);
+  state.destinations = ((s.outputs && s.outputs.streaming && s.outputs.streaming.destinations) || []).map((d) => ({ id: d.id, name: d.name, state: d.state || "idle" }));
   state.recording = !!(s.outputs && s.outputs.recording && s.outputs.recording.active);
   try {
     const a = await call("automation.list");
@@ -170,6 +172,14 @@ function heard(name, data) {
     case "stream.state":
       state.streaming = !!data.active;
       break;
+    case "output.changed": {
+      // one destination: starting, active, reconnecting, stopping, failed or idle
+      if (data.kind !== "stream") break;
+      const d = state.destinations.find((x) => x.id === data.id);
+      if (d) d.state = data.state;
+      else state.destinations.push({ id: data.id, name: data.name, state: data.state });
+      break;
+    }
     case "record.state":
       state.recording = !!data.active;
       break;
@@ -192,6 +202,10 @@ function heard(name, data) {
 
 const same = (a, b) => String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
 
+function destination(settings) {
+  return state.destinations.find((d) => d.id === settings.destination || same(d.name, settings.destination));
+}
+
 function track(settings) {
   return state.tracks.find((t) => t.id === settings.track || same(t.name, settings.track) || (t.source && t.source === settings.track));
 }
@@ -209,6 +223,18 @@ function show(context) {
     case "stream":
       on = state.streaming;
       break;
+    case "stream-start":
+    case "stream-stop":
+      on = state.streaming;
+      break;
+    case "destination": {
+      const d = destination(s);
+      on = !!d && ["starting", "active", "reconnecting"].includes(d.state);
+      // its name, and what it's doing when that isn't plain
+      const note = d && ["reconnecting", "failed", "starting", "stopping"].includes(d.state) ? `\n${d.state}` : "";
+      if (s.destination) toDeck("setTitle", context, { title: s.destination + note, target: 0 });
+      break;
+    }
     case "record":
       on = state.recording;
       break;
@@ -239,6 +265,21 @@ async function press(context) {
         break;
       case "stream":
         await call("stream.toggle");
+        break;
+      case "stream-start":
+        // going live when already live is fine: the key just stays lit
+        await call("stream.start").catch((e) => {
+          if (!/already live/.test(e.message)) throw e;
+        });
+        break;
+      case "stream-stop":
+        await call("stream.stop").catch((e) => {
+          if (!/not live/.test(e.message)) throw e;
+        });
+        break;
+      case "destination":
+        if (!s.destination) throw new Error("choose a destination");
+        await call("output.toggle", { output: s.destination });
         break;
       case "record":
         await call("record.toggle");

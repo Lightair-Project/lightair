@@ -1,7 +1,8 @@
 # Lightair for Stream Deck
 
 Keys for Lightair, lit with what's on: **Switch scene** (red while on air), **Go live** (red
-while live), **Record**, **Save clip**, **Run automation** and **Mute** (amber while muted). It
+while live), **Start all destinations** and **Stop all destinations**, **Destination** (one destination
+of your list, red while it is live, its title saying when it is reconnecting), **Record**, **Save clip**, **Run automation** and **Mute** (amber while muted). It
 talks to Lightair's remote API (JSON-RPC at `ws://127.0.0.1:4455/rpc`, see
 [docs/remote-api.md](../docs/remote-api.md)), so a key follows changes made anywhere.
 

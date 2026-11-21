@@ -56,6 +56,8 @@ async function standInLightair(password) {
     tracks: [{ id: "t1", name: "Mic", source: "src1", muted: false }],
     streaming: false,
     recording: false,
+    // two destinations: Twitch is live, YouTube isn't
+    destinations: [{ id: "d1", name: "Twitch", state: "idle" }, { id: "d2", name: "YouTube", state: "idle" }],
   };
   const clients = [];
   const emit = (name, data) => clients.forEach((c) => c.send({ jsonrpc: "2.0", method: "event", params: { name, data } }));
@@ -72,7 +74,7 @@ async function standInLightair(password) {
       switch (m.method) {
         case "events.subscribe": return ok({});
         case "state.get":
-          return ok({ program: s.program, scenes: s.scenes, tracks: s.tracks, outputs: { streaming: { active: s.streaming }, recording: { active: s.recording } } });
+          return ok({ program: s.program, scenes: s.scenes, tracks: s.tracks, outputs: { streaming: { active: s.streaming, destinations: s.destinations }, recording: { active: s.recording } } });
         case "automation.list": return ok({ automations: [{ name: "Hype" }] });
         case "scene.switch": {
           const scene = s.scenes.find((x) => x.id === p.scene || x.name.toLowerCase() === String(p.scene).toLowerCase());
@@ -85,6 +87,28 @@ async function standInLightair(password) {
           s.streaming = !s.streaming;
           ok({});
           return emit("stream.state", { active: s.streaming });
+        case "stream.start":
+          if (s.streaming) return fail("already live");
+          s.streaming = true;
+          s.destinations.forEach((d) => (d.state = "active"));
+          ok({});
+          s.destinations.forEach((d) => emit("output.changed", { kind: "stream", id: d.id, name: d.name, state: d.state }));
+          return emit("stream.state", { active: true });
+        case "stream.stop":
+          if (!s.streaming) return fail("not live");
+          s.streaming = false;
+          s.destinations.forEach((d) => (d.state = "idle"));
+          ok({});
+          s.destinations.forEach((d) => emit("output.changed", { kind: "stream", id: d.id, name: d.name, state: d.state }));
+          return emit("stream.state", { active: false });
+        case "output.toggle": {
+          const d = s.destinations.find((x) => x.id === p.output || x.name.toLowerCase() === String(p.output).toLowerCase());
+          if (!d) return fail(`no destination ${p.output}`);
+          d.state = d.state === "idle" ? "active" : "idle";
+          s.streaming = s.destinations.some((x) => x.state !== "idle");
+          ok({ active: d.state !== "idle" });
+          return emit("output.changed", { kind: "stream", id: d.id, name: d.name, state: d.state });
+        }
         case "record.toggle":
           s.recording = !s.recording;
           ok({});
@@ -168,6 +192,22 @@ async function main() {
       appear("k-stream", "stream", {});
       press("k-stream", "stream", {});
       await until("the stream key lights up once live", stateOf("k-stream", 1));
+      // one destination: its key follows only it
+      appear("k-youtube", "destination", { destination: "YouTube" });
+      appear("k-twitch", "destination", { destination: "twitch" });
+      await until("a destination key is titled with its name", (m) => m.event === "setTitle" && m.context === "k-youtube" && m.payload.title === "YouTube");
+      press("k-youtube", "destination", { destination: "YouTube" });
+      await until("YouTube's key lights up once it is live", stateOf("k-youtube", 1));
+      press("k-youtube", "destination", { destination: "YouTube" });
+      await until("YouTube's key goes dark once stopped", (m) => stateOf("k-youtube", 0)(m) && heard.indexOf(m) > heard.findIndex(stateOf("k-youtube", 1)));
+      // start all, then stop all
+      appear("k-all", "stream-start", {});
+      appear("k-none", "stream-stop", {});
+      press("k-all", "stream-start", {});
+      await until("start all lights up Twitch's key", stateOf("k-twitch", 1));
+      press("k-all", "stream-start", {});
+      press("k-none", "stream-stop", {});
+      await until("stop all darkens the start key", (m) => stateOf("k-all", 0)(m) && heard.indexOf(m) > heard.findIndex(stateOf("k-all", 1)));
       press("k-clip", "clip", {});
       await until("the clip key shows OK", (m) => m.event === "showOk" && m.context === "k-clip");
     }

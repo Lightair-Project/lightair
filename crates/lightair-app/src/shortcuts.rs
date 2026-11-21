@@ -12,6 +12,12 @@ use serde::{Deserialize, Serialize};
 pub enum GlobalAction {
     ToggleRecording,
     ToggleLive,
+    /// Go live to every included destination (does nothing when already live).
+    StartAll,
+    /// End every destination.
+    StopAll,
+    /// Start or stop the *n*th destination in Outputs' order (1-based).
+    Destination(u8),
     Take,
     /// Start or stop a Studio take (docs/plans/screen-studio.md).
     StudioTake,
@@ -26,9 +32,27 @@ pub enum GlobalAction {
 }
 
 impl GlobalAction {
+    /// The label with a destination's name where the action is about one ("… destination 2
+    /// (YouTube)"), for the Settings list.
+    pub fn label_in(self, destinations: &[lightair_model::Destination]) -> String {
+        match self {
+            GlobalAction::Destination(n) => match destinations.get((n as usize).saturating_sub(1)) {
+                Some(d) => format!("Start or stop destination {n} ({})", d.name),
+                None => format!("Start or stop destination {n} (none yet)"),
+            },
+            other => other.label(),
+        }
+    }
+
     pub const ALL: &'static [GlobalAction] = &[
         GlobalAction::ToggleRecording,
         GlobalAction::ToggleLive,
+        GlobalAction::StartAll,
+        GlobalAction::StopAll,
+        GlobalAction::Destination(1),
+        GlobalAction::Destination(2),
+        GlobalAction::Destination(3),
+        GlobalAction::Destination(4),
         GlobalAction::Take,
         GlobalAction::StudioTake,
         GlobalAction::AddMarker,
@@ -46,6 +70,9 @@ impl GlobalAction {
         match self {
             GlobalAction::ToggleRecording => "Start or stop recording".into(),
             GlobalAction::ToggleLive => "Go live or end".into(),
+            GlobalAction::StartAll => "Start every destination".into(),
+            GlobalAction::StopAll => "Stop every destination".into(),
+            GlobalAction::Destination(n) => format!("Start or stop destination {n}"),
             GlobalAction::Take => "Take (cued scene on air)".into(),
             GlobalAction::StudioTake => "Start or stop a Studio take".into(),
             GlobalAction::AddMarker => "Add marker".into(),
@@ -526,5 +553,43 @@ mod windows_tests {
         assert_eq!(parse("f5"), Some((0x74, 0)));
         assert_eq!(parse("r"), None);
         assert_eq!(display("cmd-shift-r"), "Ctrl+Shift+R");
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::GlobalAction;
+
+    fn dest(name: &str) -> lightair_model::Destination {
+        lightair_model::Destination {
+            id: lightair_model::Id::new(),
+            name: name.into(),
+            server: "rtmp://example.com/live".into(),
+            enabled: true,
+            canvas: None,
+            platform: None,
+            encoding: None,
+            audio_mix: None,
+            vod_mix: None,
+            chat: None,
+            options: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_destination_shortcut_is_labelled_with_the_destination() {
+        let list = [dest("Twitch"), dest("YouTube")];
+        assert_eq!(GlobalAction::Destination(2).label_in(&list), "Start or stop destination 2 (YouTube)");
+        assert_eq!(GlobalAction::Destination(3).label_in(&list), "Start or stop destination 3 (none yet)");
+        assert_eq!(GlobalAction::StartAll.label_in(&list), "Start every destination");
+    }
+
+    #[test]
+    fn every_action_has_its_own_label() {
+        let mut labels: Vec<String> = GlobalAction::ALL.iter().map(|a| a.label()).collect();
+        labels.sort();
+        let before = labels.len();
+        labels.dedup();
+        assert_eq!(before, labels.len(), "no two shortcuts read the same");
     }
 }

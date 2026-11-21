@@ -1131,6 +1131,32 @@ impl StudioWindow {
                     self.studio.update(cx, |s, cx| s.go_live(cx))
                 }
             }
+            A::StartAll => {
+                if !runtime().any_stream_running() {
+                    self.studio.update(cx, |s, cx| s.go_live(cx))
+                }
+            }
+            A::StopAll => self.studio.update(cx, |s, cx| s.end_stream(cx)),
+            A::Destination(n) => {
+                let id = self
+                    .studio
+                    .read(cx)
+                    .workspace()
+                    .outputs
+                    .destinations
+                    .get((n as usize).saturating_sub(1))
+                    .map(|d| d.id);
+                if let Some(id) = id {
+                    let running = runtime().get(lightair_engine::outputs::OutputKey::Stream(id)).state.is_running();
+                    self.studio.update(cx, |s, cx| {
+                        if running {
+                            s.stop_destination(id, cx)
+                        } else {
+                            s.start_destination(id, cx)
+                        }
+                    })
+                }
+            }
             A::Take => self.take(cx),
             A::StudioTake => self.studio_take(cx),
             A::AddMarker => self.studio.update(cx, |s, cx| s.add_marker(cx)),

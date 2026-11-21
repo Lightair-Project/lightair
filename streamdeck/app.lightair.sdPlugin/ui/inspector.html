@@ -19,7 +19,8 @@
   <div class="row" data-for="scene"><label for="scene">Scene</label><input id="scene" list="scenes" placeholder="Name of the scene"></div>
   <div class="row" data-for="automation"><label for="automation">Automation</label><input id="automation" list="automations" placeholder="Name of the automation"></div>
   <div class="row" data-for="mute"><label for="track">Track</label><input id="track" list="tracks" placeholder="Microphone, Desktop audio…"></div>
-  <datalist id="scenes"></datalist><datalist id="automations"></datalist><datalist id="tracks"></datalist>
+  <div class="row" data-for="destination"><label for="destination">Destination</label><input id="destination" list="destinations" placeholder="Name of the destination"></div>
+  <datalist id="destinations"></datalist><datalist id="scenes"></datalist><datalist id="automations"></datalist><datalist id="tracks"></datalist>
   <div class="note" id="status">Looking for Lightair…</div>
 
   <details id="connection">
@@ -46,7 +47,7 @@
     action = a.action;
     settings = a.payload.settings || {};
     for (const row of document.querySelectorAll("[data-for]")) row.hidden = row.dataset.for !== short();
-    for (const id of ["scene", "automation", "track"]) {
+    for (const id of ["scene", "automation", "track", "destination"]) {
       const el = document.getElementById(id);
       el.value = settings[id] || "";
       el.addEventListener("change", () => {
@@ -78,6 +79,7 @@
         fill("scenes", p.scenes);
         fill("automations", p.automations);
         fill("tracks", p.tracks);
+        fill("destinations", p.destinations);
         const status = document.getElementById("status");
         status.className = p.connected ? "note" : "note bad";
         status.textContent = p.connected

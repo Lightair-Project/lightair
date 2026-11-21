@@ -632,6 +632,7 @@ impl StudioWindow {
 
     fn shortcuts_page(&self, cx: &mut Context<Self>) -> Div {
         use crate::shortcuts::{GlobalAction, display};
+        let destinations = self.studio.read(cx).workspace().outputs.destinations.clone();
         let mut global = group(if cfg!(windows) { "Anywhere on your PC" } else { "Anywhere on your Mac" });
         for (i, action) in GlobalAction::ALL.iter().copied().enumerate() {
             let keys = self.prefs.global_shortcuts.iter().find(|h| h.action == action).map(|h| h.keys.clone());
@@ -667,7 +668,7 @@ impl StudioWindow {
                             .on_click(cx.listener(move |this, _, _, cx| this.clear_shortcut(action, cx))),
                     )
                 });
-            global = global.child(row(&action.label(), None, control));
+            global = global.child(row(&action.label_in(&destinations), None, control));
         }
         if let Some(n) = &self.shortcut_note {
             global = global.child(div().px_1().text_size(px(11.)).text_color(tok::warn()).child(n.clone()));
