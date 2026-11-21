@@ -98,6 +98,21 @@ pub fn elapsed(since: Instant) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
 }
 
+/// A row's state in words; a stream trying to get back counts down to its next try.
+fn status_of(st: &lightair_engine::outputs::OutputStatus) -> (String, Hsla) {
+    match (&st.state, st.reconnect) {
+        (OutputState::Reconnecting { .. }, Some(r)) => (reconnect_text(&r), tok::warn()),
+        (state, _) => status_text(state),
+    }
+}
+
+/// "Retrying in 8 s · try 3 of 20".
+fn reconnect_text(r: &lightair_engine::outputs::ReconnectInfo) -> String {
+    let secs = r.seconds_left();
+    let when = if secs == 0 { "Retrying now".to_string() } else { format!("Retrying in {secs} s") };
+    if r.retries > 0 { format!("{when} · try {} of {}", r.attempt.min(r.retries), r.retries) } else { when }
+}
+
 fn status_text(state: &OutputState) -> (String, Hsla) {
     match state {
         OutputState::Idle => ("Off".into(), tok::text_tertiary()),
@@ -936,6 +951,69 @@ impl OutputsPanel {
                     cx.notify();
                 }))),
         );
+        // When the connection drops: the shared tries and delay (Settings › Streaming), or its own.
+        let shared_rc = workspace.outputs.reconnect;
+        let own_rc = e.options.reconnect;
+        let set_rc = {
+            let me = cx.entity().downgrade();
+            move |f: Box<dyn Fn(Option<lightair_model::Reconnect>) -> Option<lightair_model::Reconnect>>| {
+                let me = me.clone();
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    if let Some(me) = me.upgrade() {
+                        me.update(cx, |this, cx| {
+                            if let Some(Setup::Edit(e)) = &mut this.setup {
+                                e.options.reconnect = f(e.options.reconnect);
+                            }
+                            cx.notify();
+                        });
+                    }
+                }
+            }
+        };
+        let mut reconnect = card("If the connection drops").child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Same as the other destinations")).child(
+                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(if own_rc.is_none() {
+                        if shared_rc.retries == 0 {
+                            "Don't reconnect.".to_string()
+                        } else {
+                            format!("{} tries, {} s apart, the wait growing a little each time.", shared_rc.retries, shared_rc.delay_s)
+                        }
+                    } else {
+                        "Off: this destination uses its own tries below.".to_string()
+                    }),
+                ))
+                .child(toggle("edit-rc-shared", own_rc.is_none()).on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(Setup::Edit(e)) = &mut this.setup {
+                        e.options.reconnect = if e.options.reconnect.is_some() { None } else { Some(shared_rc) };
+                    }
+                    cx.notify();
+                }))),
+        );
+        if let Some(rc) = own_rc {
+            let mut tries = seg();
+            for (i, (n, label)) in [(0u32, "Off"), (5, "5 tries"), (20, "20 tries"), (100, "Keep trying")].into_iter().enumerate() {
+                tries = tries.child(
+                    chip(("edit-rc-tries", i), label.to_string(), rc.retries == n, true)
+                        .on_click(set_rc(Box::new(move |r| r.map(|r| lightair_model::Reconnect { retries: n, ..r })))),
+                );
+            }
+            let mut delays = seg();
+            for (i, d) in [2u32, 5, 10].into_iter().enumerate() {
+                delays = delays.child(
+                    chip(("edit-rc-delay", i), format!("{d} s"), rc.delay_s == d, rc.retries > 0)
+                        .on_click(set_rc(Box::new(move |r| r.map(|r| lightair_model::Reconnect { delay_s: d, ..r })))),
+                );
+            }
+            reconnect = reconnect
+                .child(div().h(px(1.)).bg(tok::border()))
+                .child(row("Reconnect", Some("How many times to try again when the server drops the connection. The row counts down to each try and can cancel or try now."), tries.into_any_element()))
+                .child(row("Between tries", None, delays.into_any_element()));
+        }
         let id = e.id;
         let connection = card("Connection")
             .child(server)
@@ -983,6 +1061,7 @@ impl OutputsPanel {
             .child(connection)
             .child(picture_sound)
             .child(quality)
+            .child(reconnect)
             .when_some(e.error.clone(), |d, err| d.child(div().text_size(px(12.)).text_color(tok::error()).child(err)))
             .child(
                 div()
@@ -1552,9 +1631,10 @@ impl Render for OutputsPanel {
             let enabled = d.enabled;
             let st = runtime().get(OutputKey::Stream(id));
             let running = st.state.is_running();
+            let reconnecting = matches!(st.state, OutputState::Reconnecting { .. });
             let live_now = runtime().any_stream_running();
             let state = if enabled || st.state.is_running() {
-                status_text(&st.state)
+                status_of(&st)
             } else {
                 ("Skipped".into(), tok::text_tertiary())
             };
@@ -1607,6 +1687,16 @@ impl Render for OutputsPanel {
                         }
                     })))
                     .child(status(state))
+                    .when(reconnecting, |d| {
+                        d.child(
+                            ui::icon_button(("dest-retry", i), "refresh-cw", tok::text_secondary())
+                                .tooltip(ui::tip("Try again now"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.studio.update(cx, |s, cx| s.restart_destination(id, cx))
+                                })),
+                        )
+                    })
                     .child(
                         ui::icon_button(
                             ("dest-go", i),
@@ -1614,7 +1704,9 @@ impl Render for OutputsPanel {
                             if running { tok::live() } else { tok::text_secondary() },
                         )
                         .tooltip(move |w, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(if running {
+                            gpui_kit::component::tooltip::Tooltip::new(if reconnecting {
+                                "Cancel reconnecting (the others carry on)"
+                            } else if running {
                                 "Stop this destination (the others carry on)"
                             } else if live_now {
                                 "Start this destination now"
@@ -1689,7 +1781,10 @@ impl Render for OutputsPanel {
                                     }
                                 }
                             };
-                            let menu = if running {
+                            let menu = if reconnecting {
+                                menu.item(PopupMenuItem::new("Try again now").on_click(act(Studio::restart_destination)))
+                                    .item(PopupMenuItem::new("Cancel reconnecting").on_click(act(Studio::stop_destination)))
+                            } else if running {
                                 menu.item(PopupMenuItem::new("Stop").on_click(act(Studio::stop_destination)))
                                     .item(PopupMenuItem::new("Restart").on_click(act(Studio::restart_destination)))
                             } else if live_now {
@@ -1816,12 +1911,27 @@ impl Focusable for OutputsPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::bitrate_step;
+    use super::{bitrate_step, reconnect_text};
+    use lightair_engine::outputs::ReconnectInfo;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn a_stepped_down_bitrate_reads_in_megabits() {
         assert_eq!(bitrate_step(4500, 6000), "4.5 of 6 Mbps");
         assert_eq!(bitrate_step(3000, 6000), "3 of 6 Mbps");
         assert_eq!(bitrate_step(2300, 8000), "2.3 of 8 Mbps");
+    }
+
+    #[test]
+    fn a_reconnect_counts_down_to_its_next_try() {
+        let info = |attempt: u32, retries: u32, secs: u64| ReconnectInfo {
+            attempt,
+            retries,
+            next_at: Instant::now() + Duration::from_millis(secs * 1000 - 100),
+        };
+        assert_eq!(reconnect_text(&info(3, 20, 8)), "Retrying in 8 s · try 3 of 20");
+        assert_eq!(reconnect_text(&info(1, 0, 2)), "Retrying in 2 s", "no count when the tries aren't known");
+        let due = ReconnectInfo { attempt: 2, retries: 5, next_at: Instant::now() - Duration::from_secs(1) };
+        assert_eq!(reconnect_text(&due), "Retrying now · try 2 of 5");
     }
 }

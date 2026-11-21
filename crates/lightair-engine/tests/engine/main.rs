@@ -23,6 +23,7 @@ mod recording_tools;
 mod smoke;
 mod stems;
 mod stream_protocols;
+mod stream_reconnect;
 mod stream_sharing;
 mod studio_take;
 mod timers;

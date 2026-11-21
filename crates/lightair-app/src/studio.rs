@@ -1264,7 +1264,8 @@ impl Studio {
                 self.issue = Some(format!("No stream key saved for {}.", d.name).into());
                 continue;
             };
-            let reconnect = workspace.outputs.reconnect;
+            // its own tries and delay, else the workspace's
+            let reconnect = d.options.reconnect.unwrap_or(workspace.outputs.reconnect);
             let cfg = StreamConfig {
                 id: d.id,
                 server: d.server.clone(),

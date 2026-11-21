@@ -44,6 +44,24 @@ impl OutputState {
     }
 }
 
+/// A stream trying to get back: which try is next, how many there are, and when it comes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReconnectInfo {
+    /// The try about to run (1 for the first).
+    pub attempt: u32,
+    /// Tries allowed before it gives up.
+    pub retries: u32,
+    /// When that try runs.
+    pub next_at: Instant,
+}
+
+impl ReconnectInfo {
+    /// Whole seconds until the next try (0 once it's due).
+    pub fn seconds_left(&self) -> u64 {
+        self.next_at.saturating_duration_since(Instant::now()).as_secs_f64().ceil() as u64
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OutputStatus {
     pub state: OutputState,
@@ -56,6 +74,10 @@ pub struct OutputStatus {
     /// Frames the video output skipped since this output began because its encoder was too slow
     /// (per canvas: outputs on one canvas see the same ones).
     pub encoder_skipped: u32,
+    /// Streams: tries allowed when the connection drops (set when it starts).
+    pub retries: u32,
+    /// Streams: while reconnecting, the try coming and when.
+    pub reconnect: Option<ReconnectInfo>,
     /// Streams with adaptive bitrate: the encoder's bitrate now and what it is set to (kbps).
     pub current_kbps: u32,
     pub target_kbps: u32,
@@ -89,6 +111,8 @@ impl Default for OutputStatus {
             dropped_frames: 0,
             total_frames: 0,
             encoder_skipped: 0,
+            retries: 0,
+            reconnect: None,
             current_kbps: 0,
             target_kbps: 0,
             saved_clips: 0,
@@ -431,17 +455,34 @@ unsafe extern "C" fn on_start(param: *mut c_void, _: *mut sys::calldata_t) {
             _ => Instant::now(),
         };
         s.state = OutputState::Active { since };
+        s.reconnect = None;
     });
 }
 
-unsafe extern "C" fn on_reconnect(param: *mut c_void, _: *mut sys::calldata_t) {
+unsafe extern "C" fn on_reconnect(param: *mut c_void, data: *mut sys::calldata_t) {
     let key = unsafe { *(param as *const OutputKey) };
+    // libobs says how long it waits before the next try
+    let mut timeout: i64 = 0;
+    unsafe {
+        sys::calldata_get_data(
+            data,
+            c"timeout_sec".as_ptr(),
+            &mut timeout as *mut i64 as *mut c_void,
+            std::mem::size_of::<i64>(),
+        );
+    }
     runtime().update(key, |s| {
         let since = match s.state {
             OutputState::Active { since } | OutputState::Reconnecting { since } => since,
             _ => Instant::now(),
         };
         s.state = OutputState::Reconnecting { since };
+        let attempt = s.reconnect.map_or(1, |r| r.attempt + 1);
+        s.reconnect = Some(ReconnectInfo {
+            attempt,
+            retries: s.retries,
+            next_at: Instant::now() + Duration::from_secs(timeout.max(0) as u64),
+        });
     });
 }
 
@@ -466,7 +507,10 @@ unsafe extern "C" fn on_stop(param: *mut c_void, data: *mut sys::calldata_t) {
         let detail = if output.is_null() { None } else { last_error(output) };
         OutputState::Failed(describe_stop(code as i32, detail))
     };
-    runtime().update(key, |s| s.state = state);
+    runtime().update(key, |s| {
+        s.state = state;
+        s.reconnect = None;
+    });
 }
 
 fn last_error(output: *mut sys::obs_output_t) -> Option<String> {
@@ -909,6 +953,7 @@ impl Outputs {
             unsafe { start(key, output_type, &output_settings, &encoders, service, video_output, shared, &vod)? };
         if let Some((retries, delay)) = cfg.reconnect {
             unsafe { sys::obs_output_set_reconnect_settings(running.output, retries as i32, delay as i32) };
+            runtime().update(key, |s| s.retries = retries);
         }
         self.streams.insert(cfg.id, running);
         Ok(())
