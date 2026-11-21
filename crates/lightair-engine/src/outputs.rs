@@ -136,8 +136,9 @@ pub enum OutputKey {
     /// A recording of one canvas (by its canvas id); several can run at once.
     Recording(Id),
     Stream(Id),
-    /// The replay buffer behind the Clip button.
-    Clips,
+    /// The replay buffer of one canvas (by its canvas id), behind the Clip button; several can
+    /// run at once.
+    Clips(Id),
     /// The virtual camera: a canvas as a camera other apps can pick (macOS: through the OBS
     /// Virtual Camera extension, lightair-effect-stack's `lightair_virtualcam` output).
     VirtualCamera,
@@ -178,6 +179,39 @@ impl OutputsRuntime {
             .min_by_key(|s| (rank(s), since(s)))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// The replay buffers as one: running ones first (their saved clips added up; the path is
+    /// the clip saved last), else one starting, stopping or failed, else idle.
+    pub fn clips(&self) -> OutputStatus {
+        let status = self.status.lock();
+        let all: Vec<&OutputStatus> =
+            status.iter().filter(|(k, _)| matches!(k, OutputKey::Clips(_))).map(|(_, s)| s).collect();
+        let rank = |s: &OutputStatus| match s.state {
+            OutputState::Active { .. } | OutputState::Reconnecting { .. } => 0,
+            OutputState::Starting | OutputState::Stopping => 1,
+            OutputState::Failed(_) => 2,
+            OutputState::Idle => 3,
+        };
+        let mut best = all.iter().min_by_key(|s| rank(s)).map(|s| (*s).clone()).unwrap_or_default();
+        best.saved_clips = all.iter().map(|s| s.saved_clips).sum();
+        if let Some(last) = LAST_CLIP.lock().as_ref().and_then(|(canvas, _)| status.get(&OutputKey::Clips(*canvas))) {
+            best.path = last.path.clone();
+        }
+        best
+    }
+
+    /// Whether any replay buffer is running.
+    pub fn any_clips_running(&self) -> bool {
+        self.status.lock().iter().any(|(k, s)| matches!(k, OutputKey::Clips(_)) && s.state.is_running())
+    }
+
+    /// Whether any replay buffer is recording (ready for a clip).
+    pub fn clips_ready(&self) -> bool {
+        self.status
+            .lock()
+            .iter()
+            .any(|(k, s)| matches!(k, OutputKey::Clips(_)) && matches!(s.state, OutputState::Active { .. }))
     }
 
     pub fn any_stream_running(&self) -> bool {
@@ -340,6 +374,10 @@ pub struct RecordingConfig {
 
 #[derive(Debug, Clone)]
 pub struct ClipsConfig {
+    /// The canvas (canvas id) kept in this buffer; it keys the output.
+    pub canvas: Id,
+    /// Added to the clip's file name when several canvases are kept ("Vertical").
+    pub label: Option<String>,
     pub folder: PathBuf,
     pub seconds: u32,
     pub encoders: EncoderConfig,
@@ -466,7 +504,7 @@ fn signals_for(key: OutputKey) -> &'static [(&'static str, SignalCb)] {
         OutputKey::Stream(_) => {
             &[("start", on_start), ("stop", on_stop), ("reconnect", on_reconnect), ("reconnect_success", on_start)]
         }
-        OutputKey::Clips => &[("start", on_start), ("stop", on_stop), ("saved", on_saved)],
+        OutputKey::Clips(_) => &[("start", on_start), ("stop", on_stop), ("saved", on_saved)],
         OutputKey::VirtualCamera => &[("start", on_start), ("stop", on_stop)],
     }
 }
@@ -488,7 +526,9 @@ unsafe extern "C" fn on_file_changed(param: *mut c_void, data: *mut sys::calldat
 /// Replay buffer saved a clip: record its path (the UI shows it and counts clips).
 unsafe extern "C" fn on_saved(param: *mut c_void, _: *mut sys::calldata_t) {
     let key = unsafe { *(param as *const OutputKey) };
-    let path = CLIPS_OUTPUT.lock().as_ref().and_then(|p| unsafe { last_replay(p.0) });
+    let OutputKey::Clips(canvas) = key else { return };
+    let path = CLIPS_OUTPUT.lock().get(&canvas).and_then(|p| unsafe { last_replay(p.0) });
+    *LAST_CLIP.lock() = Some((canvas, std::time::Instant::now()));
     runtime().update(key, |s| {
         s.path = path;
         s.saved_clips += 1;
@@ -497,7 +537,9 @@ unsafe extern "C" fn on_saved(param: *mut c_void, _: *mut sys::calldata_t) {
 
 struct OutputPtr(*mut sys::obs_output_t);
 unsafe impl Send for OutputPtr {}
-static CLIPS_OUTPUT: Mutex<Option<OutputPtr>> = Mutex::new(None);
+static CLIPS_OUTPUT: Mutex<std::collections::BTreeMap<Id, OutputPtr>> = Mutex::new(std::collections::BTreeMap::new());
+/// The canvas whose buffer saved a clip last.
+static LAST_CLIP: Mutex<Option<(Id, std::time::Instant)>> = Mutex::new(None);
 
 unsafe fn proc_call(output: *mut sys::obs_output_t, name: &str, cd: &mut sys::calldata_t) -> bool {
     unsafe {
@@ -619,7 +661,7 @@ fn describe_stop(code: i32, detail: Option<String>) -> String {
 pub struct Outputs {
     recordings: HashMap<Id, Running>,
     streams: HashMap<Id, Running>,
-    clips: Option<Running>,
+    clips: HashMap<Id, Running>,
     virtual_camera: Option<Running>,
     /// The virtual camera's own canvas, while it shows one scene rather than what's on air.
     virtual_camera_canvas: Option<crate::obs::ObsCanvas>,
@@ -769,7 +811,7 @@ unsafe fn start(
     let name = match key {
         OutputKey::Recording(canvas) => format!("Recording {canvas}"),
         OutputKey::Stream(id) => format!("Stream {id}"),
-        OutputKey::Clips => "Clips".to_string(),
+        OutputKey::Clips(canvas) => format!("Clips {canvas}"),
         OutputKey::VirtualCamera => "Virtual camera".to_string(),
     };
     unsafe {
@@ -1243,42 +1285,47 @@ impl Outputs {
         self.virtual_camera_canvas = None;
     }
 
-    /// Starts the replay buffer (docs/11-outputs-streaming-recording.md, "Clips").
+    /// Starts the replay buffer of one canvas (docs/11-outputs-streaming-recording.md, "Clips"):
+    /// `video` is that canvas's video (`None`: the primary). Several canvases keep a buffer each.
     pub fn start_clips(&mut self, cfg: &ClipsConfig, video: Option<VideoOutput>) -> Result<(), String> {
         let video_output = video.map_or(std::ptr::null_mut(), |v| v.0);
-        if self.clips.as_ref().is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
+        let key = OutputKey::Clips(cfg.canvas);
+        if self.clips.get(&cfg.canvas).is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
             return Ok(());
         }
-        self.drop_clips();
+        self.drop_clips(cfg.canvas);
         std::fs::create_dir_all(&cfg.folder).map_err(|e| format!("Can't create the clips folder: {e}"))?;
+        let pattern = match &cfg.label {
+            Some(label) => format!("Clip %CCYY-%MM-%DD %hh-%mm-%ss {label}"),
+            None => "Clip %CCYY-%MM-%DD %hh-%mm-%ss".to_string(),
+        };
         let mut settings = Data::new();
         settings
             .set_str("directory", &cfg.folder.to_string_lossy())
-            .set_str("format", "Clip %CCYY-%MM-%DD %hh-%mm-%ss")
+            .set_str("format", &pattern)
             .set_str("extension", "mp4")
             .set_int("max_time_sec", cfg.seconds as i64)
             .set_int("max_size_mb", 0);
         let running = unsafe {
-            start(
-                OutputKey::Clips,
-                "replay_buffer",
-                &settings,
-                &cfg.encoders,
-                std::ptr::null_mut(),
-                video_output,
-                None,
-                &[],
-                None,
-            )?
+            start(key, "replay_buffer", &settings, &cfg.encoders, std::ptr::null_mut(), video_output, None, &[], None)?
         };
-        *CLIPS_OUTPUT.lock() = Some(OutputPtr(running.output));
-        self.clips = Some(running);
+        CLIPS_OUTPUT.lock().insert(cfg.canvas, OutputPtr(running.output));
+        self.clips.insert(cfg.canvas, running);
         Ok(())
     }
 
+    /// Stops every replay buffer.
     pub fn stop_clips(&mut self) {
-        if let Some(r) = &self.clips {
-            runtime().update(OutputKey::Clips, |s| {
+        let canvases: Vec<Id> = self.clips.keys().copied().collect();
+        for canvas in canvases {
+            self.stop_clips_of(canvas);
+        }
+    }
+
+    /// Stops one canvas's replay buffer.
+    pub fn stop_clips_of(&mut self, canvas: Id) {
+        if let Some(r) = self.clips.get(&canvas) {
+            runtime().update(OutputKey::Clips(canvas), |s| {
                 if s.state.is_running() {
                     s.state = OutputState::Stopping
                 }
@@ -1287,25 +1334,35 @@ impl Outputs {
         }
     }
 
-    fn drop_clips(&mut self) {
-        CLIPS_OUTPUT.lock().take();
-        if let Some(old) = self.clips.take() {
+    /// The canvases whose replay buffer exists (running or stopped, not yet dropped).
+    pub fn clips_canvases(&self) -> Vec<Id> {
+        self.clips.keys().copied().collect()
+    }
+
+    fn drop_clips(&mut self, canvas: Id) {
+        CLIPS_OUTPUT.lock().remove(&canvas);
+        if let Some(old) = self.clips.remove(&canvas) {
             unsafe { old.release() };
         }
     }
 
-    /// Saves the last N seconds as a clip; the "saved" signal reports the file.
-    pub fn save_clip(&mut self) -> bool {
-        let Some(r) = &self.clips else { return false };
-        if !unsafe { sys::obs_output_active(r.output) } {
-            return false;
+    /// Saves the last N seconds of every running buffer as a clip each; the "saved" signals
+    /// report the files. How many buffers accepted the save.
+    pub fn save_clip(&mut self) -> usize {
+        let mut saved = 0;
+        for r in self.clips.values() {
+            if !unsafe { sys::obs_output_active(r.output) } {
+                continue;
+            }
+            let mut cd = sys::calldata_t::default();
+            if unsafe { proc_call(r.output, "save", &mut cd) } {
+                saved += 1;
+            }
+            if !cd.fixed && !cd.stack.is_null() {
+                unsafe { sys::bfree(cd.stack as *mut c_void) };
+            }
         }
-        let mut cd = sys::calldata_t::default();
-        let ok = unsafe { proc_call(r.output, "save", &mut cd) };
-        if !cd.fixed && !cd.stack.is_null() {
-            unsafe { sys::bfree(cd.stack as *mut c_void) };
-        }
-        ok
+        saved
     }
 
     /// Updates byte and frame counters for running outputs (called by the stats sampler).
@@ -1339,10 +1396,13 @@ impl Outputs {
 
     /// Stops and releases everything (engine shutdown).
     pub fn shutdown(&mut self) {
-        if let Some(r) = &self.clips {
+        for r in self.clips.values() {
             unsafe { sys::obs_output_stop(r.output) };
         }
-        self.drop_clips();
+        let canvases: Vec<Id> = self.clips.keys().copied().collect();
+        for canvas in canvases {
+            self.drop_clips(canvas);
+        }
         if let Some(r) = &self.virtual_camera {
             unsafe { sys::obs_output_stop(r.output) };
         }

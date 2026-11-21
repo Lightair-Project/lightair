@@ -118,7 +118,7 @@ impl StudioWindow {
     }
 
     fn set_clips(&mut self, f: impl FnOnce(&mut ClipSettings), cx: &mut Context<Self>) {
-        let mut settings = self.studio.read(cx).workspace().outputs.clips;
+        let mut settings = self.studio.read(cx).workspace().outputs.clips.clone();
         f(&mut settings);
         self.exec(Command::SetClipSettings { settings }, cx);
     }
@@ -949,25 +949,31 @@ impl StudioWindow {
 
     fn clips_page(&self, cx: &mut Context<Self>) -> Div {
         let workspace = self.studio.read(cx).workspace().clone();
-        let clips = workspace.outputs.clips;
+        let clips = workspace.outputs.clips.clone();
         let on = clips.enabled;
         let seconds: Vec<(String, bool, bool, Command)> = [15, 30, 60, 120, 300]
             .into_iter()
             .map(|s| {
-                let settings = ClipSettings { seconds: s, ..clips };
+                let settings = ClipSettings { seconds: s, ..clips.clone() };
                 let label = if s >= 60 { format!("{} min", s / 60) } else { format!("{s} s") };
                 (label, clips.seconds == s, true, Command::SetClipSettings { settings })
             })
             .collect();
-        let canvases: Vec<(String, bool, bool, Command)> = workspace
-            .canvases
-            .iter()
-            .map(|f| {
-                let canvas = (f.id != workspace.primary_canvas().id).then_some(f.id);
-                let settings = ClipSettings { canvas, ..clips };
-                (f.name.clone(), clips.canvas == canvas, true, Command::SetClipSettings { settings })
-            })
-            .collect();
+        // a buffer for each canvas chosen (the Clip button saves them together)
+        let targets = clips.targets(&workspace);
+        let mut buffers = group("Canvases");
+        for (i, f) in workspace.canvases.iter().enumerate() {
+            let on = targets.contains(&f.id);
+            let (fid, c2, w2) = (f.id, clips.clone(), workspace.clone());
+            buffers = buffers.child(row(
+                &format!("{} {}×{}", f.name, f.width, f.height),
+                None,
+                switch(("clips-canvas", i), on).on_click(cx.listener(move |this, _, _, cx| {
+                    let settings = c2.with_canvas(&w2, fid, !on);
+                    this.exec(Command::SetClipSettings { settings }, cx);
+                })),
+            ));
+        }
         pages().child(
             group("Clips")
                 .child(row(
@@ -977,8 +983,10 @@ impl StudioWindow {
                         .on_click(cx.listener(move |this, _, _, cx| this.set_clips(|c| c.enabled = !on, cx))),
                 ))
                 .child(row("Length", None, chips("clips-length", seconds, cx)))
-                .when(workspace.canvases.len() > 1, |g| g.child(row("Canvas", None, chips("clips-canvas", canvases, cx)))),
         )
+        .when(workspace.canvases.len() > 1, |p| {
+            p.child(buffers.child(note("Each canvas keeps its own buffer; the Clip button saves them all, a file each.")))
+        })
     }
 
     fn canvases_page(&self, cx: &mut Context<Self>) -> Div {

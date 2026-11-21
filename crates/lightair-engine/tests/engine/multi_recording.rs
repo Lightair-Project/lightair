@@ -6,7 +6,7 @@ use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
 use lightair_model::{Command, Document, Canvas, Source, Object, Layout, Workspace, Scene, diff};
-use lightair_engine::outputs::{Container, OutputKey, RecordingConfig, default_encoders, runtime};
+use lightair_engine::outputs::{ClipsConfig, Container, OutputKey, RecordingConfig, default_encoders, runtime};
 use lightair_engine::{Engine, EngineConfig};
 use serde_json::json;
 
@@ -129,6 +129,39 @@ fn two_canvases_record_together() {
     assert_eq!((lw, lh), (640, 360), "the landscape canvas at its size");
     assert_eq!((vw, vh), (360, 640), "the vertical canvas at its size");
     assert!(ld > 0.8 && vd > 0.8, "both have video");
+
+    // A replay buffer for each canvas: the Clip button saves both, a file each, at each size.
+    let clips_dir = dir.join("clips");
+    for (canvas, label) in [(landscape, "Landscape"), (vid, "Vertical")] {
+        let cfg = ClipsConfig {
+            canvas,
+            label: Some(label.into()),
+            folder: clips_dir.clone(),
+            seconds: 5,
+            encoders: encoders.clone(),
+        };
+        engine
+            .call(move |s| {
+                let video = s.reconciler.canvas_video(canvas);
+                s.outputs.start_clips(&cfg, video)
+            })
+            .expect("a replay buffer starts");
+    }
+    assert!(wait(Duration::from_secs(5), || runtime().get(OutputKey::Clips(landscape)).state.is_running()
+        && runtime().get(OutputKey::Clips(vid)).state.is_running()));
+    assert!(wait(Duration::from_secs(5), || runtime().clips_ready()));
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(engine.call(|s| s.outputs.save_clip()), 2, "both buffers take the save");
+    assert!(wait(Duration::from_secs(8), || runtime().get(OutputKey::Clips(landscape)).saved_clips == 1
+        && runtime().get(OutputKey::Clips(vid)).saved_clips == 1));
+    assert_eq!(runtime().clips().saved_clips, 2, "the aggregate adds them up");
+    let (l, v) = (runtime().get(OutputKey::Clips(landscape)).path.unwrap(), runtime().get(OutputKey::Clips(vid)).path.unwrap());
+    assert_ne!(l, v, "a file each");
+    let ((lw, lh, _), (vw, vh, _)) = (probe(&l), probe(&v));
+    assert_eq!((lw, lh), (640, 360), "the landscape clip at its size");
+    assert_eq!((vw, vh), (360, 640), "the vertical clip at its size");
+    engine.call(|s| s.outputs.stop_clips());
+    assert!(wait(Duration::from_secs(8), || !runtime().any_clips_running()), "both buffers stopped");
     drop(engine);
     let _ = std::fs::remove_dir_all(dir);
 }

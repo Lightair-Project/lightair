@@ -199,7 +199,9 @@ fn output_states(w: &Workspace) -> HashMap<String, (&'static str, u32)> {
     for c in &w.canvases {
         out.insert(format!("record:{}", c.id), (word(&runtime().get(OutputKey::Recording(c.id)).state), 0));
     }
-    out.insert("clips".into(), (word(&runtime().get(OutputKey::Clips).state), 0));
+    for c in &w.canvases {
+        out.insert(format!("clips:{}", c.id), (word(&runtime().get(OutputKey::Clips(c.id)).state), 0));
+    }
     out.insert("vcam".into(), (word(&runtime().get(OutputKey::VirtualCamera).state), 0));
     out
 }
@@ -436,7 +438,7 @@ impl StudioWindow {
             recording: (rec.state.is_running(), rec.paused),
             streaming: runtime().any_stream_running(),
             vcam: studio.virtual_camera().is_running(),
-            clips_saved: runtime().get(OutputKey::Clips).saved_clips,
+            clips_saved: runtime().clips().saved_clips,
             tracks: w.tracks.iter().map(|t| (t.id, (t.source, t.volume_db, t.muted))).collect(),
             visible: w
                 .scenes
@@ -501,7 +503,7 @@ impl StudioWindow {
                         (Some(OutputKey::Stream(id)), w.outputs.destinations.iter().find(|d| d.id == id).map(|d| d.name.clone()))
                     }
                     ("record", Some(id)) => (Some(OutputKey::Recording(id)), w.canvas(id).map(|c| c.name.clone())),
-                    ("clips", _) => (Some(OutputKey::Clips), None),
+                    ("clips", Some(id)) => (Some(OutputKey::Clips(id)), w.canvas(id).map(|c| c.name.clone())),
                     _ => (Some(OutputKey::VirtualCamera), None),
                 };
                 let mut data = output_json(okey);
@@ -551,7 +553,7 @@ impl StudioWindow {
         }
         if clip_saved {
             // with its id, length, formats and a 240 px picture once the Library has it (MR-08)
-            let path = runtime().get(OutputKey::Clips).path;
+            let path = runtime().clips().path;
             let workspace = self.studio.read(cx).workspace_dir();
             self.tell_clip_saved(path, workspace, cx);
         }
@@ -1096,7 +1098,15 @@ impl StudioWindow {
         json!({
             "destinations": streaming["destinations"],
             "recordings": recordings,
-            "clips": output_json(Some(OutputKey::Clips)),
+            "clips": w
+                .canvases
+                .iter()
+                .map(|c| {
+                    let mut v = output_json(Some(OutputKey::Clips(c.id)));
+                    v["canvas"] = json!(c.id);
+                    v
+                })
+                .collect::<Vec<_>>(),
             "virtual_camera": output_json(Some(OutputKey::VirtualCamera)),
         })
     }

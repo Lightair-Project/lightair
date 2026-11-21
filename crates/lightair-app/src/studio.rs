@@ -234,7 +234,8 @@ pub struct Studio {
     pub ui_request: Option<UiRequest>,
     pub stats: Stats,
     /// Clips announced so far (to report each new one once).
-    clips_seen: u32,
+    /// Clips saved so far by each canvas's buffer that were announced.
+    clips_seen: HashMap<Id, u32>,
     /// Frames libobs lagged since the previous stats sample (health is about now, not startup).
     pub recent_lagged: u32,
     /// Destinations to start again once they've stopped (a restart from the Outputs panel).
@@ -305,7 +306,7 @@ impl Studio {
             ui_request: None,
             issue,
             stats: Stats::default(),
-            clips_seen: 0,
+            clips_seen: HashMap::new(),
             recent_lagged: 0,
             restart: Vec::new(),
             sequence: None,
@@ -645,7 +646,7 @@ impl Studio {
         self.refit = None;
         self.mic_history.clear();
         self.last_clip = None;
-        self.clips_seen = 0;
+        self.clips_seen.clear();
         self.issue = (opened.recovered > 0).then(|| format!("Recovered {} unsaved change(s)", opened.recovered).into());
         self.engine.call(move |s| {
             s.outputs.stop_clips();
@@ -753,24 +754,34 @@ impl Studio {
         }
     }
 
+    /// Keeps a replay buffer running for each canvas the workspace chooses (one file each when
+    /// the Clip button is pressed), and none when Clips are off.
     fn sync_clips(&mut self) {
-        let settings = self.workspace().outputs.clips;
-        let running = runtime().get(OutputKey::Clips).state.is_running();
-        if settings.enabled && !running {
-            let cfg = ClipsConfig {
-                folder: self.recording_folder().join("Clips"),
-                seconds: settings.seconds,
-                encoders: default_encoders(&self.engine.capabilities.encoders, 8000, false),
-            };
-            let canvas = settings.canvas;
-            self.engine.post(move |s| {
-                let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
-                if let Err(e) = s.outputs.start_clips(&cfg, video) {
-                    tracing::error!(%e, "replay buffer failed to start");
-                }
-            });
-        } else if !settings.enabled && running {
-            self.engine.post(|s| s.outputs.stop_clips());
+        let workspace = self.workspace().clone();
+        let settings = workspace.outputs.clips.clone();
+        let wanted: Vec<Id> = if settings.enabled { settings.targets(&workspace) } else { Vec::new() };
+        let several = wanted.len() > 1;
+        for canvas in &workspace.canvases {
+            let running = runtime().get(OutputKey::Clips(canvas.id)).state.is_running();
+            let id = canvas.id;
+            if wanted.contains(&id) && !running {
+                let cfg = ClipsConfig {
+                    canvas: id,
+                    // with several, the canvas's name tells the files apart
+                    label: several.then(|| canvas.name.clone()),
+                    folder: self.recording_folder().join("Clips"),
+                    seconds: settings.seconds,
+                    encoders: default_encoders(&self.engine.capabilities.encoders, 8000, false),
+                };
+                self.engine.post(move |s| {
+                    let video = s.reconciler.canvas_video(id);
+                    if let Err(e) = s.outputs.start_clips(&cfg, video) {
+                        tracing::error!(%e, "replay buffer failed to start");
+                    }
+                });
+            } else if !wanted.contains(&id) && running {
+                self.engine.post(move |s| s.outputs.stop_clips_of(id));
+            }
         }
     }
 
@@ -841,10 +852,12 @@ impl Studio {
         }
     }
 
+    /// Whether a replay buffer is running (the Clip button works).
     pub fn clips_ready(&self) -> bool {
-        matches!(runtime().get(OutputKey::Clips).state, OutputState::Active { .. })
+        runtime().clips_ready()
     }
 
+    /// Saves the last moments of every canvas's buffer, a clip each.
     pub fn save_clip(&mut self, cx: &mut Context<Self>) {
         if !self.clips_ready() {
             self.issue = Some("Turn on Clips in Outputs to save clips.".into());
@@ -857,16 +870,24 @@ impl Studio {
     }
 
     fn announce_clips(&mut self) {
-        let status = runtime().get(OutputKey::Clips);
-        if status.saved_clips > self.clips_seen {
-            self.clips_seen = status.saved_clips;
+        let workspace = self.workspace().clone();
+        for canvas in &workspace.canvases {
+            let status = runtime().get(OutputKey::Clips(canvas.id));
+            let seen = self.clips_seen.entry(canvas.id).or_insert(0);
+            if status.saved_clips <= *seen {
+                continue;
+            }
+            *seen = status.saved_clips;
             let name = status.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
             self.issue = Some(format!("Clip saved: {}", name.unwrap_or_default()).into());
             self.last_clip = status.path.clone();
             if let (Some(dir), Some(path)) = (self.workspace_dir(), status.path.clone()) {
-                let seconds = self.workspace().outputs.clips.seconds as u64;
+                let seconds = workspace.outputs.clips.seconds as u64;
                 let started = chrono::Utc::now().timestamp_millis() - seconds as i64 * 1000;
-                let title = format!("Clip · {}", chrono::Local::now().format("%-d %b, %H:%M:%S"));
+                let mut title = format!("Clip · {}", chrono::Local::now().format("%-d %b, %H:%M:%S"));
+                if workspace.canvases.len() > 1 && workspace.outputs.clips.targets(&workspace).len() > 1 {
+                    title = format!("{title} · {}", canvas.name);
+                }
                 let mut item = Item::new(Kind::Clip, title, vec![ItemFile::new(path)], started);
                 item.duration_ms = Some(seconds * 1000);
                 let thumb = recordings::thumbnails_dir(&dir).join(format!("{}.png", item.id));
@@ -1553,7 +1574,8 @@ impl Studio {
 
     /// Surfaces output failures as issues (called on the stats tick).
     fn check_outputs(&mut self) {
-        let mut keys = vec![OutputKey::Clips, OutputKey::VirtualCamera];
+        let mut keys = vec![OutputKey::VirtualCamera];
+        keys.extend(self.workspace().canvases.iter().map(|f| OutputKey::Clips(f.id)));
         keys.extend(self.workspace().canvases.iter().map(|f| OutputKey::Recording(f.id)));
         keys.extend(self.workspace().outputs.destinations.iter().map(|d| OutputKey::Stream(d.id)));
         for key in keys {
@@ -1563,7 +1585,10 @@ impl Studio {
                         Some(f) if self.workspace().canvases.len() > 1 => format!("Recording ({})", f.name),
                         _ => "Recording".to_string(),
                     },
-                    OutputKey::Clips => "Clips".to_string(),
+                    OutputKey::Clips(canvas) => match self.workspace().canvas(canvas) {
+                        Some(f) if self.workspace().canvases.len() > 1 => format!("Clips ({})", f.name),
+                        _ => "Clips".to_string(),
+                    },
                     OutputKey::VirtualCamera => "Virtual camera".to_string(),
                     OutputKey::Stream(id) => self
                         .workspace()

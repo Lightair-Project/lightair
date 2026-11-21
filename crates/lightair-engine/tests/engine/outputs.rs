@@ -168,17 +168,17 @@ fn record_and_stream() {
 
     // ---- clips: rolling buffer, save the last seconds
     let clips_dir = dir.join("clips");
-    let cfg = ClipsConfig { folder: clips_dir.clone(), seconds: 5, encoders: encoders.clone() };
+    let cfg = ClipsConfig { canvas, label: None, folder: clips_dir.clone(), seconds: 5, encoders: encoders.clone() };
     engine.call(move |s| s.outputs.start_clips(&cfg, None)).expect("replay buffer starts");
-    let state = wait_for(OutputKey::Clips, Duration::from_secs(10), |s| matches!(s, OutputState::Active { .. }));
+    let state = wait_for(OutputKey::Clips(canvas), Duration::from_secs(10), |s| matches!(s, OutputState::Active { .. }));
     assert!(matches!(state, OutputState::Active { .. }), "replay buffer active: {state:?}");
     std::thread::sleep(Duration::from_millis(1100));
-    assert!(engine.call(|s| s.outputs.save_clip()), "save accepted");
+    assert_eq!(engine.call(|s| s.outputs.save_clip()), 1, "save accepted");
     let start = Instant::now();
-    while runtime().get(OutputKey::Clips).saved_clips == 0 && start.elapsed() < Duration::from_secs(5) {
+    while runtime().get(OutputKey::Clips(canvas)).saved_clips == 0 && start.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(50));
     }
-    let status = runtime().get(OutputKey::Clips);
+    let status = runtime().get(OutputKey::Clips(canvas));
     eprintln!(
         "clips status: saved={} path={:?} files={:?}",
         status.saved_clips,
@@ -191,7 +191,7 @@ fn record_and_stream() {
     assert!(streams.iter().any(|s| s == "video:h264"), "{streams:?}");
     assert!(duration > 0.8 && duration < 6.0, "clip length {duration}");
     engine.call(|s| s.outputs.stop_clips());
-    wait_for(OutputKey::Clips, Duration::from_secs(10), |s| !s.is_running());
+    wait_for(OutputKey::Clips(canvas), Duration::from_secs(10), |s| !s.is_running());
 
     // ---- streaming to a local RTMP server
     if have("ffmpeg") {
