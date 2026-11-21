@@ -51,6 +51,8 @@ struct Edit {
     vod_mix: Option<Id>,
     /// How the connection is run (adaptive bitrate).
     options: StreamOptions,
+    /// Signed in officially on its platform (its own key can be fetched).
+    official_in: bool,
     error: Option<String>,
 }
 
@@ -67,6 +69,10 @@ struct Configure {
     /// The channel whose chat is read (empty: none).
     chat: Entity<InputState>,
     canvas: Option<Id>,
+    /// Where its key comes from: signed in officially, its account's; else pasted.
+    account_key: lightair_model::AccountKey,
+    /// Signed in officially on its platform.
+    official_in: bool,
     error: Option<String>,
     /// A vertical canvas was asked for: pick it once it exists.
     want_vertical: bool,
@@ -532,6 +538,7 @@ impl OutputsPanel {
             Shape::Vertical => workspace.canvases.iter().find(|f| f.height > f.width).map(|f| f.id),
             Shape::Landscape => None,
         };
+        let official_in = crate::keys::offers_account_key(platform.id) && lightair_live::official::signed_in(platform.id);
         let first = if platform.servers.is_empty() { server_input.clone() } else { key.clone() };
         first.update(cx, |i, cx| i.focus(window, cx));
         self.setup = Some(Setup::Configure(Configure {
@@ -541,6 +548,9 @@ impl OutputsPanel {
             key,
             chat,
             canvas,
+            // signed in on the platform: its own key, nothing to paste
+            account_key: if official_in { lightair_model::AccountKey::Account } else { lightair_model::AccountKey::Pasted },
+            official_in,
             error: None,
             want_vertical: false,
         }));
@@ -566,7 +576,7 @@ impl OutputsPanel {
             } else {
                 "That doesn't look like a server URL (rtmp://, rtmps://, srt:// or https://).".into()
             })
-        } else if needs_key && key.is_empty() {
+        } else if needs_key && key.is_empty() && c.account_key == lightair_model::AccountKey::Pasted {
             Some("Paste the stream key.".into())
         } else {
             None
@@ -591,9 +601,11 @@ impl OutputsPanel {
             audio_mix: None,
             vod_mix: None,
             chat: Some(c.chat.read(cx).value().trim().to_string()).filter(|c| !c.is_empty()),
-            options: Default::default(),
+            options: StreamOptions { account_key: c.account_key, ..Default::default() },
         };
-        if let Err(e) = crate::secrets::set_stream_key(destination.id, &key) {
+        if c.account_key == lightair_model::AccountKey::Pasted
+            && let Err(e) = crate::secrets::set_stream_key(destination.id, &key)
+        {
             c.error = Some(format!("Couldn't save the stream key: {e}"));
             cx.notify();
             return;
@@ -647,6 +659,7 @@ impl OutputsPanel {
             audio_mix: d.audio_mix,
             vod_mix: d.vod_mix,
             options: d.options.clone(),
+            official_in: lightair_live::official::signed_in(platform.id),
             error: None,
         }));
         cx.notify();
@@ -1286,10 +1299,44 @@ impl OutputsPanel {
             }
             card_
         };
+        // where the key comes from: pasted, the account's, or (YouTube) a new broadcast
+        let mut key_source = seg();
+        let youtube = e.platform.id.starts_with("youtube");
+        let mut sources = vec![
+            (lightair_model::AccountKey::Pasted, "Pasted", true),
+            (lightair_model::AccountKey::Account, "Your account", e.official_in),
+        ];
+        if youtube {
+            sources.push((lightair_model::AccountKey::NewBroadcast, "New broadcast", e.official_in));
+        }
+        for (i, (source, label, usable)) in sources.into_iter().enumerate() {
+            key_source = key_source.child(
+                chip(("edit-key-source", i), label.to_string(), e.options.account_key == source, usable)
+                    .on_click(set_opts(Box::new(move |o| o.account_key = source))),
+            );
+        }
         let id = e.id;
         let connection = card("Connection")
             .child(server)
-            .child(row("Stream key", None, div().flex_1().child(Input::new(&e.key).small().mask_toggle()).into_any_element()))
+            .when(crate::keys::offers_account_key(e.platform.id), |d| {
+                d.child(row(
+                    "Stream key from",
+                    Some("Pasted: the key you copy from the platform, kept in your keychain. Your account: fetched each time you go live through the account signed in under Settings › Connections, never stored. New broadcast (YouTube): a fresh broadcast each time, unlisted until you change it, started and ended with the stream."),
+                    key_source.into_any_element(),
+                ))
+            })
+            .when(e.options.account_key == lightair_model::AccountKey::Pasted, |d| {
+                d.child(row("Stream key", None, div().flex_1().child(Input::new(&e.key).small().mask_toggle()).into_any_element()))
+            })
+            .when(
+                crate::keys::offers_account_key(e.platform.id) && !e.official_in,
+                |d| {
+                    d.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!(
+                        "Sign in to {} under Settings › Connections to use its key from your account.",
+                        e.platform.name
+                    )))
+                },
+            )
             .when(lightair_live::channel_hint(e.platform.id).is_some(), |d| {
                 d.child(row(
                     "Chat",
@@ -1602,6 +1649,42 @@ impl OutputsPanel {
             Some(format!("Kept in your {}, never in the workspace's files.", crate::ui::KEYCHAIN).into()),
             div().flex_1().child(Input::new(&c.key).small().mask_toggle()),
         );
+        // Twitch and YouTube, signed in: its own key from the account, or a pasted one
+        let account_choice = crate::keys::offers_account_key(p.id).then(|| {
+            let mut choice = segments();
+            let mut sources = vec![
+                (lightair_model::AccountKey::Account, "Your account", c.official_in),
+                (lightair_model::AccountKey::Pasted, "Paste a key", true),
+            ];
+            if p.id.starts_with("youtube") {
+                sources.insert(1, (lightair_model::AccountKey::NewBroadcast, "New broadcast each time", c.official_in));
+            }
+            let me = cx.entity().downgrade();
+            for (i, (source, label, usable)) in sources.into_iter().enumerate() {
+                let me = me.clone();
+                choice = choice.child(segment(("cfg-key-source", i), label.to_string(), c.account_key == source, usable).on_click(
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        if let Some(me) = me.upgrade() {
+                            me.update(cx, |this, cx| {
+                                if let Some(Setup::Configure(c)) = &mut this.setup {
+                                    c.account_key = source;
+                                }
+                                cx.notify();
+                            });
+                        }
+                    },
+                ));
+            }
+            form_row(
+                "Stream key from",
+                Some(if c.official_in {
+                    "Your account: fetched each time you go live, never stored. Nothing to paste.".into()
+                } else {
+                    format!("Sign in to {} under Settings › Connections to use your account's key.", p.name).into()
+                }),
+                choice,
+            )
+        });
         // Canvas: the workspace's canvases, the ones the platform takes marked with a dot.
         let mut shapes = segments();
         for (i, f) in workspace.canvases.iter().enumerate() {
@@ -1684,8 +1767,10 @@ impl OutputsPanel {
             .child(
                 form_card("Connection")
                     .child(server)
-                    .child(key)
-                    .children(key_link.map(|l| div().flex().pl(px(120.)).child(l)))
+                    .children(account_choice)
+                    .when(c.account_key == lightair_model::AccountKey::Pasted, |d| {
+                        d.child(key).children(key_link.map(|l| div().flex().pl(px(120.)).child(l)))
+                    })
                     .when(lightair_live::channel_hint(p.id).is_some(), |d| {
                         d.child(form_row(
                             "Chat",

@@ -888,7 +888,7 @@ impl StudioWindow {
                     if enabled.is_empty() {
                         return Err(ApiError::state("no destination: add one in Outputs to go live"));
                     }
-                    if let Some(d) = enabled.iter().find(|d| crate::secrets::stream_key(d.id).is_none()) {
+                    if let Some(d) = enabled.iter().find(|d| !crate::keys::has_key(d)) {
                         return Err(ApiError::state(format!("no stream key saved for {}", d.name)));
                     }
                     self.studio.update(cx, |s, cx| s.go_live(cx));
@@ -1065,7 +1065,7 @@ impl StudioWindow {
 
     /// Starts one destination from the API, with the same checks as `stream.start`.
     fn start_destination_checked(&mut self, d: &lightair_model::Destination, cx: &mut Context<Self>) -> Result<(), ApiError> {
-        if crate::secrets::stream_key(d.id).is_none() {
+        if !crate::keys::has_key(d) {
             return Err(ApiError::state(format!("no stream key saved for {}", d.name)));
         }
         let id = d.id;

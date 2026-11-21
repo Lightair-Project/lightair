@@ -40,6 +40,7 @@ mod prefs;
 mod reframe;
 mod rows;
 mod safe_areas;
+mod keys;
 mod secrets;
 mod selftest;
 mod shell;

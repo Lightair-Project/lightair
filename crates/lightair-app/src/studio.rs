@@ -1411,11 +1411,10 @@ impl Studio {
         cx.notify();
     }
 
-    /// Posts one destination's start to the engine. Err: why it couldn't even be tried.
+    /// Posts one destination's start to the engine. Err: why it couldn't even be tried. A key
+    /// that comes through the account is fetched in the background (the state says Starting
+    /// meanwhile, and Failed with the reason if it can't be had).
     fn start_one(&mut self, d: &lightair_model::Destination, workspace: &Workspace) -> Result<(), String> {
-        let Some(key) = crate::secrets::stream_key(d.id) else {
-            return Err(format!("No stream key saved for {}.", d.name));
-        };
         // Automatic on Twitch: the nearest ingest, picked now (measured ahead in the background,
         // so this rarely waits)
         let resolved = if crate::platforms::is_auto(&d.server) {
@@ -1429,11 +1428,11 @@ impl Studio {
         // its own tries and delay, else the workspace's
         let reconnect = d.options.reconnect.unwrap_or(workspace.outputs.reconnect);
         let net = stream_net(d, &lightair_platform::net::interfaces())?;
-        let cfg = StreamConfig {
+        let mut cfg = StreamConfig {
             net,
             id: d.id,
             server: d.server.clone(),
-            key,
+            key: String::new(),
             encoders: crate::encoding::for_stream(&self.engine.capabilities.encoders, workspace, d),
             reconnect: Some((reconnect.retries, reconnect.delay_s)),
             // Twitch's VOD track
@@ -1442,16 +1441,35 @@ impl Studio {
                 .filter(|_| crate::platforms::takes_vod_track(d))
                 .and_then(|m| crate::encoding::libobs_mix(workspace, m)),
         };
-        let canvas = d.canvas;
-        let id = d.id;
+        let (canvas, id) = (d.canvas, d.id);
+        let engine = self.engine.clone();
+        let launch = move |engine: &Engine, cfg: StreamConfig| {
+            engine.post(move |s| {
+                let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
+                if let Err(e) = s.outputs.start_stream(&cfg, video) {
+                    tracing::error!(%e, "stream failed to start");
+                    lightair_engine::outputs::mark_failed(OutputKey::Stream(id), &e);
+                }
+            });
+        };
         lightair_engine::outputs::mark_starting(OutputKey::Stream(id));
-        self.engine.post(move |s| {
-            let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
-            if let Err(e) = s.outputs.start_stream(&cfg, video) {
-                tracing::error!(%e, "stream failed to start");
-                lightair_engine::outputs::mark_failed(OutputKey::Stream(id), &e);
-            }
-        });
+        if crate::keys::takes_account_key(d) {
+            // the platform answers slowly: not on the main thread
+            let (dest, title) = (d.clone(), format!("{} · {}", d.name, chrono::Local::now().format("%-d %b")));
+            std::thread::spawn(move || match crate::keys::resolve(&dest, &title) {
+                Ok(r) => {
+                    cfg.key = r.key;
+                    if let Some(server) = r.server {
+                        cfg.server = server;
+                    }
+                    launch(&engine, cfg);
+                }
+                Err(e) => lightair_engine::outputs::mark_failed(OutputKey::Stream(id), &e),
+            });
+        } else {
+            cfg.key = crate::secrets::stream_key(id).ok_or_else(|| format!("No stream key saved for {}.", d.name))?;
+            launch(&engine, cfg);
+        }
         Ok(())
     }
 
@@ -1538,6 +1556,7 @@ impl Studio {
 
     /// Stops one destination; the others carry on (a shared encoder stays while one still uses it).
     pub fn stop_destination(&mut self, id: Id, cx: &mut Context<Self>) {
+        crate::keys::finish(id);
         self.engine.post(move |s| s.outputs.stop_stream(id));
         cx.notify();
     }
@@ -1550,6 +1569,7 @@ impl Studio {
 
     /// Stops a destination and starts it again once it has stopped (a fresh connection).
     pub fn restart_destination(&mut self, id: Id, cx: &mut Context<Self>) {
+        crate::keys::finish(id);
         self.engine.post(move |s| s.outputs.stop_stream(id));
         self.restart.push(id);
         cx.notify();
@@ -1558,6 +1578,9 @@ impl Studio {
     pub fn end_stream(&mut self, cx: &mut Context<Self>) {
         // ending while destinations are still coming up stops the sequence too
         self.sequence = None;
+        for d in &self.workspace().outputs.destinations {
+            crate::keys::finish(d.id);
+        }
         self.engine.post(|s| s.outputs.stop_all_streams());
         cx.notify();
     }

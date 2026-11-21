@@ -29,7 +29,7 @@ impl StudioWindow {
         }
         let workspace = self.studio.read(cx).workspace().clone();
         let has_key =
-            workspace.outputs.destinations.iter().map(|d| (d.id, crate::secrets::stream_key(d.id).is_some())).collect();
+            workspace.outputs.destinations.iter().map(|d| (d.id, crate::keys::has_key(d))).collect();
         self.go_live_sheet = Some(GoLiveSheet { has_key, record_too: false });
         cx.notify();
     }
