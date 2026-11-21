@@ -272,6 +272,45 @@ pub struct EncoderConfig {
     pub adaptive: bool,
 }
 
+impl EncoderConfig {
+    /// The first setting that keeps `other` from sharing this encoder, in words ("bitrate",
+    /// "size"…); `None` when every setting matches.
+    pub fn difference(&self, other: &EncoderConfig) -> Option<&'static str> {
+        if self.video_encoder != other.video_encoder {
+            Some("codec")
+        } else if self.video_bitrate_kbps != other.video_bitrate_kbps {
+            Some("bitrate")
+        } else if self.scaled != other.scaled {
+            Some("size")
+        } else if self.keyint_sec != other.keyint_sec {
+            Some("keyframe interval")
+        } else if self.audio_bitrate_kbps != other.audio_bitrate_kbps || self.audio_encoder != other.audio_encoder {
+            Some("audio bitrate")
+        } else if self.audio_mix != other.audio_mix {
+            Some("audio mix")
+        } else if self.bframes != other.bframes {
+            Some("B-frames")
+        } else if self.constant_bitrate != other.constant_bitrate {
+            Some("rate control")
+        } else if self.adaptive != other.adaptive {
+            Some("adaptive bitrate")
+        } else {
+            None
+        }
+    }
+}
+
+/// The encoders a stream to `server` really uses: its settings, with what the protocol needs
+/// (WebRTC carries Opus and no B-frames). Destinations share an encoder when these are equal.
+pub fn stream_encoders(server: &str, cfg: &EncoderConfig) -> EncoderConfig {
+    let mut encoders = cfg.clone();
+    if StreamProtocol::of(server) == Some(StreamProtocol::Whip) {
+        encoders.audio_encoder = "ffmpeg_opus".into();
+        encoders.bframes = false;
+    }
+    encoders
+}
+
 #[derive(Debug, Clone)]
 pub struct RecordingConfig {
     /// The canvas (canvas id) recorded; it keys the output.
@@ -922,12 +961,8 @@ impl Outputs {
             StreamProtocol::MpegTs => ("rtmp_custom", "ffmpeg_mpegts_muxer"),
             StreamProtocol::Whip => ("whip_custom", "whip_output"),
         };
-        let mut encoders = cfg.encoders.clone();
-        if protocol == StreamProtocol::Whip {
-            // WebRTC carries Opus audio, and B-frames aren't allowed.
-            encoders.audio_encoder = "ffmpeg_opus".into();
-            encoders.bframes = false;
-        }
+        // (WebRTC carries Opus audio, and B-frames aren't allowed.)
+        let encoders = stream_encoders(&cfg.server, &cfg.encoders);
         let mut service_settings = Data::new();
         service_settings.set_str("server", &cfg.server);
         match protocol {
@@ -969,6 +1004,21 @@ impl Outputs {
         }
         self.streams.insert(cfg.id, running);
         Ok(())
+    }
+
+    /// Which running streams share an encoder: one list of destinations per video encoder.
+    pub fn stream_share_groups(&self) -> Vec<Vec<Id>> {
+        let mut groups: Vec<(usize, Vec<Id>)> = Vec::new();
+        for (id, r) in &self.streams {
+            if !runtime().get(OutputKey::Stream(*id)).state.is_running() {
+                continue;
+            }
+            match groups.iter_mut().find(|(enc, _)| *enc == r.video as usize) {
+                Some((_, ids)) => ids.push(*id),
+                None => groups.push((r.video as usize, vec![*id])),
+            }
+        }
+        groups.into_iter().map(|(_, ids)| ids).collect()
     }
 
     /// How many distinct video encoders the streams use (for the UI's "N encoders" note).

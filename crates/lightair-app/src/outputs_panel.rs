@@ -91,6 +91,8 @@ pub struct OutputsPanel {
     asked: std::cell::RefCell<std::collections::HashSet<String>>,
     /// A sign-in window open: its platform, the page, and whether it was closed.
     sign_in: Option<SignIn>,
+    /// The list of which destinations share an encoder is showing.
+    encoders_open: bool,
 }
 
 pub fn elapsed(since: Instant) -> String {
@@ -122,6 +124,19 @@ fn status_text(state: &OutputState) -> (String, Hsla) {
         OutputState::Stopping => ("Stopping…".into(), tok::text_secondary()),
         OutputState::Failed(_) => ("Failed".into(), tok::error()),
     }
+}
+
+/// "Apple hardware · H.264 · 6 Mbps · 1920×1080" for an encoder's settings.
+fn describe_encoder(cfg: &lightair_engine::outputs::EncoderConfig, canvas: &Canvas) -> String {
+    let (w, h) = cfg.scaled.unwrap_or((canvas.width, canvas.height));
+    let codec = if cfg.video_encoder.contains("hevc") { "HEVC" } else { "H.264" };
+    let mbps = cfg.video_bitrate_kbps as f32 / 1000.0;
+    format!(
+        "{} · {codec} · {} Mbps · {w}×{h}{}",
+        lightair_engine::outputs::encoder_maker(&cfg.video_encoder),
+        if (mbps - mbps.round()).abs() < 0.05 { format!("{}", mbps.round() as u32) } else { format!("{mbps:.1}") },
+        if cfg.adaptive { " · adaptive" } else { "" }
+    )
 }
 
 /// "4.5 of 6 Mbps" for an adaptive bitrate that has stepped down from its target.
@@ -448,7 +463,7 @@ impl OutputsPanel {
             }
         })
         .detach();
-        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default(), signed_in: Default::default(), asked: Default::default(), sign_in: None, import_note: None }
+        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default(), signed_in: Default::default(), asked: Default::default(), sign_in: None, import_note: None, encoders_open: false }
     }
 
     /// Asks for a vertical canvas, to send once it's there.
@@ -951,6 +966,86 @@ impl OutputsPanel {
                     cx.notify();
                 }))),
         );
+        // Encoder sharing: who this destination would share with, as drafted here, and a way to
+        // take another destination's settings so it does.
+        if let Some(saved) = &destination {
+            let others: Vec<Destination> =
+                workspace.outputs.destinations.iter().filter(|o| o.id != e.id).cloned().collect();
+            if !others.is_empty() {
+                let mut draft = saved.clone();
+                draft.server = address.clone();
+                draft.canvas = e.canvas;
+                draft.encoding = e.encoding;
+                draft.audio_mix = e.audio_mix;
+                draft.options = e.options;
+                let sharing: Vec<&Destination> =
+                    others.iter().filter(|o| crate::encoding::why_apart(&caps, workspace, &draft, o).is_none()).collect();
+                let (note, colour) = if sharing.is_empty() {
+                    let first = &others[0];
+                    let why = crate::encoding::why_apart(&caps, workspace, &draft, first).unwrap_or("settings");
+                    (format!("Own encoder: its {why} differs from {}'s.", first.name), tok::text_tertiary())
+                } else {
+                    (
+                        format!(
+                            "Shares an encoder with {}.",
+                            sharing.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(", ")
+                        ),
+                        tok::ok(),
+                    )
+                };
+                let me = cx.entity().downgrade();
+                let (ws, names) = (workspace.clone(), others.clone());
+                let match_menu = Button::new("edit-match")
+                    .label("Match settings of…")
+                    .small()
+                    .outline()
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for src in names.iter().cloned() {
+                            let (me, ws, draft_base) = (me.clone(), ws.clone(), draft.clone());
+                            menu = menu.item(PopupMenuItem::new(src.name.clone()).on_click(
+                                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                    if let Some(me) = me.upgrade() {
+                                        let moved = crate::encoding::matched_to(&ws, &draft_base, &src);
+                                        me.update(cx, |this, cx| {
+                                            if let Some(Setup::Edit(e)) = &mut this.setup {
+                                                e.canvas = moved.canvas;
+                                                e.encoding = moved.encoding;
+                                                e.audio_mix = moved.audio_mix;
+                                                e.options.adaptive_bitrate = moved.options.adaptive_bitrate;
+                                            }
+                                            cx.notify();
+                                        });
+                                    }
+                                },
+                            ));
+                        }
+                        menu
+                    });
+                quality = quality.child(div().h(px(1.)).bg(tok::border())).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(div().text_size(px(13.)).child("Encoder sharing"))
+                                .child(div().text_size(px(11.)).text_color(colour).child(note))
+                                .child(
+                                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(
+                                        "Destinations with the same canvas, quality and audio share one encoder; a separate one costs another encode.",
+                                    ),
+                                ),
+                        )
+                        .child(div().flex_none().child(match_menu)),
+                );
+            }
+        }
         // When the connection drops: the shared tries and delay (Settings › Streaming), or its own.
         let shared_rc = workspace.outputs.reconnect;
         let own_rc = e.options.reconnect;
@@ -1609,22 +1704,101 @@ impl Render for OutputsPanel {
 
         // ---- Streaming
         let mut streams = div().flex().flex_col().gap_0p5();
-        if runtime().any_stream_running() {
-            let live = workspace
+        // Which destinations share an encoder: from the engine while live, from the settings before.
+        {
+            let live_ids: Vec<Id> = workspace
                 .outputs
                 .destinations
                 .iter()
                 .filter(|d| runtime().get(OutputKey::Stream(d.id)).state.is_running())
-                .count();
-            let encoders = studio.engine().call(|s| s.outputs.stream_encoder_count());
-            streams = streams.child(
-                div()
-                    .px_4()
-                    .pb_1()
-                    .text_size(px(11.))
-                    .text_color(tok::text_tertiary())
-                    .child(format!("Live on {live} · {encoders} encoder{}", if encoders == 1 { "" } else { "s" })),
-            );
+                .map(|d| d.id)
+                .collect();
+            let live = !live_ids.is_empty();
+            let caps = studio.engine().capabilities.encoders.clone();
+            let groups: Vec<Vec<Id>> = if live {
+                let mut g = studio.engine().call(|s| s.outputs.stream_share_groups());
+                // in the order of the list
+                let place = |ids: &Vec<Id>| {
+                    ids.iter().filter_map(|id| workspace.outputs.destinations.iter().position(|d| d.id == *id)).min()
+                };
+                for ids in &mut g {
+                    ids.sort_by_key(|id| workspace.outputs.destinations.iter().position(|d| d.id == *id));
+                }
+                g.sort_by_key(place);
+                g
+            } else {
+                let enabled: Vec<&Destination> = workspace.outputs.destinations.iter().filter(|d| d.enabled).collect();
+                crate::encoding::share_groups(&caps, &workspace, &enabled)
+            };
+            let members: usize = groups.iter().map(Vec::len).sum();
+            if members >= 2 || (live && members >= 1) {
+                let plural = |n: usize| if n == 1 { "" } else { "s" };
+                let heading = if live {
+                    format!("Live on {members} · {} encoder{}", groups.len(), plural(groups.len()))
+                } else {
+                    format!("{members} destinations · {} encoder{}", groups.len(), plural(groups.len()))
+                };
+                let open = self.encoders_open;
+                streams = streams.child(
+                    div()
+                        .id("encoders-summary")
+                        .px_4()
+                        .pb_1()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .cursor_pointer()
+                        .text_size(px(11.))
+                        .text_color(tok::text_tertiary())
+                        .hover(|d| d.text_color(tok::text_secondary()))
+                        .tooltip(ui::tip("Which destinations share an encoder"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.encoders_open = !this.encoders_open;
+                            cx.notify();
+                        }))
+                        .child(heading)
+                        .child(ui::icon(if open { "chevron-down" } else { "chevron-right" }).size(px(11.))),
+                );
+                if open {
+                    let name_of = |id: Id| {
+                        workspace.outputs.destinations.iter().find(|d| d.id == id).map(|d| d.name.clone()).unwrap_or_default()
+                    };
+                    let mut list = div().mx_4().mb_1().p_2().rounded(px(6.)).bg(tok::bg_raised()).flex().flex_col().gap_1p5();
+                    for (n, ids) in groups.iter().enumerate() {
+                        let d = workspace.outputs.destinations.iter().find(|d| d.id == ids[0]);
+                        let detail = d
+                            .map(|d| {
+                                let cfg = crate::encoding::for_stream(&caps, &workspace, d);
+                                let canvas =
+                                    d.canvas.and_then(|f| workspace.canvas(f)).unwrap_or(workspace.primary_canvas());
+                                describe_encoder(&cfg, canvas)
+                            })
+                            .unwrap_or_default();
+                        list = list.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(tok::text_tertiary())
+                                        .child(format!("Encoder {} · {detail}", n + 1)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .child(ids.iter().map(|id| name_of(*id)).collect::<Vec<_>>().join(", ")),
+                                ),
+                        );
+                    }
+                    if groups.len() > 1 {
+                        list = list.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(
+                            "Each extra encoder costs another encode. Destinations with the same canvas, quality and audio share one: open a destination and choose \"Match settings\".",
+                        ));
+                    }
+                    streams = streams.child(list);
+                }
+            }
         }
         let count = workspace.outputs.destinations.len();
         for (i, d) in workspace.outputs.destinations.iter().enumerate() {
@@ -1776,6 +1950,10 @@ impl Render for OutputsPanel {
                     )
                     .context_menu({
                         let studio = self.studio.downgrade();
+                        // the destinations it could take its encoder settings from
+                        let others: Vec<Destination> =
+                            workspace.outputs.destinations.iter().filter(|o| o.id != id).cloned().collect();
+                        let (this_dest, ws) = (d.clone(), workspace.clone());
                         move |menu, _, _| {
                             let run = |cmd: Command, forget_key: bool| {
                                 let studio = studio.clone();
@@ -1813,6 +1991,19 @@ impl Render for OutputsPanel {
                                 )
                             }
                             .separator();
+                            // one tap to share an encoder: take another destination's canvas, quality and mix
+                            let mut menu = menu;
+                            for src in &others {
+                                let moved = crate::encoding::matched_to(&ws, &this_dest, src);
+                                menu = menu.item(
+                                    PopupMenuItem::new(format!("Match settings of {}", src.name))
+                                        .disabled(moved == this_dest)
+                                        .on_click(run(Command::UpdateDestination { destination: moved }, false)),
+                                );
+                            }
+                            if !others.is_empty() {
+                                menu = menu.separator();
+                            }
                             menu.item(
                                 PopupMenuItem::new(if enabled {
                                     "Skip when going live"
