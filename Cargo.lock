@@ -1253,6 +1253,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "constant_time_eq"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9eb6feb175df65d0a3ccd3e73484e940d0ac664e8034f0519fd49a93db3071d9"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4436,7 +4445,7 @@ dependencies = [
 [[package]]
 name = "lightair-audio"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=3f929b453804c666e9d5cd9b7caa362e4e2d14b9#3f929b453804c666e9d5cd9b7caa362e4e2d14b9"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
 dependencies = [
  "ebur128",
  "nnnoiseless",
@@ -4446,7 +4455,7 @@ dependencies = [
 [[package]]
 name = "lightair-automation"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=3f929b453804c666e9d5cd9b7caa362e4e2d14b9#3f929b453804c666e9d5cd9b7caa362e4e2d14b9"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4471,7 +4480,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
- "zip",
+ "zip 2.6.1",
 ]
 
 [[package]]
@@ -4522,7 +4531,7 @@ dependencies = [
 [[package]]
 name = "lightair-fonts"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=3f929b453804c666e9d5cd9b7caa362e4e2d14b9#3f929b453804c666e9d5cd9b7caa362e4e2d14b9"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
 dependencies = [
  "fontdb",
  "serde",
@@ -4550,7 +4559,7 @@ dependencies = [
 [[package]]
 name = "lightair-live"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=3f929b453804c666e9d5cd9b7caa362e4e2d14b9#3f929b453804c666e9d5cd9b7caa362e4e2d14b9"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4566,6 +4575,7 @@ dependencies = [
  "tracing",
  "tungstenite",
  "ureq",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -4582,7 +4592,7 @@ dependencies = [
 [[package]]
 name = "lightair-model"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=3f929b453804c666e9d5cd9b7caa362e4e2d14b9#3f929b453804c666e9d5cd9b7caa362e4e2d14b9"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
 dependencies = [
  "serde",
  "serde_json",
@@ -4612,7 +4622,7 @@ dependencies = [
 [[package]]
 name = "lightair-platform"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=3f929b453804c666e9d5cd9b7caa362e4e2d14b9#3f929b453804c666e9d5cd9b7caa362e4e2d14b9"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
 dependencies = [
  "block2 0.6.2",
  "dirs 6.0.0",
@@ -4646,7 +4656,7 @@ dependencies = [
 [[package]]
 name = "lightair-remote"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=3f929b453804c666e9d5cd9b7caa362e4e2d14b9#3f929b453804c666e9d5cd9b7caa362e4e2d14b9"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4668,7 +4678,7 @@ dependencies = [
 [[package]]
 name = "lightair-render"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=3f929b453804c666e9d5cd9b7caa362e4e2d14b9#3f929b453804c666e9d5cd9b7caa362e4e2d14b9"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
 dependencies = [
  "cosmic-text",
  "lightair-audio",
@@ -4693,7 +4703,7 @@ dependencies = [
 [[package]]
 name = "lightair-store"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=3f929b453804c666e9d5cd9b7caa362e4e2d14b9#3f929b453804c666e9d5cd9b7caa362e4e2d14b9"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
 dependencies = [
  "lightair-model",
  "serde",
@@ -4723,7 +4733,7 @@ dependencies = [
 [[package]]
 name = "lightair-widgets"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=3f929b453804c666e9d5cd9b7caa362e4e2d14b9#3f929b453804c666e9d5cd9b7caa362e4e2d14b9"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4736,7 +4746,7 @@ dependencies = [
  "sha1_smol",
  "tracing",
  "tungstenite",
- "zip",
+ "zip 9.8.1",
 ]
 
 [[package]]
@@ -8712,6 +8722,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "typed-path"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10758,6 +10774,26 @@ dependencies = [
  "flate2",
  "indexmap",
  "memchr",
+ "zopfli",
+]
+
+[[package]]
+name = "zip"
+version = "9.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9534624d547e3f516ecde0ed9a70d37788f01d340efcfdd03bf3ea8e163c1d0"
+dependencies = [
+ "constant_time_eq",
+ "crc32fast",
+ "flate2",
+ "getrandom 0.4.3",
+ "indexmap",
+ "libc",
+ "memchr",
+ "nix",
+ "typed-path",
+ "windows-sys 0.60.2",
+ "zeroize",
  "zopfli",
 ]
 
