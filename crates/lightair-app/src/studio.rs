@@ -139,6 +139,8 @@ pub struct Studio {
     clips_seen: u32,
     /// Frames libobs lagged since the previous stats sample (health is about now, not startup).
     pub recent_lagged: u32,
+    /// Destinations to start again once they've stopped (a restart from the Outputs panel).
+    restart: Vec<Id>,
     /// The newest saved clip, and replays playing on the canvas (scene, object, source).
     pub last_clip: Option<PathBuf>,
     /// What the virtual camera was started on (the workspace's choice then): it restarts when
@@ -205,6 +207,7 @@ impl Studio {
             stats: Stats::default(),
             clips_seen: 0,
             recent_lagged: 0,
+            restart: Vec::new(),
             refit: None,
             timers_asked: false,
             pending: None,
@@ -1236,16 +1239,26 @@ impl Studio {
     /// Starts every enabled destination, or just `only` (a destination that failed, again).
     pub fn go_live_to(&mut self, only: Option<Id>, cx: &mut Context<Self>) {
         let workspace = self.workspace().clone();
-        let enabled: Vec<_> =
-            workspace.outputs.destinations.iter().filter(|d| d.enabled && only.is_none_or(|o| o == d.id)).cloned().collect();
+        // One named destination starts whether or not it's included in going live (it was asked
+        // for); the whole list is the included ones.
+        let enabled: Vec<_> = workspace
+            .outputs
+            .destinations
+            .iter()
+            .filter(|d| only.map_or(d.enabled, |o| o == d.id))
+            .cloned()
+            .collect();
         if enabled.is_empty() {
             self.issue = Some("Add a destination in Outputs to go live.".into());
             cx.notify();
             return;
         }
         self.flush();
-        // Integrated loudness covers this show.
-        lightair_engine::loudness::reset_stream_loudness();
+        // Integrated loudness covers this show (a destination added to a show on air doesn't
+        // start it over).
+        if !runtime().any_stream_running() {
+            lightair_engine::loudness::reset_stream_loudness();
+        }
         for d in enabled {
             let Some(key) = crate::secrets::stream_key(d.id) else {
                 self.issue = Some(format!("No stream key saved for {}.", d.name).into());
@@ -1275,9 +1288,37 @@ impl Studio {
         cx.notify();
     }
 
+    /// Starts one destination (while others are live, or alone), without touching the rest.
+    pub fn start_destination(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.go_live_to(Some(id), cx);
+    }
+
+    /// Stops one destination; the others carry on (a shared encoder stays while one still uses it).
+    pub fn stop_destination(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.engine.post(move |s| s.outputs.stop_stream(id));
+        cx.notify();
+    }
+
+    /// Stops a destination and starts it again once it has stopped (a fresh connection).
+    pub fn restart_destination(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.engine.post(move |s| s.outputs.stop_stream(id));
+        self.restart.push(id);
+        cx.notify();
+    }
+
     pub fn end_stream(&mut self, cx: &mut Context<Self>) {
         self.engine.post(|s| s.outputs.stop_all_streams());
         cx.notify();
+    }
+
+    /// Starts the destinations asked to restart whose old connection has ended.
+    fn run_restarts(&mut self, cx: &mut Context<Self>) {
+        let ready: Vec<Id> =
+            self.restart.iter().copied().filter(|id| !runtime().get(OutputKey::Stream(*id)).state.is_running()).collect();
+        self.restart.retain(|id| !ready.contains(id));
+        for id in ready {
+            self.start_destination(id, cx);
+        }
     }
 
     /// Surfaces output failures as issues (called on the stats tick).
@@ -1311,12 +1352,13 @@ impl Studio {
         }
     }
 
-    pub fn refresh_stats(&mut self) {
+    pub fn refresh_stats(&mut self, cx: &mut Context<Self>) {
         self.engine.post(|s| {
             s.outputs.sample();
             s.reconciler.cleanup();
         });
         self.check_outputs();
+        self.run_restarts(cx);
         self.announce_clips();
         self.track_recording();
         self.track_studio_take();

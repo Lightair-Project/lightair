@@ -79,7 +79,7 @@ fn identical_destinations_share_an_encoder() {
         engine.call(move |s| s.reconciler.apply(&workspace, &patches));
     }
 
-    let ports = [19361u16, 19362, 19363, 19364];
+    let ports = [19361u16, 19362, 19363, 19364, 19365, 19366];
     let files: Vec<PathBuf> = ports.iter().map(|p| dir.join(format!("{p}.flv"))).collect();
     let servers: Vec<Child> = ports.iter().zip(&files).map(|(p, f)| server(*p, f)).collect();
     std::thread::sleep(Duration::from_millis(800));
@@ -116,6 +116,29 @@ fn identical_destinations_share_an_encoder() {
     assert!(wait_active(vod_id), "stream with a VOD track active");
     assert_eq!(engine.call(move |s| s.outputs.stream_audio_tracks(vod_id)), vec![2, 1], "its mix, then the VOD track");
     assert_eq!(engine.call(move |s| s.outputs.stream_audio_tracks(ids[0])), vec![0], "the others: the master alone");
+
+    // Adaptive bitrate: two identical adaptive destinations each get an encoder of their own
+    // (their outputs change the bitrate), and report the bitrate they're at against the target.
+    let adaptive = |port: u16| {
+        let mut cfg = config(port, 2500);
+        cfg.encoders.adaptive = true;
+        cfg
+    };
+    let (d, e) = (adaptive(ports[4]), adaptive(ports[5]));
+    let (d_id, e_id) = (d.id, e.id);
+    for cfg in [d, e] {
+        engine.call(move |s| s.outputs.start_stream(&cfg, None)).expect("adaptive stream starts");
+    }
+    assert!(wait_active(d_id) && wait_active(e_id), "adaptive streams active");
+    assert_ne!(enc(d_id), enc(e_id), "adaptive destinations never share an encoder");
+    assert_ne!(enc(d_id), enc(ids[0]), "nor with a fixed-bitrate one");
+    std::thread::sleep(Duration::from_millis(1200));
+    engine.call(|s| s.outputs.sample());
+    let status = runtime().get(OutputKey::Stream(d_id));
+    assert_eq!(status.target_kbps, 2500);
+    assert!(status.current_kbps > 0 && status.current_kbps <= 2500, "reports its bitrate: {}", status.current_kbps);
+    engine.call(move |s| s.outputs.stop_stream(d_id));
+    engine.call(move |s| s.outputs.stop_stream(e_id));
 
     // Stopping the first leaves the shared encoder running for the second.
     std::thread::sleep(Duration::from_millis(1200));

@@ -556,8 +556,14 @@ impl OutputsPanel {
             cx.notify();
             return;
         }
+        let live = runtime().any_stream_running();
+        let new_id = destination.id;
         self.studio.update(cx, |s, cx| {
             let _ = s.execute(Command::AddDestination { destination }, cx);
+            // a destination added to a stream that's on air starts at once (it was just chosen)
+            if live {
+                s.start_destination(new_id, cx);
+            }
         });
         self.setup = None;
         cx.notify();
@@ -647,6 +653,10 @@ impl OutputsPanel {
     fn remove_destination(&mut self, id: Id, cx: &mut Context<Self>) {
         crate::secrets::delete_stream_key(id);
         self.studio.update(cx, |s, cx| {
+            // a destination on air stops before it goes; the others carry on
+            if runtime().get(OutputKey::Stream(id)).state.is_running() {
+                s.stop_destination(id, cx);
+            }
             let _ = s.execute(Command::RemoveDestination { destination: id }, cx);
         });
         self.setup = None;
@@ -1541,6 +1551,8 @@ impl Render for OutputsPanel {
             let id = d.id;
             let enabled = d.enabled;
             let st = runtime().get(OutputKey::Stream(id));
+            let running = st.state.is_running();
+            let live_now = runtime().any_stream_running();
             let state = if enabled || st.state.is_running() {
                 status_text(&st.state)
             } else {
@@ -1596,12 +1608,40 @@ impl Render for OutputsPanel {
                     })))
                     .child(status(state))
                     .child(
+                        ui::icon_button(
+                            ("dest-go", i),
+                            if running { "circle-stop" } else { "play" },
+                            if running { tok::live() } else { tok::text_secondary() },
+                        )
+                        .tooltip(move |w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(if running {
+                                "Stop this destination (the others carry on)"
+                            } else if live_now {
+                                "Start this destination now"
+                            } else {
+                                "Go live to this destination only"
+                            })
+                            .build(w, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.studio.update(cx, |s, cx| {
+                                if running {
+                                    s.stop_destination(id, cx)
+                                } else {
+                                    s.start_destination(id, cx)
+                                }
+                            })
+                        })),
+                    )
+                    .child(
                         toggle(("dest-toggle", i), enabled)
                             .tooltip(move |w, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(if enabled {
-                                    "Going live sends here (click to skip it)"
-                                } else {
-                                    "Skipped when going live (click to use it)"
+                                gpui_kit::component::tooltip::Tooltip::new(match (enabled, live_now) {
+                                    (true, false) => "Going live sends here (click to skip it)",
+                                    (false, false) => "Skipped when going live (click to use it)",
+                                    (true, true) => "Sending here (click to stop and skip it)",
+                                    (false, true) => "Skipped (click to start sending here)",
                                 })
                                 .build(w, cx)
                             })
@@ -1612,6 +1652,16 @@ impl Render for OutputsPanel {
                                         Command::SetDestinationEnabled { destination: id, enabled: !enabled },
                                         cx,
                                     );
+                                    // While a stream is on air the switch means "send here":
+                                    // turning it on starts it, turning it off stops it.
+                                    if runtime().any_stream_running() {
+                                        let running = runtime().get(OutputKey::Stream(id)).state.is_running();
+                                        if !enabled && !running {
+                                            s.start_destination(id, cx);
+                                        } else if enabled && running {
+                                            s.stop_destination(id, cx);
+                                        }
+                                    }
                                 })
                             })),
                     )
@@ -1631,6 +1681,26 @@ impl Render for OutputsPanel {
                                     }
                                 }
                             };
+                            let act = |f: fn(&mut Studio, Id, &mut Context<Studio>)| {
+                                let studio = studio.clone();
+                                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                    if let Some(s) = studio.upgrade() {
+                                        s.update(cx, |s, cx| f(s, id, cx));
+                                    }
+                                }
+                            };
+                            let menu = if running {
+                                menu.item(PopupMenuItem::new("Stop").on_click(act(Studio::stop_destination)))
+                                    .item(PopupMenuItem::new("Restart").on_click(act(Studio::restart_destination)))
+                            } else if live_now {
+                                menu.item(PopupMenuItem::new("Start now").on_click(act(Studio::start_destination)))
+                            } else {
+                                menu.item(
+                                    PopupMenuItem::new("Go live to this one only")
+                                        .on_click(act(Studio::start_destination)),
+                                )
+                            }
+                            .separator();
                             menu.item(
                                 PopupMenuItem::new(if enabled {
                                     "Skip when going live"

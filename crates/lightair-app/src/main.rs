@@ -188,7 +188,7 @@ fn main() {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 ticks += 1;
                 let alive = ticker.update(cx, |s, cx| {
-                    s.refresh_stats();
+                    s.refresh_stats(cx);
                     s.refit_imported(cx);
                     s.run_timer_ends(cx);
                     s.refresh_plugins();
