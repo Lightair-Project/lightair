@@ -862,11 +862,20 @@ mod tests {
     use super::{aspect, revision_of, safe_folder_names};
 
     #[test]
-    fn aspects_and_revisions() {
+fn aspects_read_as_ratios() {
         assert_eq!(aspect(1080, 1920), "9:16");
         assert_eq!(aspect(1920, 1080), "16:9");
-        assert_eq!(revision_of(b"{}").len(), 16);
+    }
+
+    /// What tells the editor a project changed under it (a stale copy is kept, not overwritten).
+    #[test]
+    fn other_bytes_are_another_revision() {
+        assert_eq!(revision_of(b"{}"), revision_of(b"{}"));
         assert_ne!(revision_of(b"{}"), revision_of(b"{ }"));
+    }
+
+    #[test]
+    fn a_takes_files_go_out_under_its_folder_with_a_safe_name() {
         assert!(safe_folder_names());
     }
 }

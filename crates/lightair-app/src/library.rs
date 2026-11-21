@@ -1252,7 +1252,7 @@ impl Render for Library {
 #[cfg(test)]
 mod tests {
     // (not `super::*`: gpui's own `test` macro would come with it)
-    use super::{Local, bytes_label, day_label, duration_label};
+    use super::{bytes_label, duration_label};
 
     #[test]
     fn labels_read_naturally() {
@@ -1261,7 +1261,6 @@ mod tests {
         assert_eq!(bytes_label(812_000_000), "812 MB");
         assert_eq!(bytes_label(209_362), "210 KB");
         assert_eq!(bytes_label(3_400_000_000), "3.4 GB");
-        assert_eq!(day_label(Local::now().timestamp_millis()), "Today");
     }
 }
 

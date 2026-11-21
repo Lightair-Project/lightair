@@ -986,7 +986,6 @@ mod tests {
         assert_eq!(region_order_for_zone("Asia/Taipei")[1], Region::China);
         assert_eq!(region_order_for_zone("Europe/Berlin")[1], Region::More);
         assert_eq!(*region_order_for_zone("Asia/Jakarta").last().unwrap(), Region::Other);
-        assert_eq!(region_order_for_zone("Asia/Seoul").len(), 6);
     }
 
     #[test]

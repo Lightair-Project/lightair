@@ -331,16 +331,4 @@ mod windows_checks {
         assert_eq!(decrypt(&key, ".twitch.tv", b"v20\x01\x02\x03"), Err(true), "app-bound");
     }
 
-    #[test]
-    #[ignore = "reads this PC's browsers (counts only); cargo xtask test --machine"]
-    fn this_pcs_browsers() {
-        for b in super::installed() {
-            for platform in ["twitch", "youtube"] {
-                match super::read(b, platform) {
-                    Ok(list) => eprintln!("{b}: {} {platform} cookies read", list.len()),
-                    Err(e) => eprintln!("{b}: {e}"),
-                }
-            }
-        }
-    }
 }

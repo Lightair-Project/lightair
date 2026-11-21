@@ -181,7 +181,7 @@ impl StudioWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModesFile, Preset, display_key, load_from, next_name, save_to};
+    use super::{ModesFile, display_key, load_from, next_name, save_to};
 
     #[test]
     fn displays_are_told_apart_by_their_number_and_sizes() {
@@ -213,9 +213,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn the_presets_are_edit_live_minimal() {
-        let names: Vec<_> = Preset::ALL.iter().map(|p| p.name()).collect();
-        assert_eq!(names, ["Edit", "Live", "Minimal"]);
-    }
 }

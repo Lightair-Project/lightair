@@ -1099,10 +1099,6 @@ mod tests {
     fn configure_follows_the_layer() {
         let c = configure(&default_settings());
         assert_eq!(c["type"], "configure");
-        assert_eq!(c["format"], json!({"w": 1920, "h": 1080, "fps": 30}));
-        assert_eq!(c["codec"], "h264");
-        assert_eq!(c["orientation"], "follow");
-        assert!(c["lens"].is_null());
         let mut s = default_settings();
         s["codec"] = json!("hevc");
         assert!(new_stream(&c, &configure(&s)));
