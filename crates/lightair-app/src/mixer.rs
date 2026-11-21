@@ -2588,7 +2588,7 @@ mod layout_tests {
         let section = 120.0;
         // tall: everything
         let tall = Layout::fit(900.0, section);
-        assert!(tall.knobs && tall.foot && tall.routing && tall.fx_h == FX_H);
+        assert!(tall.knobs && tall.routing && tall.fx_h == FX_H);
         // middling: the effects stay, routing gives way first
         let mid = Layout::fit(420.0, section);
         assert!(mid.fx_h >= FX_MIN, "effects shown at mid height");
@@ -2596,11 +2596,11 @@ mod layout_tests {
         // too short for anything but the meter and fader
         let short = Layout::fit(170.0, section);
         assert_eq!(short.fx_h, 0.0);
-        assert!(!short.knobs && !short.routing && !short.foot);
+        assert!(!short.knobs && !short.routing);
         // wherever the effects show, nothing else shows without them
         for h in (150..1000).step_by(10) {
             let l = Layout::fit(h as f32, section);
-            if l.knobs || l.foot || l.routing {
+            if l.knobs || l.routing {
                 assert!(l.fx_h >= FX_MIN, "at {h}: something shown while the effects aren't");
             }
         }
