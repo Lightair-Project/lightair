@@ -50,8 +50,12 @@ pub struct OutputStatus {
     /// File being written (recordings).
     pub path: Option<PathBuf>,
     pub bytes: u64,
+    /// Frames the network dropped (the output's own count).
     pub dropped_frames: i32,
     pub total_frames: i32,
+    /// Frames the video output skipped since this output began because its encoder was too slow
+    /// (per canvas: outputs on one canvas see the same ones).
+    pub encoder_skipped: u32,
     /// Clips saved since the replay buffer started.
     pub saved_clips: u32,
     /// Recording: paused (the file holds no time while paused).
@@ -81,6 +85,7 @@ impl Default for OutputStatus {
             bytes: 0,
             dropped_frames: 0,
             total_frames: 0,
+            encoder_skipped: 0,
             saved_clips: 0,
             paused: false,
             paused_for: std::time::Duration::ZERO,
@@ -157,7 +162,7 @@ impl OutputsRuntime {
             .collect()
     }
 
-        pub fn stream_since(&self) -> Option<Instant> {
+    pub fn stream_since(&self) -> Option<Instant> {
         self.status
             .lock()
             .iter()
@@ -310,6 +315,9 @@ struct Running {
     share: (usize, EncoderConfig),
     /// Audio encoders of the extra tracks (recordings carrying mixes).
     extra: Vec<*mut sys::obs_encoder_t>,
+    /// The canvas video's skipped-frame count when this output began (it counts from the
+    /// canvas's creation).
+    skipped_base: u32,
 }
 
 unsafe impl Send for Running {}
@@ -499,6 +507,30 @@ pub struct VirtualCameraScene {
 
 unsafe impl Send for VirtualCameraScene {}
 
+/// Frames skipped so far by the canvas video an encoder reads from, because encoders were too
+/// slow (0 without an encoder).
+fn skipped_of(encoder: *mut sys::obs_encoder_t) -> u32 {
+    if encoder.is_null() {
+        return 0;
+    }
+    unsafe {
+        let video = sys::obs_encoder_video(encoder);
+        if video.is_null() { 0 } else { sys::video_output_get_skipped_frames(video) }
+    }
+}
+
+/// Frames the primary canvas skipped because an encoder was too slow, since the app began
+/// (the other canvases' are in each output's status).
+pub fn primary_skipped_frames() -> u32 {
+    unsafe {
+        if !sys::obs_initialized() {
+            return 0;
+        }
+        let video = sys::obs_get_video();
+        if video.is_null() { 0 } else { sys::video_output_get_skipped_frames(video) }
+    }
+}
+
 fn c(s: &str) -> CString {
     CString::new(s).unwrap_or_default()
 }
@@ -644,7 +676,8 @@ unsafe fn start(
             sys::signal_handler_connect(handler, c(sig).as_ptr(), Some(*cb), signal_param as *mut c_void);
         }
         let share = (video_output as usize, encoders.clone());
-        let running = Running { output, video, audio, service, signal_param, signals, share, extra };
+        let skipped_base = skipped_of(video);
+        let running = Running { output, video, audio, service, signal_param, signals, share, extra, skipped_base };
         runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
         if !sys::obs_output_start(output) {
             let err = last_error(output).unwrap_or_else(|| "The output couldn't start.".into());
@@ -693,8 +726,18 @@ impl Outputs {
         settings.set_str("format", &pattern);
         settings.set_str("extension", cfg.container.extension());
         settings.set_bool("allow_spaces", true);
-        let running =
-            unsafe { start(key, output_type, &settings, &cfg.encoders, std::ptr::null_mut(), video_output, None, &cfg.extra_mixes)? };
+        let running = unsafe {
+            start(
+                key,
+                output_type,
+                &settings,
+                &cfg.encoders,
+                std::ptr::null_mut(),
+                video_output,
+                None,
+                &cfg.extra_mixes,
+            )?
+        };
         runtime().update(key, |s| {
             s.path = Some(cfg.path.clone());
             s.files = 1;
@@ -830,7 +873,8 @@ impl Outputs {
         let shared = shared.filter(|(v, a)| !v.is_null() && !a.is_null());
         // Twitch's VOD track: a second audio track, as OBS sends it (RTMP's multitrack audio)
         let vod: Vec<usize> = cfg.vod_mix.filter(|_| protocol == StreamProtocol::Rtmp).into_iter().collect();
-        let running = unsafe { start(key, output_type, &output_settings, &encoders, service, video_output, shared, &vod)? };
+        let running =
+            unsafe { start(key, output_type, &output_settings, &encoders, service, video_output, shared, &vod)? };
         if let Some((retries, delay)) = cfg.reconnect {
             unsafe { sys::obs_output_set_reconnect_settings(running.output, retries as i32, delay as i32) };
         }
@@ -883,15 +927,20 @@ impl Outputs {
     /// Starts the virtual camera: what a canvas has on air (`video`: its canvas video; `None` the
     /// primary), or one scene (`scene`: on a canvas of the camera's own). Raw frames, no
     /// encoders. Its status is `OutputKey::VirtualCamera`'s.
-    pub fn start_virtual_camera(&mut self, video: Option<VideoOutput>, scene: Option<VirtualCameraScene>) -> Result<(), String> {
+    pub fn start_virtual_camera(
+        &mut self,
+        video: Option<VideoOutput>,
+        scene: Option<VirtualCameraScene>,
+    ) -> Result<(), String> {
         if self.virtual_camera.as_ref().is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
             return Ok(());
         }
         self.drop_virtual_camera();
         let video = match scene {
             Some(sc) => {
-                let canvas = crate::obs::ObsCanvas::create("Virtual camera", sc.width, sc.height, sc.fps_num, sc.fps_den)
-                    .ok_or_else(|| "Couldn't make the virtual camera's canvas.".to_string())?;
+                let canvas =
+                    crate::obs::ObsCanvas::create("Virtual camera", sc.width, sc.height, sc.fps_num, sc.fps_den)
+                        .ok_or_else(|| "Couldn't make the virtual camera's canvas.".to_string())?;
                 unsafe { sys::obs_canvas_set_channel(canvas.as_ptr(), 0, sc.source) };
                 let v = VideoOutput(unsafe { sys::obs_canvas_get_video(canvas.as_ptr()) });
                 self.virtual_camera_canvas = Some(canvas);
@@ -908,7 +957,12 @@ impl Outputs {
                 Some(crate::vcam::Camera::Obs) => c"virtualcam_output",
                 _ => c"lightair_virtualcam",
             };
-            let output = sys::obs_output_create(id.as_ptr(), c"Virtual camera".as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
+            let output = sys::obs_output_create(
+                id.as_ptr(),
+                c"Virtual camera".as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
             if output.is_null() {
                 let err = if cfg!(windows) {
                     crate::vcam::NOT_INSTALLED.to_string()
@@ -948,6 +1002,7 @@ impl Outputs {
                     },
                 ),
                 extra: Vec::new(),
+                skipped_base: 0,
             };
             runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
             if !sys::obs_output_start(output) {
@@ -1054,10 +1109,12 @@ impl Outputs {
                 sys::obs_output_get_frames_dropped(r.output),
                 sys::obs_output_get_total_frames(r.output),
             );
+            let skipped = skipped_of(r.video).saturating_sub(r.skipped_base);
             runtime().update(key, |s| {
                 s.bytes = bytes;
                 s.dropped_frames = dropped;
                 s.total_frames = total;
+                s.encoder_skipped = skipped;
             });
         };
         for (canvas, r) in &self.recordings {

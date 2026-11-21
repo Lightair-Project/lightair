@@ -1516,6 +1516,16 @@ impl Render for OutputsPanel {
                 .find(|(_, url)| *url == d.server)
                 .map(|(label, _)| format!("{label} · {}", StreamProtocol::label(&d.server)))
                 .unwrap_or_else(|| format!("{} · {}", host_of(&d.server), StreamProtocol::label(&d.server)));
+            // Drops while live, by cause: the connection's and the encoder's (render lag is global).
+            let where_ = if st.state.is_running() && (st.dropped_frames > 0 || st.encoder_skipped > 0) {
+                format!(
+                    "{where_} · {} dropped (network) · {} skipped (encoder)",
+                    st.dropped_frames.max(0),
+                    st.encoder_skipped
+                )
+            } else {
+                where_
+            };
             streams = streams.child(
                 card(("out-dest", i).into())
                     .cursor_pointer()

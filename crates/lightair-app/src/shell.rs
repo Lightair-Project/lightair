@@ -4628,6 +4628,9 @@ impl StudioWindow {
         } else {
             String::new()
         };
+        let encoder_skipped = lightair_engine::outputs::primary_skipped_frames();
+        let network_dropped: i64 =
+            lightair_engine::outputs::runtime().streams().iter().map(|(_, st)| st.dropped_frames.max(0) as i64).sum();
         let panel = open.then(|| {
             deferred(
                 div()
@@ -4657,9 +4660,11 @@ impl StudioWindow {
                     .child(row("Frames rendered", stats.total_frames.to_string()))
                     .child(row("Frames late", format!("{}{share}", stats.lagged_frames)))
                     .child(row("Late in the last second", recent.to_string()))
+                    .child(row("Skipped (encoder too slow)", encoder_skipped.to_string()))
+                    .child(row("Dropped (network)", network_dropped.to_string()))
                     .child(row("Preview frames", preview.to_string()))
                     .child(div().pt_1().text_size(px(11.)).text_color(tok::text_tertiary()).child(
-                        "Late frames are ones the renderer couldn't finish in time; a few at start-up are normal.",
+                        "Three causes, kept apart: late (the renderer couldn't finish a frame in time), skipped (an encoder couldn't keep up) and dropped (the connection couldn't take them). A few late frames at start-up are normal.",
                     )),
             )
             .with_priority(1)

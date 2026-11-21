@@ -932,8 +932,17 @@ impl StudioWindow {
             "total_frames": s.total_frames,
             "lagged_frames": s.lagged_frames,
             "lagged_last_second": studio.recent_lagged,
-            "output_skipped_frames": rec.dropped_frames,
-            "output_total_frames": rec.total_frames,
+            // Frames the encoders were too slow for on the primary canvas (OBS's "skipped frames
+            // due to encoding lag"); the recording's own drop count is `record_dropped_frames`.
+            "output_skipped_frames": lightair_engine::outputs::primary_skipped_frames(),
+            "output_total_frames": s.total_frames,
+            "output_dropped_network": runtime()
+                .streams()
+                .iter()
+                .map(|(_, st)| st.dropped_frames.max(0) as u64)
+                .sum::<u64>(),
+            "record_dropped_frames": rec.dropped_frames,
+            "record_total_frames": rec.total_frames,
             "cpu_percent": cpu,
             "cpu_seconds": cpu_s,
             "memory_mb": rss as f64 / (1 << 20) as f64,
