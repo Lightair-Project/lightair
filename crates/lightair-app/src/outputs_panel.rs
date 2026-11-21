@@ -11,7 +11,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_model::{Command, Destination, Encoding, Canvas, Id, Workspace, VideoEncoder};
+use lightair_model::{Command, Destination, Encoding, Canvas, Id, StreamOptions, Workspace, VideoEncoder};
 use lightair_engine::outputs::{OutputKey, OutputState, StreamProtocol, runtime};
 
 use crate::platforms::{self, PLATFORMS, Platform, Region, Shape};
@@ -49,6 +49,8 @@ struct Edit {
     /// Its sound (`None`: the master), and Twitch's VOD track (`None`: none).
     audio_mix: Option<Id>,
     vod_mix: Option<Id>,
+    /// How the connection is run (adaptive bitrate).
+    options: StreamOptions,
     error: Option<String>,
 }
 
@@ -105,6 +107,15 @@ fn status_text(state: &OutputState) -> (String, Hsla) {
         OutputState::Stopping => ("Stopping…".into(), tok::text_secondary()),
         OutputState::Failed(_) => ("Failed".into(), tok::error()),
     }
+}
+
+/// "4.5 of 6 Mbps" for an adaptive bitrate that has stepped down from its target.
+fn bitrate_step(current_kbps: u32, target_kbps: u32) -> String {
+    let mbps = |k: u32| {
+        let m = k as f32 / 1000.0;
+        if (m - m.round()).abs() < 0.05 { format!("{}", m.round() as u32) } else { format!("{m:.1}") }
+    };
+    format!("{} of {} Mbps", mbps(current_kbps), mbps(target_kbps))
 }
 
 /// "rtmp://live.twitch.tv/app" → "live.twitch.tv"
@@ -538,6 +549,7 @@ impl OutputsPanel {
             audio_mix: None,
             vod_mix: None,
             chat: Some(c.chat.read(cx).value().trim().to_string()).filter(|c| !c.is_empty()),
+            options: Default::default(),
         };
         if let Err(e) = crate::secrets::set_stream_key(destination.id, &key) {
             c.error = Some(format!("Couldn't save the stream key: {e}"));
@@ -586,6 +598,7 @@ impl OutputsPanel {
             encoding: d.encoding,
             audio_mix: d.audio_mix,
             vod_mix: d.vod_mix,
+            options: d.options,
             error: None,
         }));
         cx.notify();
@@ -620,6 +633,7 @@ impl OutputsPanel {
             encoding: e.encoding,
             audio_mix: e.audio_mix,
             vod_mix: e.vod_mix,
+            options: e.options,
             chat: Some(e.chat.read(cx).value().trim().to_string()).filter(|c| !c.is_empty()),
             ..old
         };
@@ -883,6 +897,35 @@ impl OutputsPanel {
                 .child(row("Keyframes", Some("How often a full picture is sent: 2 s is what most platforms ask for."), keys.into_any_element()))
                 .child(row("Audio bitrate", None, audio.into_any_element()));
         }
+        // Adaptive bitrate: RTMP/RTMPS only (the other protocols manage congestion themselves).
+        let address = match e.server.and_then(|i| e.platform.servers.get(i)) {
+            Some((_, url)) => url.to_string(),
+            None => e.server_input.read(cx).value().to_string(),
+        };
+        let rtmp = matches!(StreamProtocol::of(&address), Some(StreamProtocol::Rtmp) | None);
+        let adaptive = e.options.adaptive_bitrate;
+        quality = quality.child(div().h(px(1.)).bg(tok::border())).child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Adaptive bitrate")).child(
+                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(if !rtmp {
+                        "RTMP and RTMPS only: this protocol manages congestion itself."
+                    } else if adaptive {
+                        "Lowers the bitrate when the connection can't keep up and raises it again. The destination gets an encoder of its own."
+                    } else {
+                        "Off: the bitrate stays as set, and the connection may drop frames instead."
+                    }),
+                ))
+                .child(toggle("edit-adaptive", adaptive && rtmp).on_click(cx.listener(move |this, _, _, cx| {
+                    if rtmp && let Some(Setup::Edit(e)) = &mut this.setup {
+                        e.options.adaptive_bitrate = !e.options.adaptive_bitrate;
+                    }
+                    cx.notify();
+                }))),
+        );
         let id = e.id;
         let connection = card("Connection")
             .child(server)
@@ -1503,6 +1546,13 @@ impl Render for OutputsPanel {
             } else {
                 ("Skipped".into(), tok::text_tertiary())
             };
+            // Adaptive bitrate has stepped down: say how far, so a thin picture isn't a mystery.
+            let state = match st.state {
+                OutputState::Active { .. } if st.target_kbps > 0 && st.current_kbps > 0 && st.current_kbps < st.target_kbps => {
+                    (format!("{} · {}", state.0, bitrate_step(st.current_kbps, st.target_kbps)), tok::warn())
+                }
+                _ => state,
+            };
             let platform = d
                 .platform
                 .as_deref()
@@ -1691,5 +1741,17 @@ impl EventEmitter<OpenRecordingSettings> for OutputsPanel {}
 impl Focusable for OutputsPanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bitrate_step;
+
+    #[test]
+    fn a_stepped_down_bitrate_reads_in_megabits() {
+        assert_eq!(bitrate_step(4500, 6000), "4.5 of 6 Mbps");
+        assert_eq!(bitrate_step(3000, 6000), "3 of 6 Mbps");
+        assert_eq!(bitrate_step(2300, 8000), "2.3 of 8 Mbps");
     }
 }

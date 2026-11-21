@@ -56,6 +56,9 @@ pub struct OutputStatus {
     /// Frames the video output skipped since this output began because its encoder was too slow
     /// (per canvas: outputs on one canvas see the same ones).
     pub encoder_skipped: u32,
+    /// Streams with adaptive bitrate: the encoder's bitrate now and what it is set to (kbps).
+    pub current_kbps: u32,
+    pub target_kbps: u32,
     /// Clips saved since the replay buffer started.
     pub saved_clips: u32,
     /// Recording: paused (the file holds no time while paused).
@@ -86,6 +89,8 @@ impl Default for OutputStatus {
             dropped_frames: 0,
             total_frames: 0,
             encoder_skipped: 0,
+            current_kbps: 0,
+            target_kbps: 0,
             saved_clips: 0,
             paused: false,
             paused_for: std::time::Duration::ZERO,
@@ -225,6 +230,10 @@ pub struct EncoderConfig {
     pub scaled: Option<(u32, u32)>,
     /// The libobs mix its audio is (0: Program, the master; 1–5: the audio engine's mixes).
     pub audio_mix: usize,
+    /// The output lowers and raises this encoder's bitrate with the connection (RTMP's dynamic
+    /// bitrate). Such an encoder is its own: its output changes the bitrate, so others on it
+    /// would change too.
+    pub adaptive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -318,6 +327,8 @@ struct Running {
     /// The canvas video's skipped-frame count when this output began (it counts from the
     /// canvas's creation).
     skipped_base: u32,
+    /// Its bitrate is adaptive (it reports the current one).
+    adaptive: bool,
 }
 
 unsafe impl Send for Running {}
@@ -519,6 +530,22 @@ fn skipped_of(encoder: *mut sys::obs_encoder_t) -> u32 {
     }
 }
 
+/// The bitrate an encoder is set to now, kbps (dynamic bitrate changes it while live).
+fn encoder_kbps(encoder: *mut sys::obs_encoder_t) -> u32 {
+    if encoder.is_null() {
+        return 0;
+    }
+    unsafe {
+        let settings = sys::obs_encoder_get_settings(encoder);
+        if settings.is_null() {
+            return 0;
+        }
+        let kbps = sys::obs_data_get_int(settings, c"bitrate".as_ptr()).max(0) as u32;
+        sys::obs_data_release(settings);
+        kbps
+    }
+}
+
 /// Frames the primary canvas skipped because an encoder was too slow, since the app began
 /// (the other canvases' are in each output's status).
 pub fn primary_skipped_frames() -> u32 {
@@ -677,7 +704,9 @@ unsafe fn start(
         }
         let share = (video_output as usize, encoders.clone());
         let skipped_base = skipped_of(video);
-        let running = Running { output, video, audio, service, signal_param, signals, share, extra, skipped_base };
+        let adaptive = encoders.adaptive;
+        let running =
+            Running { output, video, audio, service, signal_param, signals, share, extra, skipped_base, adaptive };
         runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
         if !sys::obs_output_start(output) {
             let err = last_error(output).unwrap_or_else(|| "The output couldn't start.".into());
@@ -862,13 +891,16 @@ impl Outputs {
         }
         let mut output_settings = Data::new();
         output_settings.set_bool("low_latency_mode_enabled", false);
+        // RTMP's dynamic bitrate: the output lowers its encoder's bitrate when the connection
+        // backs up and raises it again. The other protocols manage congestion themselves.
+        output_settings.set_bool("dyn_bitrate", encoders.adaptive && protocol == StreamProtocol::Rtmp);
         // On failure `start` releases everything it was given, the service included.
         // Destinations with identical encoder settings on the same canvas share one encoder pair.
+        // (An adaptive destination's encoder is its own: its output changes the bitrate.)
         let share_key = (video_output as usize, encoders.clone());
-        let shared = self
-            .streams
-            .values()
-            .find(|r| r.share == share_key)
+        let shared = (!encoders.adaptive)
+            .then(|| self.streams.values().find(|r| r.share == share_key))
+            .flatten()
             .map(|r| unsafe { (sys::obs_encoder_get_ref(r.video), sys::obs_encoder_get_ref(r.audio)) });
         let shared = shared.filter(|(v, a)| !v.is_null() && !a.is_null());
         // Twitch's VOD track: a second audio track, as OBS sends it (RTMP's multitrack audio)
@@ -999,10 +1031,12 @@ impl Outputs {
                         keyint_sec: 0,
                         scaled: None,
                         audio_mix: 0,
+                        adaptive: false,
                     },
                 ),
                 extra: Vec::new(),
                 skipped_base: 0,
+                adaptive: false,
             };
             runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
             if !sys::obs_output_start(output) {
@@ -1110,7 +1144,10 @@ impl Outputs {
                 sys::obs_output_get_total_frames(r.output),
             );
             let skipped = skipped_of(r.video).saturating_sub(r.skipped_base);
+            let (current, target) = if r.adaptive { (encoder_kbps(r.video), r.share.1.video_bitrate_kbps) } else { (0, 0) };
             runtime().update(key, |s| {
+                s.current_kbps = current;
+                s.target_kbps = target;
                 s.bytes = bytes;
                 s.dropped_frames = dropped;
                 s.total_frames = total;
@@ -1216,6 +1253,7 @@ pub fn default_encoders(available: &[String], video_bitrate_kbps: u32, constant_
         keyint_sec: 2,
         scaled: None,
         audio_mix: 0,
+        adaptive: false,
     }
 }
 

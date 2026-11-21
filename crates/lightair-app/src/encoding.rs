@@ -4,7 +4,7 @@
 
 use lightair_model::{Destination, Encoding, Canvas, Workspace, RecordingSettings, VideoEncoder};
 use lightair_engine::outputs::{
-    EncoderConfig, H264_ENCODERS, HEVC_ENCODERS, PRORES_ENCODERS, aac_encoder, first_available,
+    EncoderConfig, StreamProtocol, H264_ENCODERS, HEVC_ENCODERS, PRORES_ENCODERS, aac_encoder, first_available,
 };
 
 use crate::platforms;
@@ -67,6 +67,9 @@ pub fn for_stream(caps: &[String], workspace: &Workspace, d: &Destination) -> En
         scaled: scaled(canvas, e.height),
         // its sound: a mix, or the master
         audio_mix: d.audio_mix.and_then(|m| libobs_mix(workspace, m)).unwrap_or(0),
+        // dynamic bitrate is RTMP's: the others handle congestion themselves
+        adaptive: d.options.adaptive_bitrate
+            && matches!(StreamProtocol::of(&d.server), Some(StreamProtocol::Rtmp)),
     }
 }
 
@@ -88,6 +91,7 @@ pub fn for_recording(caps: &[String], settings: &RecordingSettings, canvas: &Can
         keyint_sec: 2,
         scaled: scaled(canvas, settings.height),
         audio_mix: 0,
+        adaptive: false,
     }
 }
 
@@ -164,10 +168,35 @@ mod tests {
             audio_mix: None,
             vod_mix: None,
             chat: None,
+            options: Default::default(),
         };
         assert_eq!(automatic(&workspace, &d("twitch")).bitrate_kbps, 6000, "Twitch takes 6 Mbps");
         assert_eq!(automatic(&workspace, &d("youtube")).bitrate_kbps, 9000);
         let cfg = for_stream(&mac(), &workspace, &d("youtube"));
         assert!(cfg.constant_bitrate && cfg.keyint_sec == 2 && cfg.scaled.is_none());
+    }
+
+    #[test]
+    fn adaptive_bitrate_is_rtmps_and_can_be_turned_off() {
+        let workspace = Workspace::new("P");
+        let mut d = Destination {
+            id: lightair_model::Id::new(),
+            name: "T".into(),
+            server: "rtmp://example.com/live".into(),
+            enabled: true,
+            canvas: None,
+            platform: None,
+            encoding: None,
+            audio_mix: None,
+            vod_mix: None,
+            chat: None,
+            options: Default::default(),
+        };
+        assert!(for_stream(&mac(), &workspace, &d).adaptive, "on by default for RTMP");
+        d.server = "srt://example.com:9000".into();
+        assert!(!for_stream(&mac(), &workspace, &d).adaptive, "SRT manages congestion itself");
+        d.server = "rtmps://example.com/live".into();
+        d.options.adaptive_bitrate = false;
+        assert!(!for_stream(&mac(), &workspace, &d).adaptive);
     }
 }

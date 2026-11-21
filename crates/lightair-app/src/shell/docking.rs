@@ -782,6 +782,7 @@ impl StudioWindow {
                         audio_mix: None,
                         vod_mix: None,
                         chat: None,
+                        options: Default::default(),
                     };
                     self.exec(lightair_model::Command::AddDestination { destination }, cx);
                 }
@@ -802,6 +803,7 @@ impl StudioWindow {
                     audio_mix: None,
                     vod_mix: None,
                     chat: None,
+                    options: Default::default(),
                 };
                 let id = destination.id;
                 self.exec(lightair_model::Command::AddDestination { destination }, cx);
