@@ -84,6 +84,11 @@ struct Told {
     /// (scene, object): visible in the primary canvas.
     visible: HashMap<(Id, Id), bool>,
     workspace: usize,
+    /// Each output's state ("stream:<id>", "record:<canvas>", "clips", "vcam") and, for a stream
+    /// trying to get back, which try it's on.
+    outputs: HashMap<String, (&'static str, u32)>,
+    /// (id, name, width, height) of each canvas.
+    canvases: Vec<(Id, String, u32, u32)>,
 }
 
 /// A still as a small JPEG (`width` px wide at most): `{mime, data}` (base64).
@@ -176,6 +181,42 @@ fn scene_json(w: &Workspace, s: &Scene, canvas: Id) -> Value {
     json!({"id": s.id, "name": s.name, "on_air": w.program == Some(s.id), "objects": objects})
 }
 
+/// Every output's state, as a short word, for noticing when one changes.
+fn output_states(w: &Workspace) -> HashMap<String, (&'static str, u32)> {
+    let word = |s: &OutputState| match s {
+        OutputState::Idle => "idle",
+        OutputState::Starting => "starting",
+        OutputState::Active { .. } => "active",
+        OutputState::Reconnecting { .. } => "reconnecting",
+        OutputState::Stopping => "stopping",
+        OutputState::Failed(_) => "failed",
+    };
+    let mut out = HashMap::new();
+    for d in &w.outputs.destinations {
+        let st = runtime().get(OutputKey::Stream(d.id));
+        out.insert(format!("stream:{}", d.id), (word(&st.state), st.reconnect.map_or(0, |r| r.attempt)));
+    }
+    for c in &w.canvases {
+        out.insert(format!("record:{}", c.id), (word(&runtime().get(OutputKey::Recording(c.id)).state), 0));
+    }
+    out.insert("clips".into(), (word(&runtime().get(OutputKey::Clips).state), 0));
+    out.insert("vcam".into(), (word(&runtime().get(OutputKey::VirtualCamera).state), 0));
+    out
+}
+
+/// A canvas, and what is sent from it.
+fn canvas_json(w: &Workspace, c: &lightair_model::Canvas) -> Value {
+    let primary = w.primary_canvas().id;
+    let on = |d: &&lightair_model::Destination| d.canvas.unwrap_or(primary) == c.id;
+    json!({
+        "id": c.id, "name": c.name, "width": c.width, "height": c.height, "fps": c.fps(),
+        "primary": c.id == primary,
+        "program": w.program,
+        "destinations": w.outputs.destinations.iter().filter(on).map(|d| json!({"id": d.id, "name": d.name, "enabled": d.enabled})).collect::<Vec<_>>(),
+        "recording": output_json(Some(OutputKey::Recording(c.id))),
+    })
+}
+
 fn output_json(key: Option<OutputKey>) -> Value {
     let status = match key {
         Some(k) => runtime().get(k),
@@ -201,7 +242,28 @@ fn output_json(key: Option<OutputKey>) -> Value {
     if let OutputState::Failed(m) = &status.state {
         v["error"] = m.clone().into();
     }
+    // a destination's own: where it is in reconnecting, drops by cause, bitrate, delay
+    if matches!(key, Some(OutputKey::Stream(_))) {
+        v["dropped"] = json!({"network": status.dropped_frames.max(0), "encoder": status.encoder_skipped});
+        v["total_frames"] = status.total_frames.into();
+        v["bytes"] = status.bytes.into();
+        if let Some(r) = status.reconnect {
+            v["reconnect"] = json!({"attempt": r.attempt, "retries": r.retries, "seconds_left": r.seconds_left()});
+        }
+        if status.target_kbps > 0 {
+            v["bitrate"] = json!({"current_kbps": status.current_kbps, "target_kbps": status.target_kbps});
+        }
+        if status.delay_s > 0 {
+            v["delay_s"] = status.delay_s.into();
+        }
+    }
     v
+}
+
+/// A destination by its id or name.
+fn destination_by<'a>(w: &'a Workspace, key: &str) -> Result<&'a lightair_model::Destination, ApiError> {
+    pick(w.outputs.destinations.iter(), key, |d| d.id, |d| d.name.as_str())
+        .ok_or_else(|| ApiError::not_found(format!("no destination {key}")))
 }
 
 impl StudioWindow {
@@ -382,6 +444,8 @@ impl StudioWindow {
                 .flat_map(|s| s.objects.iter().map(move |o| ((s.id, o.id), o.layouts.get(&canvas).is_some_and(|l| l.visible))))
                 .collect(),
             workspace: Arc::as_ptr(&w) as usize,
+            outputs: output_states(&w),
+            canvases: w.canvases.iter().map(|c| (c.id, c.name.clone(), c.width, c.height)).collect(),
         };
         let Some(before) = self.remote.told.replace(now.clone()) else { return };
         if before == now {
@@ -424,6 +488,44 @@ impl StudioWindow {
         }
         if before.vcam != now.vcam {
             server.emit("vcam.state", json!({"active": now.vcam}));
+        }
+        // one output changed: which, its state and the reason it failed, if it did
+        if before.outputs != now.outputs {
+            for (key, (state, attempt)) in &now.outputs {
+                if before.outputs.get(key) == Some(&(*state, *attempt)) {
+                    continue;
+                }
+                let (kind, id) = key.split_once(':').map_or((key.as_str(), None), |(k, i)| (k, id_of(i)));
+                let (okey, name) = match (kind, id) {
+                    ("stream", Some(id)) => {
+                        (Some(OutputKey::Stream(id)), w.outputs.destinations.iter().find(|d| d.id == id).map(|d| d.name.clone()))
+                    }
+                    ("record", Some(id)) => (Some(OutputKey::Recording(id)), w.canvas(id).map(|c| c.name.clone())),
+                    ("clips", _) => (Some(OutputKey::Clips), None),
+                    _ => (Some(OutputKey::VirtualCamera), None),
+                };
+                let mut data = output_json(okey);
+                data["kind"] = kind.into();
+                data["id"] = json!(id);
+                data["name"] = json!(name);
+                server.emit("output.changed", data);
+            }
+        }
+        // a canvas added, removed, renamed or resized
+        if before.canvases != now.canvases {
+            for (id, name, width, height) in &now.canvases {
+                let was = before.canvases.iter().find(|(b, ..)| b == id);
+                let change = match was {
+                    None => "added",
+                    Some((_, n, ..)) if n != name => "renamed",
+                    Some((_, _, bw, bh)) if (bw, bh) != (width, height) => "resized",
+                    _ => continue,
+                };
+                server.emit("canvas.changed", json!({"id": id, "change": change, "name": name, "width": width, "height": height}));
+            }
+            for (id, name, ..) in before.canvases.iter().filter(|(b, ..)| !now.canvases.iter().any(|(n, ..)| n == b)) {
+                server.emit("canvas.changed", json!({"id": id, "change": "removed", "name": name}));
+            }
         }
         let clip_saved = now.clips_saved > before.clips_saved;
         for (track, (source, volume, muted)) in &now.tracks {
@@ -793,6 +895,66 @@ impl StudioWindow {
                 }
                 Ok(json!({"active": want}))
             }
+            // one destination, by id or name (docs/remote-api.md)
+            "output.list" => Ok(self.output_list_json(cx)),
+            "output.start" | "output.stop" | "output.toggle" | "output.retry" | "output.cancel" | "output.set_enabled" => {
+                let d = destination_by(&w, need(p, "output")?)?.clone();
+                let st = runtime().get(OutputKey::Stream(d.id));
+                let running = st.state.is_running();
+                let reconnecting = matches!(st.state, OutputState::Reconnecting { .. });
+                let id = d.id;
+                match call.method.as_str() {
+                    "output.set_enabled" => {
+                        let enabled = p.get("enabled").and_then(Value::as_bool).ok_or_else(|| ApiError::invalid("enabled: true or false"))?;
+                        self.studio.update(cx, |s, cx| s.execute(Command::SetDestinationEnabled { destination: id, enabled }, cx))
+                            .map_err(|e| ApiError::failed(e.to_string()))?;
+                        Ok(json!({"enabled": enabled}))
+                    }
+                    "output.retry" => {
+                        if !running && !matches!(st.state, OutputState::Failed(_)) {
+                            return Err(ApiError::state(format!("{} isn't running or failed", d.name)));
+                        }
+                        if running {
+                            self.studio.update(cx, |s, cx| s.restart_destination(id, cx));
+                        } else {
+                            self.start_destination_checked(&d, cx)?;
+                        }
+                        Ok(json!({"retrying": true}))
+                    }
+                    "output.cancel" => {
+                        if !reconnecting {
+                            return Err(ApiError::state(format!("{} isn't reconnecting", d.name)));
+                        }
+                        self.studio.update(cx, |s, cx| s.stop_destination(id, cx));
+                        Ok(json!({"cancelled": true}))
+                    }
+                    method => {
+                        let want = match method {
+                            "output.start" => true,
+                            "output.stop" => false,
+                            _ => !running,
+                        };
+                        if want == running {
+                            return Err(ApiError::state(if running {
+                                format!("{} is already live", d.name)
+                            } else {
+                                format!("{} isn't live", d.name)
+                            }));
+                        }
+                        if want {
+                            self.start_destination_checked(&d, cx)?;
+                        } else {
+                            self.studio.update(cx, |s, cx| s.stop_destination(id, cx));
+                        }
+                        Ok(json!({"active": want}))
+                    }
+                }
+            }
+            "canvas.list" => Ok(json!({"canvases": w.canvases.iter().map(|c| canvas_json(&w, c)).collect::<Vec<_>>()})),
+            "canvas.get" => {
+                let c = w.canvas(canvas).ok_or_else(|| ApiError::not_found("no such canvas"))?;
+                Ok(canvas_json(&w, c))
+            }
             "vcam.status" => Ok(json!({"active": self.studio.read(cx).virtual_camera().is_running()})),
             "vcam.start" | "vcam.stop" | "vcam.toggle" => {
                 let on = self.studio.read(cx).virtual_camera().is_running();
@@ -899,6 +1061,46 @@ impl StudioWindow {
         v
     }
 
+    /// Starts one destination from the API, with the same checks as `stream.start`.
+    fn start_destination_checked(&mut self, d: &lightair_model::Destination, cx: &mut Context<Self>) -> Result<(), ApiError> {
+        if crate::secrets::stream_key(d.id).is_none() {
+            return Err(ApiError::state(format!("no stream key saved for {}", d.name)));
+        }
+        let id = d.id;
+        self.studio.update(cx, |s, cx| s.start_destination(id, cx));
+        Ok(())
+    }
+
+    /// `output.list`: every output: the destinations (with which encoder each shares), the
+    /// recordings by canvas, the clip buffer and the virtual camera.
+    fn output_list_json(&self, cx: &App) -> Value {
+        let studio = self.studio.read(cx);
+        let w = studio.workspace();
+        let mut streaming = self.streaming_json(cx);
+        let groups = studio.engine().call(|s| s.outputs.stream_share_groups());
+        if let Some(list) = streaming["destinations"].as_array_mut() {
+            for d in list {
+                let id = d["id"].as_str().and_then(id_of);
+                d["encoder"] = id.and_then(|id| groups.iter().position(|g| g.contains(&id))).map_or(Value::Null, |n| json!(n + 1));
+            }
+        }
+        let recordings: Vec<Value> = w
+            .canvases
+            .iter()
+            .map(|c| {
+                let mut v = output_json(Some(OutputKey::Recording(c.id)));
+                v["canvas"] = json!(c.id);
+                v
+            })
+            .collect();
+        json!({
+            "destinations": streaming["destinations"],
+            "recordings": recordings,
+            "clips": output_json(Some(OutputKey::Clips)),
+            "virtual_camera": output_json(Some(OutputKey::VirtualCamera)),
+        })
+    }
+
     fn streaming_json(&self, cx: &App) -> Value {
         let w = self.studio.read(cx).workspace();
         let destinations: Vec<Value> = w
@@ -907,8 +1109,11 @@ impl StudioWindow {
             .iter()
             .map(|d| {
                 let mut s = output_json(Some(OutputKey::Stream(d.id)));
+                s["id"] = json!(d.id);
                 s["name"] = d.name.clone().into();
                 s["enabled"] = d.enabled.into();
+                s["platform"] = d.platform.clone().unwrap_or_else(|| "custom".into()).into();
+                s["canvas"] = json!(d.canvas.unwrap_or(w.primary_canvas().id));
                 s
             })
             .collect();
