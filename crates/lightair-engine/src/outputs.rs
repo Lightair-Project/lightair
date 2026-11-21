@@ -360,7 +360,8 @@ impl StreamProtocol {
     pub fn of(server: &str) -> Option<Self> {
         let s = server.trim().to_ascii_lowercase();
         let has = |p: &str| s.starts_with(p);
-        if has("rtmp://") || has("rtmps://") {
+        // "auto:twitch" is an RTMP server picked when going live (the nearest Twitch ingest)
+        if has("rtmp://") || has("rtmps://") || has("auto:twitch") {
             Some(Self::Rtmp)
         } else if has("srt://") || has("rist://") || has("udp://") || has("tcp://") {
             Some(Self::MpegTs)

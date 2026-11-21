@@ -456,6 +456,10 @@ impl OutputsPanel {
 
     pub fn new(studio: Entity<Studio>, cx: &mut Context<Self>) -> Self {
         cx.observe(&studio, |_, _, cx| cx.notify()).detach();
+        // a Twitch destination on Automatic: measure the ingests now, so going live doesn't wait
+        if studio.read(cx).workspace().outputs.destinations.iter().any(|d| platforms::is_auto(&d.server)) {
+            platforms::warm_twitch_auto();
+        }
         // elapsed times and the recording drive, twice a second while an output runs
         cx.spawn(async move |this, cx| {
             loop {
@@ -550,6 +554,9 @@ impl OutputsPanel {
             None => c.server_input.read(cx).value().trim().to_string(),
         };
         let key = c.key.read(cx).value().trim().to_string();
+        if platforms::is_auto(&server) {
+            platforms::warm_twitch_auto();
+        }
         let protocol = StreamProtocol::of(&server);
         // RTMP and WHIP need a key (stream key, bearer token); for SRT it's an optional stream ID.
         let needs_key = matches!(protocol, Some(StreamProtocol::Rtmp | StreamProtocol::Whip));
@@ -657,6 +664,9 @@ impl OutputsPanel {
             e.error = Some("That doesn't look like a server URL (rtmp://, rtmps://, srt:// or https://).".into());
             cx.notify();
             return;
+        }
+        if platforms::is_auto(&server) {
+            platforms::warm_twitch_auto();
         }
         let name = e.name.read(cx).value().trim().to_string();
         let key = e.key.read(cx).value().trim().to_string();
@@ -1997,12 +2007,20 @@ impl Render for OutputsPanel {
                 .or_else(|| platforms::guess(&d.server))
                 .unwrap_or(platforms::custom());
             // Which server, in words where we know it.
-            let where_ = platform
-                .servers
-                .iter()
-                .find(|(_, url)| *url == d.server)
-                .map(|(label, _)| format!("{label} · {}", StreamProtocol::label(&d.server)))
-                .unwrap_or_else(|| format!("{} · {}", host_of(&d.server), StreamProtocol::label(&d.server)));
+            let where_ = if platforms::is_auto(&d.server) {
+                // Automatic: which ingest it chose lately, if it has
+                match platforms::last_choice() {
+                    Some(c) => format!("Automatic · {} · RTMP", c.name),
+                    None => "Automatic (nearest) · RTMP".to_string(),
+                }
+            } else {
+                platform
+                    .servers
+                    .iter()
+                    .find(|(_, url)| *url == d.server)
+                    .map(|(label, _)| format!("{label} · {}", StreamProtocol::label(&d.server)))
+                    .unwrap_or_else(|| format!("{} · {}", host_of(&d.server), StreamProtocol::label(&d.server)))
+            };
             let where_ = if st.state.is_running() && st.delay_s > 0 {
                 format!("{where_} · delayed {} s", st.delay_s)
             } else {

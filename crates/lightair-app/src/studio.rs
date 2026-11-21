@@ -1395,6 +1395,16 @@ impl Studio {
         let Some(key) = crate::secrets::stream_key(d.id) else {
             return Err(format!("No stream key saved for {}.", d.name));
         };
+        // Automatic on Twitch: the nearest ingest, picked now (measured ahead in the background,
+        // so this rarely waits)
+        let resolved = if crate::platforms::is_auto(&d.server) {
+            let mut r = d.clone();
+            r.server = crate::platforms::resolve_twitch_auto().url;
+            r
+        } else {
+            d.clone()
+        };
+        let d = &resolved;
         // its own tries and delay, else the workspace's
         let reconnect = d.options.reconnect.unwrap_or(workspace.outputs.reconnect);
         let net = stream_net(d, &lightair_platform::net::interfaces())?;

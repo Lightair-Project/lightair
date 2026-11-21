@@ -60,7 +60,16 @@ pub struct Platform {
     pub max_kbps: Option<u32>,
 }
 
+/// A Twitch destination's server when it is left to Lightair: the nearest ingest, found when
+/// going live.
+pub const AUTO_TWITCH: &str = "auto:twitch";
+
+pub fn is_auto(server: &str) -> bool {
+    server == AUTO_TWITCH
+}
+
 pub const TWITCH_SERVERS: &[(&str, &str)] = &[
+    ("Automatic (nearest)", AUTO_TWITCH),
     ("Asia Pacific (Mumbai)", "rtmp://aps30.contribute.live-video.net/app/"),
     ("Asia Pacific (Seoul)", "rtmp://apn20.contribute.live-video.net/app/"),
     ("Asia Pacific (Singapore)", "rtmp://aps10.contribute.live-video.net/app/"),
@@ -662,6 +671,10 @@ pub fn custom() -> &'static Platform {
 /// Which of a platform's servers to start with: for regional lists, the one nearest this
 /// Mac's time zone; otherwise the first.
 pub fn nearest_server(p: &Platform) -> usize {
+    // Twitch starts on Automatic: the nearest ingest by measured delay, found when going live
+    if p.id == "twitch" {
+        return 0;
+    }
     let zone = std::fs::read_link("/etc/localtime").ok().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     nearest_for_zone(p, &zone)
 }
@@ -693,9 +706,217 @@ pub fn nearest_for_zone(p: &Platform, zone: &str) -> usize {
         .unwrap_or(0)
 }
 
+// ------------------------------------------------------------------ Twitch's nearest ingest
+
+/// One of Twitch's ingest servers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ingest {
+    pub name: String,
+    /// "rtmp://sea01.contribute.live-video.net/app/" (the stream key is added separately).
+    pub url: String,
+}
+
+/// Where Twitch lists its ingests (public, no key).
+const INGEST_LIST: &str = "https://ingest.twitch.tv/ingests";
+
+/// The ingests in Twitch's list: `{"ingests": [{"name", "url_template": "rtmp://…/app/{stream_key}"}]}`.
+/// The key's place is cut off the address.
+pub fn parse_ingests(json: &str) -> Vec<Ingest> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return Vec::new() };
+    v["ingests"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|i| {
+                    let name = i["name"].as_str()?.trim().to_string();
+                    let url = i["url_template"].as_str()?.split("{stream_key}").next()?.to_string();
+                    (url.starts_with("rtmp://") && !name.is_empty()).then_some(Ingest { name, url })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The ingest with the shortest time, among those that answered (the median of their tries).
+pub fn fastest(timed: &[(Ingest, Option<std::time::Duration>)]) -> Option<&Ingest> {
+    timed.iter().filter_map(|(i, t)| t.map(|t| (i, t))).min_by_key(|(_, t)| *t).map(|(i, _)| i)
+}
+
+/// The middle of some times (the slower of the two middles for an even number).
+fn median(mut times: Vec<std::time::Duration>) -> Option<std::time::Duration> {
+    times.sort();
+    times.get(times.len() / 2).copied()
+}
+
+/// How long a connection to an ingest takes: the median of a few TCP connects to its RTMP port
+/// (`None` if it never answered).
+fn measure(url: &str) -> Option<std::time::Duration> {
+    use std::net::ToSocketAddrs;
+    let host = host(url);
+    let addr = (host.as_str(), 1935).to_socket_addrs().ok()?.next()?;
+    let times: Vec<_> = (0..3)
+        .filter_map(|_| {
+            let start = std::time::Instant::now();
+            std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(1200)).ok()?;
+            Some(start.elapsed())
+        })
+        .collect();
+    median(times)
+}
+
+/// What Automatic chose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chosen {
+    pub name: String,
+    pub url: String,
+    /// Measured against Twitch's live list (otherwise a guess from the time zone).
+    pub measured: bool,
+}
+
+static CHOSEN: std::sync::Mutex<Option<(std::time::Instant, Chosen)>> = std::sync::Mutex::new(None);
+/// A choice this recent is used again rather than measuring again.
+const CHOICE_LIFE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// The choice made lately, if any (what the row shows).
+pub fn last_choice() -> Option<Chosen> {
+    CHOSEN.lock().ok()?.as_ref().map(|(_, c)| c.clone())
+}
+
+fn cache_file() -> std::path::PathBuf {
+    lightair_platform::paths::data_dir().join("cache").join("twitch-ingests.json")
+}
+
+/// Twitch's ingest list: its own, fetched (and kept a day), else the last one kept, else none.
+fn fetch_ingests() -> Vec<Ingest> {
+    let file = cache_file();
+    let fresh = std::fs::metadata(&file)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(24 * 3600));
+    if fresh && let Some(list) = std::fs::read_to_string(&file).ok().map(|t| parse_ingests(&t)).filter(|l| !l.is_empty()) {
+        return list;
+    }
+    let fetched = lightair_live::net::agent()
+        .get(INGEST_LIST)
+        .call()
+        .ok()
+        .and_then(|mut r| r.body_mut().read_to_string().ok())
+        .filter(|t| !parse_ingests(t).is_empty());
+    match fetched {
+        Some(text) => {
+            if let Some(dir) = file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&file, &text);
+            parse_ingests(&text)
+        }
+        None => std::fs::read_to_string(&file).ok().map(|t| parse_ingests(&t)).unwrap_or_default(),
+    }
+}
+
+/// The static list's pick for this Mac's time zone (when Twitch can't be reached).
+fn zone_guess() -> Chosen {
+    let twitch = by_id("twitch").expect("Twitch is a platform");
+    let zone = std::fs::read_link("/etc/localtime").ok().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    // (the first entry is Automatic itself; a zone with no match gets the first real one)
+    let i = nearest_for_zone(twitch, &zone).max(1).min(twitch.servers.len() - 1);
+    let (name, url) = twitch.servers[i];
+    Chosen { name: name.to_string(), url: url.to_string(), measured: false }
+}
+
+/// Picks the Twitch ingest with the shortest connection time: Twitch's live list, each measured
+/// at once (about two seconds at most); the time zone's pick if that fails. The answer is kept
+/// for half an hour.
+pub fn resolve_twitch_auto() -> Chosen {
+    if let Some((at, c)) = CHOSEN.lock().ok().and_then(|g| g.clone())
+        && at.elapsed() < CHOICE_LIFE
+    {
+        return c;
+    }
+    let ingests = fetch_ingests();
+    let timed: Vec<(Ingest, Option<std::time::Duration>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ingests.iter().map(|i| scope.spawn(move || (i.clone(), measure(&i.url)))).collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    let chosen = match fastest(&timed) {
+        // (Twitch's "Default" ingest is its own geographic pick: say so)
+        Some(i) => Chosen {
+            name: if i.name.eq_ignore_ascii_case("default") { "Twitch's own pick".to_string() } else { i.name.clone() },
+            url: i.url.clone(),
+            measured: true,
+        },
+        None => zone_guess(),
+    };
+    if let Ok(mut g) = CHOSEN.lock() {
+        *g = Some((std::time::Instant::now(), chosen.clone()));
+    }
+    chosen
+}
+
+/// Chooses in the background (so going live doesn't wait): called when a destination is saved
+/// and when the app starts.
+pub fn warm_twitch_auto() {
+    if last_choice().is_none() {
+        std::thread::spawn(|| {
+            resolve_twitch_auto();
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const INGESTS: &str = r#"{"ingests":[
+        {"_id":1,"availability":1.0,"name":"EU: Frankfurt, Germany (1)","url_template":"rtmp://fra02.contribute.live-video.net/app/{stream_key}","url_template_secure":"rtmps://fra02.contribute.live-video.net:443/app/{stream_key}","priority":0},
+        {"_id":2,"availability":1.0,"name":"Asia: Singapore (2)","url_template":"rtmp://sin01.contribute.live-video.net/app/{stream_key}","priority":1},
+        {"_id":3,"availability":0.0,"name":"No address","priority":2}
+    ],"meta":{"service":"IVS"}}"#;
+
+    /// Needs the network: `cargo test -p lightair-app live_ingests -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_ingests_are_fetched_and_the_nearest_chosen() {
+        let list = fetch_ingests();
+        assert!(list.len() > 10, "Twitch's list has dozens of ingests, got {}", list.len());
+        let chosen = resolve_twitch_auto();
+        eprintln!("{} ingests; nearest: {} ({}) measured: {}", list.len(), chosen.name, chosen.url, chosen.measured);
+        assert!(chosen.measured, "measured, not guessed");
+    }
+
+    #[test]
+    fn twitchs_list_gives_addresses_without_the_key() {
+        let list = parse_ingests(INGESTS);
+        assert_eq!(list.len(), 2, "the entry without an address is left out");
+        assert_eq!(list[0].url, "rtmp://fra02.contribute.live-video.net/app/");
+        assert_eq!(list[1].name, "Asia: Singapore (2)");
+        assert!(parse_ingests("not json").is_empty());
+    }
+
+    #[test]
+    fn the_nearest_ingest_is_the_one_answering_fastest() {
+        use std::time::Duration;
+        let list = parse_ingests(INGESTS);
+        let ms = Duration::from_millis;
+        let timed = vec![(list[0].clone(), Some(ms(180))), (list[1].clone(), Some(ms(35)))];
+        assert_eq!(fastest(&timed).unwrap().name, "Asia: Singapore (2)");
+        let one_down = vec![(list[0].clone(), Some(ms(180))), (list[1].clone(), None)];
+        assert_eq!(fastest(&one_down).unwrap().name, "EU: Frankfurt, Germany (1)", "one that never answered is passed over");
+        assert!(fastest(&[(list[0].clone(), None)]).is_none(), "none answered: the caller falls back");
+        assert_eq!(median(vec![ms(50), ms(10), ms(30)]), Some(ms(30)));
+        assert_eq!(median(vec![]), None);
+    }
+
+    #[test]
+    fn automatic_is_twitchs_first_choice_and_reads_as_rtmp() {
+        let twitch = by_id("twitch").unwrap();
+        assert_eq!(twitch.servers[0].1, AUTO_TWITCH);
+        assert_eq!(nearest_server(twitch), 0, "a new Twitch destination starts on Automatic");
+        assert_eq!(lightair_engine::outputs::StreamProtocol::of(AUTO_TWITCH), Some(lightair_engine::outputs::StreamProtocol::Rtmp));
+        assert!(!zone_guess().measured);
+        assert!(zone_guess().url.starts_with("rtmp://"));
+    }
 
     #[test]
     fn regional_servers_follow_the_time_zone() {
@@ -775,7 +996,11 @@ mod tests {
             assert!(ids.insert(p.id), "{} twice", p.id);
             assert!(!p.help.is_empty(), "{} has no help", p.id);
             for (_, s) in p.servers {
-                assert!(["rtmp://", "rtmps://", "srt://"].iter().any(|x| s.starts_with(x)), "{}: {s}", p.id);
+                assert!(
+                    is_auto(s) || ["rtmp://", "rtmps://", "srt://"].iter().any(|x| s.starts_with(x)),
+                    "{}: {s}",
+                    p.id
+                );
             }
         }
     }
