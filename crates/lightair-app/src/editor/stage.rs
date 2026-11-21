@@ -120,8 +120,8 @@ impl Editor {
             return;
         };
         // a zoom's region: moved, sized or drawn anew
-        if let Some((m, _, z, clip)) = self.region_zoom()
-            && let Some(zbox) = self.zoom_box(clip, &m)
+        if let Some((_, z)) = self.region_zoom()
+            && let Some(zbox) = self.zoom_box()
         {
             let r = region_of(zbox, &z);
             let corners = [(r.0, r.1), (r.0 + r.2, r.1), (r.0, r.1 + r.3), (r.0 + r.2, r.1 + r.3)];
@@ -133,7 +133,8 @@ impl Editor {
             } else {
                 (None, p)
             };
-            let start = seq.clip(clip).map(|c| c.transform_at(self.playhead)).unwrap_or_default();
+            let clip = Id::nil();
+            let start = Default::default();
             self.stage_drag = Some(StageDrag {
                 clip,
                 kind: StageKind::Region,
@@ -304,8 +305,8 @@ impl Editor {
         let mut layer = div().absolute().top_0().left_0().size_full();
         let to_px = |x: f32, y: f32| (off.0 + x * k, off.1 + y * k);
         // a zoom's region on the whole picture: the rest dimmed, the region framed
-        if let Some((m, _, z, clip)) = self.region_zoom()
-            && let Some(zbox) = self.zoom_box(clip, &m)
+        if let Some((_, z)) = self.region_zoom()
+            && let Some(zbox) = self.zoom_box()
         {
             let r = match self.stage_drag.as_ref().and_then(|d| d.region.map(|rd| (rd, d.to, d.from))) {
                 Some((rd, to, from)) if (to.0 - from.0).hypot(to.1 - from.1) > 2.0 => dragged_region(&rd, to),

@@ -280,10 +280,8 @@ pub struct Editor {
     linkage: bool,
     /// The clip being dragged was taken with ⌥: its linked clips stay put.
     drag_alone: bool,
-    /// The zoom picked on the zoom track (its studio_take, its place in the studio_take's zooms), and takes'
-    /// zooms as their looks have them (read once).
+    /// The zoom picked on the zoom track (`Id::nil()`, its place in the project's zooms).
     zoom_sel: Option<(Id, usize)>,
-    zoom_files: std::cell::RefCell<std::collections::HashMap<Id, Vec<lightair_render::edit::Zoom>>>,
     axis: bool,
     hover: Option<u64>,
     clipboard: Vec<tools::Copied>,
@@ -368,6 +366,7 @@ fn catch_up(r: &mut SequenceRenderer, pending: &Mutex<Pending>) {
     let mut p = pending.lock().unwrap();
     if let Some(mut seq) = p.seq.take() {
         if p.zooms_hidden {
+            seq.zooms.clear();
             for m in &mut seq.media {
                 m.zooms = Some(Vec::new());
             }
@@ -551,7 +550,6 @@ impl Editor {
             linkage: true,
             drag_alone: false,
             zoom_sel: None,
-            zoom_files: Default::default(),
             axis: false,
             hover: None,
             clipboard: Vec::new(),
@@ -751,7 +749,7 @@ impl Editor {
 
     fn open_project(&mut self, id: Id, cx: &mut Context<Self>) {
         let Some(ws) = self.workspace.clone() else { return };
-        let Ok(p) = Project::load(&ws, id) else {
+        let Ok(mut p) = Project::load(&ws, id) else {
             self.note = Some("That project couldn't be read.".into());
             return;
         };
@@ -762,6 +760,8 @@ impl Editor {
         self.playhead = 0;
         self.scroll_ms = 0.0;
         self.preview = None;
+        // a take's own zooms go onto the zoom track (saved with the next change)
+        p.sequence.absorb_take_zooms();
         let seq = p.sequence.clone();
         self.project = Some(p);
         self.pending.lock().unwrap().seq = None;
@@ -882,6 +882,8 @@ impl Editor {
 
     fn settle(&mut self, cx: &mut Context<Self>) {
         let (Some(ws), Some(p)) = (self.workspace.clone(), self.project.as_mut()) else { return };
+        // a take just put in: its zooms onto the zoom track
+        p.sequence.absorb_take_zooms();
         let _ = p.save(&ws);
         self.pending.lock().unwrap().seq = Some(p.sequence.clone());
         self.request(self.playhead);
@@ -2015,17 +2017,21 @@ impl Editor {
                             .child(label("CLICKS"))
                             .child(self.chips("ed-clicks", &[("None", 0i64), ("Circle", 1), ("Ripple", 2)], look.pointer.clicks, move |this, v, cx| this.change_look(mid, |e| e.pointer.clicks = v, cx), cx))
                             .child(label("ZOOMS"))
-                            .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(format!("{} zooms, on the zoom track under the timeline", self.zooms_of(&m).len())))
+                            .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(format!("{} zooms over it, on the zoom track", self.zooms_over(mid))))
                             .child(Button::new("ed-autozoom").label("Automatic zooms").icon(ui::icon("sparkles")).xsmall().outline().on_click(cx.listener(move |this, _, _, cx| {
                                 let Some(m) = this.seq().and_then(|s| s.media(mid)).cloned() else { return };
                                 let Some(log) = m.studio_take.as_ref().and_then(|t| lightair_store::input_log::Log::read(&t.join("input.bin")).ok()) else { return };
                                 let auto = zoom::auto(&log, m.duration_ms);
-                                let mut zs = this.zooms_of(&m);
-                                zs.retain(|z| !z.auto);
-                                zs.extend(auto);
-                                zs.sort_by_key(|z| z.start_ms);
+                                let spans = this.spans_of(mid);
                                 this.zoom_sel = None;
-                                this.change(|s| if let Some(m) = s.media.iter_mut().find(|x| x.id == mid) { m.zooms = Some(zs) }, cx)
+                                // the automatic ones over it replaced; they go onto the track
+                                this.change(|s| {
+                                    s.zooms.retain(|z| !(z.auto && spans.iter().any(|(a, b)| z.start_ms < *b && *a < z.end_ms)));
+                                    if let Some(m) = s.media.iter_mut().find(|x| x.id == mid) {
+                                        m.zooms = Some(auto);
+                                    }
+                                    s.absorb_take_zooms();
+                                }, cx)
                             })));
                     }
                 }
