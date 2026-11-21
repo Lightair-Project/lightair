@@ -1,8 +1,11 @@
-//! The zoom track, as Screen Studio has it: a lane under the tracks with each screen studio_take's
-//! zooms as blocks where they play. A press on the lane over a studio_take adds one there; a block
-//! is picked with a click, moved by dragging it and lengthened by its edges; the inspector sets
-//! how far it zooms and where it looks (following the pointer, or a point). Zooms belong to the
-//! take (source time), kept in the project so they're undone like anything else.
+//! The zoom track, as Screen Studio has it: a lane with the zooms of each studio_take, video and
+//! picture on the picture tracks, as blocks where they play. A press on the lane over one adds a
+//! zoom there; a block is picked with a click, moved by dragging it and lengthened by its edges.
+//! A zoom either follows the pointer (a take's: it needs the take's input log) or shows a region:
+//! with a region zoom picked, the player shows the whole picture with the region on it, to drag
+//! (inside it to move it, a corner to size it, elsewhere to draw a new one; `stage.rs`). The
+//! inspector sets how far it zooms and which of the two it is. Zooms belong to the medium (source
+//! time), kept in the project so they're undone like anything else.
 
 use super::*;
 use lightair_render::edit::{Focus, Zoom};
@@ -18,7 +21,9 @@ const NEW_LEN: u64 = 2_000;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum ZoomPart {
     /// The whole block, held `grab` ms (source) after its start.
-    Body { grab: u64 },
+    Body {
+        grab: u64,
+    },
     Start,
     End,
 }
@@ -47,24 +52,28 @@ fn in_source(c: &Clip, t: u64) -> u64 {
 }
 
 impl Editor {
-    /// A studio_take's zooms: as edited here, else its look's own (read once).
+    /// A medium's zooms: as edited here, else (a studio_take's) its look's own (read once).
     pub(super) fn zooms_of(&self, m: &Media) -> Vec<Zoom> {
         if let Some(z) = &m.zooms {
             return z.clone();
+        }
+        if m.studio_take.is_none() {
+            return Vec::new();
         }
         self.zoom_files.borrow_mut().entry(m.id).or_insert_with(|| self.look_of(m).zooms).clone()
     }
 
     /// Where the tracks start, from the timeline's top: under the ruler and the zoom track.
     pub(super) fn tracks_top(&self) -> f32 {
-        RULER_H + if self.has_studio_takes() { ZOOM_H } else { 0.0 }
+        RULER_H + if self.has_zoomable() { ZOOM_H } else { 0.0 }
     }
 
-    fn has_studio_takes(&self) -> bool {
-        self.seq().is_some_and(|s| s.tracks.iter().filter(|t| t.kind == TrackKind::Video).flat_map(|t| &t.clips).any(|c| c.content.is_none() && s.media(c.media).is_some_and(|m| m.studio_take.is_some())))
+    fn has_zoomable(&self) -> bool {
+        !self.studio_take_clips().is_empty()
     }
 
-    /// The studio_take clips (on video tracks) with their media.
+    /// The clips zooms go on (studio_takes, videos and pictures on the picture tracks), with
+    /// their media.
     fn studio_take_clips(&self) -> Vec<(Clip, Media)> {
         let Some(seq) = self.seq() else { return Vec::new() };
         seq.tracks
@@ -73,7 +82,8 @@ impl Editor {
             .flat_map(|t| t.clips.iter())
             .filter_map(|c| {
                 let m = seq.media(c.media)?;
-                (m.studio_take.is_some() && c.content.is_none()).then(|| (c.clone(), m.clone()))
+                (c.content.is_none() && (m.studio_take.is_some() || m.kind != MediaKind::Audio))
+                    .then(|| (c.clone(), m.clone()))
             })
             .collect()
     }
@@ -84,7 +94,14 @@ impl Editor {
             for (index, z) in self.zooms_of(&m).into_iter().enumerate() {
                 let (s0, s1) = (z.start_ms.max(c.in_ms), z.end_ms.min(c.out_ms));
                 if s1 > s0 {
-                    out.push(Block { media: m.id, index, clip: c.id, zoom: z, from: on_timeline(&c, s0), to: on_timeline(&c, s1) });
+                    out.push(Block {
+                        media: m.id,
+                        index,
+                        clip: c.id,
+                        zoom: z,
+                        from: on_timeline(&c, s0),
+                        to: on_timeline(&c, s1),
+                    });
                 }
             }
         }
@@ -96,7 +113,14 @@ impl Editor {
         let Some(m) = self.seq().and_then(|s| s.media(media)).cloned() else { return };
         let mut zooms = self.zooms_of(&m);
         f(&mut zooms);
-        self.change(|s| if let Some(m) = s.media.iter_mut().find(|m| m.id == media) { m.zooms = Some(zooms) }, cx);
+        self.change(
+            |s| {
+                if let Some(m) = s.media.iter_mut().find(|m| m.id == media) {
+                    m.zooms = Some(zooms)
+                }
+            },
+            cx,
+        );
     }
 
     pub(super) fn picked_zoom(&self) -> Option<(Media, usize, Zoom)> {
@@ -111,13 +135,62 @@ impl Editor {
             self.pick_only(None);
         }
         self.zoom_sel = z;
+        // to the zoom, so what it shows (and its region) is in the player
+        if let Some(b) = z.and_then(|(m, i)| self.blocks().into_iter().find(|b| b.media == m && b.index == i))
+            && (self.playhead < b.from || self.playhead >= b.to)
+        {
+            self.seek(b.from + (b.to - b.from) / 2, cx);
+        }
         cx.notify();
+    }
+
+    /// The picked zoom when it shows a region, with the clip it's on (the one under the playhead,
+    /// else its first): its region is set on the player.
+    pub(super) fn region_zoom(&self) -> Option<(Media, usize, Zoom, Id)> {
+        let (m, i, z) = self.picked_zoom()?;
+        if matches!(z.focus, Focus::Pointer) && m.studio_take.is_some() {
+            return None;
+        }
+        let blocks: Vec<Block> = self.blocks().into_iter().filter(|b| b.media == m.id && b.index == i).collect();
+        let b = blocks.iter().find(|b| b.from <= self.playhead && self.playhead < b.to).or(blocks.first())?;
+        Some((m, i, z, b.clip))
+    }
+
+    /// The player with or without the zooms: without while a zoom's region is being set.
+    pub(super) fn sync_zoom_view(&mut self) {
+        let hide = self.region_zoom().is_some();
+        let changed = {
+            let mut p = self.pending.lock().unwrap();
+            let changed = p.zooms_hidden != hide;
+            p.zooms_hidden = hide;
+            if changed && let Some(pr) = &self.project {
+                p.seq = Some(pr.sequence.clone());
+            }
+            changed
+        };
+        if changed {
+            self.request(self.playhead);
+        }
+    }
+
+    /// The box a zoom's region on `clip` is measured in (result pixels: left, top, width,
+    /// height), as last drawn: the picture; a studio_take's screen inside its look's padding.
+    pub(super) fn zoom_box(&self, clip: Id, m: &Media) -> Option<(f32, f32, f32, f32)> {
+        let q = self.placed.iter().rev().find(|p| p.clip == clip)?;
+        let (mut w, mut h) = q.size;
+        if m.studio_take.is_some() {
+            let pad = self.look_of(m).look.padding * h;
+            let (aw, ah) = ((w - 2.0 * pad).max(1.0), (h - 2.0 * pad).max(1.0));
+            let sa = m.width.max(1) as f32 / m.height.max(1) as f32;
+            (w, h) = if aw / ah > sa { (ah * sa, ah) } else { (aw, aw / sa) };
+        }
+        Some((q.center.0 - w / 2.0, q.center.1 - h / 2.0, w, h))
     }
 
     /// A zoom added at timeline time `t` (over a studio_take there), picked.
     pub(super) fn add_zoom_at(&mut self, t: u64, cx: &mut Context<Self>) {
         let Some((c, m)) = self.studio_take_clips().into_iter().find(|(c, _)| c.start_ms <= t && t < c.end_ms()) else {
-            self.note = Some("Zooms go on screen recordings: put the playhead over a Studio take.".into());
+            self.note = Some("Zooms go on videos, pictures and takes: put the playhead over one.".into());
             cx.notify();
             return;
         };
@@ -135,7 +208,9 @@ impl Editor {
             cx.notify();
             return;
         }
-        let z = Zoom { start_ms: s, end_ms: end, scale: lightair_render::zoom::DEFAULT_SCALE, focus: Focus::Pointer, auto: false };
+        // a take's follows its pointer; anything else's shows a region, at first the middle
+        let focus = if m.studio_take.is_some() { Focus::Pointer } else { Focus::Point { x: 0.5, y: 0.5 } };
+        let z = Zoom { start_ms: s, end_ms: end, scale: lightair_render::zoom::DEFAULT_SCALE, focus, auto: false };
         let mut at = 0;
         self.set_zooms(
             m.id,
@@ -150,7 +225,7 @@ impl Editor {
     }
 
     /// The picked zoom changed (no longer automatic).
-    fn change_zoom(&mut self, f: impl FnOnce(&mut Zoom), cx: &mut Context<Self>) {
+    pub(super) fn change_zoom(&mut self, f: impl FnOnce(&mut Zoom), cx: &mut Context<Self>) {
         let Some((media, i)) = self.zoom_sel else { return };
         self.set_zooms(
             media,
@@ -167,11 +242,15 @@ impl Editor {
     /// Deletes the picked zoom: true if there was one.
     pub(super) fn delete_zoom(&mut self, cx: &mut Context<Self>) -> bool {
         let Some((media, i)) = self.zoom_sel.take() else { return false };
-        self.set_zooms(media, |zs| {
-            if i < zs.len() {
-                zs.remove(i);
-            }
-        }, cx);
+        self.set_zooms(
+            media,
+            |zs| {
+                if i < zs.len() {
+                    zs.remove(i);
+                }
+            },
+            cx,
+        );
         true
     }
 
@@ -183,8 +262,20 @@ impl Editor {
         let Some(z) = zooms.get(index).copied() else { return };
         let s = in_source(&c, t);
         // its neighbours bound it
-        let prev = zooms.iter().enumerate().filter(|(i, x)| *i != index && x.end_ms <= z.start_ms).map(|(_, x)| x.end_ms).max().unwrap_or(0);
-        let next = zooms.iter().enumerate().filter(|(i, x)| *i != index && x.start_ms >= z.end_ms).map(|(_, x)| x.start_ms).min().unwrap_or(m.duration_ms.max(z.end_ms));
+        let prev = zooms
+            .iter()
+            .enumerate()
+            .filter(|(i, x)| *i != index && x.end_ms <= z.start_ms)
+            .map(|(_, x)| x.end_ms)
+            .max()
+            .unwrap_or(0);
+        let next = zooms
+            .iter()
+            .enumerate()
+            .filter(|(i, x)| *i != index && x.start_ms >= z.end_ms)
+            .map(|(_, x)| x.start_ms)
+            .min()
+            .unwrap_or(m.duration_ms.max(z.end_ms));
         let len = z.end_ms - z.start_ms;
         let (start, end) = match part {
             ZoomPart::Body { grab } => {
@@ -216,11 +307,14 @@ impl Editor {
         if takes.is_empty() {
             return None;
         }
-        let mut lane = div().id("ed-zoom-lane").relative().flex_1().h_full().overflow_hidden().cursor(CursorStyle::PointingHand);
-        // where zooms can go: under the takes
+        let mut lane =
+            div().id("ed-zoom-lane").relative().flex_1().h_full().overflow_hidden().cursor(CursorStyle::PointingHand);
+        // where zooms can go: over the videos, pictures and takes
         for (c, _) in &takes {
             let (l, w) = (self.x_of(c.start_ms), c.len_ms() as f32 / 1000.0 * self.pps());
-            lane = lane.child(div().absolute().top(px(5.)).bottom(px(5.)).left(px(l)).w(px(w)).rounded(px(5.)).bg(rgba(0xFFFFFF08)));
+            lane = lane.child(
+                div().absolute().top(px(5.)).bottom(px(5.)).left(px(l)).w(px(w)).rounded(px(5.)).bg(rgba(0xFFFFFF08)),
+            );
         }
         let picked = self.zoom_sel;
         for b in self.blocks() {
@@ -252,7 +346,9 @@ impl Editor {
                 .cursor(CursorStyle::OpenHand)
                 .child(ui::icon("zoom-in").size(px(11.)))
                 .child(div().whitespace_nowrap().child(text))
-                .when(matches!(zoom.focus, Focus::Pointer), |d| d.child(ui::icon("mouse-pointer-2").size(px(10.)).opacity(0.8)))
+                .when(matches!(zoom.focus, Focus::Pointer), |d| {
+                    d.child(ui::icon("mouse-pointer-2").size(px(10.)).opacity(0.8))
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
@@ -261,7 +357,10 @@ impl Editor {
                         let Some(t) = this.time_at(ev.position.x) else { return };
                         let Some(c) = this.seq().and_then(|s| s.clip(clip)).cloned() else { return };
                         let x = this.x_of(t);
-                        let (l, r) = (this.x_of(on_timeline(&c, zoom.start_ms.max(c.in_ms))), this.x_of(on_timeline(&c, zoom.end_ms.min(c.out_ms))));
+                        let (l, r) = (
+                            this.x_of(on_timeline(&c, zoom.start_ms.max(c.in_ms))),
+                            this.x_of(on_timeline(&c, zoom.end_ms.min(c.out_ms))),
+                        );
                         let part = if x - l < EDGE {
                             ZoomPart::Start
                         } else if r - x < EDGE {
@@ -272,7 +371,10 @@ impl Editor {
                         this.begin_drag(Drag::Zoom { media, index, clip, part });
                     }),
                 )
-                .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.pick_zoom(Some((media, index)), cx)))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _, _, cx| this.pick_zoom(Some((media, index)), cx)),
+                )
                 .context_menu({
                     let ed = cx.entity().downgrade();
                     move |m, _, _| {
@@ -288,7 +390,16 @@ impl Editor {
                 });
             // its edges lengthen it
             for left_edge in [true, false] {
-                block = block.child(div().absolute().top_0().bottom_0().when(left_edge, |d| d.left_0()).when(!left_edge, |d| d.right_0()).w(px(EDGE)).cursor(CursorStyle::ResizeLeftRight));
+                block = block.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .when(left_edge, |d| d.left_0())
+                        .when(!left_edge, |d| d.right_0())
+                        .w(px(EDGE))
+                        .cursor(CursorStyle::ResizeLeftRight),
+                );
             }
             lane = lane.child(block);
         }
@@ -313,33 +424,71 @@ impl Editor {
             .border_color(tok::border())
             .child(ui::icon("zoom-in").size(px(13.)).text_color(tok::text_tertiary()))
             .child(div().flex_1().text_size(px(11.)).text_color(tok::text_tertiary()).child("Zoom"))
-            .child(ui::icon_button("ed-zoom-add", "plus", tok::text_secondary()).on_click(cx.listener(|this, _, _, cx| {
-                let t = this.playhead;
-                this.add_zoom_at(t, cx)
-            })));
-        Some(div().flex().h(px(ZOOM_H)).border_b_1().border_color(tok::border()).bg(rgba(0x7C3AED10)).child(header).child(lane))
+            .child(ui::icon_button("ed-zoom-add", "plus", tok::text_secondary()).on_click(cx.listener(
+                |this, _, _, cx| {
+                    let t = this.playhead;
+                    this.add_zoom_at(t, cx)
+                },
+            )));
+        Some(
+            div()
+                .flex()
+                .h(px(ZOOM_H))
+                .border_b_1()
+                .border_color(tok::border())
+                .bg(rgba(0x7C3AED10))
+                .child(header)
+                .child(lane),
+        )
     }
 
     /// The inspector for the picked zoom: its head and body.
     pub(super) fn zoom_inspector(&self, cx: &mut Context<Self>) -> Option<(AnyElement, Div)> {
         let (m, _, z) = self.picked_zoom()?;
-        let head = self.inspector_head("zoom-in", "Zoom".into(), format!("{} · {:.1} s{}", m.name, (z.end_ms - z.start_ms) as f32 / 1000.0, if z.auto { " · Automatic" } else { "" }));
+        let head = self.inspector_head(
+            "zoom-in",
+            "Zoom".into(),
+            format!(
+                "{} · {:.1} s{}",
+                m.name,
+                (z.end_ms - z.start_ms) as f32 / 1000.0,
+                if z.auto { " · Automatic" } else { "" }
+            ),
+        );
         let scale = (z.scale * 100.0).round() as i32;
-        let pointer = matches!(z.focus, Focus::Pointer);
+        let take = m.studio_take.is_some();
+        let pointer = take && matches!(z.focus, Focus::Pointer);
         let at = match z.focus {
             Focus::Point { x, y } => (x, y),
             Focus::Pointer => (0.5, 0.5),
         };
         // where it looks: a picture of the screen, a click on a spot looks there
         let (cols, rows) = (8usize, 5usize);
-        let mut spots = div().relative().w_full().aspect_ratio(16.0 / 9.0).rounded(px(6.)).overflow_hidden().bg(tok::bg_canvas_well()).border_1().border_color(tok::border()).flex().flex_col();
+        let mut spots = div()
+            .relative()
+            .w_full()
+            .aspect_ratio(16.0 / 9.0)
+            .rounded(px(6.))
+            .overflow_hidden()
+            .bg(tok::bg_canvas_well())
+            .border_1()
+            .border_color(tok::border())
+            .flex()
+            .flex_col();
         for r in 0..rows {
             let mut row = div().flex().flex_1();
             for k in 0..cols {
                 let (fx, fy) = ((k as f32 + 0.5) / cols as f32, (r as f32 + 0.5) / rows as f32);
-                row = row.child(div().id(("ed-zoom-spot", r * cols + k)).flex_1().cursor_pointer().hover(|d| d.bg(rgba(0x7C3AED40))).on_click(cx.listener(move |this, _, _, cx| {
-                    this.change_zoom(|z| z.focus = Focus::Point { x: fx, y: fy }, cx)
-                })));
+                row = row.child(
+                    div()
+                        .id(("ed-zoom-spot", r * cols + k))
+                        .flex_1()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgba(0x7C3AED40)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.change_zoom(|z| z.focus = Focus::Point { x: fx, y: fy }, cx)
+                        })),
+                );
             }
             spots = spots.child(row);
         }
@@ -348,8 +497,28 @@ impl Editor {
             let (w, h) = (1.0 / z.scale.max(1.0), 1.0 / z.scale.max(1.0));
             let (x0, y0) = ((at.0 - w / 2.0).clamp(0.0, 1.0 - w), (at.1 - h / 2.0).clamp(0.0, 1.0 - h));
             spots = spots
-                .child(div().absolute().left(relative(x0)).top(relative(y0)).w(relative(w)).h(relative(h)).border_1().border_color(rgb(0xA78BFA)).bg(rgba(0x7C3AED30)))
-                .child(div().absolute().left(relative(at.0)).top(relative(at.1)).ml(px(-4.)).mt(px(-4.)).size(px(8.)).rounded_full().bg(rgb(0xFFFFFF)));
+                .child(
+                    div()
+                        .absolute()
+                        .left(relative(x0))
+                        .top(relative(y0))
+                        .w(relative(w))
+                        .h(relative(h))
+                        .border_1()
+                        .border_color(rgb(0xA78BFA))
+                        .bg(rgba(0x7C3AED30)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(relative(at.0))
+                        .top(relative(at.1))
+                        .ml(px(-4.))
+                        .mt(px(-4.))
+                        .size(px(8.))
+                        .rounded_full()
+                        .bg(rgb(0xFFFFFF)),
+                );
         }
         let body = div()
             .flex()
@@ -359,18 +528,20 @@ impl Editor {
             .pb_4()
             .child(label("ZOOM"))
             .child(self.chips("ed-zoom-scale", &[("1.25×", 125), ("1.5×", 150), ("2×", 200), ("2.5×", 250), ("3×", 300), ("4×", 400)], scale, |this, v, cx| this.change_zoom(|z| z.scale = v as f32 / 100.0, cx), cx))
-            .child(label("LOOKS AT"))
-            .child(self.segmented("ed-zoom-focus".into(), &[("Follow pointer", true), ("A spot", false)], pointer, move |this, v, cx| {
-                this.change_zoom(|z| z.focus = if v { Focus::Pointer } else { Focus::Point { x: at.0, y: at.1 } }, cx)
-            }, cx))
-            .when(!pointer, |d| d.child(spots).child(hint("Click where it should look.")))
+            .child(label("SHOWS"))
+            .when(take, |d| {
+                d.child(self.segmented("ed-zoom-focus".into(), &[("Follow pointer", true), ("A region", false)], pointer, move |this, v, cx| {
+                    this.change_zoom(|z| z.focus = if v { Focus::Pointer } else { Focus::Point { x: at.0, y: at.1 } }, cx)
+                }, cx))
+            })
+            .when(!pointer, |d| d.child(spots).child(hint("A region: drag on the player (inside it to move it, a corner to size it, elsewhere to draw a new one), or click here where it should look.")))
             .when(pointer, |d| d.child(hint("The view follows the pointer while it's zoomed.")))
             .child(
                 div().flex().pt_2().child(Button::new("ed-zoom-del").label("Delete zoom").icon(ui::icon("trash")).xsmall().outline().on_click(cx.listener(|this, _, _, cx| {
                     this.delete_zoom(cx);
                 }))),
             )
-            .child(hint("On the zoom track: drag a zoom to move it, its edges to lengthen it; click the track over a take to add one."));
+            .child(hint("On the zoom track: drag a zoom to move it, its edges to lengthen it; click the track over a video, picture or take to add one."));
         Some((head, body))
     }
 }
@@ -386,8 +557,22 @@ impl Editor {
             tracing::info!("CHECK zoom: none added");
             return;
         };
-        tracing::info!(before = n0, after = count(self), start = z.start_ms, end = z.end_ms, lane = self.tracks_top() > RULER_H, "CHECK zoom added");
+        tracing::info!(
+            before = n0,
+            after = count(self),
+            start = z.start_ms,
+            end = z.end_ms,
+            lane = self.tracks_top() > RULER_H,
+            "CHECK zoom added"
+        );
         self.change_zoom(|z| z.focus = Focus::Point { x: 0.3, y: 0.35 }, cx);
+        // a region now: the player shows the whole picture to set it on
+        self.sync_zoom_view();
+        tracing::info!(
+            region = self.region_zoom().is_some(),
+            zooms_hidden = self.pending.lock().unwrap().zooms_hidden,
+            "CHECK zoom region"
+        );
         let Some(clip) = self.studio_take_clips().first().map(|(c, _)| c.id) else { return };
         // dragged: held 500 ms in, to 3.5 s; then its end to 5.6 s
         self.begin_drag(Drag::Zoom { media: m.id, index: i, clip, part: ZoomPart::Body { grab: 500 } });

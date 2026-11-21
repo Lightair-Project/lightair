@@ -1,8 +1,11 @@
 //! The player as a stage: the selected clip's picture outlined with handles; dragged to move
 //! it, by a corner to scale it (snapping to the centre lines), or, in hide mode, a box drawn
-//! over it to hide (pixelate) that area.
+//! over it to hide (pixelate) that area. With a region zoom picked, the whole picture with the
+//! zoom's region on it: dragged inside to move it, by a corner to size it, elsewhere to draw a
+//! new one (always the picture's shape, 1× to 5×).
 
 use super::*;
+use lightair_render::edit::{Focus, Zoom};
 use lightair_render::seqrender::Placed;
 
 /// A drag on the player.
@@ -17,6 +20,52 @@ pub(super) struct StageDrag {
     before: Sequence,
     /// The box being drawn (hide mode), result pixels.
     to: (f32, f32),
+    /// A zoom's region being set: the box it's measured in and how it's dragged.
+    region: Option<RegionDrag>,
+}
+
+/// A zoom's region dragged on the player (result pixels).
+#[derive(Clone, Copy)]
+struct RegionDrag {
+    zbox: (f32, f32, f32, f32),
+    /// Moved, held this far from its top-left; or sized from this corner (a new one: from where
+    /// the drag began).
+    grab: Option<(f32, f32)>,
+    anchor: (f32, f32),
+    /// The region when the drag began.
+    was: (f32, f32, f32, f32),
+}
+
+/// A zoom's region (left, top, width, height) in `zbox`.
+fn region_of(zbox: (f32, f32, f32, f32), z: &Zoom) -> (f32, f32, f32, f32) {
+    let (fx, fy) = match z.focus {
+        Focus::Point { x, y } => (x, y),
+        Focus::Pointer => (0.5, 0.5),
+    };
+    let s = z.scale.max(1.0);
+    let (w, h) = (zbox.2 / s, zbox.3 / s);
+    (zbox.0 + fx * zbox.2 - w / 2.0, zbox.1 + fy * zbox.3 - h / 2.0, w, h)
+}
+
+/// Where a region drag has it with the pointer at `p`: kept in the box, in its shape, 1× to 5×.
+fn dragged_region(d: &RegionDrag, p: (f32, f32)) -> (f32, f32, f32, f32) {
+    let (bx, by, bw, bh) = d.zbox;
+    let r = match d.grab {
+        Some(g) => (p.0 - g.0, p.1 - g.1, d.was.2, d.was.3),
+        None => {
+            let (dx, dy) = (p.0 - d.anchor.0, p.1 - d.anchor.1);
+            let aspect = bh / bw.max(1.0);
+            let w = dx.abs().max(dy.abs() / aspect).clamp(bw / 5.0, bw);
+            let h = w * aspect;
+            (
+                if dx < 0.0 { d.anchor.0 - w } else { d.anchor.0 },
+                if dy < 0.0 { d.anchor.1 - h } else { d.anchor.1 },
+                w,
+                h,
+            )
+        }
+    };
+    (r.0.clamp(bx, bx + bw - r.2), r.1.clamp(by, by + bh - r.3), r.2, r.3)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -24,6 +73,7 @@ enum StageKind {
     Move,
     Scale,
     Hide,
+    Region,
 }
 
 /// Handle reach, in window pixels.
@@ -55,26 +105,68 @@ impl Editor {
 
     /// The topmost picture under a point (result pixels).
     pub(super) fn picture_at(&self, p: (f32, f32)) -> Option<Placed> {
-        self.placed.iter().rev().find(|q| (p.0 - q.center.0).abs() <= q.size.0 / 2.0 && (p.1 - q.center.1).abs() <= q.size.1 / 2.0).copied()
+        self.placed
+            .iter()
+            .rev()
+            .find(|q| (p.0 - q.center.0).abs() <= q.size.0 / 2.0 && (p.1 - q.center.1).abs() <= q.size.1 / 2.0)
+            .copied()
     }
 
     pub(super) fn stage_down(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         if self.playing.is_some() {
             return;
         }
-        let (Some(p), Some((_, k, _)), Some(seq)) = (self.to_result(pos), self.stage(), self.seq().cloned()) else { return };
+        let (Some(p), Some((_, k, _)), Some(seq)) = (self.to_result(pos), self.stage(), self.seq().cloned()) else {
+            return;
+        };
+        // a zoom's region: moved, sized or drawn anew
+        if let Some((m, _, z, clip)) = self.region_zoom()
+            && let Some(zbox) = self.zoom_box(clip, &m)
+        {
+            let r = region_of(zbox, &z);
+            let corners = [(r.0, r.1), (r.0 + r.2, r.1), (r.0, r.1 + r.3), (r.0 + r.2, r.1 + r.3)];
+            let reach = HANDLE * 2.0 / k.max(0.01);
+            let (grab, anchor) = if let Some(i) = corners.iter().position(|c| (c.0 - p.0).hypot(c.1 - p.1) <= reach) {
+                (None, corners[3 - i])
+            } else if p.0 >= r.0 && p.0 <= r.0 + r.2 && p.1 >= r.1 && p.1 <= r.1 + r.3 {
+                (Some((p.0 - r.0, p.1 - r.1)), p)
+            } else {
+                (None, p)
+            };
+            let start = seq.clip(clip).map(|c| c.transform_at(self.playhead)).unwrap_or_default();
+            self.stage_drag = Some(StageDrag {
+                clip,
+                kind: StageKind::Region,
+                from: p,
+                start,
+                before: seq,
+                to: p,
+                region: Some(RegionDrag { zbox, grab, anchor, was: r }),
+            });
+            cx.notify();
+            return;
+        }
         let selected = self.selected.and_then(|c| self.placed_of(c));
         let playhead = self.playhead;
         let start = |clip: Id, kind: StageKind| -> Option<StageDrag> {
             let c = seq.clip(clip)?;
-            Some(StageDrag { clip, kind, from: p, start: c.transform_at(playhead), before: seq.clone(), to: p })
+            Some(StageDrag {
+                clip,
+                kind,
+                from: p,
+                start: c.transform_at(playhead),
+                before: seq.clone(),
+                to: p,
+                region: None,
+            })
         };
         let drag = match selected {
             Some(s) if self.hiding => start(s.clip, StageKind::Hide),
             Some(s)
-                if [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
-                    .iter()
-                    .any(|(dx, dy)| ((s.center.0 + dx * s.size.0 / 2.0 - p.0).hypot(s.center.1 + dy * s.size.1 / 2.0 - p.1)) * k <= HANDLE) =>
+                if [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].iter().any(|(dx, dy)| {
+                    ((s.center.0 + dx * s.size.0 / 2.0 - p.0).hypot(s.center.1 + dy * s.size.1 / 2.0 - p.1)) * k
+                        <= HANDLE
+                }) =>
             {
                 start(s.clip, StageKind::Scale)
             }
@@ -93,13 +185,15 @@ impl Editor {
     }
 
     pub(super) fn stage_move(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
-        let (Some(d), Some(p), Some((_, k, _))) = (self.stage_drag.clone(), self.to_result(pos), self.stage()) else { return };
+        let (Some(d), Some(p), Some((_, k, _))) = (self.stage_drag.clone(), self.to_result(pos), self.stage()) else {
+            return;
+        };
         let t = self.playhead;
         let size = self.seq().map_or((1920.0, 1080.0), |s| (s.size.0 as f32, s.size.1 as f32));
         let mut tr = d.start;
         self.guides = (false, false);
         match d.kind {
-            StageKind::Hide => {
+            StageKind::Hide | StageKind::Region => {
                 if let Some(s) = &mut self.stage_drag {
                     s.to = p;
                 }
@@ -145,6 +239,24 @@ impl Editor {
     pub(super) fn stage_up(&mut self, cx: &mut Context<Self>) {
         let Some(d) = self.stage_drag.take() else { return };
         self.guides = (false, false);
+        if let Some(rd) = d.region {
+            // a tap without a drag leaves it as it was
+            if (d.to.0 - d.from.0).hypot(d.to.1 - d.from.1) > 2.0 {
+                let r = dragged_region(&rd, d.to);
+                let (bx, by, bw, bh) = rd.zbox;
+                let scale = ((bw / r.2) * 10.0).round() / 10.0;
+                let (fx, fy) = ((r.0 + r.2 / 2.0 - bx) / bw, (r.1 + r.3 / 2.0 - by) / bh);
+                self.change_zoom(
+                    |z| {
+                        z.scale = scale.clamp(1.0, 5.0);
+                        z.focus = Focus::Point { x: fx.clamp(0.0, 1.0), y: fy.clamp(0.0, 1.0) };
+                    },
+                    cx,
+                );
+            }
+            cx.notify();
+            return;
+        }
         if d.kind == StageKind::Hide {
             self.hiding = false;
             // the box as fractions of the clip's picture
@@ -152,7 +264,10 @@ impl Editor {
                 let (x0, y0) = (q.center.0 - q.size.0 / 2.0, q.center.1 - q.size.1 / 2.0);
                 let fx = |x: f32| ((x - x0) / q.size.0).clamp(0.0, 1.0);
                 let fy = |y: f32| ((y - y0) / q.size.1).clamp(0.0, 1.0);
-                let (a, b) = ((fx(d.from.0.min(d.to.0)), fy(d.from.1.min(d.to.1))), (fx(d.from.0.max(d.to.0)), fy(d.from.1.max(d.to.1))));
+                let (a, b) = (
+                    (fx(d.from.0.min(d.to.0)), fy(d.from.1.min(d.to.1))),
+                    (fx(d.from.0.max(d.to.0)), fy(d.from.1.max(d.to.1))),
+                );
                 if b.0 - a.0 > 0.01 && b.1 - a.1 > 0.01 {
                     self.change(
                         |s| {
@@ -188,6 +303,70 @@ impl Editor {
         let _ = o;
         let mut layer = div().absolute().top_0().left_0().size_full();
         let to_px = |x: f32, y: f32| (off.0 + x * k, off.1 + y * k);
+        // a zoom's region on the whole picture: the rest dimmed, the region framed
+        if let Some((m, _, z, clip)) = self.region_zoom()
+            && let Some(zbox) = self.zoom_box(clip, &m)
+        {
+            let r = match self.stage_drag.as_ref().and_then(|d| d.region.map(|rd| (rd, d.to, d.from))) {
+                Some((rd, to, from)) if (to.0 - from.0).hypot(to.1 - from.1) > 2.0 => dragged_region(&rd, to),
+                _ => region_of(zbox, &z),
+            };
+            let (bx, by) = to_px(zbox.0, zbox.1);
+            let (bw, bh) = (zbox.2 * k, zbox.3 * k);
+            let (x, y) = to_px(r.0, r.1);
+            let (w, h) = (r.2 * k, r.3 * k);
+            let dim = |l: f32, t: f32, w: f32, h: f32| {
+                div().absolute().left(px(l)).top(px(t)).w(px(w.max(0.0))).h(px(h.max(0.0))).bg(rgba(0x00000080))
+            };
+            layer = layer
+                .child(dim(bx, by, bw, y - by))
+                .child(dim(bx, y + h, bw, by + bh - y - h))
+                .child(dim(bx, y, x - bx, h))
+                .child(dim(x + w, y, bx + bw - x - w, h))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y))
+                        .w(px(w))
+                        .h(px(h))
+                        .border_2()
+                        .border_color(rgb(0xFFFFFF))
+                        .cursor(CursorStyle::OpenHand),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(x + 6.0))
+                        .top(px(y + 6.0))
+                        .px_1p5()
+                        .rounded_full()
+                        .bg(rgba(0x141414C0))
+                        .text_size(px(11.))
+                        .text_color(rgb(0xFFFFFF))
+                        .child(format!("{:.1}×", zbox.2 / r.2.max(1.0))),
+                );
+            for (i, (cx_, cy)) in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)].into_iter().enumerate() {
+                let cursor = if i == 0 || i == 3 {
+                    CursorStyle::ResizeUpLeftDownRight
+                } else {
+                    CursorStyle::ResizeUpRightDownLeft
+                };
+                layer = layer.child(
+                    div()
+                        .absolute()
+                        .left(px(cx_ - 8.0))
+                        .top(px(cy - 8.0))
+                        .size(px(16.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor(cursor)
+                        .child(div().size(px(8.)).rounded(px(2.)).bg(rgb(0xFFFFFF))),
+                );
+            }
+            return Some(layer.into_any_element());
+        }
         if let Some(q) = self.selected.and_then(|c| self.placed_of(c)) {
             let (x, y) = to_px(q.center.0 - q.size.0 / 2.0, q.center.1 - q.size.1 / 2.0);
             let (w, h) = (q.size.0 * k, q.size.1 * k);
@@ -202,7 +381,9 @@ impl Editor {
                     .h(px(h))
                     .border_1()
                     .border_color(tok::accent_primary())
-                    .when(!self.hiding, |d| d.cursor(if moving { CursorStyle::ClosedHand } else { CursorStyle::OpenHand })),
+                    .when(!self.hiding, |d| {
+                        d.cursor(if moving { CursorStyle::ClosedHand } else { CursorStyle::OpenHand })
+                    }),
             );
             if !self.hiding {
                 // corners scale it: the cursor along their diagonal
@@ -223,7 +404,14 @@ impl Editor {
                             .items_center()
                             .justify_center()
                             .cursor(cursor)
-                            .child(div().size(px(8.)).rounded(px(2.)).bg(rgb(0xFFFFFF)).border_1().border_color(tok::accent_primary())),
+                            .child(
+                                div()
+                                    .size(px(8.))
+                                    .rounded(px(2.))
+                                    .bg(rgb(0xFFFFFF))
+                                    .border_1()
+                                    .border_color(tok::accent_primary()),
+                            ),
                     );
                 }
             }
@@ -247,7 +435,17 @@ impl Editor {
         if let Some(d) = self.stage_drag.as_ref().filter(|d| d.kind == StageKind::Hide) {
             let (x0, y0) = to_px(d.from.0.min(d.to.0), d.from.1.min(d.to.1));
             let (x1, y1) = to_px(d.from.0.max(d.to.0), d.from.1.max(d.to.1));
-            layer = layer.child(div().absolute().left(px(x0)).top(px(y0)).w(px(x1 - x0)).h(px(y1 - y0)).bg(rgba(0xFFFFFF30)).border_1().border_color(rgb(0xFFFFFF)));
+            layer = layer.child(
+                div()
+                    .absolute()
+                    .left(px(x0))
+                    .top(px(y0))
+                    .w(px(x1 - x0))
+                    .h(px(y1 - y0))
+                    .bg(rgba(0xFFFFFF30))
+                    .border_1()
+                    .border_color(rgb(0xFFFFFF)),
+            );
         }
         let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
         if self.guides.0 {
@@ -280,13 +478,28 @@ impl Editor {
                             })),
                     )
                     .when(n > 0, |d| {
-                        d.child(Button::new("ed-unhide").label("Show all again").icon(ui::icon("eye")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
-                            this.change(|s| if let Some(c) = s.clip_mut(cid) { c.hidden.clear() }, cx)
-                        })))
+                        d.child(
+                            Button::new("ed-unhide")
+                                .label("Show all again")
+                                .icon(ui::icon("eye"))
+                                .xsmall()
+                                .ghost()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.change(
+                                        |s| {
+                                            if let Some(c) = s.clip_mut(cid) {
+                                                c.hidden.clear()
+                                            }
+                                        },
+                                        cx,
+                                    )
+                                })),
+                        )
                     }),
             )
             .child(hint(match n {
-                0 => "Pixelates a part of the picture (a password, a face): draw a box over it in the player.".to_string(),
+                0 => "Pixelates a part of the picture (a password, a face): draw a box over it in the player."
+                    .to_string(),
                 n => format!("{n} hidden: shown dashed in the player. At most four."),
             }))
     }

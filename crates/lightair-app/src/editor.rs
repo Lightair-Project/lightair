@@ -359,12 +359,19 @@ struct Pending {
     seq: Option<Sequence>,
     /// The most the player shows (always set: the player's frames are BGRA previews).
     preview: Option<(u32, u32)>,
+    /// The player draws without the zooms (a zoom's region is being set on the whole picture).
+    zooms_hidden: bool,
 }
 
 /// The renderer brought up to the sequence's last change and the player's size.
 fn catch_up(r: &mut SequenceRenderer, pending: &Mutex<Pending>) {
     let mut p = pending.lock().unwrap();
-    if let Some(seq) = p.seq.take() {
+    if let Some(mut seq) = p.seq.take() {
+        if p.zooms_hidden {
+            for m in &mut seq.media {
+                m.zooms = Some(Vec::new());
+            }
+        }
         let _ = r.set(&seq);
     }
     r.set_preview(p.preview);
@@ -525,7 +532,7 @@ impl Editor {
             redo: Vec::new(),
             drag_before: None,
             renderer: Arc::new(Mutex::new(None)),
-            pending: Arc::new(Mutex::new(Pending { seq: None, preview: Some(PREVIEW_BOXES[2]) })),
+            pending: Arc::new(Mutex::new(Pending { seq: None, preview: Some(PREVIEW_BOXES[2]), zooms_hidden: false })),
             retired: None,
             player_px: Default::default(),
             preview_box: Some(PREVIEW_BOXES[2]),
@@ -2509,6 +2516,8 @@ impl Render for Editor {
             self.drag_hidden.set(false);
         }
         self.sync_text_input(window, cx);
+        // a zoom's region being set: the player shows the whole picture
+        self.sync_zoom_view();
         self.sync_fields(window, cx);
         self.want_peaks();
         self.want_strips();
