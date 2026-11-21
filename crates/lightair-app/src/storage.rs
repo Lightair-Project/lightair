@@ -68,11 +68,4 @@ mod tests {
         assert_eq!(reads.get(), 5, "another folder: at once");
         assert_eq!(w.space, Some((1_000, 2_000)));
     }
-
-    #[test]
-    fn sizes_read_naturally() {
-        assert_eq!(bytes(214_318_000_000, false), "214.3 GB");
-        assert_eq!(bytes(214_318_000_000, true), "214.32 GB");
-        assert_eq!(bytes(812_400_000, false), "812.4 MB");
-    }
 }

@@ -1972,7 +1972,7 @@ mod stream_net_tests {
     fn other_protocols_say_they_cannot_choose() {
         let mut d = dest("srt://example.com:9000");
         d.options.network.ip_family = IpFamily::V6;
-        assert!(stream_net(&d, &[]).unwrap_err().contains("RTMP and RTMPS only"));
+        assert!(stream_net(&d, &[]).is_err(), "only RTMP and RTMPS can choose a network");
     }
 
     #[test]

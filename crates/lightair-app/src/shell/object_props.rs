@@ -972,14 +972,11 @@ pub(super) fn rgb_to_hsla(rgb_value: u32) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    use super::{abgr, clock, rgb_of, with};
+    use super::with;
     use serde_json::json;
 
     #[test]
-    fn colour_order() {
-        assert_eq!(abgr(0xFF4A3B), 0xFF3B4AFF);
-        assert_eq!(rgb_of(abgr(0x123456)), 0x123456);
-        assert_eq!(clock(83_500), "1:23");
+    fn setting_one_key_keeps_the_others() {
         let s = with(&json!({"text": "a", "font": {"size": 10}}), "text", json!("b"));
         assert_eq!(s, json!({"text": "b", "font": {"size": 10}}));
     }

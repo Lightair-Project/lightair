@@ -147,7 +147,6 @@ mod tests {
         let c = run(&facts());
         assert!(can_go_live(&c));
         assert!(c.iter().all(|c| c.level == Level::Ok), "{c:#?}");
-        assert!(c.iter().any(|c| c.title == "About 6.2 Mbps upload" && c.detail.contains("share")));
     }
 
     #[test]

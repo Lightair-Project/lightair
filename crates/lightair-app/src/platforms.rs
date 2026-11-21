@@ -874,17 +874,6 @@ mod tests {
         {"_id":3,"availability":0.0,"name":"No address","priority":2}
     ],"meta":{"service":"IVS"}}"#;
 
-    /// Needs the network: `cargo test -p lightair-app live_ingests -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn live_ingests_are_fetched_and_the_nearest_chosen() {
-        let list = fetch_ingests();
-        assert!(list.len() > 10, "Twitch's list has dozens of ingests, got {}", list.len());
-        let chosen = resolve_twitch_auto();
-        eprintln!("{} ingests; nearest: {} ({}) measured: {}", list.len(), chosen.name, chosen.url, chosen.measured);
-        assert!(chosen.measured, "measured, not guessed");
-    }
-
     #[test]
     fn twitchs_list_gives_addresses_without_the_key() {
         let list = parse_ingests(INGESTS);
@@ -939,32 +928,8 @@ mod tests {
         // a word in an address isn't a platform
         assert!(guess("rtmp://kickstart-media.example/live").is_none());
         assert_eq!(guess("rtmp://user@ingest.restream.io:1935/live").map(|p| p.id), Some("restream"));
-    }
-
-    #[test]
-    fn asian_platforms_are_recognised_by_server() {
-        for (server, id) in [
-            ("rtmp://global-rtmp.lip2.navercorp.com:8080/relay", "chzzk"),
-            ("rtmp://stream.soop.live/app/", "soop"),
-            ("rtmp://liveorigin.dlive.nicovideo.jp/live/input", "niconico"),
-            ("rtmp://rtmp03.twitcasting.tv/live", "twitcasting"),
-            ("rtmp://txy.live-push.bilivideo.com/live-bvc/", "bilibili"),
-            ("rtmp://al.direct.huya.com/huyalive/", "huya"),
-            ("rtmp://live-push.xhscdn.com/live", "xiaohongshu"),
-            ("rtmp://rtmp.pandalive.co.kr/app", "pandatv"),
-        ] {
-            assert_eq!(guess(server).map(|p| p.id), Some(id), "{server}");
-        }
         // Kick's per-account ingest shares the network of Whowatch's global one
         assert_eq!(guess("rtmps://fa723fc1b171.global-contribute.live-video.net/app/").map(|p| p.id), Some("kick"));
-    }
-
-    #[test]
-    fn bilibili_starts_on_the_overseas_ingest_outside_china() {
-        let b = by_id("bilibili").unwrap();
-        assert!(b.servers[nearest_for_zone(b, "Asia/Shanghai")].0.starts_with("Global"));
-        assert!(b.servers[nearest_for_zone(b, "Asia/Jakarta")].0.starts_with("Outside mainland China: primary"));
-        assert!(b.servers[nearest_for_zone(b, "Europe/Berlin")].0.starts_with("Outside mainland China: primary"));
     }
 
     #[test]

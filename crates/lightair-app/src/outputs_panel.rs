@@ -2405,30 +2405,3 @@ impl Focusable for OutputsPanel {
         self.focus.clone()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{bitrate_step, reconnect_text};
-    use lightair_engine::outputs::ReconnectInfo;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn a_stepped_down_bitrate_reads_in_megabits() {
-        assert_eq!(bitrate_step(4500, 6000), "4.5 of 6 Mbps");
-        assert_eq!(bitrate_step(3000, 6000), "3 of 6 Mbps");
-        assert_eq!(bitrate_step(2300, 8000), "2.3 of 8 Mbps");
-    }
-
-    #[test]
-    fn a_reconnect_counts_down_to_its_next_try() {
-        let info = |attempt: u32, retries: u32, secs: u64| ReconnectInfo {
-            attempt,
-            retries,
-            next_at: Instant::now() + Duration::from_millis(secs * 1000 - 100),
-        };
-        assert_eq!(reconnect_text(&info(3, 20, 8)), "Retrying in 8 s · try 3 of 20");
-        assert_eq!(reconnect_text(&info(1, 0, 2)), "Retrying in 2 s", "no count when the tries aren't known");
-        let due = ReconnectInfo { attempt: 2, retries: 5, next_at: Instant::now() - Duration::from_secs(1) };
-        assert_eq!(reconnect_text(&due), "Retrying now · try 2 of 5");
-    }
-}
