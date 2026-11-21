@@ -1626,6 +1626,7 @@ impl Render for OutputsPanel {
                     .child(format!("Live on {live} · {encoders} encoder{}", if encoders == 1 { "" } else { "s" })),
             );
         }
+        let count = workspace.outputs.destinations.len();
         for (i, d) in workspace.outputs.destinations.iter().enumerate() {
             let id = d.id;
             let enabled = d.enabled;
@@ -1672,6 +1673,22 @@ impl Render for OutputsPanel {
                 card(("out-dest", i).into())
                     .cursor_pointer()
                     .when(!enabled, |d| d.opacity(0.6))
+                    // drag to reorder: the order is the order they start in
+                    .on_drag(
+                        crate::rows::DraggedDestination { id, name: d.name.clone().into() },
+                        |row, _, _, cx| cx.new(|_| row.clone()),
+                    )
+                    .drag_over::<crate::rows::DraggedDestination>(|style, _, _, _| {
+                        style.border_t_2().border_color(tok::accent_primary())
+                    })
+                    .on_drop(cx.listener(move |this, row: &crate::rows::DraggedDestination, _, cx| {
+                        if row.id != id {
+                            let dragged = row.id;
+                            this.studio.update(cx, |s, cx| {
+                                let _ = s.execute(Command::MoveDestination { destination: dragged, to: i }, cx);
+                            })
+                        }
+                    }))
                     .on_click(cx.listener(move |this, _, window, cx| this.open_edit(id, window, cx)))
                     .child(badge(platform, 28.))
                     .child(two_lines(d.name.clone(), where_))
@@ -1807,6 +1824,15 @@ impl Render for OutputsPanel {
                                     false,
                                 )),
                             )
+                            .separator()
+                            .item(PopupMenuItem::new("Move up").disabled(i == 0).on_click(run(
+                                Command::MoveDestination { destination: id, to: i.saturating_sub(1) },
+                                false,
+                            )))
+                            .item(PopupMenuItem::new("Move down").disabled(i + 1 >= count).on_click(run(
+                                Command::MoveDestination { destination: id, to: i + 1 },
+                                false,
+                            )))
                             .separator()
                             .item(
                                 PopupMenuItem::new("Remove")

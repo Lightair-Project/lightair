@@ -89,3 +89,29 @@ impl Render for DraggedRow {
             .child(self.name.clone())
     }
 }
+
+/// A destination being dragged to a new place in Outputs (the order is the start order).
+#[derive(Clone)]
+pub struct DraggedDestination {
+    pub id: Id,
+    pub name: SharedString,
+}
+
+impl Render for DraggedDestination {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(32.))
+            .px_3()
+            .rounded(px(6.))
+            .bg(tok::bg_raised())
+            .border_1()
+            .border_color(tok::accent_primary())
+            .text_color(tok::text())
+            .shadow_md()
+            .child(ui::icon("radio").size(px(15.)).text_color(tok::text_secondary()))
+            .child(self.name.clone())
+    }
+}
