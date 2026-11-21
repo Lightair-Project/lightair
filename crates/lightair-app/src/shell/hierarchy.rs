@@ -131,6 +131,7 @@ impl StudioWindow {
             };
             let row = div()
                 .id(("tree", i))
+                .group("layer-row")
                 .relative()
                 .flex()
                 .items_center()
@@ -256,11 +257,9 @@ impl StudioWindow {
                     })),
                 )
                 .child(
-                    ui::icon_button(
-                        ("eye", i),
-                        if own_visible { "eye" } else { "eye-off" },
-                        if own_visible { tok::text_secondary() } else { tok::text_tertiary() },
-                    )
+                    // quiet until the row is hovered; a hidden layer's eye-off at full strength
+                    ui::icon_button(("eye", i), if own_visible { "eye" } else { "eye-off" }, tok::text_secondary())
+                        .when(own_visible, |d| d.opacity(0.45).group_hover("layer-row", |s| s.opacity(1.0)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.exec(

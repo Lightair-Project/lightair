@@ -3123,9 +3123,9 @@ impl StudioWindow {
                     .occlude()
                     // the Editor: undo, redo and export here; what records and streams only while it does
                     .when(editor, |d| d.child(self.editor.update(cx, |e, cx| e.title_right(cx))))
-                    .when(!editor || streaming, |d| d.child(go_live))
                     .children(recording_tools.filter(|_| !taking))
                     .when(!editor || recording || taking, |d| d.child(record))
+                    .when(!editor || streaming, |d| d.child(go_live))
                     .when(!editor, |d| d.child(self.clip_control(cx)))
                     .when(!editor && !cfg!(windows), |d| d.child(self.virtual_camera_control(cx)))
                     .children(settings_right),
@@ -3415,6 +3415,7 @@ impl StudioWindow {
         let selected = studio.selected_scene;
         let program = workspace.program;
         let shell = cx.entity().downgrade();
+        let live = live_now();
         let rows = workspace.scenes.iter().enumerate().map(|(i, scene)| {
             let id = scene.id;
             let on_air = program == Some(id);
@@ -3468,27 +3469,29 @@ impl StudioWindow {
                             .left(px(0.))
                             .top(px(8.))
                             .bottom(px(8.))
-                            .w(px(3.))
+                            .w(px(2.))
                             .rounded_full()
-                            .bg(tok::live()),
+                            .bg(if live { tok::live() } else { tok::text() }),
                     )
                 })
                 .child(self.row_label(target, &scene.name, tok::text()))
                 .when(on_air, |d| {
                     d.child(
                         div()
+                            .flex_none()
                             .text_size(px(10.))
-                            .text_color(tok::live())
+                            .text_color(if live { tok::live() } else { tok::text_secondary() })
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("ON AIR"),
+                            .child(if live { "Live" } else { "Program" }),
                     )
                 })
                 .when(i < 9, |d| {
                     d.child(
                         div()
+                            .flex_none()
                             .text_size(px(10.))
                             .font_family(crate::ui::MONO)
-                            .text_color(tok::text_tertiary())
+                            .text_color(tok::text_faint())
                             .child(crate::ui::keys_label(&format!("⌘{}", i + 1)).into_owned()),
                     )
                 })
@@ -4289,7 +4292,7 @@ impl StudioWindow {
     }
 
     fn canvas_panel(&self, workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
-        let live = runtime().any_stream_running();
+        let live = live_now();
         // the layer under the window it's in: the main window's, or its own window's
         let layer = if self.canvas_out { self.canvas_native.clone() } else { self.native.clone() };
         let native = layer.borrow().is_some();
@@ -4304,7 +4307,9 @@ impl StudioWindow {
                     .flex_1()
                     .min_h_0()
                     .when(!native, |d| d.bg(tok::bg_canvas_well()))
-                    .when(live, |d| d.border_2().border_color(tok::live()))
+                    // a hairline frame; the live border only while a stream or recording runs
+                    .when(live, |d| d.border(px(3.)).border_color(tok::live()))
+                    .when(!live, |d| d.border_1().border_color(tok::border()))
                     .cursor(self.canvas_cursor(workspace, cx))
                     .on_mouse_down(MouseButton::Right, cx.listener(Self::canvas_right_down))
                     .on_mouse_down(
@@ -4449,7 +4454,7 @@ impl StudioWindow {
             .border_color(tok::border())
             .bg(tok::bg_panel())
             .child(label("CUED", preview_name, tok::text()))
-            .child(label("ON AIR", program_name, tok::live()))
+            .child(label(if live_now() { "LIVE" } else { "PROGRAM" }, program_name, if live_now() { tok::live() } else { tok::text_secondary() }))
             .child(
                 div()
                     .relative()
@@ -4458,7 +4463,7 @@ impl StudioWindow {
                     .rounded(px(4.))
                     .overflow_hidden()
                     .border_1()
-                    .border_color(tok::live())
+                    .border_color(if live_now() { tok::live() } else { tok::border_strong() })
                     .bg(tok::bg_canvas_well())
                     .when_some(frame, |d, frame| {
                         d.child(crate::frame_view::frame(frame).absolute().size_full().object_fit(ObjectFit::Contain))
@@ -4580,13 +4585,27 @@ impl StudioWindow {
                             .child(scene.name.clone()),
                     )
                     .when(on_air, |d| {
+                        let live = live_now();
                         d.child(
                             div()
+                                .flex_none()
                                 .text_size(px(10.))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(tok::live())
-                                .child("ON AIR"),
+                                .text_color(if live { tok::live() } else { tok::text_secondary() })
+                                .child(if live { "Live" } else { "Program" }),
                         )
+                    })
+                    .child({
+                        // how many layers; the canvas's size and rate one step away
+                        let n = scene.objects.len();
+                        let detail = format!("{}×{} at {} fps", canvas.width, canvas.height, canvas.fps_num / canvas.fps_den.max(1));
+                        div()
+                            .id("scene-layers")
+                            .flex_none()
+                            .text_size(px(12.))
+                            .text_color(tok::text_secondary())
+                            .child(format!("{n} layer{}", if n == 1 { "" } else { "s" }))
+                            .tooltip(move |w, cx| Tooltip::new(detail.clone()).build(w, cx))
                     })
                     .child(
                         ui::icon_button("delete-scene", "trash", tok::text_secondary())
@@ -4595,14 +4614,6 @@ impl StudioWindow {
                                 cx.listener(move |this, _, _, cx| this.exec(Command::RemoveScene { scene: sid }, cx)),
                             ),
                     );
-                let info = div().text_size(px(12.)).text_color(tok::text_secondary()).child(format!(
-                    "{} object{} · {}×{} @ {} fps",
-                    scene.objects.len(),
-                    if scene.objects.len() == 1 { "" } else { "s" },
-                    canvas.width,
-                    canvas.height,
-                    canvas.fps_num / canvas.fps_den.max(1)
-                ));
                 // How switching to this scene looks on air: the show's default, or its own.
                 let transition = self
                     .section(
@@ -4618,7 +4629,7 @@ impl StudioWindow {
                     )
                     .child(self.transition_picker(workspace, &scene, cx));
                 let screen = self.screen_zoom_pointer_section(workspace, &scene, cx);
-                body.child(header).child(info).child(screen).child(transition).into_any_element()
+                body.child(header).child(transition).child(screen).into_any_element()
             }
             _ => body.child(div().text_color(tok::text_tertiary()).child("Nothing selected")).into_any_element(),
         };
@@ -4872,6 +4883,13 @@ fn window_controls(maximized: bool) -> impl IntoElement {
         .child(button("window-minimize", '\u{E921}', WindowControlArea::Min, false))
         .child(button("window-maximize", if maximized { '\u{E923}' } else { '\u{E922}' }, WindowControlArea::Max, false))
         .child(button("window-close", '\u{E8BB}', WindowControlArea::Close, true))
+}
+
+/// Whether the show is actually on air: a stream or a recording running. Red is for this only
+/// (docs/ui-sweep.md §0): the program scene alone isn't live.
+fn live_now() -> bool {
+    let rt = runtime();
+    rt.any_stream_running() || matches!(rt.recording().state, OutputState::Active { .. } | OutputState::Reconnecting { .. })
 }
 
 #[cfg(test)]
