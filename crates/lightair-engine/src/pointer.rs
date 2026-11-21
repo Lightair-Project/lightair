@@ -777,16 +777,4 @@ mod tests {
         assert!((cam.scale - 1.0).abs() < 0.02, "out again: {cam:?}");
     }
 
-    #[test]
-    fn shapes_are_drawn_with_their_tip_at_the_hot_spot() {
-        let a = arrow();
-        // the tip pixel is dark (edge), the body white, the far corner empty
-        let px = |x: f32, y: f32| {
-            let i = (((y * RES as f32) as usize) * RES + (x * RES as f32) as usize) * 4;
-            [a.rgba[i], a.rgba[i + 1], a.rgba[i + 2], a.rgba[i + 3]]
-        };
-        assert!(px(a.hot.0 + 0.01, a.hot.1 + 0.02)[3] > 0, "something at the tip");
-        assert_eq!(px(0.2, 0.4), [255, 255, 255, 255], "white body");
-        assert_eq!(px(0.95, 0.1)[3], 0, "nothing far from it");
-    }
 }

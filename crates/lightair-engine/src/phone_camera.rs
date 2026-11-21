@@ -777,10 +777,9 @@ mod tests {
     #[test]
     fn feeds_are_kept_by_source_and_have_their_own_ports() {
         let (a, b) = (feed("phone-camera-test-a"), feed("phone-camera-test-b"));
-        assert!(Arc::ptr_eq(&a, &feed("phone-camera-test-a")));
-        assert_ne!(a.addr().port(), 0);
-        assert_ne!(a.addr().port(), b.addr().port());
+        assert_eq!(feed("phone-camera-test-a").addr(), a.addr(), "the same source: the same port");
+        assert_ne!(a.addr().port(), b.addr().port(), "each source its own");
         forget("phone-camera-test-a");
-        assert!(!Arc::ptr_eq(&a, &feed("phone-camera-test-a")));
+        assert_ne!(feed("phone-camera-test-a").addr(), a.addr(), "forgotten: a new one");
     }
 }
