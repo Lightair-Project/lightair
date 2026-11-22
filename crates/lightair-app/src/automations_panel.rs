@@ -941,12 +941,7 @@ impl Render for AutomationsPanel {
                         .text_color(tok::text_tertiary())
                         .text_center()
                         .max_w(px(420.))
-                        .child(
-                            div().flex().items_center().justify_center().gap_1().child("No automations yet").child(crate::ui::info(
-                                "automations-empty-tip",
-                                "Make Lightair act on its own: thank raiders, read donations aloud, run chat commands, switch scenes on a follow. Start from New.",
-                            )),
-                        ),
+                        .child("Make Lightair act on its own: thank raiders, read donations aloud, run chat commands, switch scenes on a follow. Start from New."),
                 )
                 .into_any_element(),
         };

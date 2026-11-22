@@ -258,10 +258,7 @@ impl StudioWindow {
                         .text_size(px(12.))
                         .text_color(tok::text_tertiary())
                         .child(
-                            div().flex().items_center().justify_center().gap_1().child("Drop images, video or sound here").child(crate::ui::info(
-                                "assets-drop-tip",
-                                "Drag an object from the Hierarchy to make a prefab, or a scene to keep it.",
-                            )),
+                            "Drop images, video or sound here. Drag an object from the Hierarchy to make a prefab, or a scene to keep it.",
                         ),
                 )
             })

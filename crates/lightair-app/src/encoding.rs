@@ -87,6 +87,24 @@ pub fn for_stream(caps: &[String], workspace: &Workspace, d: &Destination) -> En
     }
 }
 
+/// Destinations whose streams would share one encoder: same canvas, same settings, none on
+/// adaptive bitrate (its output changes the bitrate). One list per encoder, in the destinations'
+/// order.
+pub fn share_groups(caps: &[String], workspace: &Workspace, destinations: &[&Destination]) -> Vec<Vec<lightair_model::Id>> {
+    let canvas_of = |d: &Destination| d.canvas.unwrap_or(workspace.primary_canvas().id);
+    let mut groups: Vec<(lightair_model::Id, EncoderConfig, Vec<lightair_model::Id>)> = Vec::new();
+    for d in destinations {
+        let cfg = lightair_engine::outputs::stream_encoders(&d.server, &for_stream(caps, workspace, d));
+        let canvas = canvas_of(d);
+        let slot = (!cfg.adaptive).then(|| groups.iter_mut().find(|(c, g, _)| *c == canvas && *g == cfg)).flatten();
+        match slot {
+            Some((_, _, ids)) => ids.push(d.id),
+            None => groups.push((canvas, cfg, vec![d.id])),
+        }
+    }
+    groups.into_iter().map(|(_, _, ids)| ids).collect()
+}
+
 /// Why `a` and `b` can't share an encoder, in words; `None` when they can.
 pub fn why_apart(caps: &[String], workspace: &Workspace, a: &Destination, b: &Destination) -> Option<&'static str> {
     let canvas_of = |d: &Destination| d.canvas.unwrap_or(workspace.primary_canvas().id);
@@ -251,12 +269,15 @@ mod tests {
     fn destinations_with_the_same_settings_share_and_the_difference_is_named() {
         let workspace = Workspace::new("P");
         let (a, b, c) = (dest("A", Some(6000)), dest("B", Some(6000)), dest("C", Some(4500)));
+        let groups = share_groups(&mac(), &workspace, &[&a, &b, &c]);
+        assert_eq!(groups, vec![vec![a.id, b.id], vec![c.id]]);
         assert_eq!(why_apart(&mac(), &workspace, &a, &b), None);
         assert_eq!(why_apart(&mac(), &workspace, &a, &c), Some("bitrate"));
         // adaptive destinations keep an encoder each
         let (mut d, mut e) = (dest("D", Some(6000)), dest("E", Some(6000)));
         d.options.adaptive_bitrate = true;
         e.options.adaptive_bitrate = true;
+        assert_eq!(share_groups(&mac(), &workspace, &[&d, &e]).len(), 2);
         assert_eq!(why_apart(&mac(), &workspace, &d, &e), Some("adaptive bitrate"));
     }
 
@@ -266,6 +287,7 @@ mod tests {
         let (a, c) = (dest("A", Some(6000)), dest("C", Some(4500)));
         let moved = matched_to(&workspace, &c, &a);
         assert_eq!(why_apart(&mac(), &workspace, &a, &moved), None);
+        assert_eq!(share_groups(&mac(), &workspace, &[&a, &moved]).len(), 1);
         // an Automatic source is written out as what it means
         let auto = dest("Auto", None);
         let moved = matched_to(&workspace, &c, &auto);

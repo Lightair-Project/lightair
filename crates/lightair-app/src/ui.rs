@@ -61,14 +61,6 @@ pub mod tok {
     pub fn live() -> Hsla {
         rgb(0xFF3B4A).into()
     }
-    /// The faintest text: meter scales, shortcut hints (docs/ui-sweep.md).
-    pub fn text_faint() -> Hsla {
-        rgb(0x5C5C61).into()
-    }
-    /// A switch that's on: the mobile apps' `control.on`.
-    pub fn control_on() -> Hsla {
-        rgb(0x34D399).into()
-    }
     pub fn ok() -> Hsla {
         rgb(0x34D399).into()
     }
@@ -249,8 +241,7 @@ pub fn keys_label(text: &str) -> std::borrow::Cow<'_, str> {
 pub fn source_icon(kind: &str) -> &'static str {
     match kind {
         lightair_model::kinds::SCREEN => "monitor",
-        lightair_model::kinds::CAMERA | "lightair_phone_camera" => "camera",
-        "lightair_avatar" => "user-round",
+        lightair_model::kinds::CAMERA => "camera",
         "image_source" | "slideshow" => "image",
         "text_ft2_source_v2" => "type",
         "color_source_v3" => "square",

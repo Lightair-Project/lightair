@@ -97,6 +97,8 @@ pub struct OutputsPanel {
     asked: std::cell::RefCell<std::collections::HashSet<String>>,
     /// A sign-in window open: its platform, the page, and whether it was closed.
     sign_in: Option<SignIn>,
+    /// The list of which destinations share an encoder is showing.
+    encoders_open: bool,
     /// The Dual Format card's caps shown (its More).
     dual_more: bool,
     /// The destination dialog's scrolling (a screenshot hook scrolls it to the end).
@@ -175,6 +177,32 @@ fn aspect_label(f: &Canvas) -> String {
     format!("{}:{}", f.width / g, f.height / g)
 }
 
+/// The canvas after `current` in the workspace's list (wrapping), for the badge's click.
+fn next_canvas(workspace: &Workspace, current: Option<Id>) -> Option<Id> {
+    let cur = current.unwrap_or(workspace.primary_canvas().id);
+    let i = workspace.canvases.iter().position(|f| f.id == cur).unwrap_or(0);
+    let next = &workspace.canvases[(i + 1) % workspace.canvases.len()];
+    (next.id != workspace.primary_canvas().id).then_some(next.id)
+}
+
+fn canvas_badge(id: impl Into<ElementId>, workspace: &Workspace, canvas: Option<Id>) -> Stateful<Div> {
+    let f = canvas.and_then(|id| workspace.canvas(id)).unwrap_or(workspace.primary_canvas());
+    div()
+        .id(id)
+        .px_1p5()
+        .h(px(18.))
+        .flex()
+        .items_center()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(tok::border_strong())
+        .text_size(px(10.))
+        .font_family(crate::ui::MONO)
+        .text_color(tok::text_secondary())
+        .when(workspace.canvases.len() > 1, |d| d.cursor_pointer().hover(|d| d.bg(tok::bg_selected())))
+        .child(aspect_label(f))
+}
+
 /// A landscape-only platform pointed at a vertical canvas: what to say, and the landscape canvas
 /// to send instead (`Some(None)`: the primary; `None`: there's no landscape canvas to offer).
 fn landscape_mismatch(p: &Platform, workspace: &Workspace, chosen: Option<Id>) -> Option<(String, Option<Option<Id>>, String)> {
@@ -185,7 +213,7 @@ fn landscape_mismatch(p: &Platform, workspace: &Workspace, chosen: Option<Id>) -
     let primary = workspace.primary_canvas().id;
     let landscape = workspace.canvases.iter().find(|c| c.width >= c.height);
     let text = format!(
-        "{} shows landscape: the {} canvas would have bars.",
+        "{} shows landscape video: the {} canvas would play with bars on computers and TVs.",
         p.name,
         f.name.to_lowercase()
     );
@@ -194,18 +222,6 @@ fn landscape_mismatch(p: &Platform, workspace: &Workspace, chosen: Option<Id>) -
         landscape.map(|c| (c.id != primary).then_some(c.id)),
         landscape.map_or_else(String::new, |c| format!("Send {} instead", c.name)),
     ))
-}
-
-/// A switch's name with what it does behind an ⓘ, and under it only a short value or state
-/// ("20 tries, 2 s apart", "RTMP and RTMPS only"): docs/ui-sweep.md's rule for the sheet.
-fn named(id: &'static str, name: &'static str, tip: String, line: Option<String>) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .child(div().flex().items_center().gap_1().child(div().text_size(px(13.)).child(name)).child(ui::info(id, tip)))
-        .children(line.map(|l| div().text_size(px(11.)).text_color(tok::text_tertiary()).truncate().child(l)))
 }
 
 /// A canvas note under a destination's canvas choice: an icon, what's wrong, its fix.
@@ -501,7 +517,7 @@ impl OutputsPanel {
             }
         })
         .detach();
-        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default(), signed_in: Default::default(), asked: Default::default(), sign_in: None, import_note: None, dual_more: false, dialog_scroll: ScrollHandle::new() }
+        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default(), signed_in: Default::default(), asked: Default::default(), sign_in: None, import_note: None, encoders_open: false, dual_more: false, dialog_scroll: ScrollHandle::new() }
     }
 
     /// Asks for a vertical canvas, to send once it's there.
@@ -1034,11 +1050,12 @@ impl OutputsPanel {
                 .items_center()
                 .justify_between()
                 .gap_3()
-                .child(named(
-                    "tip-automatic",
-                    "Automatic",
-                    "On: the shared bitrate (Settings › Streaming), capped for the platform. Off: this destination uses its own settings below.".into(),
-                    automatic.then(|| summary(&auto)),
+                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Automatic")).child(
+                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(if automatic {
+                        summary(&auto)
+                    } else {
+                        "Off: this destination uses its own settings below.".to_string()
+                    }),
                 ))
                 .child(toggle("edit-auto", automatic).on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(Setup::Edit(e)) = &mut this.setup {
@@ -1165,11 +1182,14 @@ impl OutputsPanel {
                 .items_center()
                 .justify_between()
                 .gap_3()
-                .child(named(
-                    "tip-adaptive",
-                    "Adaptive bitrate",
-                    "Lowers the bitrate when the connection can't keep up and raises it again; the destination gets an encoder of its own. Off: the bitrate stays as set, and the connection may drop frames instead. RTMP and RTMPS only: the other protocols manage congestion themselves.".into(),
-                    (!rtmp).then(|| "RTMP and RTMPS only".to_string()),
+                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Adaptive bitrate")).child(
+                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(if !rtmp {
+                        "RTMP and RTMPS only: this protocol manages congestion itself."
+                    } else if adaptive {
+                        "Lowers the bitrate when the connection can't keep up and raises it again. The destination gets an encoder of its own."
+                    } else {
+                        "Off: the bitrate stays as set, and the connection may drop frames instead."
+                    }),
                 ))
                 .child(toggle("edit-adaptive", adaptive && rtmp).on_click(cx.listener(move |this, _, _, cx| {
                     if rtmp && let Some(Setup::Edit(e)) = &mut this.setup {
@@ -1204,12 +1224,6 @@ impl OutputsPanel {
                         ),
                         tok::ok(),
                     )
-                };
-                // what this destination's encoder is (once the Outputs list's detail)
-                let encoder = {
-                    let cfg = crate::encoding::for_stream(&caps, workspace, &draft);
-                    let canvas = draft.canvas.and_then(|f| workspace.canvas(f)).unwrap_or(workspace.primary_canvas());
-                    describe_encoder(&cfg, canvas)
                 };
                 let me = cx.entity().downgrade();
                 let (ws, names) = (workspace.clone(), others.clone());
@@ -1252,13 +1266,13 @@ impl OutputsPanel {
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
+                                .child(div().text_size(px(13.)).child("Encoder sharing"))
+                                .child(div().text_size(px(11.)).text_color(colour).child(note))
                                 .child(
-                                    div().flex().items_center().gap_1().child(div().text_size(px(13.)).child("Encoder sharing")).child(ui::info(
-                                        "tip-sharing",
-                                        format!("Its encoder: {encoder}. Destinations with the same canvas, quality and audio share one encoder; a separate one costs another encode."),
-                                    )),
-                                )
-                                .child(div().text_size(px(11.)).text_color(colour).truncate().child(note)),
+                                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(
+                                        "Destinations with the same canvas, quality and audio share one encoder; a separate one costs another encode.",
+                                    ),
+                                ),
                         )
                         .child(div().flex_none().child(match_menu)),
                 );
@@ -1289,16 +1303,15 @@ impl OutputsPanel {
                 .items_center()
                 .justify_between()
                 .gap_3()
-                .child(named(
-                    "tip-rc-shared",
-                    "Same as the other destinations",
-                    "On: the tries and delay from Settings › Streaming, the wait growing a little each time. Off: this destination uses its own tries below.".into(),
-                    own_rc.is_none().then(|| {
+                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Same as the other destinations")).child(
+                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(if own_rc.is_none() {
                         if shared_rc.retries == 0 {
-                            "Don't reconnect".to_string()
+                            "Don't reconnect.".to_string()
                         } else {
-                            format!("{} tries, {} s apart", shared_rc.retries, shared_rc.delay_s)
+                            format!("{} tries, {} s apart, the wait growing a little each time.", shared_rc.retries, shared_rc.delay_s)
                         }
+                    } else {
+                        "Off: this destination uses its own tries below.".to_string()
                     }),
                 ))
                 .child(toggle("edit-rc-shared", own_rc.is_none()).on_click(cx.listener(move |this, _, _, cx| {
@@ -1347,7 +1360,7 @@ impl OutputsPanel {
         };
         let network = {
             // (RTMP and RTMPS can choose; the others say so)
-            let note = (!rtmp).then_some("RTMP and RTMPS only");
+            let note = (!rtmp).then_some("Choosing a connection or address type works for RTMP and RTMPS only.");
             let current = e.options.network.interface.clone();
             let connected = lightair_platform::net::interfaces();
             let mut names: Vec<String> = Vec::new();
@@ -1419,14 +1432,15 @@ impl OutputsPanel {
                     .items_center()
                     .justify_between()
                     .gap_3()
-                    .child(named(
-                        "tip-delay",
-                        "Hold the stream back",
-                        format!(
-                            "Viewers see it this many seconds late; off, as it happens. It uses about {} MB of memory per 30 s while live.",
-                            (mbps as u64 * 30 / 8000).max(1)
-                        ),
-                        current.map(|d| format!("{} s late", d.seconds)),
+                    .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Hold the stream back")).child(
+                        div().text_size(px(11.)).text_color(tok::text_tertiary()).child(match current {
+                            None => "Off: viewers see it as it happens.".to_string(),
+                            Some(d) => format!(
+                                "Viewers see it {} s late. It uses about {} MB of memory while live.",
+                                d.seconds,
+                                (mbps as u64 * d.seconds as u64 / 8000).max(1)
+                            ),
+                        }),
                     ))
                     .child(toggle("edit-delay", current.is_some()).on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Setup::Edit(e)) = &mut this.setup {
@@ -1459,11 +1473,10 @@ impl OutputsPanel {
                             .items_center()
                             .justify_between()
                             .gap_3()
-                            .child(named(
-                                "tip-delay-preserve",
-                                "Carry on after a drop",
-                                "After a dropped connection, resume where it stopped instead of skipping ahead. Uses more memory while it reconnects.".into(),
-                                None,
+                            .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Carry on after a drop")).child(
+                                div().text_size(px(11.)).text_color(tok::text_tertiary()).child(
+                                    "After a dropped connection, resume where it stopped instead of skipping ahead. Uses more memory while it reconnects.",
+                                ),
                             ))
                             .child(toggle("edit-delay-preserve", d.preserve_cutoff).on_click(set_opts(Box::new(|o| {
                                 if let Some(x) = &mut o.delay {
@@ -1501,10 +1514,17 @@ impl OutputsPanel {
                 ))
             })
             .when(e.options.account_key == lightair_model::AccountKey::Pasted, |d| {
-                let tip = (crate::keys::offers_account_key(e.platform.id) && !e.official_in)
-                    .then_some("Or sign in under Settings › Connections to use the key from your account.");
-                d.child(row("Stream key", tip, div().flex_1().child(Input::new(&e.key).small().mask_toggle()).into_any_element()))
+                d.child(row("Stream key", None, div().flex_1().child(Input::new(&e.key).small().mask_toggle()).into_any_element()))
             })
+            .when(
+                crate::keys::offers_account_key(e.platform.id) && !e.official_in,
+                |d| {
+                    d.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!(
+                        "Sign in to {} under Settings › Connections to use its key from your account.",
+                        e.platform.name
+                    )))
+                },
+            )
             .when(lightair_live::channel_hint(e.platform.id).is_some(), |d| {
                 d.child(row(
                     "Chat",
@@ -1665,13 +1685,12 @@ impl OutputsPanel {
                 div()
                     .flex()
                     .flex_col()
+                    .child(div().text_size(px(13.)).text_color(tok::text()).child("Custom server"))
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(div().text_size(px(13.)).text_color(tok::text()).child("Custom server"))
-                            .child(ui::info("custom-server-tip", "Any RTMP, RTMPS, SRT or RIST address, or a WHIP endpoint")),
+                            .text_size(px(11.))
+                            .text_color(tok::text_tertiary())
+                            .child("Any RTMP, RTMPS, SRT or RIST address, or a WHIP endpoint"),
                     ),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.choose(custom, window, cx)));
@@ -1716,6 +1735,7 @@ impl OutputsPanel {
             .flex_col()
             .gap_3()
             .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Add a destination"))
+            .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child("Where do you want to go live?"))
             .child(Input::new(search).small().prefix(ui::icon("search").size(px(14.)).text_color(tok::text_tertiary())))
             .child(body)
             .child(custom_row)
@@ -1951,15 +1971,8 @@ impl OutputsPanel {
                             .flex()
                             .flex_col()
                             .gap_0p5()
-                            // how to get its key, behind the ⓘ (the key link is below)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(p.name))
-                                    .child(ui::info("platform-help", p.help)),
-                            ),
+                            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(p.name))
+                            .child(div().text_size(px(12.)).text_color(tok::text_tertiary()).child(p.help)),
                     )
                     .child(
                         Button::new("change-platform")
@@ -2054,24 +2067,14 @@ impl Render for OutputsPanel {
         let several = workspace.canvases.len() > 1;
         let container = settings.container.to_uppercase();
         let folder_name = folder.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-        // The recording drive: free space, moving live while recording.
-        let recording = workspace.canvases.iter().any(|f| runtime().get(OutputKey::Recording(f.id)).state.is_running());
-        self.disk.poll(&folder, recording, Instant::now(), lightair_platform::files::space);
-        let free_text = self.disk.space.map(|(free, _)| format!("{} free", crate::storage::bytes(free, false)));
         let mut recordings = div().flex().flex_col().gap_0p5();
         for (i, f) in workspace.canvases.iter().enumerate() {
             let fid = f.id;
             let on = targets.contains(&fid);
             let st = runtime().get(OutputKey::Recording(fid));
             let running = st.state.is_running();
-            // idle: nothing to say (the switch, or Record, says it)
-            let state = if running || st.state != OutputState::Idle {
-                Some(status_text(&st.state))
-            } else if !on {
-                Some(("Not recorded".into(), tok::text_tertiary()))
-            } else {
-                None
-            };
+            let state =
+                if on || running { status_text(&st.state) } else { ("Not recorded".into(), tok::text_tertiary()) };
             recordings = recordings.child(
                 card(("out-rec", i).into())
                     .when(!on && !running, |d| d.opacity(0.6))
@@ -2096,11 +2099,10 @@ impl Render for OutputsPanel {
                         if running && st.bytes > 0 {
                             format!("{container} · {}", crate::storage::bytes(st.bytes, true))
                         } else {
-                            format!("{container} · {}", free_text.clone().unwrap_or_else(|| folder_name.clone()))
+                            format!("{container} · {folder_name}")
                         },
                     ))
-                    .tooltip(ui::tip(format!("Recordings are saved to {}", folder.display())))
-                    .children(state.map(status))
+                    .child(status(state))
                     .when(several, |d| {
                         let s2 = settings.clone();
                         let p2 = workspace.clone();
@@ -2124,8 +2126,10 @@ impl Render for OutputsPanel {
                     }),
             );
         }
-        // While recording: the drive's space as a bar, moving live (idle, it's in the row's words).
-        let storage = self.disk.space.filter(|_| recording).map(|(free, total)| {
+        // The recording drive: free space, moving live while recording.
+        let recording = workspace.canvases.iter().any(|f| runtime().get(OutputKey::Recording(f.id)).state.is_running());
+        self.disk.poll(&folder, recording, Instant::now(), lightair_platform::files::space);
+        let storage = self.disk.space.map(|(free, total)| {
             let low = |bytes: u64| recording && free < bytes;
             let colour = if low(2_000_000_000) {
                 tok::error()
@@ -2183,7 +2187,102 @@ impl Render for OutputsPanel {
 
         // ---- Streaming
         let mut streams = div().flex().flex_col().gap_0p5();
-        // (which destinations share an encoder is in each one's sheet, docs/ui-sweep.md §6)
+        // Which destinations share an encoder: from the engine while live, from the settings before.
+        {
+            let live_ids: Vec<Id> = workspace
+                .outputs
+                .destinations
+                .iter()
+                .filter(|d| runtime().get(OutputKey::Stream(d.id)).state.is_running())
+                .map(|d| d.id)
+                .collect();
+            let live = !live_ids.is_empty();
+            let caps = studio.engine().capabilities.encoders.clone();
+            let groups: Vec<Vec<Id>> = if live {
+                let mut g = studio.engine().call(|s| s.outputs.stream_share_groups());
+                // in the order of the list
+                let place = |ids: &Vec<Id>| {
+                    ids.iter().filter_map(|id| workspace.outputs.destinations.iter().position(|d| d.id == *id)).min()
+                };
+                for ids in &mut g {
+                    ids.sort_by_key(|id| workspace.outputs.destinations.iter().position(|d| d.id == *id));
+                }
+                g.sort_by_key(place);
+                g
+            } else {
+                let enabled: Vec<&Destination> = workspace.outputs.destinations.iter().filter(|d| d.enabled).collect();
+                crate::encoding::share_groups(&caps, &workspace, &enabled)
+            };
+            let members: usize = groups.iter().map(Vec::len).sum();
+            if members >= 2 || (live && members >= 1) {
+                let plural = |n: usize| if n == 1 { "" } else { "s" };
+                let heading = if live {
+                    format!("Live on {members} · {} encoder{}", groups.len(), plural(groups.len()))
+                } else {
+                    format!("{members} destinations · {} encoder{}", groups.len(), plural(groups.len()))
+                };
+                let open = self.encoders_open;
+                streams = streams.child(
+                    div()
+                        .id("encoders-summary")
+                        .px_4()
+                        .pb_1()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .cursor_pointer()
+                        .text_size(px(11.))
+                        .text_color(tok::text_tertiary())
+                        .hover(|d| d.text_color(tok::text_secondary()))
+                        .tooltip(ui::tip("Which destinations share an encoder"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.encoders_open = !this.encoders_open;
+                            cx.notify();
+                        }))
+                        .child(heading)
+                        .child(ui::icon(if open { "chevron-down" } else { "chevron-right" }).size(px(11.))),
+                );
+                if open {
+                    let name_of = |id: Id| {
+                        workspace.outputs.destinations.iter().find(|d| d.id == id).map(|d| d.name.clone()).unwrap_or_default()
+                    };
+                    let mut list = div().mx_4().mb_1().p_2().rounded(px(6.)).bg(tok::bg_raised()).flex().flex_col().gap_1p5();
+                    for (n, ids) in groups.iter().enumerate() {
+                        let d = workspace.outputs.destinations.iter().find(|d| d.id == ids[0]);
+                        let detail = d
+                            .map(|d| {
+                                let cfg = crate::encoding::for_stream(&caps, &workspace, d);
+                                let canvas =
+                                    d.canvas.and_then(|f| workspace.canvas(f)).unwrap_or(workspace.primary_canvas());
+                                describe_encoder(&cfg, canvas)
+                            })
+                            .unwrap_or_default();
+                        list = list.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(tok::text_tertiary())
+                                        .child(format!("Encoder {} · {detail}", n + 1)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .child(ids.iter().map(|id| name_of(*id)).collect::<Vec<_>>().join(", ")),
+                                ),
+                        );
+                    }
+                    if groups.len() > 1 {
+                        list = list.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(
+                            "Each extra encoder costs another encode. Destinations with the same canvas, quality and audio share one: open a destination and choose \"Match settings\".",
+                        ));
+                    }
+                    streams = streams.child(list);
+                }
+            }
+        }
         let count = workspace.outputs.destinations.len();
         for (i, d) in workspace.outputs.destinations.iter().enumerate() {
             let id = d.id;
@@ -2193,13 +2292,10 @@ impl Render for OutputsPanel {
             let reconnecting = matches!(st.state, OutputState::Reconnecting { .. });
             let stopping_delayed = st.state == OutputState::Stopping && st.delay_s > 0;
             let live_now = runtime().any_stream_running();
-            // one state line: "Singapore · ready", "Primary · live", "Connecting…"
-            let state = if st.state == OutputState::Idle {
-                (if enabled { "ready" } else { "skipped" }.to_string(), tok::text_tertiary())
-            } else if enabled || st.state.is_running() {
+            let state = if enabled || st.state.is_running() {
                 status_of(&st)
             } else {
-                ("skipped".into(), tok::text_tertiary())
+                ("Skipped".into(), tok::text_tertiary())
             };
             // Adaptive bitrate has stepped down: say how far, so a thin picture isn't a mystery.
             let state = match st.state {
@@ -2218,19 +2314,17 @@ impl Render for OutputsPanel {
             let where_ = if platforms::is_auto(&d.server) {
                 // Automatic: which ingest it chose lately, if it has
                 match platforms::last_choice() {
-                    Some(c) => format!("Automatic · {}", c.name),
-                    None => "Automatic (nearest)".to_string(),
+                    Some(c) => format!("Automatic · {} · RTMP", c.name),
+                    None => "Automatic (nearest) · RTMP".to_string(),
                 }
             } else {
                 platform
                     .servers
                     .iter()
                     .find(|(_, url)| *url == d.server)
-                    .map(|(label, _)| label.to_string())
-                    .unwrap_or_else(|| host_of(&d.server))
+                    .map(|(label, _)| format!("{label} · {}", StreamProtocol::label(&d.server)))
+                    .unwrap_or_else(|| format!("{} · {}", host_of(&d.server), StreamProtocol::label(&d.server)))
             };
-            // the protocol one step away, in the row's tooltip
-            let protocol = StreamProtocol::label(&d.server);
             let where_ = if st.state.is_running() && st.delay_s > 0 {
                 format!("{where_} · delayed {} s", st.delay_s)
             } else {
@@ -2268,20 +2362,27 @@ impl Render for OutputsPanel {
                     }))
                     .on_click(cx.listener(move |this, _, window, cx| this.open_edit(id, window, cx)))
                     .child(badge(platform, 28.))
-                    .child({
-                        let dual = d.options.enhanced.as_ref().is_some_and(|x| x.vertical_canvas.is_some())
-                            && crate::enhanced::offered(d);
-                        let line = if st.state.is_running() && matches!(st.state, OutputState::Active { .. }) {
-                            let tracks = crate::enhanced::summary(id).filter(|s| s.tracks > 1).map(|s| format!(" · {} tracks", s.tracks));
-                            format!("{where_} · live {}{}", state.0, tracks.unwrap_or_default())
-                        } else if dual {
-                            format!("{where_} · Dual Format · {}", state.0)
+                    // (Twitch's Dual Format: said with where it goes)
+                    .child(two_lines(
+                        d.name.clone(),
+                        if d.options.enhanced.as_ref().is_some_and(|x| x.vertical_canvas.is_some()) && crate::enhanced::offered(d) {
+                            format!("{where_} · Dual Format")
                         } else {
-                            format!("{where_} · {}", state.0)
-                        };
-                        two_lines(d.name.clone(), line)
-                    })
-                    .tooltip(ui::tip(format!("{} over {protocol}. Click for its settings: the canvas it sends, its quality and sound.", d.name)))
+                            where_
+                        },
+                    ))
+                    .child(canvas_badge(("dest-canvas", i), &workspace, d.canvas).on_click(cx.listener({
+                        let workspace = workspace.clone();
+                        let current = d.canvas;
+                        move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            let canvas = next_canvas(&workspace, current);
+                            this.studio.update(cx, |s, cx| {
+                                let _ = s.execute(Command::SetDestinationCanvas { destination: id, canvas }, cx);
+                            })
+                        }
+                    })))
+                    .child(status(state))
                     .when(reconnecting, |d| {
                         d.child(
                             ui::icon_button(("dest-retry", i), "refresh-cw", tok::text_secondary())
@@ -2292,15 +2393,12 @@ impl Render for OutputsPanel {
                                 })),
                         )
                     })
-                    .child({
-                        let only = format!("Go live on {} only", d.name);
+                    .child(
                         ui::icon_button(
                             ("dest-go", i),
                             if running { "circle-stop" } else { "play" },
-                            if running { tok::live() } else { tok::text() },
+                            if running { tok::live() } else { tok::text_secondary() },
                         )
-                        .border_1()
-                        .border_color(tok::border_strong())
                         .tooltip(move |w, cx| {
                             gpui_kit::component::tooltip::Tooltip::new(if reconnecting {
                                 "Cancel reconnecting (the others carry on)"
@@ -2309,7 +2407,7 @@ impl Render for OutputsPanel {
                             } else if live_now {
                                 "Start this destination now"
                             } else {
-                                only.as_str()
+                                "Go live to this destination only"
                             })
                             .build(w, cx)
                         })
@@ -2322,8 +2420,8 @@ impl Render for OutputsPanel {
                                     s.start_destination(id, cx)
                                 }
                             })
-                        }))
-                    })
+                        })),
+                    )
                     .child(
                         toggle(("dest-toggle", i), enabled)
                             .tooltip(move |w, cx| {
@@ -2464,16 +2562,17 @@ impl Render for OutputsPanel {
             )
             .child(recordings)
             .children(storage)
-            .child(streams)
             .child(
-                card("add-destination".into())
-                    .cursor_pointer()
-                    .text_size(px(13.))
-                    .text_color(tok::text_secondary())
-                    .child(ui::icon("plus").size(px(14.)).text_color(tok::text_secondary()))
-                    .child("Add a destination")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_picker(window, cx))),
+                div().flex().items_center().justify_between().pr_3().child(section_label("STREAMING")).child(
+                    Button::new("add-destination")
+                        .label("Add")
+                        .icon(ui::icon("plus"))
+                        .xsmall()
+                        .ghost()
+                        .on_click(cx.listener(|this, _, window, cx| this.open_picker(window, cx))),
+                ),
             )
+            .child(streams)
     }
 }
 

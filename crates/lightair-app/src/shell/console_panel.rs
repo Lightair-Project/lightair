@@ -1,5 +1,5 @@
-//! The footer's console (crate::console): the most important problem and its fix, at the
-//! footer's left; opened, each one with its fix.
+//! The footer's console (crate::console): how many things need attention, at the footer's
+//! left; opened, each one with its fix.
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::Button;
@@ -35,73 +35,39 @@ impl StudioWindow {
         .detach();
     }
 
-    /// The footer's left: the most important problem in words, with its fix (docs/ui-sweep.md
-    /// §7); several, the first and "and N more". A click opens the console with each one.
+    /// The footer's left: what needs attention (a click opens the console).
     pub(super) fn console_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let items = console::look(self.studio.read(cx).workspace(), self.connected.as_ref());
-        if items.is_empty() && !self.console_open {
+        let n = console::look(self.studio.read(cx).workspace(), self.connected.as_ref()).len();
+        if n == 0 && !self.console_open {
             return None;
         }
         let open = self.console_open;
-        let toggle = |this: &mut Self, cx: &mut Context<Self>| {
-            this.console_open = !this.console_open;
-            cx.notify();
-        };
-        let first = items.first().cloned();
-        let more = items.len().saturating_sub(1);
-        let row = match first {
-            None => div()
-                .id("console-chip")
-                .flex()
-                .items_center()
-                .h(px(20.))
-                .px_1p5()
-                .rounded(px(4.))
-                .cursor_pointer()
-                .when(open, |d| d.bg(tok::bg_raised()))
-                .hover(|d| d.bg(tok::bg_raised()))
-                .child("Console")
-                .on_click(cx.listener(move |this, _, _, cx| toggle(this, cx))),
-            Some(item) => {
-                let title = format!("{}.", item.title.trim_end_matches('.'));
-                let fix = match item.fix {
-                    Fix::Device { camera: true, .. } => "Choose a camera",
-                    Fix::Device { camera: false, .. } => "Choose a microphone",
-                    Fix::None => "Details",
-                };
-                div()
-                    .id("console-chip")
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .h(px(20.))
-                    .child(ui::icon("triangle-alert").flex_none().size(px(13.)).text_color(tok::warn()))
-                    .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_color(tok::text()).child(title))
-                    .child(
-                        Button::new("console-fix")
-                            .label(fix)
-                            .xsmall()
-                            .outline()
-                            .on_click(cx.listener(move |this, _, _, cx| toggle(this, cx))),
-                    )
-                    .when(more > 0, |d| {
-                        d.child(
-                            div()
-                                .id("console-more")
-                                .flex_none()
-                                .px_1()
-                                .rounded(px(4.))
-                                .cursor_pointer()
-                                .when(open, |d| d.bg(tok::bg_raised()))
-                                .hover(|d| d.bg(tok::bg_raised()))
-                                .child(format!("and {more} more"))
-                                .on_click(cx.listener(move |this, _, _, cx| toggle(this, cx))),
-                        )
-                    })
-            }
-        };
-        Some(div().relative().min_w_0().child(row).children(open.then(|| self.console_overlay(cx))).into_any_element())
+        Some(
+            div()
+                .relative()
+                .child(
+                    div()
+                        .id("console-chip")
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .h(px(20.))
+                        .px_1p5()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .text_color(if n > 0 { tok::warn() } else { tok::text_secondary() })
+                        .when(open, |d| d.bg(tok::bg_raised()))
+                        .hover(|d| d.bg(tok::bg_raised()))
+                        .child(ui::icon("triangle-alert").size(px(13.)))
+                        .child(if n == 0 { "Console".to_string() } else if n == 1 { "1 needs attention".to_string() } else { format!("{n} need attention") })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.console_open = !this.console_open;
+                            cx.notify();
+                        })),
+                )
+                .children(open.then(|| self.console_overlay(cx)))
+                .into_any_element(),
+        )
     }
 
     fn console_overlay(&self, cx: &mut Context<Self>) -> AnyElement {

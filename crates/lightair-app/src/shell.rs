@@ -375,8 +375,6 @@ pub struct StudioWindow {
     interfaces: RefCell<(std::time::Instant, Vec<lightair_engine::devices::DeviceInfo>)>,
     /// The transition tile playing its preview (under the pointer), and since when.
     transition_hover: Option<(usize, Instant)>,
-    /// The scene inspector's transition menu (the kinds with their previews, and their settings).
-    transition_menu: bool,
     /// The object showing crop handles instead of resize handles.
     crop_mode: Option<Id>,
     crop_preview_sent: Option<(Id, Id, Id)>,
@@ -769,7 +767,6 @@ impl StudioWindow {
             interfaces: RefCell::new((std::time::Instant::now(), Vec::new())),
             crop_mode: None,
             transition_hover: None,
-            transition_menu: false,
             crop_preview_sent: None,
             rotate_tool: false,
             gizmo_hover: None,
@@ -2612,7 +2609,7 @@ impl StudioWindow {
                         .flex()
                         .flex_col()
                         .child(div().font_weight(FontWeight::MEDIUM).child("Studio take saved"))
-
+                        .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("Screen, cameras, audio and pointer, in the Library")),
                 )
                 .child(Button::new("take-card-library").label("Show").small().outline().on_click(cx.listener(|this, _, _, cx| {
                     this.studio.update(cx, |s, _| s.last_studio_take = None);
@@ -3127,9 +3124,9 @@ impl StudioWindow {
                     .occlude()
                     // the Editor: undo, redo and export here; what records and streams only while it does
                     .when(editor, |d| d.child(self.editor.update(cx, |e, cx| e.title_right(cx))))
+                    .when(!editor || streaming, |d| d.child(go_live))
                     .children(recording_tools.filter(|_| !taking))
                     .when(!editor || recording || taking, |d| d.child(record))
-                    .when(!editor || streaming, |d| d.child(go_live))
                     .when(!editor, |d| d.child(self.clip_control(cx)))
                     .when(!editor && !cfg!(windows), |d| d.child(self.virtual_camera_control(cx)))
                     .children(settings_right),
@@ -3250,10 +3247,9 @@ impl StudioWindow {
         cx.notify();
     }
 
-    /// How scenes change on air: a row ("Fade · 0.3 s") whose menu has a preview per kind and its
-    /// settings (duration; direction for Slide and Wipe; the video and its cut point for
-    /// Stinger), and "Same for every scene" (off: this scene has its own).
-    fn transition_picker(&self, workspace: &Workspace, scene: &Scene, cx: &mut Context<Self>) -> Div {
+    /// How scenes change on air: a tile per kind, then its settings as rows (duration;
+    /// direction for Slide and Wipe; the video and its cut point for Stinger).
+    fn transition_picker(&self, workspace: &Workspace, scene: &Scene, cx: &mut Context<Self>) -> impl IntoElement {
         // this scene's own, or the default every switch uses (what the tiles below change)
         let own = scene.transition.is_some();
         let current = scene.transition.unwrap_or(workspace.transition);
@@ -3261,12 +3257,15 @@ impl StudioWindow {
         let set = move |settings: TransitionSettings| {
             if own { Command::SetSceneTransition { scene: sid, transition: Some(settings) } } else { Command::SetTransition { settings } }
         };
-        // on: the show's default; off: its own, starting as a copy of the default
-        let same_cmd = if own {
-            Command::SetSceneTransition { scene: sid, transition: None }
-        } else {
-            Command::SetSceneTransition { scene: sid, transition: Some(current) }
-        };
+        let scope = self.segmented(
+            "tr-scope",
+            vec![
+                ("All scenes", Command::SetSceneTransition { scene: sid, transition: None }, !own),
+                // its own starts as a copy of the default
+                ("This scene", Command::SetSceneTransition { scene: sid, transition: Some(current) }, own),
+            ],
+            cx,
+        );
         // the kinds, as tiles
         let tile = |i: usize, kind: TransitionKind| {
             let on = current.kind == kind;
@@ -3327,7 +3326,13 @@ impl StudioWindow {
         let hint = (!own && others > 0).then(|| {
             format!("Except switching to the {others} scene{} with {} own", if others == 1 { "" } else { "s" }, if others == 1 { "its" } else { "their" })
         });
-        let mut body = div().flex().flex_col().gap_2().child(grid);
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(scope)
+            .children(hint.map(|h| div().text_size(px(11.)).text_color(tok::text_tertiary()).child(h)))
+            .child(grid);
         // duration (a cut has none)
         if current.kind != TransitionKind::Cut {
             let durations: Vec<(&'static str, Command, bool)> = [(300u32, "0.3 s"), (500, "0.5 s"), (800, "0.8 s"), (1200, "1.2 s")]
@@ -3403,72 +3408,7 @@ impl StudioWindow {
                 ));
             }
         }
-        let label = if current.kind == TransitionKind::Cut {
-            current.kind.label().to_string()
-        } else {
-            format!("{} · {:.1} s", current.kind.label(), current.duration_ms as f32 / 1000.0)
-        };
-        let open = self.transition_menu;
-        let card_row = |name: &'static str| {
-            div().flex().items_center().gap_2().min_h(px(40.)).px_3().child(div().flex_1().min_w_0().text_size(px(13.)).child(name))
-        };
-        let same_tip = hint.unwrap_or_else(|| {
-            "On: switching to this scene uses the show's transition. Off: this scene has its own, used whenever you switch to it.".into()
-        });
-        div()
-            .flex()
-            .flex_col()
-            .rounded(px(8.))
-            .bg(tok::bg_raised())
-            .child(
-                card_row("Transition")
-                    .relative()
-                    .child(
-                        Button::new("tr-menu")
-                            .label(label)
-                            .small()
-                            .ghost()
-                            .dropdown_caret(true)
-                            .tooltip("How switching to this scene looks on air")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.transition_menu = !this.transition_menu;
-                                cx.notify();
-                            })),
-                    )
-                    .when(open, |d| {
-                        d.child(
-                            deferred(
-                                div()
-                                    .id("tr-menu-body")
-                                    .absolute()
-                                    .top(px(40.))
-                                    .left_0()
-                                    .right_0()
-                                    .p_2()
-                                    .rounded(px(8.))
-                                    .bg(tok::bg_header())
-                                    .border_1()
-                                    .border_color(tok::border_header())
-                                    .shadow_lg()
-                                    .occlude()
-                                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                        this.transition_menu = false;
-                                        cx.notify();
-                                    }))
-                                    .child(body),
-                            )
-                            .with_priority(1),
-                        )
-                    }),
-            )
-            .child(div().h(px(1.)).mx_3().bg(tok::border()))
-            .child(
-                card_row("Same for every scene").child(
-                    settings::switch("tr-same", !own)
-                        .tooltip(ui::tip(same_tip))
-                        .on_click(cx.listener(move |this, _, _, cx| this.exec(same_cmd.clone(), cx))),
-                ),
-            )
+        body
     }
 
     fn scenes_panel(&self, workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3476,7 +3416,6 @@ impl StudioWindow {
         let selected = studio.selected_scene;
         let program = workspace.program;
         let shell = cx.entity().downgrade();
-        let live = live_now();
         let rows = workspace.scenes.iter().enumerate().map(|(i, scene)| {
             let id = scene.id;
             let on_air = program == Some(id);
@@ -3530,29 +3469,27 @@ impl StudioWindow {
                             .left(px(0.))
                             .top(px(8.))
                             .bottom(px(8.))
-                            .w(px(2.))
+                            .w(px(3.))
                             .rounded_full()
-                            .bg(if live { tok::live() } else { tok::text() }),
+                            .bg(tok::live()),
                     )
                 })
                 .child(self.row_label(target, &scene.name, tok::text()))
                 .when(on_air, |d| {
                     d.child(
                         div()
-                            .flex_none()
                             .text_size(px(10.))
-                            .text_color(if live { tok::live() } else { tok::text_secondary() })
+                            .text_color(tok::live())
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(if live { "Live" } else { "Program" }),
+                            .child("ON AIR"),
                     )
                 })
                 .when(i < 9, |d| {
                     d.child(
                         div()
-                            .flex_none()
                             .text_size(px(10.))
                             .font_family(crate::ui::MONO)
-                            .text_color(tok::text_faint())
+                            .text_color(tok::text_tertiary())
                             .child(crate::ui::keys_label(&format!("⌘{}", i + 1)).into_owned()),
                     )
                 })
@@ -3657,11 +3594,11 @@ impl StudioWindow {
                     .justify_center()
                     .rounded(px(4.))
                     .cursor_pointer()
-                    .text_size(px(12.))
+                    .text_size(px(11.))
+                    .font_family(crate::ui::MONO)
                     .text_color(if fitted { tok::text_secondary() } else { tok::text() })
                     .hover(|d| d.bg(tok::bg_raised()))
-                    // "Fit" while it fits; zoomed, the percentage
-                    .child(if fitted { "Fit".to_string() } else { format!("{percent:.0}%") })
+                    .child(format!("{percent:.0}%"))
                     .tooltip(|w, cx| Tooltip::new(crate::ui::keys_label("Fit (⌘0) · double-click: 100% (⌥⌘0)").into_owned()).build(w, cx))
                     .on_click(cx.listener(|this, ev: &ClickEvent, _, cx| {
                         if ev.click_count() == 2 { this.zoom_to_actual(cx) } else { this.zoom_to_fit(cx) }
@@ -3738,12 +3675,7 @@ impl StudioWindow {
                     .when(is_active, |d| d.bg(tok::bg_selected()))
                     .hover(|d| d.bg(tok::bg_raised()))
                     .child(div().w(px(gw)).h(px(gh)).rounded(px(2.)).border_1().border_color(tok::text_secondary()))
-                    // "Landscape · 1080p"; the exact size and rate in the tooltip
-                    .child(format!("{} · {}p", f.name, f.width.min(f.height)))
-                    .tooltip({
-                        let detail = format!("{}×{} at {} fps", f.width, f.height, f.fps_num / f.fps_den.max(1));
-                        move |w, cx| Tooltip::new(detail.clone()).build(w, cx)
-                    })
+                    .child(format!("{} {}×{}", f.name, f.width, f.height))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.active_canvas = Some(id);
                         this.side_by_side = false;
@@ -4358,7 +4290,7 @@ impl StudioWindow {
     }
 
     fn canvas_panel(&self, workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
-        let live = live_now();
+        let live = runtime().any_stream_running();
         // the layer under the window it's in: the main window's, or its own window's
         let layer = if self.canvas_out { self.canvas_native.clone() } else { self.native.clone() };
         let native = layer.borrow().is_some();
@@ -4373,9 +4305,7 @@ impl StudioWindow {
                     .flex_1()
                     .min_h_0()
                     .when(!native, |d| d.bg(tok::bg_canvas_well()))
-                    // a hairline frame; the live border only while a stream or recording runs
-                    .when(live, |d| d.border(px(3.)).border_color(tok::live()))
-                    .when(!live, |d| d.border_1().border_color(tok::border()))
+                    .when(live, |d| d.border_2().border_color(tok::live()))
                     .cursor(self.canvas_cursor(workspace, cx))
                     .on_mouse_down(MouseButton::Right, cx.listener(Self::canvas_right_down))
                     .on_mouse_down(
@@ -4520,7 +4450,7 @@ impl StudioWindow {
             .border_color(tok::border())
             .bg(tok::bg_panel())
             .child(label("CUED", preview_name, tok::text()))
-            .child(label(if live_now() { "LIVE" } else { "PROGRAM" }, program_name, if live_now() { tok::live() } else { tok::text_secondary() }))
+            .child(label("ON AIR", program_name, tok::live()))
             .child(
                 div()
                     .relative()
@@ -4529,7 +4459,7 @@ impl StudioWindow {
                     .rounded(px(4.))
                     .overflow_hidden()
                     .border_1()
-                    .border_color(if live_now() { tok::live() } else { tok::border_strong() })
+                    .border_color(tok::live())
                     .bg(tok::bg_canvas_well())
                     .when_some(frame, |d, frame| {
                         d.child(crate::frame_view::frame(frame).absolute().size_full().object_fit(ObjectFit::Contain))
@@ -4598,6 +4528,7 @@ impl StudioWindow {
                 .child(distribute_button(1, "align-vertical-distribute-center", "Space evenly down", false))
         });
         body.child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{} objects selected", selection.len())))
+            .child(div().text_color(tok::text_tertiary()).child("Drag any of them to move them together."))
             .child(row)
             .child(
                 Button::new("delete-objects")
@@ -4650,27 +4581,13 @@ impl StudioWindow {
                             .child(scene.name.clone()),
                     )
                     .when(on_air, |d| {
-                        let live = live_now();
                         d.child(
                             div()
-                                .flex_none()
                                 .text_size(px(10.))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(if live { tok::live() } else { tok::text_secondary() })
-                                .child(if live { "Live" } else { "Program" }),
+                                .text_color(tok::live())
+                                .child("ON AIR"),
                         )
-                    })
-                    .child({
-                        // how many layers; the canvas's size and rate one step away
-                        let n = scene.objects.len();
-                        let detail = format!("{}×{} at {} fps", canvas.width, canvas.height, canvas.fps_num / canvas.fps_den.max(1));
-                        div()
-                            .id("scene-layers")
-                            .flex_none()
-                            .text_size(px(12.))
-                            .text_color(tok::text_secondary())
-                            .child(format!("{n} layer{}", if n == 1 { "" } else { "s" }))
-                            .tooltip(move |w, cx| Tooltip::new(detail.clone()).build(w, cx))
                     })
                     .child(
                         ui::icon_button("delete-scene", "trash", tok::text_secondary())
@@ -4679,10 +4596,30 @@ impl StudioWindow {
                                 cx.listener(move |this, _, _, cx| this.exec(Command::RemoveScene { scene: sid }, cx)),
                             ),
                     );
+                let info = div().text_size(px(12.)).text_color(tok::text_secondary()).child(format!(
+                    "{} object{} · {}×{} @ {} fps",
+                    scene.objects.len(),
+                    if scene.objects.len() == 1 { "" } else { "s" },
+                    canvas.width,
+                    canvas.height,
+                    canvas.fps_num / canvas.fps_den.max(1)
+                ));
                 // How switching to this scene looks on air: the show's default, or its own.
-                let transition = self.transition_picker(workspace, &scene, cx);
+                let transition = self
+                    .section(
+                        "Transition",
+                        Some(
+                            ui::info(
+                                "transition-info",
+                                "How switching to this scene looks on air. All scenes: the default every switch uses. This scene: its own, used whenever you switch to it.",
+                            )
+                            .into_any_element(),
+                        ),
+                        cx,
+                    )
+                    .child(self.transition_picker(workspace, &scene, cx));
                 let screen = self.screen_zoom_pointer_section(workspace, &scene, cx);
-                body.child(header).child(transition).child(screen).into_any_element()
+                body.child(header).child(info).child(screen).child(transition).into_any_element()
             }
             _ => body.child(div().text_color(tok::text_tertiary()).child("Nothing selected")).into_any_element(),
         };
@@ -4772,10 +4709,9 @@ impl StudioWindow {
                     .child(row("Skipped (encoder too slow)", encoder_skipped.to_string()))
                     .child(row("Dropped (network)", network_dropped.to_string()))
                     .child(row("Preview frames", preview.to_string()))
-                    .child(div().pt_1().flex().child(ui::info(
-                        "perf-causes-tip",
+                    .child(div().pt_1().text_size(px(11.)).text_color(tok::text_tertiary()).child(
                         "Three causes, kept apart: late (the renderer couldn't finish a frame in time), skipped (an encoder couldn't keep up) and dropped (the connection couldn't take them). A few late frames at start-up are normal.",
-                    ))),
+                    )),
             )
             .with_priority(1)
         });
@@ -4937,13 +4873,6 @@ fn window_controls(maximized: bool) -> impl IntoElement {
         .child(button("window-minimize", '\u{E921}', WindowControlArea::Min, false))
         .child(button("window-maximize", if maximized { '\u{E923}' } else { '\u{E922}' }, WindowControlArea::Max, false))
         .child(button("window-close", '\u{E8BB}', WindowControlArea::Close, true))
-}
-
-/// Whether the show is actually on air: a stream or a recording running. Red is for this only
-/// (docs/ui-sweep.md §0): the program scene alone isn't live.
-fn live_now() -> bool {
-    let rt = runtime();
-    rt.any_stream_running() || matches!(rt.recording().state, OutputState::Active { .. } | OutputState::Reconnecting { .. })
 }
 
 #[cfg(test)]

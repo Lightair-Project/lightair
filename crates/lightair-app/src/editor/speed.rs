@@ -49,21 +49,19 @@ impl Editor {
         let Some(seq) = self.seq() else { return body };
         let wanting: Vec<&Media> = seq.media.iter().filter(|m| m.wants_proxy()).collect();
         let made = wanting.iter().filter(|m| m.proxy().is_some()).count();
-        // on screen: what's happening (a proxy being made, how many are ready); how proxies work in the ⓘ
         let status = match (&self.proxying, seq.proxies) {
-            (_, false) => None,
-            (Some((name, f)), _) => Some(format!("Making a proxy for “{name}”… {:.0}%", f * 100.0)),
-            (None, _) if wanting.is_empty() => None,
-            (None, _) => Some(format!("{made} of {} large videos through proxies", wanting.len())),
+            (_, false) => "Off: the player reads the original files.".to_string(),
+            (Some((name, f)), _) => format!("Making a proxy for “{name}”… {:.0}%", f * 100.0),
+            (None, _) if wanting.is_empty() => "On: videos larger than 1080p are edited through smaller copies (none here).".to_string(),
+            (None, _) => format!("On: {made} of {} large videos edited through smaller copies. The export reads the originals.", wanting.len()),
         };
-        body.child(div().flex().items_center().gap_1().child(label("PROXIES")).child(hint(
-            "On: videos larger than 1080p are edited through smaller copies; the export reads the originals. Off: the player reads the original files.",
-        )))
+        body.child(label("PROXIES"))
             .child(self.chips("ed-proxies", &[("On", true), ("Off", false)], seq.proxies, |this, v, cx| {
                 this.change(|s| s.proxies = v, cx);
                 this.make_proxies(cx);
             }, cx))
-            .children(status.map(line))
+            // (its state, shown as it was: hint() is an ⓘ now)
+            .child(line(status))
     }
 }
 

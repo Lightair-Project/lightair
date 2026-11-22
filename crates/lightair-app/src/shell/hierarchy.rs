@@ -131,7 +131,6 @@ impl StudioWindow {
             };
             let row = div()
                 .id(("tree", i))
-                .group("layer-row")
                 .relative()
                 .flex()
                 .items_center()
@@ -257,9 +256,11 @@ impl StudioWindow {
                     })),
                 )
                 .child(
-                    // quiet until the row is hovered; a hidden layer's eye-off at full strength
-                    ui::icon_button(("eye", i), if own_visible { "eye" } else { "eye-off" }, tok::text_secondary())
-                        .when(own_visible, |d| d.opacity(0.45).group_hover("layer-row", |s| s.opacity(1.0)))
+                    ui::icon_button(
+                        ("eye", i),
+                        if own_visible { "eye" } else { "eye-off" },
+                        if own_visible { tok::text_secondary() } else { tok::text_tertiary() },
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.exec(
@@ -437,7 +438,7 @@ impl StudioWindow {
             )
             .child(grid)
             .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!(
-                "Holds {count} object{}",
+                "Holds {count} object{}. Moving, turning or scaling it carries them.",
                 if count == 1 { "" } else { "s" }
             )));
         let actions = div()

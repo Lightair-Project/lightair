@@ -1775,7 +1775,7 @@ impl Editor {
                             .child(div().flex_1().child(heading("THIS WORKSPACE")))
                             .child(Button::new("ed-import").label("Import").icon(ui::icon("plus")).xsmall().outline().on_click(cx.listener(|this, _, w, cx| this.import(w, cx)))),
                     )
-                    .when(!self.library.is_empty(), |d| d.child(grid))
+                    .child(if self.library.is_empty() { line("Recordings, takes and clips appear here.") } else { grid })
                     .when(!imported.is_empty(), |d| d.child(heading("IMPORTED")).child(own)),
             },
             LeftTab::Audio => self.audio_tab(cx),

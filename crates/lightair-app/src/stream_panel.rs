@@ -296,7 +296,7 @@ impl Render for StreamPanel {
                 .p_6()
                 .child(ui::icon("radio").size(px(28.)).text_color(tok::text_tertiary()))
                 .child(div().text_size(px(13.)).text_color(tok::text_secondary()).child("No channels yet"))
-                .child(div().text_size(px(12.)).text_color(tok::text_tertiary()).text_center().child("Add your channel to a destination's Chat field in Outputs"))
+                .child(div().text_size(px(12.)).text_color(tok::text_tertiary()).text_center().child("Add your channel to a destination in Outputs (its Chat field) to see how your stream looks on each platform."))
                 .into_any_element()
         } else {
             div().id("stream-rows").flex_1().min_h_0().overflow_y_scroll().children(rows).into_any_element()

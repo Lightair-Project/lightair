@@ -651,7 +651,7 @@ impl StudioWindow {
                     body = body.child(empty_state(
                         "search",
                         format!("Nothing matches “{}”", query.trim()),
-                        "",
+                        "Try “camera”, “chat” or “timer”",
                     ));
                 }
                 let lines = lines(&shown, state.group == Group::All);
@@ -1078,7 +1078,9 @@ impl StudioWindow {
                     d.child(key_hint("↑ ↓ ← →", "Move")).child(key_hint("↵", "Add")).child(key_hint("esc", "Close"))
                 }
                 Step::Web => d.child(key_hint("↵", "Add")).child(key_hint("esc", "Close")),
-                _ => d.child(key_hint("esc", "Close")),
+                _ => d
+                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("Click one to add it"))
+                    .child(key_hint("esc", "Close")),
             });
 
         Some(
@@ -1183,14 +1185,8 @@ fn tile(
                         .child(name.into()),
                 )
                 .children(line.map(|l| {
-                    div()
-                        .text_size(px(11.5))
-                        .line_height(px(15.))
-                        .text_color(tok::text_tertiary())
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(l)
+                    // up to two lines, as before
+                    div().text_size(px(11.5)).line_height(px(15.)).text_color(tok::text_tertiary()).line_clamp(2).child(l)
                 })),
         )
 }

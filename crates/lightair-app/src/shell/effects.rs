@@ -200,6 +200,7 @@ impl StudioWindow {
                     .hover(|d| d.bg(tok::bg_raised()))
                     .child(ui::icon("sparkles").size(px(16.)).text_color(tok::text_tertiary()))
                     .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child("Add effect"))
+                    .tooltip(ui::tip(if iid.audio() { "Voice, dynamics, EQ, space and more" } else { "Face, background, colour, stylize and more" }))
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.open_effect_catalog(iid, Page::All, window, cx)),
                     ),
@@ -343,9 +344,18 @@ impl StudioWindow {
             );
         }
         if open {
-            // (a plugin's effect: its settings are its own window's)
-            if let Some(d) = def {
-                card = card.child(self.effect_controls(iid, e, d, cx));
+            match def {
+                Some(d) => card = card.child(self.effect_controls(iid, e, d, cx)),
+                None => {
+                    card = card.child(
+                        div()
+                            .px_2()
+                            .pb_2()
+                            .text_size(px(11.))
+                            .text_color(tok::text_tertiary())
+                            .child("A plugin's effect: its settings are its own."),
+                    )
+                }
             }
             card = card.child(self.effect_footer(iid, e, def, i, count, cx));
         }
@@ -1424,7 +1434,7 @@ impl StudioWindow {
                     .p_4()
                     .text_size(px(12.))
                     .text_color(tok::text_tertiary())
-                    .child("No Audio Unit or VST3 effects installed"),
+                    .child("No Audio Unit or VST3 effects are installed. Install one and it shows here."),
             );
         }
 

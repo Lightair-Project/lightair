@@ -492,7 +492,7 @@ impl StudioWindow {
                         .line_height(px(15.))
                         .text_color(tok::text_tertiary())
                         .child(ui::icon("unplug").size(px(14.)).flex_none())
-                        .child(div().flex_1().min_w_0().child("No platform connected yet: send a test")),
+                        .child(div().flex_1().min_w_0().child("No platform connected yet. Add a destination with its chat in Outputs and its events come here; until then, send a test.")),
                 )
                 .into_any_element();
         }
