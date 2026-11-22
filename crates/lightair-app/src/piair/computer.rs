@@ -585,17 +585,7 @@ mod tests {
     /// Quitting, closing and deleting need the streamer's yes, however the combination is written.
     #[test]
     fn destructive_key_combinations_are_caught_however_theyre_written() {
-        for keys in [
-            "cmd+q",
-            "cmd+shift+w",
-            "Shift+Cmd+W",
-            "command+delete",
-            "opt+cmd+escape",
-            "ctrl+shift+delete",
-            "shift+ctrl+delete",
-            "ALT+F4",
-            "shift+delete",
-        ] {
+        for keys in ["cmd+q", "cmd+shift+w", "Shift+Cmd+W", "command+delete", "opt+cmd+escape", "ctrl+shift+delete", "shift+ctrl+delete", "ALT+F4", "shift+delete"] {
             assert!(destructive(keys), "{keys}");
         }
         for keys in ["cmd+t", "cmd+c", "return", "shift+tab", "cmd+shift+t"] {
