@@ -651,7 +651,7 @@ impl StudioWindow {
                     body = body.child(empty_state(
                         "search",
                         format!("Nothing matches “{}”", query.trim()),
-                        "Try “camera”, “chat” or “timer”",
+                        "",
                     ));
                 }
                 let lines = lines(&shown, state.group == Group::All);
@@ -676,7 +676,7 @@ impl StudioWindow {
                         Line::Row(a, b) => {
                             let card = |i: usize| {
                                 let e = shown[i];
-                                tile(("add-object-type", i), e.icon, e.name, e.about, Some(i == sel))
+                                tile(("add-object-type", i), e.icon, e.name, None, Some(e.about.into()), Some(i == sel))
                                     .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
                                         if let Some(a) = this.add_object.as_mut().filter(|a| a.sel != i) {
                                             a.sel = i;
@@ -768,7 +768,7 @@ impl StudioWindow {
                                         .text_color(tok::text())
                                         .child(label),
                                 )
-                                .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(hint)),
+                                .child(ui::info(SharedString::from(format!("field-tip-{label}")), hint)),
                         )
                         .child(control)
                 };
@@ -830,7 +830,7 @@ impl StudioWindow {
                     for (i, (item, _)) in shown {
                         let (title, value) = (item.title.clone(), item.value.clone());
                         grid = grid.child(
-                            tile(("screen", i), icon, item.title.clone(), item.detail.clone(), None).on_click(
+                            tile(("screen", i), icon, item.title.clone(), Some(item.detail.clone().into()), None, None).on_click(
                                 cx.listener(move |this, _, window, cx| {
                                     this.add_screen(mode, &title, &value, None, window, cx)
                                 }),
@@ -971,7 +971,7 @@ impl StudioWindow {
                 let mut grid = div().grid().grid_cols(2).gap(px(4.));
                 for (i, (name, uid)) in phones.into_iter().enumerate() {
                     grid = grid.child(
-                        tile(("phone", i), "smartphone", name.clone(), "Its screen and sound", None)
+                        tile(("phone", i), "smartphone", name.clone(), None, Some("Its screen and sound".into()), None)
                             .on_click(cx.listener(move |this, _, window, cx| this.add_phone(&name, &uid, window, cx))),
                     );
                 }
@@ -993,7 +993,7 @@ impl StudioWindow {
                     // (by the device's transport type, not its name)
                     let hint =
                         if lightair_platform::devices::camera_is_virtual(&uid) { "Virtual camera" } else { "Camera" };
-                    grid = grid.child(tile(("camera", i), "camera", label.clone(), hint, None).on_click(cx.listener(
+                    grid = grid.child(tile(("camera", i), "camera", label.clone(), Some(hint.into()), None, None).on_click(cx.listener(
                         move |this, _, window, cx| {
                             this.add_camera(&label, &uid, cx);
                             this.close_add_object(window, cx);
@@ -1078,9 +1078,7 @@ impl StudioWindow {
                     d.child(key_hint("↑ ↓ ← →", "Move")).child(key_hint("↵", "Add")).child(key_hint("esc", "Close"))
                 }
                 Step::Web => d.child(key_hint("↵", "Add")).child(key_hint("esc", "Close")),
-                _ => d
-                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("Click one to add it"))
-                    .child(key_hint("esc", "Close")),
+                _ => d.child(key_hint("esc", "Close")),
             });
 
         Some(
@@ -1127,16 +1125,20 @@ impl StudioWindow {
 /// A type, camera, window or app: its icon in a well, its name, and what it is. `on`: whether
 /// it's highlighted, for a list walked by keys (where the pointer moves the highlight too);
 /// `None` for one that just lights up under the pointer.
+/// A choice: its icon and name; under it only a value (a window's app, "Virtual camera"),
+/// what it is behind its tooltip (docs/ui-sweep.md).
 fn tile(
     id: impl Into<ElementId>,
     icon: &str,
     name: impl Into<SharedString>,
-    about: impl Into<SharedString>,
+    line: Option<SharedString>,
+    about: Option<SharedString>,
     on: Option<bool>,
 ) -> Stateful<Div> {
     let (hover, on) = (on.is_none(), on.unwrap_or(false));
     div()
         .id(id)
+        .when_some(about, |d, a| d.tooltip(ui::tip(a)))
         .flex()
         .flex_1()
         .min_w_0()
@@ -1180,15 +1182,16 @@ fn tile(
                         .whitespace_nowrap()
                         .child(name.into()),
                 )
-                .child(
-                    // up to two lines (a widget's runs long)
+                .children(line.map(|l| {
                     div()
                         .text_size(px(11.5))
                         .line_height(px(15.))
                         .text_color(tok::text_tertiary())
-                        .line_clamp(2)
-                        .child(about.into()),
-                ),
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(l)
+                })),
         )
 }
 

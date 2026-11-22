@@ -200,11 +200,6 @@ impl StudioWindow {
                     .hover(|d| d.bg(tok::bg_raised()))
                     .child(ui::icon("sparkles").size(px(16.)).text_color(tok::text_tertiary()))
                     .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child("Add effect"))
-                    .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(if iid.audio() {
-                        "Voice, dynamics, EQ, space and more"
-                    } else {
-                        "Face, background, colour, stylize and more"
-                    }))
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.open_effect_catalog(iid, Page::All, window, cx)),
                     ),
@@ -348,18 +343,9 @@ impl StudioWindow {
             );
         }
         if open {
-            match def {
-                Some(d) => card = card.child(self.effect_controls(iid, e, d, cx)),
-                None => {
-                    card = card.child(
-                        div()
-                            .px_2()
-                            .pb_2()
-                            .text_size(px(11.))
-                            .text_color(tok::text_tertiary())
-                            .child("A plugin's effect: its settings are its own."),
-                    )
-                }
+            // (a plugin's effect: its settings are its own window's)
+            if let Some(d) = def {
+                card = card.child(self.effect_controls(iid, e, d, cx));
             }
             card = card.child(self.effect_footer(iid, e, def, i, count, cx));
         }
@@ -1697,8 +1683,11 @@ fn tile(
     badge: Option<(&'static str, &'static str)>,
     selected: bool,
 ) -> Stateful<Div> {
+    // what it does: its tooltip (docs/ui-sweep.md); the tile shows its icon and name
+    let tip = description.to_string();
     div()
         .id(id)
+        .tooltip(ui::tip(tip))
         .flex()
         .flex_col()
         .gap_1p5()
@@ -1753,16 +1742,6 @@ fn tile(
                 .text_color(tok::text())
                 .truncate()
                 .child(name.to_string()),
-        )
-        .child(
-            div()
-                .flex_none()
-                .h(px(28.))
-                .overflow_hidden()
-                .text_size(px(11.))
-                .line_height(px(14.))
-                .text_color(tok::text_tertiary())
-                .child(description.to_string()),
         )
 }
 
