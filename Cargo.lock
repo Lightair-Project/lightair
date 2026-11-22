@@ -4445,7 +4445,7 @@ dependencies = [
 [[package]]
 name = "lightair-audio"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=61a661aaa3935c7fe26789bf9079702906bb508b#61a661aaa3935c7fe26789bf9079702906bb508b"
 dependencies = [
  "ebur128",
  "nnnoiseless",
@@ -4455,7 +4455,7 @@ dependencies = [
 [[package]]
 name = "lightair-automation"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=61a661aaa3935c7fe26789bf9079702906bb508b#61a661aaa3935c7fe26789bf9079702906bb508b"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4531,7 +4531,7 @@ dependencies = [
 [[package]]
 name = "lightair-fonts"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=61a661aaa3935c7fe26789bf9079702906bb508b#61a661aaa3935c7fe26789bf9079702906bb508b"
 dependencies = [
  "fontdb",
  "serde",
@@ -4559,7 +4559,7 @@ dependencies = [
 [[package]]
 name = "lightair-live"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=61a661aaa3935c7fe26789bf9079702906bb508b#61a661aaa3935c7fe26789bf9079702906bb508b"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4592,7 +4592,7 @@ dependencies = [
 [[package]]
 name = "lightair-model"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=61a661aaa3935c7fe26789bf9079702906bb508b#61a661aaa3935c7fe26789bf9079702906bb508b"
 dependencies = [
  "serde",
  "serde_json",
@@ -4622,7 +4622,7 @@ dependencies = [
 [[package]]
 name = "lightair-platform"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=61a661aaa3935c7fe26789bf9079702906bb508b#61a661aaa3935c7fe26789bf9079702906bb508b"
 dependencies = [
  "block2 0.6.2",
  "dirs 6.0.0",
@@ -4656,7 +4656,7 @@ dependencies = [
 [[package]]
 name = "lightair-remote"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=61a661aaa3935c7fe26789bf9079702906bb508b#61a661aaa3935c7fe26789bf9079702906bb508b"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4678,7 +4678,7 @@ dependencies = [
 [[package]]
 name = "lightair-render"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=61a661aaa3935c7fe26789bf9079702906bb508b#61a661aaa3935c7fe26789bf9079702906bb508b"
 dependencies = [
  "cosmic-text",
  "lightair-audio",
@@ -4703,7 +4703,7 @@ dependencies = [
 [[package]]
 name = "lightair-store"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=61a661aaa3935c7fe26789bf9079702906bb508b#61a661aaa3935c7fe26789bf9079702906bb508b"
 dependencies = [
  "lightair-model",
  "serde",
@@ -4733,7 +4733,7 @@ dependencies = [
 [[package]]
 name = "lightair-widgets"
 version = "0.1.0"
-source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=ca039022a49f089d937783a79f6d8de726955e2a#ca039022a49f089d937783a79f6d8de726955e2a"
+source = "git+https://github.com/MoonGoblinDev/lightair-core?rev=61a661aaa3935c7fe26789bf9079702906bb508b#61a661aaa3935c7fe26789bf9079702906bb508b"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
