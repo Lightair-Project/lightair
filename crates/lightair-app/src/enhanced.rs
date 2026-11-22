@@ -19,6 +19,8 @@ use parking_lot::Mutex;
 /// What Go live needs to ask for a destination's plan.
 #[derive(Debug, Clone)]
 pub struct Request {
+    /// The destination's name, for the warning prompt.
+    name: String,
     /// The canvases in track order: the destination's (landscape), then the vertical one.
     canvases: Vec<(Id, CanvasSize)>,
     max_bitrate_kbps: Option<u32>,
@@ -42,6 +44,32 @@ pub struct Summary {
 }
 
 static SUMMARIES: Mutex<Option<HashMap<Id, Summary>>> = Mutex::new(None);
+
+/// A plan the platform cautioned about, waiting for the person: go live with it anyway, or not.
+struct Held {
+    id: Id,
+    name: String,
+    words: String,
+    start: Box<dyn FnOnce() + Send>,
+}
+
+static HELD: Mutex<Option<Held>> = Mutex::new(None);
+
+/// The destination waiting on the person because its platform cautioned about the plan: its id,
+/// its name, and the platform's words.
+pub fn held() -> Option<(Id, String, String)> {
+    HELD.lock().as_ref().map(|h| (h.id, h.name.clone(), h.words.clone()))
+}
+
+/// The person's answer to the caution: go live with the plan anyway, or leave that destination off.
+pub fn answer(go: bool) {
+    let Some(h) = HELD.lock().take() else { return };
+    if go {
+        (h.start)();
+    } else {
+        lightair_engine::outputs::mark_idle(OutputKey::Stream(h.id));
+    }
+}
 
 /// The last Go live's summary for destination `id`.
 pub fn summary(id: Id) -> Option<Summary> {
@@ -71,6 +99,7 @@ pub fn request(d: &Destination, workspace: &Workspace, encoders: &[String]) -> O
         canvases.push((v.id, size(v)));
     }
     Some(Request {
+        name: d.name.clone(),
         canvases,
         max_bitrate_kbps: enhanced.max_bitrate_kbps,
         max_video_tracks: enhanced.max_video_tracks,
@@ -132,17 +161,24 @@ pub fn go(engine: Arc<Engine>, cfg: StreamConfig, req: Request, single_canvas: O
                 },
             );
             let cfg = StreamConfig { server, key, ..cfg };
-            engine.post(move |s| {
-                let videos: Option<Vec<_>> = canvases.iter().map(|c| s.reconciler.canvas_video(*c)).collect();
-                let result = match videos {
-                    Some(v) => s.outputs.start_multitrack_stream(&cfg, &multitrack, &v),
-                    None => Err("A canvas in the plan isn't there any more.".into()),
-                };
-                if let Err(e) = result {
-                    tracing::error!(%e, "multitrack stream failed to start");
-                    lightair_engine::outputs::mark_failed(OutputKey::Stream(id), &e);
-                }
-            });
+            let start = move || {
+                engine.post(move |s| {
+                    let videos: Option<Vec<_>> = canvases.iter().map(|c| s.reconciler.canvas_video(*c)).collect();
+                    let result = match videos {
+                        Some(v) => s.outputs.start_multitrack_stream(&cfg, &multitrack, &v),
+                        None => Err("A canvas in the plan isn't there any more.".into()),
+                    };
+                    if let Err(e) = result {
+                        tracing::error!(%e, "multitrack stream failed to start");
+                        lightair_engine::outputs::mark_failed(OutputKey::Stream(id), &e);
+                    }
+                });
+            };
+            // a caution: the person decides (the prompt over the window), in the platform's words
+            match plan.verdict {
+                Verdict::Caution(words) => *HELD.lock() = Some(Held { id, name: req.name.clone(), words, start: Box::new(start) }),
+                _ => start(),
+            }
         }
         Err(why) => {
             tracing::warn!(%why, "going live without Enhanced Broadcasting");

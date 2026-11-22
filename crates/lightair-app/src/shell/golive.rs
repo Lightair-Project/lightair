@@ -50,6 +50,70 @@ impl StudioWindow {
         });
     }
 
+    /// The prompt shown when a platform cautions about its Enhanced Broadcasting plan (Twitch's
+    /// Dual Format): its words, then go live with the plan anyway, or leave that destination off.
+    pub(super) fn plan_warning_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (_, name, words) = crate::enhanced::held()?;
+        let answer = |go: bool| {
+            cx.listener(move |_, _, _, cx| {
+                crate::enhanced::answer(go);
+                cx.notify();
+            })
+        };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(tok::scrim())
+                .occlude()
+                .child(
+                    div()
+                        .id("plan-warning")
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .w(px(440.))
+                        .p_5()
+                        .rounded(px(14.))
+                        .bg(tok::bg_panel())
+                        .border_1()
+                        .border_color(tok::border_strong())
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(ui::icon("triangle-alert").size(px(16.)).text_color(tok::warn()))
+                                .child(
+                                    div()
+                                        .text_size(px(16.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(format!("{name}: a note on Dual Format")),
+                                ),
+                        )
+                        .child(div().text_color(tok::text_secondary()).child(words))
+                        .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(
+                            "Twitch planned the stream's settings for this computer and said this about them. Cancel leaves this destination off; the others carry on.",
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(Button::new("plan-cancel").label("Cancel").small().ghost().on_click(answer(false)))
+                                .child(
+                                    Button::new("plan-go").label("Go live anyway").small().danger().on_click(answer(true)),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The sheet shown while an ordered start waits on a destination that didn't come up.
     pub(super) fn start_failure_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let studio = self.studio.read(cx);

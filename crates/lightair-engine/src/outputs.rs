@@ -260,6 +260,12 @@ pub fn mark_failed(key: OutputKey, reason: &str) {
     runtime().update(key, |s| s.state = OutputState::Failed(reason.to_string()));
 }
 
+/// Marks an output as off again: a start called off before it reached libobs (the person said
+/// no to a platform's plan).
+pub fn mark_idle(key: OutputKey) {
+    runtime().update(key, |s| *s = OutputStatus::default());
+}
+
 pub fn runtime() -> &'static OutputsRuntime {
     static RUNTIME: OnceLock<OutputsRuntime> = OnceLock::new();
     RUNTIME.get_or_init(OutputsRuntime::default)
