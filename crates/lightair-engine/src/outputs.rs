@@ -449,6 +449,48 @@ pub struct StreamNet {
     pub delay: Option<(u32, bool)>,
 }
 
+/// A stream sent as several encodes in one RTMP connection (Enhanced Broadcasting: Twitch's
+/// Dual Format), the encodes as the platform planned them. Video track *i* is `video[i]`.
+#[derive(Debug, Clone, Default)]
+pub struct Multitrack {
+    pub video: Vec<MultitrackVideo>,
+    /// The live audio tracks' encoder settings (JSON objects), on the stream's mix.
+    pub audio: Vec<serde_json::Value>,
+    /// The VOD track's audio settings, on `StreamConfig::vod_mix` (none without one).
+    pub vod_audio: Vec<serde_json::Value>,
+    /// The connection's bitrate table for adaptive bitrate: a JSON array with one table per video
+    /// track, when the plan has one for every track (else libobs's own).
+    pub bitrate_table: Option<String>,
+}
+
+/// One video encode of a [`Multitrack`] stream.
+#[derive(Debug, Clone)]
+pub struct MultitrackVideo {
+    /// The libobs encoder id.
+    pub encoder: String,
+    /// Scaled to this size from its canvas, on the GPU.
+    pub width: u32,
+    pub height: u32,
+    /// Every this many canvas frames (1: all).
+    pub fps_divisor: u32,
+    /// The encoder's own settings (bitrate, keyint_sec, profile, rate_control…), as planned.
+    pub settings: serde_json::Value,
+    /// The scaler ("OBS_SCALE_BICUBIC", "…_LANCZOS"…); `None`: bicubic.
+    pub scale: Option<String>,
+}
+
+/// libobs's scaler for a plan's name of it.
+fn scale_type(name: Option<&str>) -> sys::obs_scale_type {
+    match name {
+        Some("OBS_SCALE_DISABLE") => sys::OBS_SCALE_DISABLE,
+        Some("OBS_SCALE_POINT") => sys::OBS_SCALE_POINT,
+        Some("OBS_SCALE_BILINEAR") => sys::OBS_SCALE_BILINEAR,
+        Some("OBS_SCALE_LANCZOS") => sys::OBS_SCALE_LANCZOS,
+        Some("OBS_SCALE_AREA") => sys::OBS_SCALE_AREA,
+        _ => sys::OBS_SCALE_BICUBIC,
+    }
+}
+
 // ---------------------------------------------------------------- libobs objects
 struct Running {
     output: *mut sys::obs_output_t,
@@ -467,6 +509,9 @@ struct Running {
     skipped_base: u32,
     /// Its bitrate is adaptive (it reports the current one).
     adaptive: bool,
+    /// A multitrack stream's encoders, kept aligned (null otherwise). Its other video encoders
+    /// are in `extra`.
+    group: *mut sys::obs_encoder_group_t,
 }
 
 unsafe impl Send for Running {}
@@ -490,6 +535,10 @@ impl Running {
             }
             if !self.service.is_null() {
                 sys::obs_service_release(self.service);
+            }
+            // (the group holds its own references; it goes once its encoders have stopped)
+            if !self.group.is_null() {
+                sys::obs_encoder_group_destroy(self.group);
             }
             drop(Box::from_raw(self.signal_param));
         }
@@ -882,7 +931,7 @@ unsafe fn start(
         let skipped_base = skipped_of(video);
         let adaptive = encoders.adaptive;
         let running =
-            Running { output, video, audio, service, signal_param, signals, share, extra, skipped_base, adaptive };
+            Running { output, video, audio, service, signal_param, signals, share, extra, skipped_base, adaptive, group: std::ptr::null_mut() };
         runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
         if !sys::obs_output_start(output) {
             let err = last_error(output).unwrap_or_else(|| "The output couldn't start.".into());
@@ -1103,6 +1152,169 @@ impl Outputs {
         Ok(())
     }
 
+    /// Starts a stream as several encodes in one RTMP connection (Enhanced Broadcasting), as
+    /// `plan` says: `videos[i]` is the canvas video track *i* is made from. Its encoders are its
+    /// own (shared with no other destination) and start together, so their keyframes line up.
+    /// `cfg.server` and `cfg.key` are the plan's ingest address and key.
+    pub fn start_multitrack_stream(&mut self, cfg: &StreamConfig, plan: &Multitrack, videos: &[VideoOutput]) -> Result<(), String> {
+        let key = OutputKey::Stream(cfg.id);
+        if self.streams.get(&cfg.id).is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
+            return Ok(());
+        }
+        if let Some(old) = self.streams.remove(&cfg.id) {
+            unsafe { old.release() };
+        }
+        if StreamProtocol::of(&cfg.server) != Some(StreamProtocol::Rtmp) {
+            return Err("Enhanced Broadcasting goes over RTMP or RTMPS.".into());
+        }
+        if plan.video.is_empty() || plan.audio.is_empty() || videos.len() != plan.video.len() {
+            return Err("The platform's plan has no video or audio to send.".into());
+        }
+        let name = format!("Stream {}", cfg.id);
+        unsafe {
+            let mut service_settings = Data::new();
+            service_settings.set_str("server", &cfg.server).set_str("key", &cfg.key);
+            let service = sys::obs_service_create(
+                c("rtmp_custom").as_ptr(),
+                c(&format!("Service {}", cfg.id)).as_ptr(),
+                service_settings.as_ptr(),
+                std::ptr::null_mut(),
+            );
+            if service.is_null() {
+                return Err("Couldn't set up the streaming service.".into());
+            }
+            let mut output_settings = Data::new();
+            output_settings.set_bool("low_latency_mode_enabled", false);
+            output_settings.set_bool("dyn_bitrate", cfg.encoders.adaptive);
+            if let Some(table) = plan.bitrate_table.as_deref().filter(|_| cfg.encoders.adaptive) {
+                output_settings.set_str("interpolation_table_data", table);
+            }
+            if let Some(ip) = &cfg.net.bind_ip {
+                output_settings.set_str("bind_ip", ip);
+            }
+            output_settings.set_str(
+                "ip_family",
+                match cfg.net.ip_family {
+                    lightair_model::IpFamily::Auto => "IPv4+IPv6",
+                    lightair_model::IpFamily::V4 => "IPv4",
+                    lightair_model::IpFamily::V6 => "IPv6",
+                },
+            );
+            let output = sys::obs_output_create(
+                c("rtmp_output").as_ptr(),
+                c(&name).as_ptr(),
+                output_settings.as_ptr(),
+                std::ptr::null_mut(),
+            );
+            if output.is_null() {
+                sys::obs_service_release(service);
+                return Err("Couldn't create the RTMP output.".into());
+            }
+            let group = sys::obs_encoder_group_create();
+            // what's made so far, released together if a step fails
+            let mut made: Vec<*mut sys::obs_encoder_t> = Vec::new();
+            let fail = |made: &[*mut sys::obs_encoder_t], why: String| -> Result<(), String> {
+                sys::obs_output_release(output);
+                for e in made {
+                    sys::obs_encoder_release(*e);
+                }
+                if !group.is_null() {
+                    sys::obs_encoder_group_destroy(group);
+                }
+                sys::obs_service_release(service);
+                Err(why)
+            };
+            for (i, (t, video)) in plan.video.iter().zip(videos).enumerate() {
+                let mut settings = t.settings.clone();
+                if let Some(o) = settings.as_object_mut() {
+                    // keyframes only on the interval, so every track's line up
+                    o.entry("disable_scenecut").or_insert(serde_json::Value::Bool(true));
+                }
+                let settings = Data::from_json(&settings);
+                let enc = sys::obs_video_encoder_create(
+                    c(&t.encoder).as_ptr(),
+                    c(&format!("{name} video {}", i + 1)).as_ptr(),
+                    settings.as_ptr(),
+                    std::ptr::null_mut(),
+                );
+                if enc.is_null() {
+                    return fail(&made, format!("Couldn't create video track {} ({}).", i + 1, t.encoder)).map(|_| ());
+                }
+                made.push(enc);
+                sys::obs_encoder_set_video(enc, video.0);
+                sys::obs_encoder_set_scaled_size(enc, t.width & !1, t.height & !1);
+                sys::obs_encoder_set_gpu_scale_type(enc, scale_type(t.scale.as_deref()));
+                if t.fps_divisor > 1 {
+                    sys::obs_encoder_set_frame_rate_divisor(enc, t.fps_divisor);
+                }
+                if !group.is_null() && !sys::obs_encoder_set_group(enc, group) {
+                    return fail(&made, format!("Couldn't keep video track {} with the others.", i + 1));
+                }
+                sys::obs_output_set_video_encoder2(output, enc, i);
+            }
+            let videos_made = made.len();
+            // audio: the live tracks on the stream's mix, then the VOD track's on its own
+            let tracks = plan.audio.iter().map(|a| (a, cfg.encoders.audio_mix)).chain(
+                cfg.vod_mix.into_iter().flat_map(|mix| plan.vod_audio.iter().map(move |a| (a, mix))),
+            );
+            for (j, (a, mix)) in tracks.enumerate().take(6) {
+                let settings = Data::from_json(a);
+                let enc = sys::obs_audio_encoder_create(
+                    c(&cfg.encoders.audio_encoder).as_ptr(),
+                    c(&format!("{name} audio {}", j + 1)).as_ptr(),
+                    settings.as_ptr(),
+                    mix,
+                    std::ptr::null_mut(),
+                );
+                if enc.is_null() {
+                    return fail(&made, format!("Couldn't create audio track {} ({}).", j + 1, cfg.encoders.audio_encoder));
+                }
+                sys::obs_encoder_set_audio(enc, sys::obs_get_audio());
+                sys::obs_output_set_audio_encoder(output, enc, j);
+                made.push(enc);
+            }
+            sys::obs_output_set_service(output, service);
+            if let Some((seconds, preserve)) = cfg.net.delay.filter(|(s, _)| *s > 0) {
+                sys::obs_output_set_delay(output, seconds, if preserve { sys::OBS_OUTPUT_DELAY_PRESERVE } else { 0 });
+            }
+            let signal_param = Box::into_raw(Box::new(key));
+            let handler = sys::obs_output_get_signal_handler(output);
+            let signals = signals_for(key);
+            for (sig, cb) in signals {
+                sys::signal_handler_connect(handler, c(sig).as_ptr(), Some(*cb), signal_param as *mut c_void);
+            }
+            let (video, audio) = (made[0], made[videos_made]);
+            let extra: Vec<_> = made.iter().enumerate().filter(|(k, _)| *k != 0 && *k != videos_made).map(|(_, e)| *e).collect();
+            let running = Running {
+                output,
+                video,
+                audio,
+                service,
+                signal_param,
+                signals,
+                // shares with nothing: no canvas video is at this address
+                share: (output as usize, cfg.encoders.clone()),
+                extra,
+                skipped_base: skipped_of(video),
+                adaptive: cfg.encoders.adaptive,
+                group,
+            };
+            if let Some((retries, delay)) = cfg.reconnect {
+                sys::obs_output_set_reconnect_settings(output, retries as i32, delay as i32);
+                runtime().update(key, |s| s.retries = retries);
+            }
+            runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
+            if !sys::obs_output_start(output) {
+                let err = last_error(output).unwrap_or_else(|| "The stream couldn't start.".into());
+                running.release();
+                runtime().update(key, |s| s.state = OutputState::Failed(err.clone()));
+                return Err(err);
+            }
+            self.streams.insert(cfg.id, running);
+        }
+        Ok(())
+    }
+
     /// Which running streams share an encoder: one list of destinations per video encoder.
     pub fn stream_share_groups(&self) -> Vec<Vec<Id>> {
         let mut groups: Vec<(usize, Vec<Id>)> = Vec::new();
@@ -1251,6 +1463,7 @@ impl Outputs {
                 extra: Vec::new(),
                 skipped_base: 0,
                 adaptive: false,
+                group: std::ptr::null_mut(),
             };
             runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
             if !sys::obs_output_start(output) {
