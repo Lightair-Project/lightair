@@ -366,6 +366,7 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
     // Lightair's own source types (the audio engine's mix outputs, a test tone)
     crate::audio_host::register_types();
     crate::pointer::register();
+    crate::piair_voice::register();
     crate::backdrop::register();
     crate::avatar::register();
     crate::web::register();

@@ -1394,18 +1394,21 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
         let f = settings.calibration.face(&m);
         if settings.mirror { f.mirrored() } else { f }
     });
+    // PiAir's co-host face, when this is its avatar (crate::face_drive)
+    let (seen, ai_expression) = crate::face_drive::merge(s.source as *mut sys::obs_source_t, seen);
     let face: Face = r.smoother.step(seen, dt);
-    let expression =
-        (!settings.expression.is_empty()).then(|| (settings.expression.clone(), settings.expression_weight));
+    // the co-host's mood over the avatar's own expression (borrowed: nothing copied per frame)
+    let expression: Option<(&str, f32)> =
+        ai_expression.or_else(|| (!settings.expression.is_empty()).then(|| (settings.expression.as_str(), settings.expression_weight)));
     r.body.step(body.as_ref(), settings.mirror, dt);
     let r = &mut *r;
     if let Some((_, a)) = r.avatar.as_mut() {
         let (bones, torso) = a.body_bones(&r.body, settings.body);
-        a.update(&Controls { face, expression, bones, torso }, dt);
+        a.update(&Controls { face, expression: expression.map(|(e, w)| (e.to_owned(), w)), bones, torso }, dt);
         r.dirty = true;
     }
     if let Some((_, l)) = r.puppet.as_mut() {
-        l.update(&face, (!settings.expression.is_empty()).then_some(settings.expression.as_str()), dt);
+        l.update(&face, expression.map(|e| e.0), dt);
         r.dirty = true;
     }
     r.grab_due = tracking;

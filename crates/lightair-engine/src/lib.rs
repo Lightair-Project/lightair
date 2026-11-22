@@ -15,6 +15,7 @@ mod avatar_uma;
 pub mod backdrop;
 pub mod devices;
 pub mod displays;
+pub mod face_drive;
 mod engine;
 pub mod gpu;
 pub mod kinds;
@@ -30,6 +31,7 @@ pub mod obs;
 pub mod on_screen;
 pub mod outputs;
 pub mod phone_camera;
+pub mod piair_voice;
 #[cfg(target_os = "macos")]
 mod phone_decode;
 #[cfg(windows)]
@@ -50,6 +52,7 @@ pub mod timers;
 mod transition;
 pub mod vcam;
 pub mod web;
+pub mod zoom_to;
 
 pub use engine::{Capabilities, Engine, EngineConfig, EngineError, EngineState, Graphics, Modules, Stats, read_stats};
 pub use libobs_sys as sys;

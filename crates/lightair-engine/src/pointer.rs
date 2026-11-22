@@ -596,8 +596,15 @@ fn zoom_tick(f: &mut Filter, dt: f32) {
         _ => f.zoom_until.is_some_and(|u| u > now),
     };
     let want = if zoomed { f.look.zoom_scale } else { 1.0 };
+    // "zoom to here" (PiAir, crate::zoom_to): in to that point while it lasts
+    let asked = crate::zoom_to::current();
+    let (want, focus) = match asked {
+        Some(r) => (r.scale.unwrap_or(f.look.zoom_scale.max(1.5)), ((r.at.0 - dx) * k, (r.at.1 - dy) * k)),
+        None => (want, focus),
+    };
+    let snap = asked.is_some_and(|r| now.duration_since(r.since) < Duration::from_millis(50));
     let cam = f.cam.get_or_insert_with(|| Cam::new(size));
-    cam_step(cam, want, focus, size, f.look.zoom_motion, dt, (clicked || new_key) && !was_in && mode == 1);
+    cam_step(cam, want, focus, size, f.look.zoom_motion, dt, snap || ((clicked || new_key) && !was_in && mode == 1));
 }
 
 
