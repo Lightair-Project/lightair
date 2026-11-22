@@ -36,7 +36,7 @@ const APP_ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 "#;
 
-/// Chromium's helpers (V8 needs JIT).
+/// Chromium's helpers (V8 needs JIT), and PiAir (a Bun binary: JavaScriptCore needs JIT too).
 const HELPER_ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -95,6 +95,7 @@ fn build() -> anyhow::Result<()> {
     std::fs::copy(root.join("branding/final/icon/lightair-icon-512.png"), c.join("Resources/lightair-icon-512.png"))?;
     crate::stream_deck_plugin(&c.join("Resources/Lightair.streamDeckPlugin"))?;
     crate::speech_helper(&c.join("MacOS/lightair-speech"))?;
+    crate::piair_binary(&c.join("MacOS/piair"))?;
 
     // libobs, its graphics backends and mux helper, the modules Lightair loads
     let obs_frameworks = obs.join("Contents/Frameworks");
@@ -422,7 +423,7 @@ fn sign_all(app: &Path, identity: &str, out: &Path) -> anyhow::Result<()> {
     let code: Vec<PathBuf> = files(app).into_iter().filter(|p| is_macho(p)).collect();
     eprintln!("signing {} pieces of code and {} bundles with the hardened runtime", code.len(), bundles.len());
     for f in &code {
-        let helper = f.to_string_lossy().contains("Lightair Helper");
+        let helper = f.to_string_lossy().contains("Lightair Helper") || f.ends_with("MacOS/piair");
         sign(f, helper.then_some(helper_ent.as_path()))?;
     }
     for b in &bundles {

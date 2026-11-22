@@ -38,6 +38,7 @@ mod plugin_editor;
 mod plugin_scan;
 mod outputs_panel;
 mod permissions;
+mod piair;
 mod platforms;
 mod preflight;
 mod prefs;

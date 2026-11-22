@@ -312,6 +312,9 @@ pub struct StudioWindow {
     chat: Entity<crate::chat_panel::ChatPanel>,
     /// Follows, subs, donations and raids (a tab beside Chat).
     activity: Entity<crate::activity_panel::ActivityPanel>,
+    /// PiAir, the AI co-host (crate::piair), and its panel.
+    pub(crate) piair: crate::piair::Host,
+    piair_panel: Entity<crate::piair::panel::PiAirPanel>,
     /// How each platform shows the stream (a tab beside Activity).
     stream: Entity<crate::stream_panel::StreamPanel>,
     /// Automations (a tab beside the mixer).
@@ -704,6 +707,11 @@ impl StudioWindow {
         .detach();
         let remote = Self::new_remote(window, cx);
         let automations = live_api::start_automations(&studio.read(cx).chat, remote.jobs());
+        let piair = crate::piair::Host::new(remote.jobs(), studio.read(cx).chat.clone());
+        let piair_panel = {
+            let (h, st) = (piair.clone(), studio.clone());
+            cx.new(|cx| crate::piair::panel::PiAirPanel::new(h, st, window, cx))
+        };
         live_api::feed_widgets(automations.clone(), studio.read(cx).widgets.clone());
         let automations_panel = {
             let a = automations.clone();
@@ -712,6 +720,8 @@ impl StudioWindow {
         };
         cx.defer_in(window, |this, _, cx| {
             this.sync_remote(cx);
+            // PiAir's Lightair calls: answered like MCP clients' (crate::piair)
+            this.piair.set_handler(this.api_handler(cx));
             this.load_connections(cx);
             // what's connected (for the console): looked at every few seconds
             this.watch_devices(cx);
@@ -738,6 +748,8 @@ impl StudioWindow {
             outputs,
             chat,
             activity,
+            piair,
+            piair_panel,
             stream,
             confirm_end: None,
             studio,
@@ -1174,6 +1186,7 @@ impl StudioWindow {
                     }
                 }
             }
+            A::PiAirStop => self.piair.kill_switch(),
             A::Automation(i) => {
                 if let Some(id) = crate::shortcuts::automation_for(i)
                     && let Err(e) = self.automations.run(&id, None, &[])

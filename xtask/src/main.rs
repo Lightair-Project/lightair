@@ -137,6 +137,42 @@ pub(crate) fn speech_helper(dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// PiAir, the AI co-host (the private piair repo beside this one): its Bun-compiled binary,
+/// built if needed (`bun scripts/build.ts`), copied to `dest`. Left out without the checkout or
+/// Bun (the PiAir panel then says it isn't in this build).
+pub(crate) fn piair_binary(dest: &Path) -> anyhow::Result<()> {
+    let checkout = root().join("../piair");
+    let (target, exe) = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => ("darwin-arm64", "piair"),
+        ("macos", _) => ("darwin-x64", "piair"),
+        _ => ("windows-x64", "piair.exe"),
+    };
+    let built = checkout.join("dist").join(target).join(exe);
+    let newest_source = std::fs::read_dir(checkout.join("src"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .max();
+    let stale = match (newest_source, std::fs::metadata(&built).and_then(|m| m.modified())) {
+        (Some(s), Ok(b)) => s > b,
+        (None, Ok(_)) => false,
+        _ => true,
+    };
+    if stale && checkout.join("scripts/build.ts").exists() {
+        let ok = Command::new("bun").arg("scripts/build.ts").arg(target).current_dir(&checkout).status().is_ok_and(|s| s.success());
+        if !ok {
+            eprintln!("couldn't build PiAir (bun scripts/build.ts {target} in ../piair)");
+        }
+    }
+    if !built.exists() {
+        eprintln!("left out PiAir (no ../piair/dist/{target}/{exe})");
+        return Ok(());
+    }
+    std::fs::copy(&built, dest)?;
+    Ok(())
+}
+
 fn modules() -> anyhow::Result<()> {
     let root = root();
     for entry in std::fs::read_dir(root.join("modules"))? {
@@ -217,6 +253,7 @@ fn bundle(release: bool) -> anyhow::Result<()> {
     }
     stream_deck_plugin(&app.join("Resources/Lightair.streamDeckPlugin"))?;
     speech_helper(&app.join("MacOS/lightair-speech"))?;
+    piair_binary(&app.join("MacOS/piair"))?;
     for (from, to) in
         [(obs.join("Contents/Frameworks"), app.join("Frameworks")), (obs.join("Contents/PlugIns"), app.join("PlugIns"))]
     {
@@ -379,6 +416,7 @@ fn dist_windows() -> anyhow::Result<()> {
     for exe in ["lightair.exe", "lightair-web-helper.exe", "lightair_camera.dll"] {
         std::fs::copy(release.join(exe), bin.join(exe))?;
     }
+    piair_binary(&bin.join("piair.exe"))?;
     // libobs, its graphics backend, its DLLs and helper programs (not OBS's own UI: Qt, scripting)
     let skip = |name: &str| {
         let n = name.to_ascii_lowercase();

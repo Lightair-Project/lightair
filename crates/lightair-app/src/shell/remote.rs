@@ -324,6 +324,51 @@ impl StudioWindow {
         .detach();
     }
 
+    /// How a call from outside is answered (the remote API, MCP, the phones, PiAir): a few methods
+    /// on the calling thread (they wait on the network or the system), the rest on the main
+    /// thread through `remote_call`.
+    pub(crate) fn api_handler(&self, cx: &mut Context<Self>) -> Handler {
+        let jobs = self.remote.jobs.clone();
+        let engine = self.studio.read(cx).engine().clone();
+        let chat = self.studio.read(cx).chat.clone();
+        let editor_sync = self.remote.phones.editor_sync.clone();
+        Arc::new(move |call: Call| {
+            // Lightair Editor's takes, projects and transfers: files, on the server's thread
+            if let Some(reply) = editor_sync.call(&call) {
+                return reply;
+            }
+            // sending takes a moment: on the server's thread, not the main one
+            if call.method == "chat.send" {
+                return crate::chat_send::send(&chat, &call.params).map_err(|e| ApiError::new(ErrorKind::State, e));
+            }
+            // the platforms answer slowly: on the server's thread (phones.rs)
+            if call.method == "stream.info.get" {
+                return super::phones::stream_info(&chat, &call.params);
+            }
+            if call.method == "stream.categories" {
+                return super::phones::stream_categories(&call.params);
+            }
+            // moderating waits on the platform (a hidden signed-in page for Twitch and Kick)
+            if call.method == "chat.moderate" {
+                return super::phones::chat_moderate(&chat, &call.params);
+            }
+            // phones' name for `stream.edit`
+            let method = if call.method == "stream.info.set" { "stream.edit" } else { call.method.as_str() };
+            if let Some(out) = lightair_live::integrations::call(method, &call.params) {
+                return out.map_err(|e| ApiError::new(ErrorKind::State, e));
+            }
+            // asking the system for windows and devices takes a moment: not on the main thread
+            if call.method == "capture.targets" {
+                return capture_targets(&call.params, &engine);
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            if jobs.unbounded_send((call, tx)).is_err() {
+                return Err(ApiError::failed("Lightair is closing"));
+            }
+            rx.recv_timeout(ANSWER_WITHIN).unwrap_or_else(|_| Err(ApiError::failed("Lightair didn't answer in time")))
+        })
+    }
+
     pub(super) fn sync_remote(&mut self, cx: &mut Context<Self>) {
         let p = self.prefs.remote;
         // a test copy keeps off the running app's port
@@ -360,45 +405,7 @@ impl StudioWindow {
         }
         // the old one lets go of the port first
         self.remote.server = None;
-        let jobs = self.remote.jobs.clone();
-        let engine = self.studio.read(cx).engine().clone();
-        let chat = self.studio.read(cx).chat.clone();
-        let editor_sync = self.remote.phones.editor_sync.clone();
-        let handler: Handler = Arc::new(move |call: Call| {
-            // Lightair Editor's takes, projects and transfers: files, on the server's thread
-            if let Some(reply) = editor_sync.call(&call) {
-                return reply;
-            }
-            // sending takes a moment: on the server's thread, not the main one
-            if call.method == "chat.send" {
-                return crate::chat_send::send(&chat, &call.params).map_err(|e| ApiError::new(ErrorKind::State, e));
-            }
-            // the platforms answer slowly: on the server's thread (phones.rs)
-            if call.method == "stream.info.get" {
-                return super::phones::stream_info(&chat, &call.params);
-            }
-            if call.method == "stream.categories" {
-                return super::phones::stream_categories(&call.params);
-            }
-            // moderating waits on the platform (a hidden signed-in page for Twitch and Kick)
-            if call.method == "chat.moderate" {
-                return super::phones::chat_moderate(&chat, &call.params);
-            }
-            // phones' name for `stream.edit`
-            let method = if call.method == "stream.info.set" { "stream.edit" } else { call.method.as_str() };
-            if let Some(out) = lightair_live::integrations::call(method, &call.params) {
-                return out.map_err(|e| ApiError::new(ErrorKind::State, e));
-            }
-            // asking the system for windows and devices takes a moment: not on the main thread
-            if call.method == "capture.targets" {
-                return capture_targets(&call.params, &engine);
-            }
-            let (tx, rx) = std::sync::mpsc::channel();
-            if jobs.unbounded_send((call, tx)).is_err() {
-                return Err(ApiError::failed("Lightair is closing"));
-            }
-            rx.recv_timeout(ANSWER_WITHIN).unwrap_or_else(|_| Err(ApiError::failed("Lightair didn't answer in time")))
-        });
+        let handler = self.api_handler(cx);
         // the phones' port belongs to the server it shares a handler with
         self.remote.phones.stop_listening();
         match Server::start(config, handler) {

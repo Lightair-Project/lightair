@@ -31,7 +31,12 @@ pub enum GlobalAction {
     Automation(u16),
     /// An avatar expression's shortcut (its place in `expression_keys`).
     Expression(u16),
+    /// PiAir's kill switch: AI drives off, speech cut, PiAir stopped.
+    PiAirStop,
 }
+
+/// The kill switch's keys until the streamer picks others (⌃⌥⌘K; Ctrl+Alt+K on Windows).
+pub const PIAIR_STOP_KEYS: &str = "ctrl-alt-cmd-k";
 
 impl GlobalAction {
     /// The label with a destination's name where the action is about one ("… destination 2
@@ -66,6 +71,7 @@ impl GlobalAction {
         GlobalAction::Scene(3),
         GlobalAction::Scene(4),
         GlobalAction::Scene(5),
+        GlobalAction::PiAirStop,
     ];
 
     pub fn label(self) -> String {
@@ -84,6 +90,7 @@ impl GlobalAction {
             GlobalAction::Scene(n) => format!("Scene {n} on air"),
             GlobalAction::Automation(_) => "An automation".into(),
             GlobalAction::Expression(_) => "An avatar's expression".into(),
+            GlobalAction::PiAirStop => "Stop PiAir (kill switch)".into(),
         }
     }
 }
@@ -99,6 +106,10 @@ static EXPRESSIONS: std::sync::Mutex<Vec<(lightair_model::Id, String, String)>> 
 pub fn register_all(base: &[(GlobalAction, String)]) -> Vec<GlobalAction> {
     *BASE.lock().unwrap() = base.to_vec();
     let mut all = base.to_vec();
+    // PiAir's kill switch is always on a key: its own unless the streamer gave it another
+    if !all.iter().any(|(a, k)| *a == GlobalAction::PiAirStop || k == PIAIR_STOP_KEYS) {
+        all.push((GlobalAction::PiAirStop, PIAIR_STOP_KEYS.to_string()));
+    }
     for (i, (_, keys)) in AUTOMATIONS.lock().unwrap().iter().enumerate() {
         // a key already taken by Settings' shortcuts stays theirs
         if !base.iter().any(|(_, k)| k == keys) {

@@ -35,6 +35,7 @@ pub(super) struct DockPanels {
     activity: Entity<crate::activity_panel::ActivityPanel>,
     stream: Entity<crate::stream_panel::StreamPanel>,
     automations: Entity<crate::automations_panel::AutomationsPanel>,
+    piair: Entity<crate::piair::panel::PiAirPanel>,
 }
 
 impl DockPanels {
@@ -59,6 +60,7 @@ impl DockPanels {
         reg!("activity", self.activity);
         reg!("stream", self.stream);
         reg!("automations", self.automations);
+        reg!("piair", self.piair);
     }
 }
 
@@ -109,6 +111,7 @@ pub(super) fn populate_dock(
         Preset::Live => DockLayout::tabs()
             .panel_view(panel_handle(panels.chat.clone()), cx)
             .panel_view(panel_handle(panels.activity.clone()), cx)
+            .panel_view(panel_handle(panels.piair.clone()), cx)
             .panel_view(panel_handle(panels.outputs.clone()), cx)
             .panel_view(panel_handle(panels.stream.clone()), cx),
         _ => DockLayout::tabs()
@@ -116,10 +119,12 @@ pub(super) fn populate_dock(
             .panel_view(panel_handle(panels.chat.clone()), cx)
             .panel_view(panel_handle(panels.activity.clone()), cx)
             .panel_view(panel_handle(panels.stream.clone()), cx)
+            .panel_view(panel_handle(panels.piair.clone()), cx)
             .active_index(match hook.as_deref() {
                 Some("chat") => 1,
                 Some(h) if h.starts_with("activity") => 2,
                 Some("stream") => 3,
+                Some(h) if h.starts_with("piair") => 4,
                 _ => 0,
             }),
     };
@@ -130,6 +135,7 @@ pub(super) fn populate_dock(
             Preset::Live => DockLayout::tabs()
                 .panel_view(panel_handle(panels.chat.clone()), cx)
                 .panel_view(panel_handle(panels.activity.clone()), cx)
+                .panel_view(panel_handle(panels.piair.clone()), cx)
                 .panel_view(panel_handle(panels.outputs.clone()), cx)
                 .panel_view(panel_handle(panels.stream.clone()), cx)
                 .panel_view(panel_handle(panels.inspector.clone()), cx),
@@ -355,6 +361,7 @@ impl StudioWindow {
             activity: self.activity.clone(),
             stream: self.stream.clone(),
             automations: self.automations_panel.clone(),
+            piair: self.piair_panel.clone(),
         };
         // Every group shows a tab bar, even with one panel, so any panel can be dropped onto
         // any header to join it as a tab (and the canvas gets a header like the rest).
