@@ -1443,7 +1443,14 @@ impl Studio {
         };
         let (canvas, id) = (d.canvas, d.id);
         let engine = self.engine.clone();
-        let launch = move |engine: &Engine, cfg: StreamConfig| {
+        // Enhanced Broadcasting (Twitch, Dual Format): the platform's plan first, off this thread
+        let enhanced = crate::enhanced::request(d, workspace, &self.engine.capabilities.encoders);
+        let launch = move |engine: &Arc<Engine>, cfg: StreamConfig| {
+            if let Some(req) = enhanced.clone() {
+                let engine = engine.clone();
+                std::thread::spawn(move || crate::enhanced::go(engine, cfg, req, canvas));
+                return;
+            }
             engine.post(move |s| {
                 let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
                 if let Err(e) = s.outputs.start_stream(&cfg, video) {

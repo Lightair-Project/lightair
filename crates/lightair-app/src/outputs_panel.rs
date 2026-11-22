@@ -728,6 +728,73 @@ impl OutputsPanel {
         cx.notify();
     }
 
+    /// Twitch's Dual Format (docs/plans/twitch-dual-format.md §4): the vertical canvas sent with
+    /// the landscape one, for phones held upright, through Enhanced Broadcasting. Off by default.
+    fn dual_format_card(&self, e: &Edit, workspace: &Workspace, cx: &mut Context<Self>) -> Option<Div> {
+        if e.platform.id != "twitch" {
+            return None;
+        }
+        let on = e.options.enhanced.as_ref().is_some_and(|x| x.vertical_canvas.is_some());
+        let vertical = workspace.canvases.iter().find(|c| c.height > c.width).cloned();
+        let main = e.canvas.and_then(|id| workspace.canvas(id)).unwrap_or(workspace.primary_canvas()).clone();
+        let landscape = main.width >= main.height;
+        let can = vertical.is_some() && landscape;
+        let vertical_id = vertical.as_ref().map(|v| v.id);
+        let switch = toggle("dual-format", on)
+            .when(!can && !on, |d| d.opacity(0.5))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(Setup::Edit(e)) = &mut this.setup {
+                    e.options.enhanced = match (on, vertical_id) {
+                        (true, _) => None,
+                        (false, Some(v)) if can => Some(lightair_model::EnhancedBroadcasting {
+                            vertical_canvas: Some(v),
+                            ..e.options.enhanced.clone().unwrap_or_default()
+                        }),
+                        _ => e.options.enhanced.clone(),
+                    };
+                }
+                cx.notify();
+            }));
+        let line = |text: String, colour: Hsla| div().text_size(px(12.)).text_color(colour).child(text);
+        let mut card = form_card("Dual Format").child(form_row(
+            "Dual Format",
+            Some("One broadcast with both pictures: computers and TVs get the landscape one, phones held upright the vertical one, full screen.".into()),
+            switch,
+        ));
+        if vertical.is_none() {
+            card = card.child(canvas_note(
+                "smartphone",
+                "Dual Format needs a vertical canvas: phones get it full screen.".into(),
+                Some(
+                    Button::new("dual-add-vertical")
+                        .label("Add vertical canvas")
+                        .xsmall()
+                        .outline()
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(AddVerticalCanvas))),
+                ),
+            ));
+        }
+        if on && let Some(v) = &vertical {
+            let last = crate::enhanced::summary(e.id).filter(|s| s.dual || s.note.is_some());
+            card = card
+                .child(line(format!("{} {}×{}: computers and TVs", main.name, main.width, main.height), tok::text_secondary()))
+                .child(line(format!("{} {}×{}: phones held upright", v.name, v.width, v.height), tok::text_secondary()))
+                .child(line(
+                    "About 12.5 Mbps of upload at 1080p (14 at 1440p). Without Twitch's server-side transcode, which Partners and some Affiliates get, about 13.5 Mbps.".into(),
+                    tok::text_tertiary(),
+                ))
+                .children(last.as_ref().filter(|s| s.dual).map(|s| {
+                    line(format!("Last time, Twitch planned {:.1} Mbps in {} tracks.", s.kbps as f32 / 1000.0, s.tracks), tok::text_secondary())
+                }))
+                .children(last.and_then(|s| s.note).map(|n| line(n, tok::warn())))
+                .child(line(
+                    format!("Going live asks Twitch for the best settings for this {} (its chip, memory and canvases).", crate::ui::MACHINE),
+                    tok::text_tertiary(),
+                ));
+        }
+        Some(card)
+    }
+
     fn edit_view(&self, e: &Edit, workspace: &Workspace, cx: &mut Context<Self>) -> Div {
         let p = e.platform;
         let caps = self.studio.read(cx).engine().capabilities.encoders.clone();
@@ -1407,6 +1474,7 @@ impl OutputsPanel {
             )
             .child(connection)
             .child(picture_sound)
+            .children(self.dual_format_card(e, workspace, cx))
             .child(quality)
             .child(reconnect)
             .child(network)
@@ -2106,8 +2174,13 @@ impl Render for OutputsPanel {
                     .on_click(cx.listener(move |this, _, window, cx| this.open_edit(id, window, cx)))
                     .child(badge(platform, 28.))
                     .child({
+                        let dual = d.options.enhanced.as_ref().is_some_and(|x| x.vertical_canvas.is_some())
+                            && crate::enhanced::offered(d);
                         let line = if st.state.is_running() && matches!(st.state, OutputState::Active { .. }) {
-                            format!("{where_} · live {}", state.0)
+                            let tracks = crate::enhanced::summary(id).filter(|s| s.tracks > 1).map(|s| format!(" · {} tracks", s.tracks));
+                            format!("{where_} · live {}{}", state.0, tracks.unwrap_or_default())
+                        } else if dual {
+                            format!("{where_} · Dual Format · {}", state.0)
                         } else {
                             format!("{where_} · {}", state.0)
                         };
