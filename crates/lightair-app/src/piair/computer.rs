@@ -576,7 +576,7 @@ fn normalize_combo(keys: &str) -> String {
 #[cfg(test)]
 mod tests {
     // (not `super::*`: gpui's own `test` macro would come with it)
-    use super::{Computer, DESTRUCTIVE_KEYS, DESTRUCTIVE_WORDS, contains_word, normalize_combo};
+    use super::{Computer, DESTRUCTIVE_KEYS, DESTRUCTIVE_WORDS, Rect, WinInfo, contains_word, mask, normalize_combo};
 
     fn destructive(keys: &str) -> bool {
         DESTRUCTIVE_KEYS.contains(&normalize_combo(keys).as_str())
@@ -616,5 +616,57 @@ mod tests {
         c.allowed.lock().unwrap().push("com.apple.TextEdit".into());
         assert!(c.allowed("com.apple.textedit"));
         assert!(!c.allowed("com.apple.Safari"));
+    }
+
+    // The screenshot mask: a 100×100 picture of a 100×100-point display whose menu bar is the top
+    // 10 points and whose Dock is the bottom 10.
+    const DISPLAY: Rect = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+    const VISIBLE: Rect = Rect { x: 0.0, y: 10.0, w: 100.0, h: 80.0 };
+
+    fn win(x: f32, y: f32, w: f32, h: f32, allowed: bool) -> WinInfo {
+        WinInfo { frame: Rect { x, y, w, h }, allowed, layer: 0 }
+    }
+
+    /// Whether the pixel at (x, y) goes to the model.
+    fn shows(keep: &[bool], x: usize, y: usize) -> bool {
+        keep[y * 100 + x]
+    }
+
+    /// Only an allowed window shows; the desktop and other apps' windows are black.
+    #[test]
+    fn an_allowed_window_shows_and_other_apps_are_black() {
+        let windows = [win(60.0, 20.0, 30.0, 30.0, false), win(10.0, 20.0, 40.0, 60.0, true)];
+        let keep = mask(&windows, DISPLAY, Some(VISIBLE), (100, 100));
+        assert!(shows(&keep, 30, 50), "inside the allowed window");
+        assert!(!shows(&keep, 75, 35), "another app's window");
+        assert!(!shows(&keep, 5, 50), "the desktop");
+    }
+
+    /// A window in front of an allowed one covers it: that part is black.
+    #[test]
+    fn a_window_covering_an_allowed_one_is_black() {
+        let windows = [win(30.0, 40.0, 20.0, 20.0, false), win(10.0, 20.0, 80.0, 60.0, true)];
+        let keep = mask(&windows, DISPLAY, Some(VISIBLE), (100, 100));
+        assert!(!shows(&keep, 40, 50), "covered");
+        assert!(shows(&keep, 70, 50), "the uncovered part shows");
+    }
+
+    /// The menu bar and the Dock (outside the visible frame) never show, even over an allowed
+    /// full-screen window; a full-screen overlay above the windows covers nothing.
+    #[test]
+    fn the_menu_bar_and_the_dock_are_black() {
+        let overlay = WinInfo { frame: DISPLAY, allowed: false, layer: 25 };
+        let windows = [overlay, win(0.0, 0.0, 100.0, 100.0, true)];
+        let keep = mask(&windows, DISPLAY, Some(VISIBLE), (100, 100));
+        assert!(!shows(&keep, 50, 5), "the menu bar");
+        assert!(!shows(&keep, 50, 95), "the Dock");
+        assert!(shows(&keep, 50, 50), "the window, under the overlay");
+    }
+
+    /// Where the menu bar and the Dock are can't be told: nothing shows at all.
+    #[test]
+    fn with_no_visible_frame_everything_is_black() {
+        let keep = mask(&[win(0.0, 0.0, 100.0, 100.0, true)], DISPLAY, None, (100, 100));
+        assert!(keep.iter().all(|k| !k));
     }
 }

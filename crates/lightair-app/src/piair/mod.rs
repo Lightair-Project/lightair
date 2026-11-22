@@ -808,7 +808,10 @@ pub fn voice_track_commands(w: &lightair_model::Workspace) -> Option<lightair_mo
 
 #[cfg(test)]
 mod tests {
-    use super::voice_track_commands;
+    use serde_json::json;
+
+    use super::{Auth, FaceLook, Incoming, Line, parse_line, voice_track_commands};
+    use lightair_engine::piair_voice::Shape;
 
     /// Turning PiAir on adds its voice source and the "PiAir" track once; a workspace that has
     /// them gets no second one.
@@ -819,5 +822,55 @@ mod tests {
         add.apply(&mut w).unwrap();
         assert_eq!(w.tracks.iter().filter(|t| t.name == "PiAir").count(), 1);
         assert!(voice_track_commands(&w).is_none(), "already there");
+    }
+
+    /// A voice piece: its sound decoded, its mouth shapes read (an unknown shape dropped), 24 kHz
+    /// when the rate isn't said.
+    #[test]
+    fn a_voice_piece_is_read_with_its_sound_and_mouth_shapes() {
+        let line = r#"{"t":"voice","utterance":"u1","pcm":"AAEC","marks":[{"t_ms":0,"v":"A"},{"t_ms":80,"v":"M"},{"t_ms":120,"v":"?"}]}"#;
+        assert_eq!(
+            parse_line(line).unwrap(),
+            Incoming::Voice { utterance: "u1".into(), rate: 24_000, pcm: vec![0, 1, 2], marks: vec![(0.0, Shape::A), (80.0, Shape::M)] }
+        );
+    }
+
+    /// Each kind of line PiAir sends, read into its message.
+    #[test]
+    fn every_kind_of_message_is_read() {
+        let read = |v: serde_json::Value| parse_line(&v.to_string()).unwrap();
+        assert_eq!(read(json!({"t": "voice_end", "utterance": "u1"})), Incoming::VoiceEnd { utterance: "u1".into() });
+        assert_eq!(read(json!({"t": "voice_cancel"})), Incoming::VoiceCancel { utterance: None }, "all of them");
+        assert_eq!(
+            read(json!({"t": "face", "mood": "happy", "look": "chat"})),
+            Incoming::Face { mood: Some("happy".into()), look: Some(FaceLook::Named("chat".into())) }
+        );
+        assert_eq!(read(json!({"t": "face", "look": {"x": 0.5, "y": -0.25}})), Incoming::Face { mood: None, look: Some(FaceLook::At(0.5, -0.25)) });
+        assert_eq!(
+            read(json!({"t": "call", "id": 7, "method": "computer.click", "params": {"x": 1}})),
+            Incoming::Call { id: json!(7), method: "computer.click".into(), params: json!({"x": 1}) }
+        );
+        assert_eq!(read(json!({"t": "call", "id": 8, "method": "state.get"})), Incoming::Call { id: json!(8), method: "state.get".into(), params: json!({}) });
+        assert_eq!(read(json!({"t": "ready", "settings": {"a": 1}, "providers": []})), Incoming::Ready { settings: json!({"a": 1}), providers: json!([]) });
+        assert_eq!(read(json!({"t": "settings", "values": {"b": 2}})), Incoming::Settings { values: json!({"b": 2}) });
+        assert_eq!(read(json!({"t": "providers", "providers": [1]})), Incoming::Providers { providers: json!([1]) });
+        assert_eq!(read(json!({"t": "status"})), Incoming::Status { state: "idle".into(), detail: None });
+        assert_eq!(
+            read(json!({"t": "transcript", "role": "viewer", "who": "kiwi", "text": "hi"})),
+            Incoming::Transcript(Line { role: "viewer".into(), who: Some("kiwi".into()), text: "hi".into() })
+        );
+        assert_eq!(
+            read(json!({"t": "auth", "provider": "anthropic", "message": "Paste the code", "prompt": true})),
+            Incoming::Auth(Auth { provider: "anthropic".into(), message: "Paste the code".into(), wants_code: true, ..Auth::default() })
+        );
+        assert_eq!(read(json!({"t": "something_new"})), Incoming::Other("something_new".into()), "a newer PiAir's kind is ignored");
+    }
+
+    /// A line that isn't a JSON object with a kind is refused (and the reader goes on).
+    #[test]
+    fn bad_lines_are_refused() {
+        for line in ["", "not json", "[1, 2]", r#"{"utterance": "u1"}"#, r#"{"t": 5}"#] {
+            assert!(parse_line(line).is_err(), "{line:?}");
+        }
     }
 }
