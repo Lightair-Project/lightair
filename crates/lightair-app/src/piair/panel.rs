@@ -132,10 +132,17 @@ impl PiAirPanel {
             }
         }));
         // what PiAir says and does shows as it happens; the mics and the avatar follow the workspace
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(100)).await;
-                let ok = this.update(cx, |this, cx| {
+                let ok = this.update_in(cx, |this, window, cx| {
+                    // the persona fields show what's set, unless they're being edited
+                    for (input, pointer) in [(this.name.clone(), "/persona/name"), (this.personality.clone(), "/persona/personality")] {
+                        let want = this.setting(pointer).as_str().unwrap_or("").to_string();
+                        if !want.is_empty() && !input.read(cx).focus_handle(cx).is_focused(window) && input.read(cx).value() != want.as_str() {
+                            input.update(cx, |s, cx| s.set_value(want, window, cx));
+                        }
+                    }
                     let w = this.studio.read(cx).workspace().clone();
                     let mics: Vec<_> = w.tracks.iter().filter(|t| w.sources.get(&t.source).is_some_and(|s| s.kind == lightair_model::kinds::MIC)).map(|t| t.id).collect();
                     *this.host.0.mics.lock().unwrap_or_else(|e| e.into_inner()) = mics;
