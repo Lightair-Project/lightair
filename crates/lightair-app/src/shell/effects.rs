@@ -1424,7 +1424,7 @@ impl StudioWindow {
                     .p_4()
                     .text_size(px(12.))
                     .text_color(tok::text_tertiary())
-                    .child("No Audio Unit or VST3 effects are installed. Install one and it shows here."),
+                    .child("No Audio Unit or VST3 effects installed"),
             );
         }
 

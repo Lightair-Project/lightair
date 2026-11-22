@@ -688,7 +688,7 @@ pub(super) fn pairing_code(link: &str, offer: &Offer, camera: bool) -> Div {
             .flex_1()
             .child(div().text_size(px(13.)).child("Scan this with Lightair Live"))
             .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(if camera {
-                "On the phone: Camera, then scan this. Lightair asks you to allow the phone before it sends anything."
+                "On the phone: Camera, then scan this"
             } else {
                 "On the phone: Home › Pair a computer. Lightair asks you to allow the phone before it can do anything."
             }))
