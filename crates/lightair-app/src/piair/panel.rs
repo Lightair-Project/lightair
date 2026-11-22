@@ -307,7 +307,7 @@ impl PiAirPanel {
             (false, _) if s.error.is_some() => ("Stopped", tok::error()),
             (false, _) => ("Off", tok::text_tertiary()),
             (true, "starting") => ("Starting", tok::warn()),
-            (true, "speaking") => ("Speaking", tok::accent_primary()),
+            (true, "speaking") => ("Speaking", tok::ok()),
             (true, "thinking") => ("Thinking", tok::warn()),
             (true, "acting") => ("Using the computer", tok::live()),
             (true, "error") => ("Problem", tok::error()),
