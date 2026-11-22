@@ -773,16 +773,25 @@ impl OutputsPanel {
                 }
                 cx.notify();
             }));
-        let line = |text: String, colour: Hsla| div().text_size(px(12.)).text_color(colour).child(text);
-        let mut card = form_card("Dual Format").child(form_row(
-            "Dual Format",
-            Some("One broadcast with both pictures: computers and TVs get the landscape one, phones held upright the vertical one, full screen.".into()),
-            switch,
-        ));
+        // the explanation behind the ⓘ (docs/ui-sweep.md: a control shows its label and value)
+        let tip = {
+            let pictures = match &vertical {
+                Some(v) => format!(
+                    "{} {}×{} goes to computers and TVs; {} {}×{} to phones held upright.",
+                    main.name, main.width, main.height, v.name, v.width, v.height
+                ),
+                None => "The landscape canvas goes to computers and TVs; a vertical canvas to phones held upright.".into(),
+            };
+            format!(
+                "One Twitch broadcast with both pictures. {pictures} It needs about 12.5 Mbps of upload at 1080p (14 at 1440p); without Twitch's server-side transcode, which Partners and some Affiliates get, about 13.5 Mbps. Going live asks Twitch for the best settings for this {}, using its chip, memory and canvases.",
+                crate::ui::MACHINE
+            )
+        };
+        let mut card = form_card("Dual Format").child(form_row("Dual Format", Some(tip.into()), switch));
         if vertical.is_none() {
             card = card.child(canvas_note(
                 "smartphone",
-                "Dual Format needs a vertical canvas: phones get it full screen.".into(),
+                "Dual Format needs a vertical canvas.".into(),
                 Some(
                     Button::new("dual-add-vertical")
                         .label("Add vertical canvas")
@@ -792,23 +801,21 @@ impl OutputsPanel {
                 ),
             ));
         }
-        if on && let Some(v) = &vertical {
-            let last = crate::enhanced::summary(e.id).filter(|s| s.dual || s.note.is_some());
-            card = card
-                .child(line(format!("{} {}×{}: computers and TVs", main.name, main.width, main.height), tok::text_secondary()))
-                .child(line(format!("{} {}×{}: phones held upright", v.name, v.width, v.height), tok::text_secondary()))
-                .child(line(
-                    "About 12.5 Mbps of upload at 1080p (14 at 1440p). Without Twitch's server-side transcode, which Partners and some Affiliates get, about 13.5 Mbps.".into(),
-                    tok::text_tertiary(),
-                ))
-                .children(last.as_ref().filter(|s| s.dual).map(|s| {
-                    line(format!("Last time, Twitch planned {:.1} Mbps in {} tracks.", s.kbps as f32 / 1000.0, s.tracks), tok::text_secondary())
-                }))
-                .children(last.and_then(|s| s.note).map(|n| line(n, tok::warn())))
-                .child(line(
-                    format!("Going live asks Twitch for the best settings for this {} (its chip, memory and canvases).", crate::ui::MACHINE),
-                    tok::text_tertiary(),
-                ));
+        if on && vertical.is_some() {
+            // state to act on, one short line: the last Go live went landscape only, or Twitch cautioned
+            if let Some(note) = crate::enhanced::summary(e.id).and_then(|s| s.note) {
+                let short = if note.starts_with("Sent landscape only") { "Last Go live: landscape only" } else { "Last Go live: Twitch's note" };
+                card = card.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_size(px(12.))
+                        .text_color(tok::warn())
+                        .child(short)
+                        .child(ui::info("dual-note", note)),
+                );
+            }
             // the caps Twitch's plan keeps within, behind More (Auto: Twitch decides)
             let more = self.dual_more;
             card = card.child(
