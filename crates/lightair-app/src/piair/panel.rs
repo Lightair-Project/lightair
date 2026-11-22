@@ -31,7 +31,11 @@ impl Prefs {
         lightair_platform::paths::data_dir().join("PiAir").join("lightair.json")
     }
     pub fn load() -> Prefs {
-        std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        let mut p: Prefs =
+            std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        p.allowed.retain(|a| seen.insert(a.to_lowercase()));
+        p
     }
     fn save(&self) {
         let p = Self::path();
@@ -61,6 +65,7 @@ pub struct PiAirPanel {
     personality: Entity<InputState>,
     code: Entity<InputState>,
     scroll: ScrollHandle,
+    settings_scroll: ScrollHandle,
     shown_lines: usize,
     apps: Vec<(String, String)>,
     dev_prompts: String,
@@ -200,8 +205,18 @@ impl PiAirPanel {
                                             tracing::info!(target: "piair", "CALL {method} → {}", match r { Ok(v) => v.to_string(), Err(e) => format!("error {} {}", e.0, e.1) });
                                         });
                                     }
+                                    l if l.starts_with("!scroll ") => {
+                                        let y: f32 = l[8..].trim().parse().unwrap_or(0.0);
+                                        this.settings_scroll.set_offset(point(px(0.), px(-y)));
+                                    }
                                     "!talk" => this.tab = Tab::Talk,
-                                    "!settings-tab" => this.tab = Tab::Settings,
+                                    "!settings-tab" => {
+                                        this.tab = Tab::Settings;
+                                        #[cfg(target_os = "macos")]
+                                        {
+                                            this.apps = super::input_mac::running_apps();
+                                        }
+                                    }
                                     l => this.host.prompt(l),
                                 }
                                 cx.notify();
@@ -238,6 +253,7 @@ impl PiAirPanel {
             personality,
             code,
             scroll: ScrollHandle::new(),
+            settings_scroll: ScrollHandle::new(),
             shown_lines: 0,
             apps: Vec::new(),
             dev_prompts: String::new(),
@@ -300,7 +316,9 @@ impl PiAirPanel {
         cx.notify();
     }
 
-    fn set_allowed(&mut self, allowed: Vec<String>, cx: &mut Context<Self>) {
+    fn set_allowed(&mut self, mut allowed: Vec<String>, cx: &mut Context<Self>) {
+        let mut seen = std::collections::HashSet::new();
+        allowed.retain(|a| seen.insert(a.to_lowercase()));
         self.prefs.allowed = allowed.clone();
         self.prefs.save();
         *self.host.0.computer.allowed.lock().unwrap_or_else(|e| e.into_inner()) = allowed;
@@ -637,10 +655,10 @@ impl PiAirPanel {
                         cx.notify();
                     },
                 )))
-                .child(div().w(px(130.)).child(TextInput::new(&self.key).xsmall()))
+                .child(field(&self.key, 130.))
                 .into_any_element()
         } else {
-            div().w(px(160.)).child(TextInput::new(&self.key).xsmall()).into_any_element()
+            field(&self.key, 180.).into_any_element()
         };
 
         // Voice
@@ -689,7 +707,7 @@ impl PiAirPanel {
 
         // Computer: allowed apps
         let allowed = self.prefs.allowed.clone();
-        let app_name = |id: &str| self.apps.iter().find(|a| a.0 == id).map_or(id.to_string(), |a| a.1.clone());
+        let app_name = |id: &str| self.apps.iter().find(|a| a.0 == id).map_or_else(|| short_name(id), |a| a.1.clone());
         let add_app = {
             let me = me.clone();
             let list: Vec<(String, String)> =
@@ -749,6 +767,7 @@ impl PiAirPanel {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.settings_scroll)
             .px_3()
             .py_2()
             .flex()
@@ -759,13 +778,13 @@ impl PiAirPanel {
                 d.child(section("Brain").child(row("Provider", Some("Any provider Pi supports: an API key, or your subscription (Claude Pro/Max, ChatGPT, GitHub Copilot) where it has one. Keys stay in the Keychain."), provider_menu)).child(row("Model", Some("A fast model answers sooner. Computer use needs a model that can see images."), model_menu)).child(row("Sign in", None, sign_in)))
                     .child(
                         section("Voice")
-                            .child(row("Voice", Some("Cartesia and ElevenLabs answer in about a tenth of a second and give timings for the mouth. Gemini works with a Gemini key. None: PiAir writes here instead of speaking. Plays on the PiAir mixer track."), vendors))
-                            .when(vendor != "none", |d| d.child(row("Voice key", Some("Kept in the Keychain."), div().w(px(160.)).child(TextInput::new(&self.voice_key).xsmall())))),
+                            .child(row_choices("Voice", Some("Cartesia and ElevenLabs answer in about a tenth of a second and give timings for the mouth. Gemini works with a Gemini key. None: PiAir writes here instead of speaking. Plays on the PiAir mixer track."), vendors))
+                            .when(vendor != "none", |d| d.child(row("Voice key", Some("Kept in the Keychain."), field(&self.voice_key, 180.)))),
                     )
-                    .child(section("Persona").child(row("Name", Some("PiAir answers when chat or you say its name."), div().w(px(160.)).child(TextInput::new(&self.name).xsmall()))).child(row("Personality", Some("A few words on how it talks."), div().w(px(200.)).child(TextInput::new(&self.personality).xsmall()))).child(row("Family friendly", Some("No swearing or adult topics; anything that slips through is cut before it's said."), toggle("piair-ff", "/persona/familyFriendly", flag("/persona/familyFriendly"), cx))))
+                    .child(section("Persona").child(row("Name", Some("PiAir answers when chat or you say its name."), field(&self.name, 180.))).child(row("Personality", Some("A few words on how it talks."), field(&self.personality, 220.))).child(row("Family friendly", Some("No swearing or adult topics; anything that slips through is cut before it's said."), toggle("piair-ff", "/persona/familyFriendly", flag("/persona/familyFriendly"), cx))))
                     .child(
                         section("Behaviour")
-                            .child(row("Chattiness", Some("Quiet: only when spoken to. Normal: also picks a chat message now and then. Lively and Chatty: more often."), chatty))
+                            .child(row_choices("Chattiness", Some("Quiet: only when spoken to. Normal: also picks a chat message now and then. Lively and Chatty: more often."), chatty))
                             .child(row("Answer chat", Some("Reads chat from every platform and answers some of it. Chat can never make PiAir change Lightair or use the computer."), toggle("piair-chat", "/behaviour/answerChat", flag("/behaviour/answerChat"), cx)))
                             .child(row("Listen to me", Some("Hears you with on-device speech recognition and answers when you say its name."), toggle("piair-listen", "/behaviour/listen", flag("/behaviour/listen"), cx)))
                             .child(row("Stop when I talk", Some("PiAir goes quiet when your mic picks you up."), toggle("piair-yield", "/behaviour/stopWhenStreamerTalks", flag("/behaviour/stopWhenStreamerTalks"), cx))),
@@ -821,17 +840,48 @@ fn row(label: &str, detail: Option<&str>, control: impl IntoElement) -> Div {
         .py_1p5()
         .rounded(px(8.))
         .bg(tok::bg_raised())
+        // the label keeps its words; the control takes what's left (text fields shrink, choices wrap)
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .child(div().text_size(px(13.)).child(label.to_string()))
+                .children(detail.map(|d| ui::info(SharedString::from(format!("piair-tip-{label}")), d.to_string()))),
+        )
+        .child(div().flex_1().min_w_0().flex().justify_end().child(control))
+}
+
+/// A setting whose choices go on their own line under its name (they'd wrap beside it).
+fn row_choices(label: &str, detail: Option<&str>, control: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .rounded(px(8.))
+        .bg(tok::bg_raised())
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap_1()
-                .flex_1()
-                .min_w_0()
-                .child(div().min_w_0().truncate().text_size(px(13.)).child(label.to_string()))
+                .child(div().text_size(px(13.)).child(label.to_string()))
                 .children(detail.map(|d| ui::info(SharedString::from(format!("piair-tip-{label}")), d.to_string()))),
         )
-        .child(div().flex_none().child(control))
+        .child(control)
+}
+
+/// A text field in a row: as wide as there's room for, up to `max`.
+fn field(input: &Entity<InputState>, max: f32) -> Div {
+    div().w_full().max_w(px(max)).child(TextInput::new(input).xsmall())
+}
+
+/// An app's name from its bundle id when it isn't running ("com.apple.TextEdit" → "TextEdit").
+fn short_name(id: &str) -> String {
+    id.rsplit('.').next().unwrap_or(id).to_string()
 }
 
 /// The house switch: accent green when on.
@@ -853,16 +903,18 @@ fn chips(
     cx: &mut Context<PiAirPanel>,
     pick: impl Fn(&mut PiAirPanel, usize, &mut Context<PiAirPanel>) + Clone + 'static,
 ) -> AnyElement {
-    let mut row = div().flex().flex_wrap().justify_end().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
+    let mut row = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
     for (i, (label, on)) in options.into_iter().enumerate() {
         let pick = pick.clone();
         row = row.child(
             div()
                 .id((id, i))
-                .px_2()
+                .flex_1()
+                .px_1()
                 .h(px(22.))
                 .flex()
                 .items_center()
+                .justify_center()
                 .rounded(px(5.))
                 .text_size(px(11.))
                 .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
