@@ -171,6 +171,41 @@ fn aspect_label(f: &Canvas) -> String {
     format!("{}:{}", f.width / g, f.height / g)
 }
 
+/// A landscape-only platform pointed at a vertical canvas: what to say, and the landscape canvas
+/// to send instead (`Some(None)`: the primary; `None`: there's no landscape canvas to offer).
+fn landscape_mismatch(p: &Platform, workspace: &Workspace, chosen: Option<Id>) -> Option<(String, Option<Option<Id>>, String)> {
+    let f = chosen.and_then(|id| workspace.canvas(id)).unwrap_or(workspace.primary_canvas());
+    if p.shape != Shape::Landscape || p.id == "custom" || f.width >= f.height {
+        return None;
+    }
+    let primary = workspace.primary_canvas().id;
+    let landscape = workspace.canvases.iter().find(|c| c.width >= c.height);
+    let text = format!(
+        "{} shows landscape video: the {} canvas would play with bars on computers and TVs.",
+        p.name,
+        f.name.to_lowercase()
+    );
+    Some((
+        text,
+        landscape.map(|c| (c.id != primary).then_some(c.id)),
+        landscape.map_or_else(String::new, |c| format!("Send {} instead", c.name)),
+    ))
+}
+
+/// A canvas note under a destination's canvas choice: an icon, what's wrong, its fix.
+fn canvas_note(icon: &str, text: String, fix: Option<Button>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .p_2p5()
+        .rounded(px(8.))
+        .bg(tok::bg_app())
+        .child(ui::icon(icon).size(px(14.)).text_color(tok::warn()))
+        .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(tok::text_secondary()).child(text))
+        .children(fix.map(|b| b.flex_none()))
+}
+
 /// A platform's badge: its colour with its logo (or a short mark).
 pub fn badge(p: &Platform, size: f32) -> Div {
     let light = matches!(p.id, "kick" | "chzzk");
@@ -1326,6 +1361,20 @@ impl OutputsPanel {
             .children(self.sending_row(e.platform.id, cx));
         let picture_sound = card("Picture & sound")
             .child(row("Canvas", None, shapes.into_any_element()))
+            .children(landscape_mismatch(p, workspace, e.canvas).map(|(text, target, label)| {
+                canvas_note(
+                    "monitor",
+                    text,
+                    target.map(|to| {
+                        Button::new("edit-use-landscape").label(label).xsmall().outline().on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(Setup::Edit(e)) = &mut this.setup {
+                                e.canvas = to;
+                            }
+                            cx.notify();
+                        }))
+                    }),
+                )
+            }))
             .child(row(
                 "Audio",
                 Some("What it hears: the master (everything on air), or a mix built from sends, such as one without the music."),
@@ -1689,7 +1738,22 @@ impl OutputsPanel {
             format!("{} wants {shape} video: the canvases that fit have a green dot.{rate}", p.name).into()
         });
         let no_vertical = p.shape == Shape::Vertical && !workspace.canvases.iter().any(|f| f.height > f.width);
-        let picture = form_card("Picture").child(form_row("Canvas", shape_tip, shapes)).when(no_vertical, |d| {
+        // the reverse: a landscape-only platform (Twitch, YouTube…) sent a vertical canvas
+        let mismatch = landscape_mismatch(p, workspace, c.canvas).map(|(text, target, label)| {
+            canvas_note(
+                "monitor",
+                text,
+                target.map(|to| {
+                    Button::new("use-landscape").label(label).xsmall().outline().on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(Setup::Configure(c)) = &mut this.setup {
+                            c.canvas = to;
+                        }
+                        cx.notify();
+                    }))
+                }),
+            )
+        });
+        let picture = form_card("Picture").child(form_row("Canvas", shape_tip, shapes)).children(mismatch).when(no_vertical, |d| {
             d.child(
                 div()
                     .flex()
