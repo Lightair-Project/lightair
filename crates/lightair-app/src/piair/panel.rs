@@ -201,7 +201,9 @@ impl PiAirPanel {
                             }
                         }
                     }
-                    if this.host.0.dirty.swap(false, Ordering::Relaxed) {
+                    // the screenshot glyph goes away on its own
+                    let shot = this.host.state().last_shot.is_some_and(|t| t.elapsed() < Duration::from_secs(5));
+                    if this.host.0.dirty.swap(false, Ordering::Relaxed) || shot {
                         let n = this.host.state().log.len();
                         if n != this.shown_lines {
                             this.shown_lines = n;
@@ -314,6 +316,12 @@ impl PiAirPanel {
             _ => ("Listening", tok::ok()),
         };
         let paused = s.paused;
+        // a picture of the screen just went to the model
+        let shot = s.last_shot.is_some_and(|t| t.elapsed() < Duration::from_secs(4));
+        let provider = s.providers.as_array().and_then(|l| {
+            let id = s.settings.pointer("/provider")?.as_str()?;
+            l.iter().find(|p| p["id"] == id)?["name"].as_str().map(str::to_owned)
+        });
         drop(s);
         div()
             .flex()
@@ -330,6 +338,13 @@ impl PiAirPanel {
                 label
             }))
             .child(div().flex_1())
+            .when(shot, |d| {
+                let tip = format!(
+                    "A picture of the screen went to {} just now: only the allowed apps' windows, the rest blacked out.",
+                    provider.clone().unwrap_or_else(|| "the AI provider".into())
+                );
+                d.child(div().id("piair-shot").flex_none().child(ui::icon("camera").size(px(14.)).text_color(tok::warn())).tooltip(ui::tip(tip)))
+            })
             .when(self.host.running(), |d| {
                 d.child(
                     Button::new("piair-stop")

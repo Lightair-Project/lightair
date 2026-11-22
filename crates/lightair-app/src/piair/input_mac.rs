@@ -101,6 +101,12 @@ unsafe extern "C" {
     fn CGDisplayBounds(display: u32) -> CGRect;
     fn CGMainDisplayID() -> u32;
     fn CGPreflightListenEventAccess() -> bool;
+    fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> CFTypeRef;
+    fn CGRectMakeWithDictionaryRepresentation(dict: CFTypeRef, rect: *mut CGRect) -> bool;
+    static kCGWindowOwnerPID: CFTypeRef;
+    static kCGWindowBounds: CFTypeRef;
+    static kCGWindowLayer: CFTypeRef;
+    static kCGWindowAlpha: CFTypeRef;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -113,6 +119,10 @@ unsafe extern "C" {
     fn CFStringCreateWithCString(alloc: *const c_void, s: *const i8, encoding: u32) -> CFTypeRef;
     fn CFStringGetCString(s: CFTypeRef, buf: *mut i8, size: isize, encoding: u32) -> bool;
     fn CFGetTypeID(cf: CFTypeRef) -> usize;
+    fn CFArrayGetCount(a: CFTypeRef) -> isize;
+    fn CFArrayGetValueAtIndex(a: CFTypeRef, i: isize) -> CFTypeRef;
+    fn CFDictionaryGetValue(d: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    fn CFNumberGetValue(n: CFTypeRef, kind: isize, out: *mut c_void) -> bool;
     fn CFStringGetTypeID() -> usize;
     static kCFRunLoopCommonModes: *const c_void;
     static kCFBooleanTrue: CFTypeRef;
@@ -625,6 +635,101 @@ pub fn running_apps() -> Vec<(String, String)> {
 }
 
 // ------------------------------------------------------------------ the screen
+
+/// A window on screen: its process, frame (global points) and layer (0 = a normal window).
+#[derive(Clone, Copy, Debug)]
+pub struct Window {
+    pub pid: i32,
+    pub frame: CGRect,
+    pub layer: i32,
+}
+
+/// The windows on screen, front to back (the menu bar, the Dock and panels included; the desktop
+/// picture left out). Transparent windows are skipped.
+pub fn windows_on_screen() -> Vec<Window> {
+    // kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements
+    const OPTIONS: u32 = (1 << 0) | (1 << 4);
+    let mut out = Vec::new();
+    unsafe {
+        let list = CGWindowListCopyWindowInfo(OPTIONS, 0);
+        if list.is_null() {
+            return out;
+        }
+        let n = CFArrayGetCount(list);
+        let int = |d: CFTypeRef, k: CFTypeRef| -> Option<i64> {
+            let v = CFDictionaryGetValue(d, k);
+            let mut x: i64 = 0;
+            // kCFNumberSInt64Type
+            (!v.is_null() && CFNumberGetValue(v, 4, &mut x as *mut i64 as *mut c_void)).then_some(x)
+        };
+        let float = |d: CFTypeRef, k: CFTypeRef| -> Option<f64> {
+            let v = CFDictionaryGetValue(d, k);
+            let mut x: f64 = 0.0;
+            // kCFNumberFloat64Type
+            (!v.is_null() && CFNumberGetValue(v, 6, &mut x as *mut f64 as *mut c_void)).then_some(x)
+        };
+        for i in 0..n {
+            let d = CFArrayGetValueAtIndex(list, i);
+            if d.is_null() || float(d, kCGWindowAlpha).is_some_and(|a| a <= 0.01) {
+                continue;
+            }
+            let mut frame = CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: 0.0, height: 0.0 } };
+            let b = CFDictionaryGetValue(d, kCGWindowBounds);
+            if b.is_null() || !CGRectMakeWithDictionaryRepresentation(b, &mut frame) {
+                continue;
+            }
+            out.push(Window {
+                pid: int(d, kCGWindowOwnerPID).unwrap_or(0) as i32,
+                frame,
+                layer: int(d, kCGWindowLayer).unwrap_or(0) as i32,
+            });
+        }
+        CFRelease(list);
+    }
+    out
+}
+
+/// The part of a display (its frame in global points, top-left origin) not taken by the menu bar
+/// and the Dock, in the same coordinates. `None` when it can't be told.
+pub fn visible_frame(display: CGRect) -> Option<CGRect> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::NSRect;
+    unsafe {
+        let cls = AnyClass::get(c"NSScreen")?;
+        let screens: *mut AnyObject = msg_send![cls, screens];
+        if screens.is_null() {
+            return None;
+        }
+        let n: usize = msg_send![screens, count];
+        // Cocoa's y goes up from the bottom of the main (first) screen
+        let first: *mut AnyObject = msg_send![screens, objectAtIndex: 0usize];
+        let main: NSRect = msg_send![first, frame];
+        let main_h = main.size.height;
+        for i in 0..n {
+            let sc: *mut AnyObject = msg_send![screens, objectAtIndex: i];
+            let f: NSRect = msg_send![sc, frame];
+            let top = main_h - (f.origin.y + f.size.height);
+            let same = (f.origin.x - display.origin.x).abs() < 1.0
+                && (top - display.origin.y).abs() < 1.0
+                && (f.size.width - display.size.width).abs() < 1.0;
+            if same {
+                let v: NSRect = msg_send![sc, visibleFrame];
+                let vtop = main_h - (v.origin.y + v.size.height);
+                return Some(CGRect {
+                    origin: CGPoint { x: v.origin.x, y: vtop },
+                    size: CGSize { width: v.size.width, height: v.size.height },
+                });
+            }
+        }
+        None
+    }
+}
+
+/// An app's bundle id from its process.
+pub fn bundle_id(pid: i32) -> Option<String> {
+    bundle_of_pid(pid)
+}
 
 /// A display: its index for `screencapture -D` (1-based, active list order) and bounds in points.
 pub fn display_at(at: (f32, f32)) -> (u32, CGRect) {

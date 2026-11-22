@@ -80,6 +80,8 @@ pub struct State {
     pub restarts: Vec<Instant>,
     /// The human touched the mouse or keyboard: the AI is paused.
     pub paused: bool,
+    /// When a picture of the screen last went to the model (the panel shows it for a moment).
+    pub last_shot: Option<Instant>,
 }
 
 pub struct Shared {
@@ -489,7 +491,12 @@ impl Host {
     pub(crate) fn answer(&self, method: &str, params: Value) -> Result<Value, (String, String)> {
         if method.starts_with("computer.") {
             let ask = |text: String| self.ask(text);
-            return self.0.computer.call(method, &params, &ask).map_err(|r| (r.code.to_string(), r.message));
+            let r = self.0.computer.call(method, &params, &ask).map_err(|r| (r.code.to_string(), r.message));
+            if method == "computer.screenshot" && r.is_ok() {
+                self.state().last_shot = Some(Instant::now());
+                self.touch();
+            }
+            return r;
         }
         match method {
             "secret.get" => {

@@ -116,7 +116,17 @@ impl Computer {
     #[cfg(target_os = "macos")]
     fn call_mac(&self, method: &str, p: &Value, ask: &dyn Fn(String) -> bool) -> Result<Value, Refusal> {
         match method {
-            "computer.screenshot" => return self.screenshot(p),
+            // a picture of the screen goes to a cloud model: only while the streamer lets the AI
+            // drive, and only the allowed apps' windows are in it
+            "computer.screenshot" => {
+                if !self.ai_drives.load(Ordering::Relaxed) {
+                    return Err(refuse(
+                        "not_enabled",
+                        "AI drives is off. The streamer turns it on in the PiAir panel.",
+                    ));
+                }
+                return self.screenshot(p);
+            }
             "computer.cursor" => {
                 let (x, y) = self.to_pixels(imp::pointer());
                 return Ok(json!({"x": x, "y": y}));
@@ -380,9 +390,11 @@ impl Computer {
         let max_w = p.get("max_width").and_then(Value::as_u64).unwrap_or(1280).clamp(320, 1920) as u32;
         let img =
             if img.width() > max_w { img.resize(max_w, u32::MAX, image::imageops::FilterType::Triangle) } else { img };
+        let mut rgb = img.to_rgb8();
+        self.black_out(&mut rgb, (bounds.origin.x as f32, bounds.origin.y as f32), bounds.size.width as f32);
         let mut out = Vec::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 78)
-            .encode_image(&img.to_rgb8())
+            .encode_image(&rgb)
             .map_err(|e| refuse("failed", e.to_string()))?;
         let shot = Shot {
             origin: (bounds.origin.x as f32, bounds.origin.y as f32),
@@ -398,6 +410,90 @@ impl Computer {
             "display": index,
             "cursor": {"x": cx.round(), "y": cy.round()},
         }))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Computer {
+    /// Leaves only what the allowed apps' windows show where nothing else covers them; the rest
+    /// (other apps, Lightair, the menu bar, the Dock, the desktop) is black. `origin` and `width`
+    /// are the display's frame in points.
+    fn black_out(&self, img: &mut image::RgbImage, origin: (f32, f32), width: f32) {
+        let k = img.width() as f32 / width.max(1.0);
+        let (w, h) = (img.width() as i64, img.height() as i64);
+        let mut keep = vec![false; (w * h) as usize];
+        let me = std::process::id() as i32;
+        let mut allowed_pid: std::collections::HashMap<i32, bool> = std::collections::HashMap::new();
+        // back to front: an allowed window shows; anything above it covers it again
+        for win in imp::windows_on_screen().into_iter().rev() {
+            let allowed = win.pid != me
+                && *allowed_pid
+                    .entry(win.pid)
+                    .or_insert_with(|| imp::bundle_id(win.pid).is_some_and(|b| self.allowed(&b)));
+            let f = win.frame;
+            // full-screen overlays above the windows (the Dock's, the window server's) cover
+            // nothing; the menu bar, the Dock itself and other apps' panels do
+            let whole = f.size.width as f32 * k >= w as f32 * 0.95 && f.size.height as f32 * k >= h as f32 * 0.95;
+            if win.layer != 0 && whole && !allowed {
+                continue;
+            }
+            let show = allowed;
+            let x0 = (((f.origin.x as f32 - origin.0) * k).floor() as i64).clamp(0, w);
+            let y0 = (((f.origin.y as f32 - origin.1) * k).floor() as i64).clamp(0, h);
+            let x1 = ((((f.origin.x + f.size.width) as f32 - origin.0) * k).ceil() as i64).clamp(0, w);
+            let y1 = ((((f.origin.y + f.size.height) as f32 - origin.1) * k).ceil() as i64).clamp(0, h);
+            for y in y0..y1 {
+                let row = (y * w) as usize;
+                keep[row + x0 as usize..row + x1 as usize].fill(show);
+            }
+            // windows have round corners: what's behind them there stays black too
+            if show {
+                let r = ((12.0 * k).ceil() as i64).min((x1 - x0) / 2).min((y1 - y0) / 2);
+                for dy in 0..r {
+                    for dx in 0..r {
+                        let (cx, cy) = (r - dx, r - dy);
+                        if cx * cx + cy * cy <= r * r {
+                            continue;
+                        }
+                        for (x, y) in [
+                            (x0 + dx, y0 + dy),
+                            (x1 - 1 - dx, y0 + dy),
+                            (x0 + dx, y1 - 1 - dy),
+                            (x1 - 1 - dx, y1 - 1 - dy),
+                        ] {
+                            keep[(y * w + x) as usize] = false;
+                        }
+                    }
+                }
+            }
+        }
+        // the menu bar and the Dock never show, whatever is under them
+        let display = imp::CGRect {
+            origin: imp::CGPoint { x: origin.0 as f64, y: origin.1 as f64 },
+            size: imp::CGSize { width: width as f64, height: h as f64 / k as f64 },
+        };
+        match imp::visible_frame(display) {
+            Some(v) => {
+                let vx0 = (((v.origin.x as f32 - origin.0) * k).ceil() as i64).clamp(0, w);
+                let vy0 = (((v.origin.y as f32 - origin.1) * k).ceil() as i64).clamp(0, h);
+                let vx1 = ((((v.origin.x + v.size.width) as f32 - origin.0) * k).floor() as i64).clamp(0, w);
+                let vy1 = ((((v.origin.y + v.size.height) as f32 - origin.1) * k).floor() as i64).clamp(0, h);
+                for y in 0..h {
+                    for x in 0..w {
+                        if x < vx0 || x >= vx1 || y < vy0 || y >= vy1 {
+                            keep[(y * w + x) as usize] = false;
+                        }
+                    }
+                }
+            }
+            // can't tell where they are: nothing shows
+            None => keep.fill(false),
+        }
+        for (i, px) in img.pixels_mut().enumerate() {
+            if !keep[i] {
+                *px = image::Rgb([0, 0, 0]);
+            }
+        }
     }
 }
 
