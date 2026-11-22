@@ -125,7 +125,11 @@ fn flat_names(f: &Flat) -> Vec<(String, String)> {
             .puppet
             .mesh_ids()
             .into_iter()
-            .map(|(id, part)| (id, if part.is_empty() { "Art meshes".into() } else { part }))
+            // (a part's id as its name: "PartRobe" → "Robe")
+            .map(|(id, part)| {
+                let name = part.strip_prefix("Part").filter(|r| !r.is_empty()).unwrap_or(&part).to_string();
+                (id, if name.is_empty() { "Art meshes".into() } else { name })
+            })
             .collect(),
         Flat::Inochi2d(l) => l.puppet.parts().iter().map(|p| (p.name.clone(), "Parts".into())).collect(),
         Flat::Uma(l) => l.puppet.drawables().iter().map(|d| (d.name.clone(), "Art meshes".into())).collect(),
@@ -180,7 +184,7 @@ pub(crate) fn flat_frame(f: &Flat, framing: lightair_avatar::Framing, aspect: f3
 /// An anchor in the avatar's picture: pixels, its turn (radians, clockwise as seen) and its size
 /// (only ever compared with itself at rest).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Spot {
+pub struct Spot {
     pub x: f32,
     pub y: f32,
     pub angle: f32,
@@ -197,18 +201,18 @@ fn project(p: Vec3, vp: &Mat4, w: f32, h: f32) -> Option<(f32, f32, f32)> {
     (c.w > 1e-5).then(|| ((c.x / c.w * 0.5 + 0.5) * w, (0.5 - c.y / c.w * 0.5) * h, c.w))
 }
 
-/// Which of a bone's axes shows longest in the picture (its turn is read from that one).
-pub(crate) fn best_axis(world: &Mat4, vp: &Mat4, w: f32, h: f32) -> usize {
-    let o = world.w_axis.truncate();
-    let Some((x, y, _)) = project(o, vp, w, h) else { return 1 };
+/// Which of a bone's axes lies flattest across the picture at rest (its turn is read from that
+/// one): the one pointing least toward the camera, which always looks along the model's depth, so
+/// the choice doesn't depend on framing.
+pub(crate) fn best_axis(rest_world: &Mat4) -> usize {
     (0..3)
-        .map(|i| {
-            let a = [world.x_axis, world.y_axis, world.z_axis][i].truncate().normalize_or_zero() * 0.1;
-            let len = project(o + a, vp, w, h).map_or(0.0, |(x2, y2, _)| (x2 - x).hypot(y2 - y));
-            (i, len)
+        .min_by(|a, b| {
+            let z = |i: usize| {
+                [rest_world.x_axis, rest_world.y_axis, rest_world.z_axis][i].truncate().normalize_or_zero().z.abs()
+            };
+            z(*a).total_cmp(&z(*b))
         })
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-        .map_or(1, |(i, _)| i)
+        .unwrap_or(1)
 }
 
 /// A bone in the picture.
@@ -300,6 +304,9 @@ impl Placement {
 pub struct PinTarget {
     pub item: *mut sys::obs_sceneitem_t,
     pub anchor: String,
+    /// Where the anchor was at rest in the avatar's picture when the object was pinned: its offset
+    /// is from there, whatever the framing or zoom since (`None`: from where it's at rest now).
+    pub pinned_at: Option<Spot>,
     pub base: Placement,
     pub host: Placement,
 }
@@ -358,6 +365,7 @@ pub(crate) fn apply(source: usize, w: f32, h: f32, spot: impl Fn(&str) -> Option
     let mut cache: HashMap<&str, Option<(Spot, Spot)>> = HashMap::new();
     for t in targets {
         let Some((rest, now)) = *cache.entry(t.anchor.as_str()).or_insert_with(|| spot(&t.anchor)) else { continue };
+        let rest = t.pinned_at.unwrap_or(rest);
         let p0 = on_canvas(&t.host, w, h, rest.x, rest.y);
         let p1 = on_canvas(&t.host, w, h, now.x, now.y);
         let turn = now.angle - rest.angle;

@@ -857,12 +857,19 @@ impl Puppet {
         }
     }
 
-    /// The parameters the face doesn't drive (arms, hair, toggles the artist made), by name: an
-    /// Inochi2D puppet's expressions, each held at its maximum while chosen.
+    /// The parameters the face doesn't drive (arms, toggles the artist made), by name: an Inochi2D
+    /// puppet's expressions, each held at its maximum while chosen. Those its physics move ("…::
+    /// Physics": hair, ears, skirts) aren't: holding one would fight the physics.
     pub fn toggles(&self) -> Vec<String> {
         let driven: std::collections::HashSet<&str> = self.mapping.drives.iter().map(|d| d.param.as_str()).collect();
-        let mut names: Vec<String> =
-            self.model.puppet.params().keys().filter(|n| !driven.contains(n.as_str())).cloned().collect();
+        let mut names: Vec<String> = self
+            .model
+            .puppet
+            .params()
+            .keys()
+            .filter(|n| !driven.contains(n.as_str()) && !n.to_lowercase().contains("physics"))
+            .cloned()
+            .collect();
         names.sort();
         names
     }

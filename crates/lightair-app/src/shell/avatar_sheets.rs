@@ -50,14 +50,26 @@ pub(super) fn entry_of(settings: &Value) -> Option<Id> {
     serde_json::from_value(settings.get("library")?.clone()).ok()
 }
 
-/// `settings` with `object` pinned to `key` (`None`: not pinned).
-pub(super) fn with_pin(settings: &Value, object: Id, key: Option<&str>) -> Value {
+/// The anchor an object is pinned to, from the avatar's settings.
+pub(super) fn pin_of(settings: &Value, object: Id) -> Option<String> {
+    let pin = &settings["pins"][object.to_string()];
+    pin.as_str().or_else(|| pin["anchor"].as_str()).filter(|k| !k.is_empty()).map(str::to_string)
+}
+
+/// `settings` with `object` pinned to `key` (`None`: not pinned), with where the anchor is at rest
+/// now (`at`), which its offset is kept from.
+pub(super) fn with_pin(settings: &Value, object: Id, key: Option<&str>, at: Option<lightair_engine::avatar_pins::Spot>) -> Value {
     let mut s = if settings.is_object() { settings.clone() } else { json!({}) };
     if !s["pins"].is_object() {
         s["pins"] = json!({});
     }
     match key {
-        Some(k) => s["pins"][object.to_string()] = json!(k),
+        Some(k) => {
+            s["pins"][object.to_string()] = match at {
+                Some(a) => json!({"anchor": k, "at": [a.x, a.y, a.angle, a.scale]}),
+                None => json!(k),
+            }
+        }
         None => {
             if let Some(m) = s["pins"].as_object_mut() {
                 m.remove(&object.to_string());
@@ -109,7 +121,7 @@ impl StudioWindow {
 
     /// Puts a library avatar on `source` (keeping the one it had in the library as it was), or
     /// adds it as a new avatar object.
-    fn use_avatar(&mut self, entry: Id, source: Option<Id>, cx: &mut Context<Self>) {
+    pub(super) fn use_avatar(&mut self, entry: Id, source: Option<Id>, cx: &mut Context<Self>) {
         let Some(e) = self.avatar_library.get(entry).cloned() else { return };
         self.library_sheet = None;
         match source {
@@ -472,6 +484,12 @@ impl StudioWindow {
         cx.notify();
     }
 
+    /// Where an anchor is at rest now, in the avatar's picture.
+    fn anchor_at_rest(&self, avatar_source: Id, key: Option<&str>, cx: &App) -> Option<lightair_engine::avatar_pins::Spot> {
+        let key = key?.to_string();
+        self.studio.read(cx).engine().call(move |e| e.reconciler.avatar_anchor_rest(avatar_source, &key))
+    }
+
     /// Asks for a picture or video, then the anchor it goes on.
     pub(super) fn add_accessory(
         &mut self,
@@ -491,13 +509,14 @@ impl StudioWindow {
         .detach();
     }
 
-    fn choose_anchor(&mut self, key: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn choose_anchor(&mut self, key: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(sheet) = self.anchor_sheet.take() else { return };
         let workspace = self.studio.read(cx).workspace().clone();
         let Some(avatar) = workspace.sources.get(&sheet.avatar_source) else { return };
         match (sheet.object, sheet.file) {
             (Some(object), _) => {
-                let settings = with_pin(&avatar.settings, object, key.as_deref());
+                let at = self.anchor_at_rest(sheet.avatar_source, key.as_deref(), cx);
+                let settings = with_pin(&avatar.settings, object, key.as_deref(), at);
                 self.exec(Command::SetSourceSettings { source: sheet.avatar_source, settings }, cx);
             }
             (None, Some(file)) => {
@@ -527,7 +546,8 @@ impl StudioWindow {
             avatar.settings["height"].as_f64().unwrap_or(1080.0) as f32,
         );
         let engine = self.studio.read(cx).engine().clone();
-        let at = key.clone().and_then(|k| engine.call(move |e| e.reconciler.avatar_anchor_rest(avatar_source, &k)));
+        let rest = key.clone().and_then(|k| engine.call(move |e| e.reconciler.avatar_anchor_rest(avatar_source, &k)));
+        let at = rest.map(|s| (s.x, s.y));
         let mut layouts = Vec::new();
         for canvas in &workspace.canvases {
             let (Some(host), Some(frame)) =
@@ -560,7 +580,7 @@ impl StudioWindow {
         if let Some(k) = key.as_deref() {
             commands.push(Command::SetSourceSettings {
                 source: avatar_source,
-                settings: with_pin(&avatar.settings, object_id, Some(k)),
+                settings: with_pin(&avatar.settings, object_id, Some(k), rest),
             });
         }
         self.exec(Command::Batch { label: format!("Add {name}"), commands }, cx);
@@ -577,7 +597,7 @@ impl StudioWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let avatar_source = avatar.id;
-        let key = avatar.settings["pins"][object.to_string()].as_str().unwrap_or("").to_string();
+        let key = pin_of(&avatar.settings, object).unwrap_or_default();
         let anchors = self.avatar_status.get(&avatar_source).map(|s| s.anchors.clone()).unwrap_or_default();
         let (value, detail) = if key.is_empty() {
             ("Not pinned".to_string(), String::new())
@@ -585,7 +605,11 @@ impl StudioWindow {
             match anchors.iter().find(|a| a.key == key && a.group != "Suggested") {
                 Some(a) => (
                     a.label.clone(),
-                    if a.label == a.key { a.group.clone() } else { format!("{} · {}", a.group, a.key) },
+                    match (a.label == a.key, a.label == a.group) {
+                        (true, _) => a.group.clone(),
+                        (false, true) => a.key.clone(),
+                        (false, false) => format!("{} · {}", a.group, a.key),
+                    },
                 ),
                 None => (key.clone(), "Not in this model".to_string()),
             }
@@ -598,7 +622,7 @@ impl StudioWindow {
         };
         let pinned = !key.is_empty();
         let unpin =
-            Command::SetSourceSettings { source: avatar_source, settings: with_pin(&avatar.settings, object, None) };
+            Command::SetSourceSettings { source: avatar_source, settings: with_pin(&avatar.settings, object, None, None) };
         self.section(
             "Pin to",
             Some(
@@ -641,7 +665,7 @@ impl StudioWindow {
         let avatar = workspace.sources.get(&sheet.avatar_source)?;
         let vrm = lib::kind_of(avatar.settings["file"].as_str().unwrap_or("")) == "VRM";
         let query = sheet.search.read(cx).value().to_lowercase();
-        let current = sheet.object.and_then(|o| avatar.settings["pins"][o.to_string()].as_str().map(str::to_string));
+        let current = sheet.object.and_then(|o| pin_of(&avatar.settings, o));
         let what = match (&sheet.object, &sheet.file) {
             (Some(o), _) => {
                 workspace.scene(sheet.scene).and_then(|s| s.object(*o)).map(|o| o.name.clone()).unwrap_or_default()

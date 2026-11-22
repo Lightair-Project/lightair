@@ -250,7 +250,13 @@ impl Reconciler {
                 let Some(host) = parent.source.and_then(|i| workspace.sources.get(&i)).filter(|i| i.kind == crate::avatar::KIND) else {
                     continue;
                 };
-                let Some(anchor) = host.settings["pins"][o.id.to_string()].as_str().filter(|a| !a.is_empty()) else { continue };
+                // {"anchor": key, "at": [x, y, turn, size]} (or just the key)
+                let pin = &host.settings["pins"][o.id.to_string()];
+                let Some(anchor) = pin.as_str().or_else(|| pin["anchor"].as_str()).filter(|a| !a.is_empty()) else { continue };
+                let pinned_at = pin["at"].as_array().filter(|a| a.len() == 4).map(|a| {
+                    let f = |i: usize| a[i].as_f64().unwrap_or(0.0) as f32;
+                    crate::avatar_pins::Spot { x: f(0), y: f(1), angle: f(2), scale: f(3).max(1e-6) }
+                });
                 let Some(src) = self.sources.get(&host.id) else { continue };
                 // it and what's under it
                 let mut ids = vec![o.id];
@@ -270,6 +276,7 @@ impl Reconciler {
                         out.entry(src.as_ptr() as usize).or_default().push(PinTarget {
                             item: item.0,
                             anchor: anchor.to_string(),
+                            pinned_at,
                             base: Placement::of(&base),
                             host: Placement::of(&at),
                         });
@@ -773,7 +780,7 @@ impl Reconciler {
     }
 
     /// Where an avatar's anchor is in its picture at rest (pixels).
-    pub fn avatar_anchor_rest(&self, source: Id, key: &str) -> Option<(f32, f32)> {
+    pub fn avatar_anchor_rest(&self, source: Id, key: &str) -> Option<crate::avatar_pins::Spot> {
         crate::avatar::anchor_rest(self.sources.get(&source)?.as_ptr(), key)
     }
 

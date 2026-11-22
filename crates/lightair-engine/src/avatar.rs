@@ -1201,7 +1201,7 @@ unsafe extern "C" fn proc_anchor_rest(data: *mut c_void, cd: *mut sys::calldata_
         let mut rest = Avatar::new(a.model.clone());
         rest.update(&Controls::default(), 0.0);
         let vp = crate::avatar_pins::view_projection(&rest.camera(settings.framing, aspect, settings.zoom), aspect);
-        rest.world.get(i).and_then(|m| crate::avatar_pins::bone_spot(m, &vp, w, h, 1))
+        rest.world.get(i).and_then(|m| crate::avatar_pins::bone_spot(m, &vp, w, h, crate::avatar_pins::best_axis(m)))
     } else if let Some((_, l)) = &r.puppet {
         let frame = crate::avatar_pins::flat_frame(l, settings.framing, aspect, settings.zoom);
         r.rest2d.get(i).map(|m| crate::avatar_pins::rest_spot(m, frame, w, h))
@@ -1209,7 +1209,7 @@ unsafe extern "C" fn proc_anchor_rest(data: *mut c_void, cd: *mut sys::calldata_
         None
     };
     if let Some(at) = at {
-        let text = CString::new(format!("{} {}", at.x, at.y)).unwrap_or_default();
+        let text = CString::new(format!("{} {} {} {}", at.x, at.y, at.angle, at.scale)).unwrap_or_default();
         set_string(cd, c"at", &text);
     }
 }
@@ -1433,7 +1433,7 @@ fn follow_pins(source: usize, r: &mut Render, settings: &Settings) {
         let anchors = &r.anchors;
         crate::avatar_pins::apply(source, w, h, |key| {
             let n = *anchors.get(key)?;
-            let axis = crate::avatar_pins::best_axis(rest.world.get(n)?, &vp_rest, w, h);
+            let axis = crate::avatar_pins::best_axis(rest.world.get(n)?);
             Some((
                 crate::avatar_pins::bone_spot(rest.world.get(n)?, &vp_rest, w, h, axis)?,
                 crate::avatar_pins::bone_spot(a.world.get(n)?, &vp_now, w, h, axis)?,
@@ -1620,7 +1620,7 @@ pub fn status(source: *mut sys::obs_source_t) -> Status {
 }
 
 /// Where an anchor is in the avatar's picture at rest (pixels), once the model is in use.
-pub fn anchor_rest(source: *mut sys::obs_source_t, key: &str) -> Option<(f32, f32)> {
+pub fn anchor_rest(source: *mut sys::obs_source_t, key: &str) -> Option<crate::avatar_pins::Spot> {
     let key = CString::new(key).ok()?;
     unsafe {
         let ph = sys::obs_source_get_proc_handler(source);
@@ -1632,8 +1632,8 @@ pub fn anchor_rest(source: *mut sys::obs_source_t, key: &str) -> Option<(f32, f3
         let ok = sys::proc_handler_call(ph, c"anchor_rest".as_ptr(), &mut cd);
         let at = if ok { get_string(&mut cd, c"at") } else { String::new() };
         free_cd(&mut cd);
-        let mut xy = at.split(' ').filter_map(|v| v.parse::<f32>().ok());
-        Some((xy.next()?, xy.next()?))
+        let mut v = at.split(' ').filter_map(|v| v.parse::<f32>().ok());
+        Some(crate::avatar_pins::Spot { x: v.next()?, y: v.next()?, angle: v.next()?, scale: v.next()? })
     }
 }
 
