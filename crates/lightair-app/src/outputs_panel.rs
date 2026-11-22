@@ -185,7 +185,7 @@ fn landscape_mismatch(p: &Platform, workspace: &Workspace, chosen: Option<Id>) -
     let primary = workspace.primary_canvas().id;
     let landscape = workspace.canvases.iter().find(|c| c.width >= c.height);
     let text = format!(
-        "{} shows landscape video: the {} canvas would play with bars on computers and TVs.",
+        "{} shows landscape: the {} canvas would have bars.",
         p.name,
         f.name.to_lowercase()
     );
@@ -194,6 +194,18 @@ fn landscape_mismatch(p: &Platform, workspace: &Workspace, chosen: Option<Id>) -
         landscape.map(|c| (c.id != primary).then_some(c.id)),
         landscape.map_or_else(String::new, |c| format!("Send {} instead", c.name)),
     ))
+}
+
+/// A switch's name with what it does behind an ⓘ, and under it only a short value or state
+/// ("20 tries, 2 s apart", "RTMP and RTMPS only"): docs/ui-sweep.md's rule for the sheet.
+fn named(id: &'static str, name: &'static str, tip: String, line: Option<String>) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(div().flex().items_center().gap_1().child(div().text_size(px(13.)).child(name)).child(ui::info(id, tip)))
+        .children(line.map(|l| div().text_size(px(11.)).text_color(tok::text_tertiary()).truncate().child(l)))
 }
 
 /// A canvas note under a destination's canvas choice: an icon, what's wrong, its fix.
@@ -1022,12 +1034,11 @@ impl OutputsPanel {
                 .items_center()
                 .justify_between()
                 .gap_3()
-                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Automatic")).child(
-                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(if automatic {
-                        summary(&auto)
-                    } else {
-                        "Off: this destination uses its own settings below.".to_string()
-                    }),
+                .child(named(
+                    "tip-automatic",
+                    "Automatic",
+                    "On: the shared bitrate (Settings › Streaming), capped for the platform. Off: this destination uses its own settings below.".into(),
+                    automatic.then(|| summary(&auto)),
                 ))
                 .child(toggle("edit-auto", automatic).on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(Setup::Edit(e)) = &mut this.setup {
@@ -1154,14 +1165,11 @@ impl OutputsPanel {
                 .items_center()
                 .justify_between()
                 .gap_3()
-                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Adaptive bitrate")).child(
-                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(if !rtmp {
-                        "RTMP and RTMPS only: this protocol manages congestion itself."
-                    } else if adaptive {
-                        "Lowers the bitrate when the connection can't keep up and raises it again. The destination gets an encoder of its own."
-                    } else {
-                        "Off: the bitrate stays as set, and the connection may drop frames instead."
-                    }),
+                .child(named(
+                    "tip-adaptive",
+                    "Adaptive bitrate",
+                    "Lowers the bitrate when the connection can't keep up and raises it again; the destination gets an encoder of its own. Off: the bitrate stays as set, and the connection may drop frames instead. RTMP and RTMPS only: the other protocols manage congestion themselves.".into(),
+                    (!rtmp).then(|| "RTMP and RTMPS only".to_string()),
                 ))
                 .child(toggle("edit-adaptive", adaptive && rtmp).on_click(cx.listener(move |this, _, _, cx| {
                     if rtmp && let Some(Setup::Edit(e)) = &mut this.setup {
@@ -1244,14 +1252,13 @@ impl OutputsPanel {
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
-                                .child(div().text_size(px(13.)).child("Encoder sharing"))
-                                .child(div().text_size(px(11.)).text_color(colour).child(note))
-                                .child(div().text_size(px(11.)).text_color(tok::text_secondary()).child(encoder))
                                 .child(
-                                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(
-                                        "Destinations with the same canvas, quality and audio share one encoder; a separate one costs another encode.",
-                                    ),
-                                ),
+                                    div().flex().items_center().gap_1().child(div().text_size(px(13.)).child("Encoder sharing")).child(ui::info(
+                                        "tip-sharing",
+                                        format!("Its encoder: {encoder}. Destinations with the same canvas, quality and audio share one encoder; a separate one costs another encode."),
+                                    )),
+                                )
+                                .child(div().text_size(px(11.)).text_color(colour).truncate().child(note)),
                         )
                         .child(div().flex_none().child(match_menu)),
                 );
@@ -1282,15 +1289,16 @@ impl OutputsPanel {
                 .items_center()
                 .justify_between()
                 .gap_3()
-                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Same as the other destinations")).child(
-                    div().text_size(px(11.)).text_color(tok::text_tertiary()).child(if own_rc.is_none() {
+                .child(named(
+                    "tip-rc-shared",
+                    "Same as the other destinations",
+                    "On: the tries and delay from Settings › Streaming, the wait growing a little each time. Off: this destination uses its own tries below.".into(),
+                    own_rc.is_none().then(|| {
                         if shared_rc.retries == 0 {
-                            "Don't reconnect.".to_string()
+                            "Don't reconnect".to_string()
                         } else {
-                            format!("{} tries, {} s apart, the wait growing a little each time.", shared_rc.retries, shared_rc.delay_s)
+                            format!("{} tries, {} s apart", shared_rc.retries, shared_rc.delay_s)
                         }
-                    } else {
-                        "Off: this destination uses its own tries below.".to_string()
                     }),
                 ))
                 .child(toggle("edit-rc-shared", own_rc.is_none()).on_click(cx.listener(move |this, _, _, cx| {
@@ -1339,7 +1347,7 @@ impl OutputsPanel {
         };
         let network = {
             // (RTMP and RTMPS can choose; the others say so)
-            let note = (!rtmp).then_some("Choosing a connection or address type works for RTMP and RTMPS only.");
+            let note = (!rtmp).then_some("RTMP and RTMPS only");
             let current = e.options.network.interface.clone();
             let connected = lightair_platform::net::interfaces();
             let mut names: Vec<String> = Vec::new();
@@ -1411,15 +1419,14 @@ impl OutputsPanel {
                     .items_center()
                     .justify_between()
                     .gap_3()
-                    .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Hold the stream back")).child(
-                        div().text_size(px(11.)).text_color(tok::text_tertiary()).child(match current {
-                            None => "Off: viewers see it as it happens.".to_string(),
-                            Some(d) => format!(
-                                "Viewers see it {} s late. It uses about {} MB of memory while live.",
-                                d.seconds,
-                                (mbps as u64 * d.seconds as u64 / 8000).max(1)
-                            ),
-                        }),
+                    .child(named(
+                        "tip-delay",
+                        "Hold the stream back",
+                        format!(
+                            "Viewers see it this many seconds late; off, as it happens. It uses about {} MB of memory per 30 s while live.",
+                            (mbps as u64 * 30 / 8000).max(1)
+                        ),
+                        current.map(|d| format!("{} s late", d.seconds)),
                     ))
                     .child(toggle("edit-delay", current.is_some()).on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Setup::Edit(e)) = &mut this.setup {
@@ -1452,10 +1459,11 @@ impl OutputsPanel {
                             .items_center()
                             .justify_between()
                             .gap_3()
-                            .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).child("Carry on after a drop")).child(
-                                div().text_size(px(11.)).text_color(tok::text_tertiary()).child(
-                                    "After a dropped connection, resume where it stopped instead of skipping ahead. Uses more memory while it reconnects.",
-                                ),
+                            .child(named(
+                                "tip-delay-preserve",
+                                "Carry on after a drop",
+                                "After a dropped connection, resume where it stopped instead of skipping ahead. Uses more memory while it reconnects.".into(),
+                                None,
                             ))
                             .child(toggle("edit-delay-preserve", d.preserve_cutoff).on_click(set_opts(Box::new(|o| {
                                 if let Some(x) = &mut o.delay {
@@ -1493,17 +1501,10 @@ impl OutputsPanel {
                 ))
             })
             .when(e.options.account_key == lightair_model::AccountKey::Pasted, |d| {
-                d.child(row("Stream key", None, div().flex_1().child(Input::new(&e.key).small().mask_toggle()).into_any_element()))
+                let tip = (crate::keys::offers_account_key(e.platform.id) && !e.official_in)
+                    .then_some("Or sign in under Settings › Connections to use the key from your account.");
+                d.child(row("Stream key", tip, div().flex_1().child(Input::new(&e.key).small().mask_toggle()).into_any_element()))
             })
-            .when(
-                crate::keys::offers_account_key(e.platform.id) && !e.official_in,
-                |d| {
-                    d.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!(
-                        "Sign in to {} under Settings › Connections to use its key from your account.",
-                        e.platform.name
-                    )))
-                },
-            )
             .when(lightair_live::channel_hint(e.platform.id).is_some(), |d| {
                 d.child(row(
                     "Chat",
@@ -1664,12 +1665,13 @@ impl OutputsPanel {
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().text_size(px(13.)).text_color(tok::text()).child("Custom server"))
                     .child(
                         div()
-                            .text_size(px(11.))
-                            .text_color(tok::text_tertiary())
-                            .child("Any RTMP, RTMPS, SRT or RIST address, or a WHIP endpoint"),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(div().text_size(px(13.)).text_color(tok::text()).child("Custom server"))
+                            .child(ui::info("custom-server-tip", "Any RTMP, RTMPS, SRT or RIST address, or a WHIP endpoint")),
                     ),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.choose(custom, window, cx)));
@@ -1714,7 +1716,6 @@ impl OutputsPanel {
             .flex_col()
             .gap_3()
             .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Add a destination"))
-            .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child("Where do you want to go live?"))
             .child(Input::new(search).small().prefix(ui::icon("search").size(px(14.)).text_color(tok::text_tertiary())))
             .child(body)
             .child(custom_row)
@@ -1950,8 +1951,15 @@ impl OutputsPanel {
                             .flex()
                             .flex_col()
                             .gap_0p5()
-                            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(p.name))
-                            .child(div().text_size(px(12.)).text_color(tok::text_tertiary()).child(p.help)),
+                            // how to get its key, behind the ⓘ (the key link is below)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(p.name))
+                                    .child(ui::info("platform-help", p.help)),
+                            ),
                     )
                     .child(
                         Button::new("change-platform")

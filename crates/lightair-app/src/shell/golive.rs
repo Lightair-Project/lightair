@@ -93,12 +93,13 @@ impl StudioWindow {
                                         .text_size(px(16.))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child(format!("{name}: a note on Dual Format")),
-                                ),
+                                )
+                                .child(ui::info(
+                                    "plan-warning-tip",
+                                    "Twitch planned the stream's settings for this computer and said this about them. Cancel leaves this destination off; the others carry on.",
+                                )),
                         )
                         .child(div().text_color(tok::text_secondary()).child(words))
-                        .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(
-                            "Twitch planned the stream's settings for this computer and said this about them. Cancel leaves this destination off; the others carry on.",
-                        ))
                         .child(
                             div()
                                 .flex()
