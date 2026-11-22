@@ -883,7 +883,7 @@ impl Library {
                     .child(if searching {
                         "Try other words, or another kind."
                     } else {
-                        "Recordings, clips and multitrack audio from this workspace appear here as soon as they finish."
+                        "Nothing recorded yet"
                     }),
             )
             .when(!searching, |d| {

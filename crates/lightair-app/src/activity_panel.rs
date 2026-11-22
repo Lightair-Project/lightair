@@ -224,7 +224,12 @@ impl Render for ActivityPanel {
                         .text_size(px(12.))
                         .text_color(tok::text_tertiary())
                         .text_center()
-                        .child("Follows, subs, donations, cheers and raids from your channels show here. Try one with the test buttons."),
+                        .child(
+                            div().flex().items_center().justify_center().gap_1().child("No events yet").child(crate::ui::info(
+                                "activity-empty-tip",
+                                "Follows, subs, donations, cheers and raids from your channels show here. Try one with the test buttons.",
+                            )),
+                        ),
                 )
                 .into_any_element()
         } else {

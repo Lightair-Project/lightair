@@ -437,7 +437,7 @@ impl StudioWindow {
             )
             .child(grid)
             .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child(format!(
-                "Holds {count} object{}. Moving, turning or scaling it carries them.",
+                "Holds {count} object{}",
                 if count == 1 { "" } else { "s" }
             )));
         let actions = div()

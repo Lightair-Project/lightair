@@ -2612,7 +2612,7 @@ impl StudioWindow {
                         .flex()
                         .flex_col()
                         .child(div().font_weight(FontWeight::MEDIUM).child("Studio take saved"))
-                        .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("Screen, cameras, audio and pointer, in the Library")),
+
                 )
                 .child(Button::new("take-card-library").label("Show").small().outline().on_click(cx.listener(|this, _, _, cx| {
                     this.studio.update(cx, |s, _| s.last_studio_take = None);
@@ -4598,7 +4598,6 @@ impl StudioWindow {
                 .child(distribute_button(1, "align-vertical-distribute-center", "Space evenly down", false))
         });
         body.child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{} objects selected", selection.len())))
-            .child(div().text_color(tok::text_tertiary()).child("Drag any of them to move them together."))
             .child(row)
             .child(
                 Button::new("delete-objects")
@@ -4773,9 +4772,10 @@ impl StudioWindow {
                     .child(row("Skipped (encoder too slow)", encoder_skipped.to_string()))
                     .child(row("Dropped (network)", network_dropped.to_string()))
                     .child(row("Preview frames", preview.to_string()))
-                    .child(div().pt_1().text_size(px(11.)).text_color(tok::text_tertiary()).child(
+                    .child(div().pt_1().flex().child(ui::info(
+                        "perf-causes-tip",
                         "Three causes, kept apart: late (the renderer couldn't finish a frame in time), skipped (an encoder couldn't keep up) and dropped (the connection couldn't take them). A few late frames at start-up are normal.",
-                    )),
+                    ))),
             )
             .with_priority(1)
         });

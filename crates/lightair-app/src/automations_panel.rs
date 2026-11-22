@@ -796,7 +796,21 @@ impl AutomationsPanel {
     }
 
     fn editor(&self, a: &Automation, cx: &mut Context<Self>) -> AnyElement {
-        let label = |t: &str| div().text_size(px(11.)).text_color(tok::text_tertiary()).child(t.to_string());
+        // a label's help in parentheses goes behind an ⓘ ("Keys ⓘ"); a short unit stays ("Cooldown (seconds)")
+        let label = |t: &str| {
+            let split = t.split_once(" (").filter(|(name, rest)| t.ends_with(')') && !name.contains('(') && rest.len() > 11);
+            match split {
+                Some((name, rest)) => div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(11.))
+                    .text_color(tok::text_tertiary())
+                    .child(name.to_string())
+                    .child(crate::ui::info(SharedString::from(format!("field-tip-{name}")), rest.trim_end_matches(')').to_string())),
+                None => div().text_size(px(11.)).text_color(tok::text_tertiary()).child(t.to_string()),
+            }
+        };
         let field = |this: &Self, key: &str, l: &'static str| {
             this.input(key).map(|s| div().flex().flex_col().flex_1().min_w_0().gap_1().child(label(l)).child(TextInput::new(&s).small()))
         };
@@ -927,7 +941,12 @@ impl Render for AutomationsPanel {
                         .text_color(tok::text_tertiary())
                         .text_center()
                         .max_w(px(420.))
-                        .child("Make Lightair act on its own: thank raiders, read donations aloud, run chat commands, switch scenes on a follow. Start from New."),
+                        .child(
+                            div().flex().items_center().justify_center().gap_1().child("No automations yet").child(crate::ui::info(
+                                "automations-empty-tip",
+                                "Make Lightair act on its own: thank raiders, read donations aloud, run chat commands, switch scenes on a follow. Start from New.",
+                            )),
+                        ),
                 )
                 .into_any_element(),
         };

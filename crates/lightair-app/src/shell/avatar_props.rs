@@ -230,9 +230,11 @@ impl StudioWindow {
                             .disabled(device.is_empty())
                             .on_click(cx.listener(move |this, _, _, cx| this.calibrate_avatar(id, cx))),
                     )
-                    .child(div().flex_1().min_w_0().text_size(px(11.)).line_height(px(15.)).text_color(tok::text_tertiary()).child(
-                        self.avatar_note.as_ref().filter(|(s, _)| *s == id).map_or("Look at the camera, face relaxed, then click.".to_string(), |(_, n)| n.clone()),
-                    )),
+                    // the result once calibrated (state); how to, in the ⓘ
+                    .child(ui::info("calibrate-tip", "Look at the camera, face relaxed, then click."))
+                    .children(self.avatar_note.as_ref().filter(|(s, _)| *s == id).map(|(_, n)| {
+                        div().flex_1().min_w_0().text_size(px(11.)).line_height(px(15.)).text_color(tok::text_tertiary()).child(n.clone())
+                    })),
             )
             // (a flat model follows the face only)
             .when(!flat, |d| {

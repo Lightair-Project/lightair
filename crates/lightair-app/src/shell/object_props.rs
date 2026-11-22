@@ -674,7 +674,7 @@ impl StudioWindow {
                     div()
                         .text_size(px(11.))
                         .text_color(tok::text_tertiary())
-                        .child(if channels == 1 { "1 channel".to_string() } else { format!("{channels} channels: all, one, or a pair") }),
+                        .child(if channels == 1 { "1 channel".to_string() } else { format!("{channels} channels") }),
                 )
                 .when(channels > 1, |d| d.child(row))
                 .into_any_element(),
@@ -714,7 +714,7 @@ impl StudioWindow {
                         .flex()
                         .flex_col()
                         .child(div().text_size(px(12.)).child("Record to its own file"))
-                        .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("In multitrack recordings")),
+
                 )
                 .child(super::settings::switch("track-record", rec).on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))))
         })

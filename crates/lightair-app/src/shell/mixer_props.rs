@@ -91,9 +91,8 @@ impl StudioWindow {
         if workspace.audio.mixes.is_empty() {
             return col.child(
                 div()
-                    .text_size(px(11.))
-                    .text_color(tok::text_tertiary())
-                    .child("Add a mix in the mixer (+) to send to headphones, a VOD track or a guest."),
+                    .flex()
+                    .child(ui::info("sends-empty-tip", "Add a mix in the mixer (+) to send to headphones, a VOD track or a guest.")),
             );
         }
         for (n, mix) in workspace.audio.mixes.iter().enumerate() {

@@ -382,9 +382,12 @@ impl MixerPanel {
                 .text_color(tok::text_tertiary())
                 .child(label.to_uppercase())
         }
+        // what each is: its tooltip (docs/ui-sweep.md); the menu shows its icon and name
         fn entry(id: impl Into<ElementId>, icon: &str, title: impl Into<SharedString>, detail: impl Into<SharedString>) -> Stateful<Div> {
+            let detail: SharedString = detail.into();
             div()
                 .id(id)
+                .tooltip(ui::tip(detail))
                 .flex()
                 .items_center()
                 .gap_2p5()
@@ -410,8 +413,7 @@ impl MixerPanel {
                         .flex_col()
                         .flex_1()
                         .min_w_0()
-                        .child(div().text_size(px(12.)).text_color(tok::text()).truncate().child(title.into()))
-                        .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).truncate().child(detail.into())),
+                        .child(div().text_size(px(12.)).text_color(tok::text()).truncate().child(title.into())),
                 )
         }
         let column = || div().flex().flex_col().gap_0p5().flex_1().min_w_0();
