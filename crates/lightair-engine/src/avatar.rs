@@ -26,6 +26,7 @@ use lightair_avatar::{Avatar, Calibration, Controls, Face, Framing, Landmarks, M
 use parking_lot::Mutex;
 use serde_json::json;
 
+use crate::avatar_pins::{Anchor, MeshRest};
 use crate::obs::{Data, ObsSource};
 use crate::sys;
 
@@ -197,12 +198,28 @@ enum Load {
     Failed(String, String),
 }
 
-/// A model read: VRM (shared), or a flat one, Live2D or Inochi2D (moved to the graphics side
-/// once, when first drawn), with its expressions.
+/// A model read: VRM (shared), or a flat one, Live2D, Inochi2D or Umamo (moved to the graphics
+/// side once, when first drawn), with its expressions and anchors.
 #[derive(Clone)]
 enum Loaded {
     Vrm(Arc<Model>),
-    Flat(Arc<Mutex<Option<Box<crate::avatar2d::Flat>>>>, Vec<String>),
+    Flat(Arc<Mutex<Option<Box<crate::avatar2d::Flat>>>>, Vec<String>, Arc<Vec<(Anchor, usize)>>),
+}
+
+/// A VRM model's expressions to choose from: the moods first (happy, angry, sad, relaxed,
+/// surprised), then the artist's own, without the ones the face drives (vowels, blinks, looks).
+fn vrm_expressions(m: &Model) -> Vec<String> {
+    const MOODS: [&str; 5] = ["happy", "angry", "sad", "relaxed", "surprised"];
+    const DRIVEN: [&str; 12] =
+        ["aa", "ih", "ou", "ee", "oh", "blink", "blinkLeft", "blinkRight", "lookUp", "lookDown", "lookLeft", "lookRight"];
+    let mut own: Vec<String> = m
+        .expressions
+        .keys()
+        .filter(|k| !MOODS.contains(&k.as_str()) && !DRIVEN.contains(&k.as_str()) && k.as_str() != "neutral")
+        .cloned()
+        .collect();
+    own.sort();
+    MOODS.iter().filter(|e| m.expressions.contains_key(**e)).map(|e| e.to_string()).chain(own).collect()
 }
 
 use crate::avatar2d::is_flat;
@@ -367,6 +384,12 @@ struct Render {
     view_body: Option<BodyFrame>,
     view_tex: *mut sys::gs_texture_t,
     view_size: (u32, u32),
+    /// What things can be pinned to, by key: a VRM's node, a flat model's mesh.
+    anchors: std::collections::HashMap<String, usize>,
+    /// The VRM at rest (its idle pose, nothing tracked), made once something is pinned to it.
+    rest: Option<Avatar>,
+    /// A flat model's meshes at rest.
+    rest2d: Vec<MeshRest>,
 }
 
 struct Shared {
@@ -414,7 +437,8 @@ impl Shared {
                 let result = if is_flat(&file) {
                     crate::avatar2d::Flat::load(std::path::Path::new(&file)).map(|l| {
                         let names = l.expressions();
-                        Loaded::Flat(Arc::new(Mutex::new(Some(Box::new(l)))), names)
+                        let anchors = Arc::new(crate::avatar_pins::flat_anchors(&l));
+                        Loaded::Flat(Arc::new(Mutex::new(Some(Box::new(l)))), names, anchors)
                     })
                 } else {
                     std::fs::read(&file)
@@ -1135,6 +1159,9 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
             view_body: None,
             view_tex: std::ptr::null_mut(),
             view_size: (0, 0),
+            anchors: Default::default(),
+            rest: None,
+            rest2d: Vec::new(),
         }),
     });
     s.load_if_changed();
@@ -1142,7 +1169,8 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         let ph = sys::obs_source_get_proc_handler(source);
         let data = Box::into_raw(Box::new(Arc::downgrade(&s))) as *mut c_void;
         sys::proc_handler_add(ph, c"void calibrate(out string calibration)".as_ptr(), Some(proc_calibrate), data);
-        sys::proc_handler_add(ph, c"void status(out bool loaded, out bool tracking, out string error, out string name, out string body, out string expressions)".as_ptr(), Some(proc_status), data);
+        sys::proc_handler_add(ph, c"void anchor_rest(in string key, out string at)".as_ptr(), Some(proc_anchor_rest), data);
+        sys::proc_handler_add(ph, c"void status(out bool loaded, out bool tracking, out string error, out string name, out string body, out string expressions, out string anchors)".as_ptr(), Some(proc_status), data);
         // (the weak reference lives as long as the source: freed with it)
         let _ = data;
     }
@@ -1159,13 +1187,41 @@ unsafe extern "C" fn proc_calibrate(data: *mut c_void, cd: *mut sys::calldata_t)
     set_string(cd, c"calibration", &c);
 }
 
+/// `anchor_rest`: where an anchor is in the avatar's picture with the model at rest (pixels).
+unsafe extern "C" fn proc_anchor_rest(data: *mut c_void, cd: *mut sys::calldata_t) {
+    let weak = unsafe { &*(data as *const std::sync::Weak<Shared>) };
+    let Some(s) = weak.upgrade() else { return };
+    let key = get_string(unsafe { &mut *cd }, c"key");
+    let settings = s.settings.lock().clone();
+    let (w, h) = (settings.width as f32, settings.height as f32);
+    let aspect = w / h.max(1.0);
+    let r = s.render.lock();
+    let Some(&i) = r.anchors.get(&key) else { return };
+    let at = if let Some((_, a)) = &r.avatar {
+        let mut rest = Avatar::new(a.model.clone());
+        rest.update(&Controls::default(), 0.0);
+        let vp = crate::avatar_pins::view_projection(&rest.camera(settings.framing, aspect, settings.zoom), aspect);
+        rest.world.get(i).and_then(|m| crate::avatar_pins::bone_spot(m, &vp, w, h, 1))
+    } else if let Some((_, l)) = &r.puppet {
+        let frame = crate::avatar_pins::flat_frame(l, settings.framing, aspect, settings.zoom);
+        r.rest2d.get(i).map(|m| crate::avatar_pins::rest_spot(m, frame, w, h))
+    } else {
+        None
+    };
+    if let Some(at) = at {
+        let text = CString::new(format!("{} {}", at.x, at.y)).unwrap_or_default();
+        set_string(cd, c"at", &text);
+    }
+}
+
 /// `status`: whether the model is ready, a face is being tracked, the model's error or name.
 unsafe extern "C" fn proc_status(data: *mut c_void, cd: *mut sys::calldata_t) {
     let weak = unsafe { &*(data as *const std::sync::Weak<Shared>) };
     let Some(s) = weak.upgrade() else { return };
-    let expressions = match &*s.load.lock() {
-        Load::Ready(_, Loaded::Flat(_, names)) => names.join("\n"),
-        _ => String::new(),
+    let (expressions, anchors) = match &*s.load.lock() {
+        Load::Ready(_, Loaded::Flat(_, names, anchors)) => (names.join("\n"), anchor_lines(anchors)),
+        Load::Ready(_, Loaded::Vrm(m)) => (vrm_expressions(m).join("\n"), anchor_lines(&crate::avatar_pins::vrm_anchors(m))),
+        _ => (String::new(), String::new()),
     };
     let (loaded, error, name) = match &*s.load.lock() {
         Load::Ready(p, Loaded::Vrm(m)) => {
@@ -1202,6 +1258,13 @@ unsafe extern "C" fn proc_status(data: *mut c_void, cd: *mut sys::calldata_t) {
     set_string(cd, c"body", &b);
     let x = CString::new(expressions).unwrap_or_default();
     set_string(cd, c"expressions", &x);
+    let a = CString::new(anchors).unwrap_or_default();
+    set_string(cd, c"anchors", &a);
+}
+
+/// Anchors as the status proc gives them: a line each, "group\tlabel\tkey".
+fn anchor_lines(anchors: &[(Anchor, usize)]) -> String {
+    anchors.iter().map(|(a, _)| format!("{}\t{}\t{}", a.group, a.label, a.key)).collect::<Vec<_>>().join("\n")
 }
 
 /// A model's name from its file ("mao_pro" for mao_pro.model3.json).
@@ -1302,20 +1365,29 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
         Some((path, Loaded::Vrm(m))) => {
             r.puppet = None;
             if r.avatar.as_ref().is_none_or(|(p, _)| *p != path) {
+                r.anchors = crate::avatar_pins::vrm_anchors(&m).into_iter().map(|(a, n)| (a.key, n)).collect();
+                r.rest = None;
                 r.avatar = Some((path, Avatar::new(m)));
             }
         }
-        Some((path, Loaded::Flat(slot, _))) => {
+        Some((path, Loaded::Flat(slot, _, anchors))) => {
             r.avatar = None;
             if r.puppet.as_ref().is_none_or(|(p, _)| *p != path)
-                && let Some(l) = slot.lock().take()
+                && let Some(mut l) = slot.lock().take()
             {
+                // its meshes at rest: posed once with nothing tracked
+                l.update(&Face::default(), None, 0.0);
+                r.rest2d = (0..anchors.iter().map(|(_, i)| i + 1).max().unwrap_or(0))
+                    .map(|i| crate::avatar_pins::mesh_rest(&crate::avatar_pins::flat_points(&l, i)))
+                    .collect();
+                r.anchors = anchors.iter().map(|(a, i)| (a.key.clone(), *i)).collect();
                 r.puppet = Some((path, l));
             }
         }
         None => {
             r.avatar = None;
             r.puppet = None;
+            r.rest = None;
         }
     }
     let seen = measures.map(|m| {
@@ -1337,6 +1409,46 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
         r.dirty = true;
     }
     r.grab_due = tracking;
+    follow_pins(s.source, r, &settings);
+}
+
+/// Moves what's pinned to this avatar to where its anchors are this frame.
+fn follow_pins(source: usize, r: &mut Render, settings: &Settings) {
+    let pinned = crate::avatar_pins::anchors_pinned(source);
+    if pinned.is_empty() {
+        r.rest = None;
+        return;
+    }
+    let (w, h) = (settings.width as f32, settings.height as f32);
+    let aspect = w / h.max(1.0);
+    if let Some((_, a)) = &r.avatar {
+        if r.rest.is_none() {
+            let mut rest = Avatar::new(a.model.clone());
+            rest.update(&Controls::default(), 0.0);
+            r.rest = Some(rest);
+        }
+        let Some(rest) = &r.rest else { return };
+        let vp_rest = crate::avatar_pins::view_projection(&rest.camera(settings.framing, aspect, settings.zoom), aspect);
+        let vp_now = crate::avatar_pins::view_projection(&a.camera(settings.framing, aspect, settings.zoom), aspect);
+        let anchors = &r.anchors;
+        crate::avatar_pins::apply(source, w, h, |key| {
+            let n = *anchors.get(key)?;
+            let axis = crate::avatar_pins::best_axis(rest.world.get(n)?, &vp_rest, w, h);
+            Some((
+                crate::avatar_pins::bone_spot(rest.world.get(n)?, &vp_rest, w, h, axis)?,
+                crate::avatar_pins::bone_spot(a.world.get(n)?, &vp_now, w, h, axis)?,
+            ))
+        });
+    } else if let Some((_, l)) = &r.puppet {
+        let frame = crate::avatar_pins::flat_frame(l, settings.framing, aspect, settings.zoom);
+        let (anchors, rest) = (&r.anchors, &r.rest2d);
+        crate::avatar_pins::apply(source, w, h, |key| {
+            let i = *anchors.get(key)?;
+            let at_rest = rest.get(i)?;
+            let now = crate::avatar_pins::mesh_spot(&crate::avatar_pins::flat_points(l, i), at_rest.far, frame, w, h)?;
+            Some((crate::avatar_pins::rest_spot(at_rest, frame, w, h), now))
+        });
+    }
 }
 
 unsafe extern "C" fn video_render(data: *mut c_void, _: *mut sys::gs_effect_t) {
@@ -1452,8 +1564,11 @@ pub struct Status {
     pub name: String,
     /// What body tracking sees ("body, left arm", "no body"; empty when off).
     pub body: String,
-    /// A Live2D model's own expressions (VRM models have the standard ones).
+    /// The model's expressions: a VRM's moods and its own, a Live2D model's, an Inochi2D or
+    /// Umamo puppet's parameters the face doesn't drive.
     pub expressions: Vec<String>,
+    /// What things can be pinned to (bones, meshes), in the picker's order.
+    pub anchors: Vec<Anchor>,
 }
 
 fn get_string(cd: &mut sys::calldata_t, name: &CStr) -> String {
@@ -1492,9 +1607,34 @@ pub fn status(source: *mut sys::obs_source_t) -> Status {
         name: get_string(&mut cd, c"name"),
         body: get_string(&mut cd, c"body"),
         expressions: get_string(&mut cd, c"expressions").lines().map(str::to_string).collect(),
+        anchors: get_string(&mut cd, c"anchors")
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.splitn(3, '\t');
+                Some(Anchor { group: f.next()?.into(), label: f.next()?.into(), key: f.next()?.into() })
+            })
+            .collect(),
     };
     free_cd(&mut cd);
     s
+}
+
+/// Where an anchor is in the avatar's picture at rest (pixels), once the model is in use.
+pub fn anchor_rest(source: *mut sys::obs_source_t, key: &str) -> Option<(f32, f32)> {
+    let key = CString::new(key).ok()?;
+    unsafe {
+        let ph = sys::obs_source_get_proc_handler(source);
+        if ph.is_null() {
+            return None;
+        }
+        let mut cd = sys::calldata_t::default();
+        set_string(&mut cd, c"key", &key);
+        let ok = sys::proc_handler_call(ph, c"anchor_rest".as_ptr(), &mut cd);
+        let at = if ok { get_string(&mut cd, c"at") } else { String::new() };
+        free_cd(&mut cd);
+        let mut xy = at.split(' ').filter_map(|v| v.parse::<f32>().ok());
+        Some((xy.next()?, xy.next()?))
+    }
 }
 
 /// The face the avatar sees now, as its neutral one: the `calibration` setting's JSON (`None`
@@ -1552,6 +1692,9 @@ pub fn track_body_once(bgra: &[u8], width: u32, height: u32) -> Option<BodyFrame
             view_body: None,
             view_tex: std::ptr::null_mut(),
             view_size: (0, 0),
+            anchors: Default::default(),
+            rest: None,
+            rest2d: Vec::new(),
         }),
     };
     if let Some(mut cd) = tracker_call(c"lightair_body_tracker_submit", |cd| {

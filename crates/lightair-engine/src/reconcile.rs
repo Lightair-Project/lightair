@@ -235,6 +235,49 @@ impl Reconciler {
         if screens_changed || recreated {
             self.sync_screen_zoom_pointers(workspace);
         }
+        self.sync_avatar_pins(workspace);
+    }
+
+    /// Hands each avatar the scene items pinned to it (`crate::avatar_pins`): an object under an
+    /// avatar that the avatar's `pins` setting names ({object id: anchor}), and everything under
+    /// that object, in every canvas.
+    fn sync_avatar_pins(&mut self, workspace: &Workspace) {
+        use crate::avatar_pins::{PinTarget, Placement};
+        let mut out: HashMap<usize, Vec<PinTarget>> = HashMap::new();
+        for scene in &workspace.scenes {
+            for o in &scene.objects {
+                let Some(parent) = o.parent.and_then(|p| scene.object(p)) else { continue };
+                let Some(host) = parent.source.and_then(|i| workspace.sources.get(&i)).filter(|i| i.kind == crate::avatar::KIND) else {
+                    continue;
+                };
+                let Some(anchor) = host.settings["pins"][o.id.to_string()].as_str().filter(|a| !a.is_empty()) else { continue };
+                let Some(src) = self.sources.get(&host.id) else { continue };
+                // it and what's under it
+                let mut ids = vec![o.id];
+                let mut i = 0;
+                while i < ids.len() {
+                    let under: Vec<Id> = scene.children(Some(ids[i])).map(|c| c.id).collect();
+                    ids.extend(under);
+                    i += 1;
+                }
+                for &canvas in &self.canvases {
+                    let Some(at) = scene.world(parent.id, canvas) else { continue };
+                    for id in &ids {
+                        let (Some(base), Some(item)) = (scene.world(*id, canvas), self.items.get(&(scene.id, canvas, *id))) else {
+                            continue;
+                        };
+                        unsafe { sys::obs_sceneitem_addref(item.0) };
+                        out.entry(src.as_ptr() as usize).or_default().push(PinTarget {
+                            item: item.0,
+                            anchor: anchor.to_string(),
+                            base: Placement::of(&base),
+                            host: Placement::of(&at),
+                        });
+                    }
+                }
+            }
+        }
+        crate::avatar_pins::set_pins(out);
     }
 
     /// Puts each scene's `ScreenZoomPointer` on its screen captures: a pointer filter (zoom, drawn
@@ -722,6 +765,16 @@ impl Reconciler {
     pub fn avatar_status(&self, source: Id) -> Option<crate::avatar::Status> {
         let src = self.sources.get(&source)?;
         Some(crate::avatar::status(src.as_ptr()))
+    }
+
+    /// A new strong reference to a source (the caller releases it).
+    pub fn source_ref(&self, source: Id) -> Option<*mut sys::obs_source_t> {
+        self.sources.get(&source).map(|s| unsafe { sys::obs_source_get_ref(s.as_ptr()) }).filter(|p| !p.is_null())
+    }
+
+    /// Where an avatar's anchor is in its picture at rest (pixels).
+    pub fn avatar_anchor_rest(&self, source: Id, key: &str) -> Option<(f32, f32)> {
+        crate::avatar::anchor_rest(self.sources.get(&source)?.as_ptr(), key)
     }
 
     /// Takes the face an avatar sees now as its neutral one: the `calibration` setting.

@@ -533,6 +533,13 @@ impl ModelRuntime {
         true
     }
 
+    /// Returns the model-order index of the part a drawable sits in, if it sits in one.
+    pub fn drawable_part(&self, drawable_index: usize) -> Option<usize> {
+        self.offscreen
+            .drawable_parent_part_index(drawable_index)
+            .and_then(|p| usize::try_from(p).ok())
+    }
+
     /// Returns all part ids in model order.
     pub fn part_ids(&self) -> &[String] {
         self.ids.parts()

@@ -9,5 +9,7 @@ Changes from that commit:
 - Renamed from `mocari` to `lightair-moc3`, and not published.
 - Only the library is here: `src/`. Upstream's sample models (`assets/`), examples and
   integration tests aren't, so the unit tests that read the sample models don't run here.
+- `ModelRuntime::drawable_part`: the part a drawable sits in (Lightair groups art meshes by
+  part when pinning things to an avatar).
 
 `README.md` is upstream's, as it was at that commit.

@@ -385,20 +385,32 @@ impl Flat {
         }
     }
 
-    /// The model's own expressions (Inochi2D and Umamo puppets have none).
+    /// The model's expressions: a Live2D model's own; for an Inochi2D or Umamo puppet (whose files
+    /// carry none), the parameters the face doesn't drive, each held at its maximum when chosen.
     pub fn expressions(&self) -> Vec<String> {
         match self {
             Flat::Live2d(l) => l.expressions.clone(),
-            Flat::Inochi2d(_) | Flat::Uma(_) => Vec::new(),
+            Flat::Inochi2d(l) => l.puppet.toggles(),
+            Flat::Uma(l) => l.puppet.toggles(),
         }
     }
 
-    /// Poses it for this frame.
+    /// Poses it for this frame, with an expression (its name) or none.
     pub fn update(&mut self, face: &lightair_avatar::Face, expression: Option<&str>, dt: f32) {
         match self {
             Flat::Live2d(l) => l.puppet.update(face, expression, dt),
-            Flat::Inochi2d(l) => l.puppet.update(face, dt),
-            Flat::Uma(l) => l.puppet.update(face, dt),
+            Flat::Inochi2d(l) => {
+                l.puppet.hold(expression);
+                l.puppet.update(face, dt)
+            }
+            Flat::Uma(l) => {
+                l.puppet.update(face, dt);
+                let max = expression.and_then(|e| l.puppet.parameters().iter().find(|p| p.id == e).map(|p| (e, p.max)));
+                if let Some((e, max)) = max {
+                    l.puppet.set_parameter(e, max);
+                    l.puppet.pose();
+                }
+            }
         }
     }
 }

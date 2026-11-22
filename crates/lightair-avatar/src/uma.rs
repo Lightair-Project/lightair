@@ -420,6 +420,13 @@ impl Puppet {
         self.pose();
     }
 
+    /// The parameters the face doesn't drive, by id: an Umamo puppet's expressions, each held at
+    /// its maximum while chosen ([`set_parameter`](Puppet::set_parameter) after the face).
+    pub fn toggles(&self) -> Vec<String> {
+        let driven = self.driven();
+        self.params.iter().map(|p| p.id.as_str()).filter(|id| !driven.contains(id)).map(str::to_string).collect()
+    }
+
     /// Sets parameters by id (after [`update`](Puppet::update), then [`pose`](Puppet::pose) again).
     pub fn set_parameter(&mut self, id: &str, value: f32) {
         if let Some(i) = self.params.iter().position(|p| p.id == id)

@@ -159,6 +159,18 @@ impl Puppet {
         self.model.runtime().meshes()
     }
 
+    /// Each art mesh's id and the id of the part it sits in ("" for none), in model order (as
+    /// [`meshes`](Puppet::meshes)).
+    pub fn mesh_ids(&self) -> Vec<(String, String)> {
+        let rt = self.model.runtime();
+        let parts = rt.part_ids();
+        rt.drawable_ids()
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.clone(), rt.drawable_part(i).and_then(|p| parts.get(p)).cloned().unwrap_or_default()))
+            .collect()
+    }
+
     /// The meshes' indices in the order they're drawn (back to front).
     pub fn draw_order(&self) -> Vec<usize> {
         let infos: Vec<DrawableInfo> = self.meshes().iter().map(DrawableInfo::from_mesh).collect();

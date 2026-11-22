@@ -523,6 +523,8 @@ pub struct Puppet {
     first: bool,
     /// Set when the puppet runtime failed on this puppet: it stays as it was.
     broken: bool,
+    /// A parameter the face doesn't drive, held at its maximum (an expression or toggle).
+    held: Option<String>,
     /// The puppet at rest: its lowest and highest corner (model units, y up).
     pub bounds: (Vec2, Vec2),
     /// Across the middle of its head (the top fifth of it), where a frame centres.
@@ -757,6 +759,7 @@ impl Puppet {
             time: 0.0,
             first: true,
             broken: false,
+            held: None,
             bounds: (Vec2::ZERO, Vec2::ZERO),
             centre_x: 0.0,
         };
@@ -836,13 +839,38 @@ impl Puppet {
         self.time += dt;
         let ok = catch_unwind(AssertUnwindSafe(|| {
             let mapping = self.mapping.clone();
-            let values = mapping.values(face, self.time);
+            let mut values = mapping.values(face, self.time);
+            // a held parameter at its maximum (both axes of a 2D one)
+            let held = self.held.clone().and_then(|n| self.model.puppet.params().get(&n).map(|p| (n, p.max, p.is_vec2)));
+            if let Some((name, max, vec2)) = &held {
+                values.push((name.as_str(), 0, max.x));
+                if *vec2 {
+                    values.push((name.as_str(), 1, max.y));
+                }
+            }
             self.step(&values, dt);
             self.record();
         }));
         if let Err(e) = ok {
             tracing::warn!(error = failed(e), "Inochi2D puppet stopped");
             self.broken = true;
+        }
+    }
+
+    /// The parameters the face doesn't drive (arms, hair, toggles the artist made), by name: an
+    /// Inochi2D puppet's expressions, each held at its maximum while chosen.
+    pub fn toggles(&self) -> Vec<String> {
+        let driven: std::collections::HashSet<&str> = self.mapping.drives.iter().map(|d| d.param.as_str()).collect();
+        let mut names: Vec<String> =
+            self.model.puppet.params().keys().filter(|n| !driven.contains(n.as_str())).cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Holds a parameter the face doesn't drive at its maximum from the next frame (`None`: none).
+    pub fn hold(&mut self, name: Option<&str>) {
+        if self.held.as_deref() != name {
+            self.held = name.map(str::to_string);
         }
     }
 
