@@ -133,20 +133,8 @@ pub fn go(engine: Arc<Engine>, cfg: StreamConfig, req: Request, single_canvas: O
             eb::fetch(&url, &ask)
         }
     };
-    let plan = plan.and_then(|p| {
-        // refused: the platform's own words are the reason (what follows from it isn't news)
-        if let Verdict::Refused(why) = &p.verdict {
-            return Err(why.trim_end_matches('.').to_string());
-        }
-        let problems = p.problems(req.canvases.len(), &req.encoders);
-        if problems.is_empty() { Ok(p) } else { Err(problems.join("; ")) }
-    });
-    let plan = plan.and_then(|p| match p.connect(req.rtmps, &cfg.key) {
-        Some(at) => Ok((p, at)),
-        None => Err("the plan has nowhere to send the stream".into()),
-    });
-    match plan {
-        Ok((plan, (server, key))) => {
+    match decide(plan, &req, &cfg.key) {
+        Decision::Plan { plan, server, key } => {
             let (multitrack, canvases) = tracks(&plan, &req);
             remember(
                 id,
@@ -180,9 +168,9 @@ pub fn go(engine: Arc<Engine>, cfg: StreamConfig, req: Request, single_canvas: O
                 _ => start(),
             }
         }
-        Err(why) => {
-            tracing::warn!(%why, "going live without Enhanced Broadcasting");
-            remember(id, Summary { tracks: 1, kbps: cfg.encoders.video_bitrate_kbps, dual: false, note: Some(format!("Sent landscape only: {why}.")) });
+        Decision::LandscapeOnly { note } => {
+            tracing::warn!(%note, "going live without Enhanced Broadcasting");
+            remember(id, Summary { tracks: 1, kbps: cfg.encoders.video_bitrate_kbps, dual: false, note: Some(note) });
             engine.post(move |s| {
                 let video = single_canvas.and_then(|f| s.reconciler.canvas_video(f));
                 if let Err(e) = s.outputs.start_stream(&cfg, video) {
@@ -191,6 +179,38 @@ pub fn go(engine: Arc<Engine>, cfg: StreamConfig, req: Request, single_canvas: O
                 }
             });
         }
+    }
+}
+
+/// What Go live does with the platform's answer, or with the failure to get one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Decision {
+    /// Go live with the plan, at its server and with its key (the plan's id added).
+    Plan { plan: Plan, server: String, key: String },
+    /// Go live as one encode, landscape only; `note` says why, as the card shows it ("Sent
+    /// landscape only: <the platform's words>.").
+    LandscapeOnly { note: String },
+}
+
+/// Decides between the plan and landscape only. A refusal's own words are the reason (what
+/// follows from an empty plan isn't news); a plan that can't run here (a canvas not sent, an
+/// encoder this computer doesn't have, nowhere to send it) or no plan at all goes landscape only
+/// too, saying why. `key`: the destination's stream key.
+pub fn decide(plan: Result<Plan, String>, req: &Request, key: &str) -> Decision {
+    let plan = plan.and_then(|p| {
+        if let Verdict::Refused(why) = &p.verdict {
+            return Err(why.trim_end_matches('.').to_string());
+        }
+        let problems = p.problems(req.canvases.len(), &req.encoders);
+        if problems.is_empty() { Ok(p) } else { Err(problems.join("; ")) }
+    });
+    let plan = plan.and_then(|p| match p.connect(req.rtmps, key) {
+        Some(at) => Ok((p, at)),
+        None => Err("the plan has nowhere to send the stream".into()),
+    });
+    match plan {
+        Ok((plan, (server, key))) => Decision::Plan { plan, server, key },
+        Err(why) => Decision::LandscapeOnly { note: format!("Sent landscape only: {why}.") },
     }
 }
 
