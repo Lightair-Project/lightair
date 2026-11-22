@@ -8,11 +8,15 @@
 //! (`target/<profile>` and `target/<triple>/<profile>`), all but the newest [`KEEP`] copies of
 //! each crate's libraries and of each binary, with their `.fingerprint` and `build` entries.
 //! A copy that was still in use only costs a rebuild of that crate. Only `target/` is touched.
+//!
+//! On macOS it also deletes the loose object files no program refers to ([`prune_objects`]),
+//! which `cargo xtask prune` does alone.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, TryLockError};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::SystemTime;
 
 /// Copies kept per crate and kind. A dev build, a check/clippy run and a test build (or a
@@ -92,17 +96,120 @@ pub fn tidy(root: &Path, dry_run: bool) -> Result {
                 }
             }
         }
-        total += inc_bytes + stale_bytes;
+        let (mut objects, mut object_bytes) = (0, 0);
+        for p in profiles {
+            let (n, b) = prune_objects(&p.join("deps"), dry_run);
+            objects += n;
+            object_bytes += b;
+        }
+        total += inc_bytes + stale_bytes + object_bytes;
         println!(
-            "{triple}: {verb} {} (incremental {}, {} stale copies {})",
-            human(inc_bytes + stale_bytes),
+            "{triple}: {verb} {} (incremental {}, {} stale copies {}, {objects} unused object files {})",
+            human(inc_bytes + stale_bytes + object_bytes),
             human(inc_bytes),
             stale.len(),
-            human(stale_bytes)
+            human(stale_bytes),
+            human(object_bytes)
         );
     }
     println!("total {verb}: {}", human(total));
     Ok(())
+}
+
+/// `cargo xtask prune`: [`prune_objects`] in every profile directory of `target/`. Unlike
+/// `tidy`, it never costs a rebuild.
+pub fn prune(root: &Path) -> Result {
+    let target = root.join("target");
+    let mut dirs = Vec::new();
+    for entry in subdirs(&target) {
+        if entry.join("deps").is_dir() {
+            dirs.push(entry.join("deps"));
+        } else {
+            dirs.extend(subdirs(&entry).into_iter().map(|p| p.join("deps")).filter(|d| d.is_dir()));
+        }
+    }
+    let (mut files, mut bytes) = (0, 0);
+    for d in dirs {
+        let (n, b) = prune_objects(&d, false);
+        if n > 0 {
+            println!("  {:>10}  {n} object files in {}", human(b), rel(&target, &d));
+        }
+        files += n;
+        bytes += b;
+    }
+    // APFS clones share blocks, so the disk gains less than the files list
+    println!("prune: deleted {files} unused object files (listed size {})", human(bytes));
+    Ok(())
+}
+
+/// Files directly in a `deps` folder; prune first when there are more (see [`prune_objects`]).
+pub const CROWDED: usize = 50_000;
+
+/// The number of entries in `target/debug/deps`.
+pub fn deps_files(root: &Path) -> usize {
+    fs::read_dir(root.join("target/debug/deps")).map_or(0, |d| d.count())
+}
+
+/// Deletes the object files in one `deps` folder that no program or dynamic library there
+/// refers to. Returns (files, bytes).
+///
+/// On Apple targets debug info stays in the object files (`split-debuginfo = "unpacked"`), so
+/// rustc keeps every program's objects beside it, and each incremental build writes them under
+/// new names (`name-hash.<unit>.<build>.rcgu.o`) without deleting the old ones. rustc lists the
+/// whole folder each time it starts: 650,000 of them made every rustc start take 4–34 s. A
+/// program's debug map (`nm -ap`, its OSO entries) names the objects it still uses; static
+/// libraries carry their objects inside, so none of theirs are needed.
+pub fn prune_objects(deps: &Path, dry_run: bool) -> (usize, u64) {
+    if !cfg!(target_os = "macos") {
+        return (0, 0);
+    }
+    let mut objects = Vec::new();
+    let mut programs = Vec::new();
+    for e in read(deps) {
+        let name = file_name(&e);
+        if name.ends_with(".o") {
+            objects.push(e);
+        } else if name.ends_with(".dylib")
+            || (!name.contains('.') && name.rsplit_once('-').is_some_and(|(_, h)| h.len() == 16))
+        {
+            programs.push(e);
+        }
+    }
+    if objects.is_empty() {
+        return (0, 0);
+    }
+    let used: HashSet<String> = std::thread::scope(|s| {
+        let jobs: Vec<_> = programs
+            .chunks(programs.len().div_ceil(8).max(1))
+            .map(|chunk| {
+                s.spawn(move || {
+                    let mut names = Vec::new();
+                    for p in chunk {
+                        let Ok(out) = Command::new("nm").arg("-ap").arg(p).output() else { continue };
+                        for line in String::from_utf8_lossy(&out.stdout).lines() {
+                            if let Some((_, path)) = line.split_once(" OSO ") {
+                                names.push(path.rsplit('/').next().unwrap_or(path).to_string());
+                            }
+                        }
+                    }
+                    names
+                })
+            })
+            .collect();
+        jobs.into_iter().flat_map(|j| j.join().unwrap_or_default()).collect()
+    });
+    let (mut files, mut bytes) = (0, 0);
+    for o in objects {
+        if used.contains(&file_name(&o)) {
+            continue;
+        }
+        let size = fs::symlink_metadata(&o).map_or(0, |m| m.blocks() * 512);
+        if dry_run || fs::remove_file(&o).is_ok() {
+            files += 1;
+            bytes += size;
+        }
+    }
+    (files, bytes)
 }
 
 fn add(groups: &mut Vec<(String, Vec<PathBuf>)>, name: &str, dir: PathBuf) {

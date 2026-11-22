@@ -553,9 +553,7 @@ fn main() -> anyhow::Result<()> {
         Some("tidy") => tidy::tidy(&root(), std::env::args().any(|a| a == "--dry-run")).map_err(anyhow::Error::msg),
         Some("prune") => {
             be_polite();
-            let (files, bytes) = prune(None)?;
-            eprintln!("deleted {files} unused object files ({:.0} MB)", bytes as f64 / 1e6);
-            Ok(())
+            tidy::prune(&root()).map_err(anyhow::Error::msg)
         }
         _ => {
             eprintln!(
@@ -771,10 +769,8 @@ fn check(changed: bool) -> anyhow::Result<()> {
     effects_in_sync()?;
     // Plain `cargo build` and `cargo test` leave object files behind too: past 50,000 files in
     // the folder (a few seconds per crate again), clear them first.
-    let crowded = std::fs::read_dir(root().join("target/debug/deps")).map_or(0, |d| d.count()) > 50_000;
-    if crowded {
-        let (files, bytes) = prune(None)?;
-        eprintln!("deleted {files} unused object files ({:.0} MB)", bytes as f64 / 1e6);
+    if tidy::deps_files(&root()) > tidy::CROWDED {
+        tidy::prune(&root()).map_err(anyhow::Error::msg)?;
     }
     let mut cmd = cargo();
     cmd.args(["check", "--all-targets"]);
