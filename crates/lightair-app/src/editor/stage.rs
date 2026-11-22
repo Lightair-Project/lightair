@@ -498,10 +498,9 @@ impl Editor {
                         )
                     }),
             )
-            .child(hint(match n {
-                0 => "Pixelates a part of the picture (a password, a face): draw a box over it in the player."
-                    .to_string(),
-                n => format!("{n} hidden: shown dashed in the player. At most four."),
-            }))
+            .child(match n {
+                0 => hint("Pixelates a part of the picture (a password, a face): draw a box over it in the player."),
+                n => line(format!("{n} hidden (at most four)")),
+            })
     }
 }

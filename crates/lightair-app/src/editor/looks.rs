@@ -584,7 +584,7 @@ impl Editor {
         let cid = c.id;
         let before = self.seq().and_then(|s| s.before(cid)).cloned();
         let Some(prev) = before else {
-            return body.child(label("TRANSITION")).child(hint("A transition plays across a cut: put this clip right after another on its track."));
+            return body.child(label("TRANSITION")).child(line("A transition plays across a cut: put this clip right after another on its track."));
         };
         let longest = (prev.len_ms().min(c.len_ms())).max(100);
         let kind = c.transition.map(|t| t.kind);
@@ -643,7 +643,15 @@ pub(super) fn label(t: &'static str) -> Div {
     div().mt_2().pt_3().border_t_1().border_color(tok::border()).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text()).child(name)
 }
 
+/// How something works: behind an ⓘ (docs/ui-sweep.md: on screen, a control shows its label and
+/// value; explanations go in a tooltip).
 pub(super) fn hint(t: impl Into<SharedString>) -> Div {
+    let t: SharedString = t.into();
+    div().flex().child(crate::ui::info(SharedString::from(format!("hint-{t}")), t))
+}
+
+/// A value or a state to act on, shown: one short line ("1920×1080 · 16:9", "2 hidden").
+pub(super) fn line(t: impl Into<SharedString>) -> Div {
     div().text_size(px(11.5)).line_height(px(16.)).text_color(tok::text_tertiary()).child(t.into())
 }
 

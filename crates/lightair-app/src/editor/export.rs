@@ -19,7 +19,7 @@ use lightair_render::exporter::{AudioCodec, Container, ExportSettings, Rate, Vid
 use lightair_render::seqrender::SequenceRenderer;
 use lightair_store::recordings::{File as ItemFile, Index, Item, Kind};
 
-use super::looks::{hint, label};
+use super::looks::{hint, label, line};
 use super::{Done, Editor, fps_label};
 use crate::ui::{self, tok};
 
@@ -282,7 +282,7 @@ impl Editor {
         body.child(label("SIZE"))
             .child(presets)
             .child(dims)
-            .child(hint(format!("{}×{} · {}", size.0, size.1, aspect(size))))
+            .child(line(format!("{}×{} · {}", size.0, size.1, aspect(size))))
             .child(label("FRAME RATE"))
             // in two even rows: film and PAL rates, then NTSC and high
             .child(self.segmented("ed-fps".into(), &RATES[..4], rate, |this, v, cx| this.change(|s| s.fps = v, cx), cx))
@@ -570,7 +570,7 @@ impl Editor {
             }
             body = body.child(row("Resolution", size_cell.into_any_element()));
             if aspect(out) != aspect(project) {
-                body = body.child(row("", hint(format!("Fitted inside, with {} bars ({} into {})", if s.keeps_alpha() { "see-through" } else { "black" }, aspect(project), aspect(out))).flex_1().min_w_0().into_any_element()));
+                body = body.child(row("", line(format!("Fitted inside, with {} bars ({} into {})", if s.keeps_alpha() { "see-through" } else { "black" }, aspect(project), aspect(out))).flex_1().min_w_0().into_any_element()));
             }
 
             // the rate

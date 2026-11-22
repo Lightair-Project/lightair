@@ -42,7 +42,7 @@ mod voiceover;
 mod words;
 mod zooms;
 use lightair_render::sequence::Content;
-use looks::{heading, hint, label};
+use looks::{heading, hint, label, line};
 
 /// What the background work sends back.
 enum Done {
@@ -1638,7 +1638,7 @@ impl Editor {
             // a studio_take opened: its parts, each on its own
             let parts = self.studio_take_parts.get(&studio_take.id).cloned().flatten();
             match parts {
-                None => grid = grid.child(hint("Reading the take…")),
+                None => grid = grid.child(line("Reading the take…")),
                 Some(parts) => {
                     for (n, p) in parts.into_iter().enumerate() {
                         let detail = match &p.media {
@@ -1775,7 +1775,7 @@ impl Editor {
                             .child(div().flex_1().child(heading("THIS WORKSPACE")))
                             .child(Button::new("ed-import").label("Import").icon(ui::icon("plus")).xsmall().outline().on_click(cx.listener(|this, _, w, cx| this.import(w, cx)))),
                     )
-                    .child(if self.library.is_empty() { hint("Recordings, takes and clips appear here.") } else { grid })
+                    .when(!self.library.is_empty(), |d| d.child(grid))
                     .when(!imported.is_empty(), |d| d.child(heading("IMPORTED")).child(own)),
             },
             LeftTab::Audio => self.audio_tab(cx),

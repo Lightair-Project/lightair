@@ -385,8 +385,8 @@ impl StudioWindow {
                 .flex()
                 .items_start()
                 .gap_1p5()
-                .child(div().flex_1().min_w_0().text_size(px(12.)).line_height(px(17.)).text_color(tok::text_secondary()).child(about))
-                .child(div().pt(px(2.)).child(ui::info("widget-how", HOW))),
+                // what it is, and how widgets work: the ⓘ (docs/ui-sweep.md)
+                .child(div().pt(px(2.)).child(ui::info("widget-how", format!("{about}\n\n{HOW}")))),
         );
         // (tests come from a platform it listens to)
         let platform = instance.platforms.first().cloned().unwrap_or_else(|| self.test_platform(cx));
@@ -553,7 +553,7 @@ impl StudioWindow {
         }
         col = col.child(chips);
         if instance.platforms.is_empty() {
-            col = col.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("All of them, and any added later. Click one to leave it out."));
+            col = col.child(div().flex().child(ui::info("widget-platforms-tip", "All of them, and any added later. Click one to leave it out.")));
         }
         col.into_any_element()
     }
@@ -579,7 +579,8 @@ impl StudioWindow {
         let heading = |text: &'static str| {
             div().pt_2().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child(text)
         };
-        let hint = |text: SharedString| div().text_size(px(11.)).line_height(px(15.)).text_color(tok::text_tertiary()).child(text);
+        // how the code works: behind an ⓘ
+        let hint = |text: SharedString| div().flex().child(ui::info(SharedString::from(format!("code-hint-{}", text.len())), text));
         let editor_box = |editor: Editor, h: f32| {
             div().h(px(h)).rounded(px(5.)).overflow_hidden().bg(tok::bg_raised()).border_1().border_color(tok::border()).child(editor.h(px(h)).bordered(false).xsmall().text_size(px(11.)))
         };
@@ -802,9 +803,8 @@ impl StudioWindow {
                         .py_2()
                         .border_t_1()
                         .border_color(tok::border())
-                        .text_size(px(11.))
-                        .text_color(tok::text_tertiary())
-                        .child(code_hint(code.tab, &custom)),
+                        .flex()
+                        .child(ui::info("code-footer-tip", code_hint(code.tab, &custom))),
                 )
                 .into_any_element(),
         )
