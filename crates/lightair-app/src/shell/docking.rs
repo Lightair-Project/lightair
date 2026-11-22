@@ -639,10 +639,12 @@ impl StudioWindow {
                 self.pick_screen(open.trim_start_matches("add-"), window, cx);
             }
             Ok("settings") => self.toggle_settings(cx),
-            // the first destination's sheet open (Dual Format's card, for screenshots)
-            Ok("dest-edit") => {
+            // the first destination's sheet open (Dual Format's card, for screenshots; "-more":
+            // its caps shown)
+            Ok(hook @ ("dest-edit" | "dest-edit-more")) => {
+                let more = hook.ends_with("-more");
                 if let Some(id) = self.studio.read(cx).workspace().outputs.destinations.first().map(|d| d.id) {
-                    self.outputs.update(cx, |o, cx| o.open_edit(id, window, cx));
+                    self.outputs.update(cx, |o, cx| if more { o.open_edit_with_more(id, window, cx) } else { o.open_edit(id, window, cx) });
                 }
             }
             // going live a few seconds after launch, the Go live sheet skipped, and ending a while
@@ -651,6 +653,9 @@ impl StudioWindow {
             Ok(hook) if hook.starts_with("go-live") => {
                 let then_edit = hook.ends_with("+dest-edit");
                 let hook = hook.trim_end_matches("+dest-edit");
+                // "+accept": a platform's caution answered with Go live anyway, 12 s after it shows
+                let accept = hook.ends_with("+accept");
+                let hook = hook.trim_end_matches("+accept");
                 let mut nums = hook.split(':').skip(1).filter_map(|n| n.parse::<u64>().ok());
                 let (start, end) = (nums.next().unwrap_or(6), nums.next());
                 // a test key for the first destination, only in a workspace opened for this
@@ -663,6 +668,16 @@ impl StudioWindow {
                 cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(std::time::Duration::from_secs(start)).await;
                     let _ = this.update(cx, |this, cx| this.studio.update(cx, |s, cx| s.go_live(cx)));
+                    if accept {
+                        for _ in 0..40 {
+                            cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                            if crate::enhanced::held().is_some() {
+                                break;
+                            }
+                        }
+                        cx.background_executor().timer(std::time::Duration::from_secs(12)).await;
+                        crate::enhanced::answer(true);
+                    }
                     if let Some(end) = end {
                         cx.background_executor().timer(std::time::Duration::from_secs(end.saturating_sub(start))).await;
                         let _ = this.update(cx, |this, cx| this.studio.update(cx, |s, cx| s.end_stream(cx)));

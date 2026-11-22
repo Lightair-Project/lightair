@@ -97,6 +97,10 @@ pub struct OutputsPanel {
     asked: std::cell::RefCell<std::collections::HashSet<String>>,
     /// A sign-in window open: its platform, the page, and whether it was closed.
     sign_in: Option<SignIn>,
+    /// The Dual Format card's caps shown (its More).
+    dual_more: bool,
+    /// The destination dialog's scrolling (a screenshot hook scrolls it to the end).
+    dialog_scroll: ScrollHandle,
 }
 
 pub fn elapsed(since: Instant) -> String {
@@ -485,7 +489,7 @@ impl OutputsPanel {
             }
         })
         .detach();
-        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default(), signed_in: Default::default(), asked: Default::default(), sign_in: None, import_note: None }
+        Self { studio, setup: None, focus: cx.focus_handle(), disk: Default::default(), signed_in: Default::default(), asked: Default::default(), sign_in: None, import_note: None, dual_more: false, dialog_scroll: ScrollHandle::new() }
     }
 
     /// Asks for a vertical canvas, to send once it's there.
@@ -631,6 +635,20 @@ impl OutputsPanel {
     }
 
     /// Opens a destination's settings.
+    /// Opens a destination's sheet with its Dual Format caps shown (a screenshot hook).
+    pub fn open_edit_with_more(&mut self, id: Id, window: &mut Window, cx: &mut Context<Self>) {
+        self.dual_more = true;
+        self.open_edit(id, window, cx);
+        // once laid out, at its end: the card and its caps in view
+        let scroll = self.dialog_scroll.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(800)).await;
+            scroll.scroll_to_bottom();
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
     pub fn open_edit(&mut self, id: Id, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = self.studio.read(cx).workspace().clone();
         let Some(d) = workspace.outputs.destinations.iter().find(|d| d.id == id).cloned() else { return };
@@ -791,6 +809,67 @@ impl OutputsPanel {
                     format!("Going live asks Twitch for the best settings for this {} (its chip, memory and canvases).", crate::ui::MACHINE),
                     tok::text_tertiary(),
                 ));
+            // the caps Twitch's plan keeps within, behind More (Auto: Twitch decides)
+            let more = self.dual_more;
+            card = card.child(
+                div()
+                    .id("dual-more")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(tok::text_secondary())
+                    .hover(|d| d.text_color(tok::text()))
+                    .child(ui::icon(if more { "chevron-down" } else { "chevron-right" }).size(px(12.)))
+                    .child("More")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.dual_more = !this.dual_more;
+                        cx.notify();
+                    })),
+            );
+            if more {
+                let caps = e.options.enhanced.clone().unwrap_or_default();
+                let set = |f: fn(&mut lightair_model::EnhancedBroadcasting, Option<u32>), value: Option<u32>| {
+                    cx.listener(move |this, _, _, cx| {
+                        if let Some(Setup::Edit(e)) = &mut this.setup
+                            && let Some(x) = &mut e.options.enhanced
+                        {
+                            f(x, value);
+                        }
+                        cx.notify();
+                    })
+                };
+                let mut upload = segments();
+                for (i, (label, kbps)) in
+                    [("Auto", None), ("6 Mbps", Some(6000)), ("8 Mbps", Some(8000)), ("10 Mbps", Some(10_000)), ("12.5 Mbps", Some(12_500))]
+                        .into_iter()
+                        .enumerate()
+                {
+                    upload = upload.child(
+                        segment(("dual-upload", i), label, caps.max_bitrate_kbps == kbps, true)
+                            .on_click(set(|x, v| x.max_bitrate_kbps = v, kbps)),
+                    );
+                }
+                let mut tracks = segments();
+                for (i, (label, n)) in [("Auto", None), ("2", Some(2)), ("3", Some(3)), ("4", Some(4)), ("5", Some(5))].into_iter().enumerate() {
+                    tracks = tracks.child(
+                        segment(("dual-tracks", i), label, caps.max_video_tracks == n, true)
+                            .on_click(set(|x, v| x.max_video_tracks = v, n)),
+                    );
+                }
+                card = card
+                    .child(form_row(
+                        "Most upload",
+                        Some("The most upload Twitch's plan may use. Auto: Twitch decides from this computer and the canvases.".into()),
+                        upload,
+                    ))
+                    .child(form_row(
+                        "Most video tracks",
+                        Some("The most encodes this computer runs for the stream. Fewer is lighter; Twitch makes the rest where it can.".into()),
+                        tracks,
+                    ));
+            }
         }
         Some(card)
     }
@@ -1675,6 +1754,7 @@ impl OutputsPanel {
                 .child(
                     div()
                         .id("destination-dialog")
+                        .track_scroll(&self.dialog_scroll)
                         .w(px(if wide { 640. } else { 520. }))
                         .max_h(relative(0.88))
                         .overflow_y_scroll()
