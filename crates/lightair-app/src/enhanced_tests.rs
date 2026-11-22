@@ -4,9 +4,11 @@
 use lightair_model::{Canvas, Destination, EnhancedBroadcasting, Id, StreamOptions, Workspace};
 use lightair_live::enhanced_broadcasting as eb;
 
-use super::{request, tracks};
+use super::{Decision, decide, request, tracks};
 
 const PLAN: &str = include_str!("../../../docs/plans/twitch-dual-format-plan.json");
+const REFUSED: &str = include_str!("../../../docs/plans/twitch-dual-format-plan-error.json");
+const CAUTION: &str = include_str!("../../../docs/plans/twitch-dual-format-plan-warning.json");
 const ENCODER: &str = "com.apple.videotoolbox.videoencoder.ave.avc";
 
 /// A workspace with its landscape canvas and a vertical one.
@@ -93,4 +95,56 @@ fn only_a_landscape_destination_asks_and_only_a_portrait_canvas_is_dual() {
     let mut youtube = twitch(EnhancedBroadcasting::default());
     (youtube.platform, youtube.server) = (Some("youtube".into()), "rtmps://a.rtmps.youtube.com/live2".into());
     assert!(request(&youtube, &ws, &[]).is_none(), "Twitch's feature only");
+}
+
+fn dual_request() -> super::Request {
+    let (ws, _, vertical) = workspace();
+    request(&twitch(EnhancedBroadcasting { vertical_canvas: Some(vertical), ..Default::default() }), &ws, &[ENCODER.to_string()])
+        .unwrap()
+}
+
+fn landscape_only(d: Decision) -> String {
+    match d {
+        Decision::LandscapeOnly { note } => note,
+        Decision::Plan { .. } => panic!("went with the plan"),
+    }
+}
+
+/// Twitch refuses the plan: the stream goes landscape only, and the reason the person reads is
+/// Twitch's own words.
+#[test]
+fn a_refused_plan_goes_landscape_only_in_twitchs_words() {
+    let eb::Verdict::Refused(words) = eb::read(REFUSED).unwrap().verdict else { panic!("the error file refuses") };
+    let note = landscape_only(decide(eb::read(REFUSED), &dual_request(), "live_k"));
+    assert!(note.starts_with("Sent landscape only: "), "{note}");
+    assert!(note.contains(words.trim_end_matches('.')), "Twitch's words: {note}");
+}
+
+/// No plan (the service didn't answer) or one this computer can't run: landscape only, saying why.
+#[test]
+fn no_plan_or_one_that_cant_run_here_goes_landscape_only_saying_why() {
+    let note = landscape_only(decide(Err("the platform's stream settings didn't come (HTTP 503)".into()), &dual_request(), "k"));
+    assert!(note.contains("HTTP 503"), "{note}");
+    let mut req = dual_request();
+    req.encoders = vec!["obs_x264".into()];
+    let note = landscape_only(decide(eb::read(PLAN), &req, "k"));
+    assert!(note.contains("encoder"), "{note}");
+}
+
+/// A plan that runs: its server, and the key with the plan's id; a caution still goes with the
+/// plan (the person is asked before it starts).
+#[test]
+fn a_plan_that_runs_goes_with_its_server_and_the_keyed_plan_id() {
+    match decide(eb::read(PLAN), &dual_request(), "live_k") {
+        Decision::Plan { server, key, plan } => {
+            assert_eq!(server, "rtmp://127.0.0.1:1935/twitch-dual");
+            assert_eq!(key, "live_k?clientConfigId=local-check-0001");
+            assert_eq!(plan.video.len(), 4);
+        }
+        Decision::LandscapeOnly { note } => panic!("{note}"),
+    }
+    match decide(eb::read(CAUTION), &dual_request(), "live_k") {
+        Decision::Plan { plan, .. } => assert!(matches!(plan.verdict, eb::Verdict::Caution(_))),
+        Decision::LandscapeOnly { note } => panic!("a caution isn't a refusal: {note}"),
+    }
 }

@@ -2632,3 +2632,50 @@ impl Focusable for OutputsPanel {
         self.focus.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Canvas, Id, Workspace, landscape_mismatch};
+    use crate::platforms::by_id;
+
+    fn with_vertical() -> (Workspace, Id) {
+        let mut ws = Workspace::new("Show");
+        let vertical = Canvas::vertical();
+        let v = vertical.id;
+        ws.canvases.push(vertical);
+        (ws, v)
+    }
+
+    /// A landscape platform sent the vertical canvas is warned, with the landscape canvas to send
+    /// instead (the primary one here).
+    #[test]
+    fn a_landscape_platform_on_the_vertical_canvas_is_warned_with_the_fix() {
+        let (ws, vertical) = with_vertical();
+        let twitch = by_id("twitch").unwrap();
+        let (text, target, label) = landscape_mismatch(twitch, &ws, Some(vertical)).expect("a warning");
+        assert!(text.contains("Twitch") && text.contains("landscape"), "{text}");
+        assert_eq!(target, Some(None), "send the primary (landscape) canvas instead");
+        assert!(!label.is_empty(), "a one-tap fix");
+    }
+
+    /// No warning where nothing's wrong: a landscape platform on a landscape canvas, a vertical
+    /// platform on the vertical canvas, a custom server (its shape isn't known).
+    #[test]
+    fn nothing_is_said_when_the_shapes_match_or_arent_known() {
+        let (ws, vertical) = with_vertical();
+        assert!(landscape_mismatch(by_id("twitch").unwrap(), &ws, None).is_none());
+        assert!(landscape_mismatch(by_id("tiktok").unwrap(), &ws, Some(vertical)).is_none());
+        assert!(landscape_mismatch(by_id("custom").unwrap(), &ws, Some(vertical)).is_none());
+    }
+
+    /// Only vertical canvases: still warned, but no canvas to offer instead.
+    #[test]
+    fn with_no_landscape_canvas_the_warning_comes_without_a_fix() {
+        let mut ws = Workspace::new("Phone show");
+        let vertical = Canvas::vertical();
+        let v = vertical.id;
+        ws.canvases = vec![vertical];
+        let (_, target, label) = landscape_mismatch(by_id("youtube").unwrap(), &ws, Some(v)).expect("a warning");
+        assert_eq!((target, label.as_str()), (None, ""));
+    }
+}
