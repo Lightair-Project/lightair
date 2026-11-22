@@ -19,6 +19,7 @@ mod effect_drag;
 mod encoding;
 mod enhanced;
 mod eyedropper;
+mod file_pick;
 mod frame_view;
 mod geometry;
 mod shortcuts;

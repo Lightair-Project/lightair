@@ -2,8 +2,6 @@
 //! microphone or file a object shows. Changing it changes the source, so it changes in every scene
 //! that uses it.
 
-use std::path::PathBuf;
-
 use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -146,11 +144,25 @@ impl StudioWindow {
     }
 
     fn replace_file(&mut self, source: Id, key: &'static str, window: &mut Window, cx: &mut Context<Self>) {
-        let paths =
-            cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+        // an avatar's model: only the formats Lightair loads
+        let avatar = self.studio.read(cx).workspace().sources.get(&source).is_some_and(|i| i.kind == lightair_engine::avatar::KIND);
+        let picked = if avatar {
+            crate::file_pick::pick(crate::file_pick::AVATAR, cx)
+        } else {
+            let (tx, rx) = futures_channel::oneshot::channel();
+            let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+            cx.spawn(async move |_, _| {
+                let path = match paths.await {
+                    Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                    _ => None,
+                };
+                let _ = tx.send(path);
+            })
+            .detach();
+            rx
+        };
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
-            let Some(path): Option<PathBuf> = paths.into_iter().next() else { return };
+            let Ok(Some(path)) = picked.await else { return };
             let _ = this.update(cx, |this, cx| {
                 let workspace = this.studio.read(cx).workspace().clone();
                 let Some(i) = workspace.sources.get(&source) else { return };

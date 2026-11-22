@@ -1861,11 +1861,12 @@ impl StudioWindow {
         .detach();
     }
 
-    /// Asks for a VRM, Live2D (.model3.json), Inochi2D (.inp, .inx) or Umamo (.uma) model and adds it as an avatar, following the face a camera sees (the
+    /// Asks for a VRM (.vrm, or .glb with VRM data), Live2D (.model3.json), Inochi2D (.inp, .inx) or
+    /// Umamo (.uma) model (only those can be chosen) and adds it as an avatar, following the face a camera sees (the
     /// camera the scenes already use, else the first one).
     pub(super) fn add_avatar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.add_menu = false;
-        let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Add avatar".into()) });
+        let picked = crate::file_pick::pick(crate::file_pick::AVATAR, cx);
         let workspace = self.studio.read(cx).workspace().clone();
         // (an iPhone's or iPad's screen is a "camera" too, without a face in it)
         let screens: Vec<String> = lightair_platform::devices::ios_screens().into_iter().map(|(_, uid)| uid).collect();
@@ -1878,8 +1879,7 @@ impl StudioWindow {
             .find(|d| face_camera(d));
         let connected: Vec<(String, String)> = self.connected.as_ref().map(|c| c.cameras.clone()).unwrap_or_default();
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
-            let Some(path): Option<PathBuf> = paths.into_iter().next() else { return };
+            let Ok(Some(path)) = picked.await else { return };
             // (a Live2D model's file is <name>.model3.json)
             let name = path.file_stem().map(|s| s.to_string_lossy().trim_end_matches(".model3").to_string()).unwrap_or_else(|| "Avatar".into());
             // (Lightair's own virtual camera shows the program: never the face)
