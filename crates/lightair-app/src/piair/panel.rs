@@ -165,8 +165,9 @@ impl PiAirPanel {
                     if lightair_engine::face_drive::target() != want {
                         lightair_engine::face_drive::set_target(want);
                     }
-                    // development: prompts from a file (LIGHTAIR_PIAIR_PROMPT_FILE), one per new last line
-                    if let Some(f) = std::env::var_os("LIGHTAIR_PIAIR_PROMPT_FILE") {
+                    // development only: prompts from a file (LIGHTAIR_PIAIR_PROMPT_FILE), one per new
+                    // last line. They count as the streamer's, so a shipped (Release) app ignores it.
+                    if let Some(f) = std::env::var_os("LIGHTAIR_PIAIR_PROMPT_FILE").filter(|_| cfg!(debug_assertions)) {
                         let text = std::fs::read_to_string(&f).unwrap_or_default();
                         if text != this.dev_prompts {
                             this.dev_prompts = text.clone();
