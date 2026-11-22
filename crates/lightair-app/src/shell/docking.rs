@@ -646,8 +646,11 @@ impl StudioWindow {
                 }
             }
             // going live a few seconds after launch, the Go live sheet skipped, and ending a while
-            // later ("go-live:<start s>:<end s>"; local checks against Stream Check)
+            // later ("go-live:<start s>:<end s>"; local checks against Stream Check); with
+            // "+dest-edit", the first destination's sheet opened after it (its card's last plan)
             Ok(hook) if hook.starts_with("go-live") => {
+                let then_edit = hook.ends_with("+dest-edit");
+                let hook = hook.trim_end_matches("+dest-edit");
                 let mut nums = hook.split(':').skip(1).filter_map(|n| n.parse::<u64>().ok());
                 let (start, end) = (nums.next().unwrap_or(6), nums.next());
                 // a test key for the first destination, only in a workspace opened for this
@@ -665,6 +668,9 @@ impl StudioWindow {
                         let _ = this.update(cx, |this, cx| this.studio.update(cx, |s, cx| s.end_stream(cx)));
                         if let (Some(id), Some(_)) = (first, &test_key) {
                             crate::secrets::delete_stream_key(id);
+                        }
+                        if let Some(id) = first.filter(|_| then_edit) {
+                            let _ = this.update_in(cx, |this, window, cx| this.outputs.update(cx, |o, cx| o.open_edit(id, window, cx)));
                         }
                     }
                 })

@@ -105,6 +105,10 @@ pub fn go(engine: Arc<Engine>, cfg: StreamConfig, req: Request, single_canvas: O
         }
     };
     let plan = plan.and_then(|p| {
+        // refused: the platform's own words are the reason (what follows from it isn't news)
+        if let Verdict::Refused(why) = &p.verdict {
+            return Err(why.trim_end_matches('.').to_string());
+        }
         let problems = p.problems(req.canvases.len(), &req.encoders);
         if problems.is_empty() { Ok(p) } else { Err(problems.join("; ")) }
     });
