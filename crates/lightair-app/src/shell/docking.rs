@@ -639,6 +639,37 @@ impl StudioWindow {
                 self.pick_screen(open.trim_start_matches("add-"), window, cx);
             }
             Ok("settings") => self.toggle_settings(cx),
+            // the first destination's sheet open (Dual Format's card, for screenshots)
+            Ok("dest-edit") => {
+                if let Some(id) = self.studio.read(cx).workspace().outputs.destinations.first().map(|d| d.id) {
+                    self.outputs.update(cx, |o, cx| o.open_edit(id, window, cx));
+                }
+            }
+            // going live a few seconds after launch, the Go live sheet skipped, and ending a while
+            // later ("go-live:<start s>:<end s>"; local checks against Stream Check)
+            Ok(hook) if hook.starts_with("go-live") => {
+                let mut nums = hook.split(':').skip(1).filter_map(|n| n.parse::<u64>().ok());
+                let (start, end) = (nums.next().unwrap_or(6), nums.next());
+                // a test key for the first destination, only in a workspace opened for this
+                // (LIGHTAIR_PROJECT), kept for the run and removed after it
+                let first = self.studio.read(cx).workspace().outputs.destinations.first().map(|d| d.id);
+                let test_key = std::env::var("LIGHTAIR_TEST_KEY").ok().filter(|_| std::env::var_os("LIGHTAIR_PROJECT").is_some());
+                if let (Some(id), Some(key)) = (first, &test_key) {
+                    let _ = crate::secrets::set_stream_key(id, key);
+                }
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_secs(start)).await;
+                    let _ = this.update(cx, |this, cx| this.studio.update(cx, |s, cx| s.go_live(cx)));
+                    if let Some(end) = end {
+                        cx.background_executor().timer(std::time::Duration::from_secs(end.saturating_sub(start))).await;
+                        let _ = this.update(cx, |this, cx| this.studio.update(cx, |s, cx| s.end_stream(cx)));
+                        if let (Some(id), Some(_)) = (first, &test_key) {
+                            crate::secrets::delete_stream_key(id);
+                        }
+                    }
+                })
+                .detach();
+            }
             Ok("virtual-camera-on") => self.studio.update(cx, |s, cx| s.toggle_virtual_camera(cx)),
             Ok("bottom-closed") => {
                 if let Some(dock) = self.dock.clone() {
