@@ -19,7 +19,7 @@ use sha2::Digest;
 /// doesn't update itself.
 pub const PUBLIC_KEY: &str = "8cf309e5f6db29b3a0446f45d2512157486cf586a82e828d4fe0f8e3b6021ef7";
 
-const MANIFEST: &str = "https://github.com/MoonGoblinDev/lightair/releases/latest/download/latest.json";
+const MANIFEST: &str = "https://github.com/Lightair-Project/lightair/releases/latest/download/latest.json";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum State {

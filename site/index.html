@@ -203,7 +203,7 @@
       <a href="#editor">Editor</a>
       <a href="#podcasts">Podcasts</a>
       <a href="#live">Live</a>
-      <a href="https://github.com/MoonGoblinDev/lightair">GitHub</a>
+      <a href="https://github.com/Lightair-Project/lightair">GitHub</a>
       <a href="#download">Download</a>
     </nav>
   </div>
@@ -222,7 +222,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg>
           <span id="get-label">Download</span>
         </a>
-        <a class="btn" href="https://github.com/MoonGoblinDev/lightair">Source on GitHub</a>
+        <a class="btn" href="https://github.com/Lightair-Project/lightair">Source on GitHub</a>
         <span class="mono" id="get-note">Free · GPL-3.0 · macOS 14+ and Windows 10/11</span>
       </div>
     </div>
@@ -365,17 +365,17 @@
       <div class="row" id="row-mac">
         <h3>macOS</h3>
         <p>Apple silicon, macOS 14 or later. Signed and notarized. <span class="mono file" id="mac-file">Lightair-x.y.z.dmg</span></p>
-        <a class="btn solid" id="mac-link" href="https://github.com/MoonGoblinDev/lightair/releases/latest">Download for Mac</a>
+        <a class="btn solid" id="mac-link" href="https://github.com/Lightair-Project/lightair/releases/latest">Download for Mac</a>
       </div>
       <div class="row" id="row-win">
         <h3>Windows</h3>
         <p>Windows 10 22H2 or 11, x64. Portable: unzip and run. <span class="mono file" id="win-file">Lightair-x.y.z-windows-x64.zip</span></p>
-        <a class="btn" id="win-link" href="https://github.com/MoonGoblinDev/lightair/releases/latest">Download for Windows</a>
+        <a class="btn" id="win-link" href="https://github.com/Lightair-Project/lightair/releases/latest">Download for Windows</a>
       </div>
       <div class="row">
         <h3>Source</h3>
         <p>Rust on GPUI, libobs 33 as OBS releases it. Build it with Cargo.</p>
-        <a class="btn" href="https://github.com/MoonGoblinDev/lightair#build-from-source">Build from source</a>
+        <a class="btn" href="https://github.com/Lightair-Project/lightair#build-from-source">Build from source</a>
       </div>
     </div>
   </div>
@@ -387,9 +387,9 @@
     <img src="assets/lockup-white.svg" alt="Lightair">
     <span>GPL-3.0-or-later · built on libobs</span>
     <nav>
-      <a href="https://github.com/MoonGoblinDev/lightair">GitHub</a>
-      <a href="https://github.com/MoonGoblinDev/lightair/releases">Releases</a>
-      <a href="https://github.com/MoonGoblinDev/lightair/tree/main/docs">Docs</a>
+      <a href="https://github.com/Lightair-Project/lightair">GitHub</a>
+      <a href="https://github.com/Lightair-Project/lightair/releases">Releases</a>
+      <a href="https://github.com/Lightair-Project/lightair/tree/main/docs">Docs</a>
     </nav>
   </div>
 </footer>
@@ -426,7 +426,7 @@
     document.getElementById("get-label").textContent = os === "mac" ? "Download for Mac" : "Download for Windows";
     document.getElementById("row-" + os).classList.add("mine");
   }
-  fetch("https://api.github.com/repos/MoonGoblinDev/lightair/releases/latest")
+  fetch("https://api.github.com/repos/Lightair-Project/lightair/releases/latest")
     .then((r) => (r.ok ? r.json() : Promise.reject()))
     .then((rel) => {
       const find = (re) => (rel.assets || []).find((a) => re.test(a.name));

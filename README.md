@@ -11,8 +11,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/MoonGoblinDev/lightair/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/MoonGoblinDev/lightair?label=release&color=FF3B4A"></a>
-  <a href="https://github.com/MoonGoblinDev/lightair/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/MoonGoblinDev/lightair/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/Lightair-Project/lightair/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Lightair-Project/lightair?label=release&color=FF3B4A"></a>
+  <a href="https://github.com/Lightair-Project/lightair/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Lightair-Project/lightair/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-2A2A2D"></a>
   <a href="https://moongoblindev.github.io/lightair/"><img alt="Website" src="https://img.shields.io/badge/website-lightair-141414"></a>
 </p>
@@ -27,8 +27,8 @@ Lightair is one app for app demos, podcasts and streams. Record a **Studio take*
 
 | Platform | Get it | Needs |
 |---|---|---|
-| **macOS** | [Lightair-x.y.z.dmg](https://github.com/MoonGoblinDev/lightair/releases/latest) (signed and notarized) | macOS 14 or later, Apple silicon |
-| **Windows** | [Lightair-x.y.z-windows-x64.zip](https://github.com/MoonGoblinDev/lightair/releases/latest) (portable) | Windows 10 22H2 or 11, x64 |
+| **macOS** | [Lightair-x.y.z.dmg](https://github.com/Lightair-Project/lightair/releases/latest) (signed and notarized) | macOS 14 or later, Apple silicon |
+| **Windows** | [Lightair-x.y.z-windows-x64.zip](https://github.com/Lightair-Project/lightair/releases/latest) (portable) | Windows 10 22H2 or 11, x64 |
 
 Lightair updates itself (Settings › About), and never installs an update while you're live. You don't need OBS installed.
 
@@ -89,7 +89,7 @@ Lightair updates itself (Settings › About), and never installs an update while
 You need Rust (stable), and on macOS Xcode with **OBS Studio 33.0.0** in `/Applications` (development builds use its `libobs.framework`; set `OBS_APP` for another place). Lightair's own libobs is OBS's official build, unmodified.
 
 ```bash
-git clone https://github.com/MoonGoblinDev/lightair.git && cd lightair
+git clone https://github.com/Lightair-Project/lightair.git && cd lightair
 git submodule update --init --depth 1
 cargo xtask modules   # the Lightair Effect Stack module
 cargo xtask bundle    # target/debug/Lightair.app

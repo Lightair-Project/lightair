@@ -10,7 +10,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use sha2::Digest;
 
 const SERVICE: &str = "Lightair update signing key";
-const REPO: &str = "MoonGoblinDev/lightair";
+const REPO: &str = "Lightair-Project/lightair";
 /// The app's copy of the public key (filled by `update-key`).
 const UPDATER: &str = "crates/lightair-app/src/updater.rs";
 
@@ -165,7 +165,7 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key().verify(&bytes, &sig).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["notes"], "Faster, calmer");
-        assert_eq!(v["assets"]["macos"]["url"], "https://github.com/MoonGoblinDev/lightair/releases/download/v9.9.9/Lightair-9.9.9.dmg");
+        assert_eq!(v["assets"]["macos"]["url"], "https://github.com/Lightair-Project/lightair/releases/download/v9.9.9/Lightair-9.9.9.dmg");
         assert_eq!(v["assets"]["windows"]["sha256"].as_str().unwrap().len(), 64);
         let _ = std::fs::remove_dir_all(dir);
     }

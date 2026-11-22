@@ -644,7 +644,7 @@ fn changed_packages() -> anyhow::Result<Option<Vec<String>>> {
 
 // ── lightair-core: the shared crates, pinned to a commit ────────────────────────────────────
 
-const CORE_URL: &str = "https://github.com/MoonGoblinDev/lightair-core";
+const CORE_URL: &str = "https://github.com/Lightair-Project/lightair-core";
 
 fn core_checkout() -> PathBuf {
     root().join("../lightair-core")
