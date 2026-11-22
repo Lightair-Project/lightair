@@ -37,7 +37,7 @@ pub type Jobs = futures_channel::mpsc::UnboundedSender<(Call, std::sync::mpsc::S
 const KEYCHAIN_SERVICE: &str = "Lightair PiAir";
 
 /// One line of the panel's running log.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Line {
     pub role: String,
     pub who: Option<String>,
@@ -51,7 +51,7 @@ pub struct Question {
 }
 
 /// A sign-in step from a provider (open a page, enter a code, paste a code back).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Auth {
     pub provider: String,
     pub message: String,
@@ -242,7 +242,7 @@ impl Host {
                 .name("piair-read".into())
                 .spawn(move || {
                     for line in BufReader::new(out).lines().map_while(Result::ok) {
-                        match serde_json::from_str::<Value>(&line) {
+                        match parse_line(&line) {
                             Ok(m) => host.on_message(m),
                             Err(e) => tracing::warn!(%e, "piair: bad line"),
                         }
@@ -368,120 +368,74 @@ impl Host {
 
     // ---------------------------------------------------------------- from PiAir
 
-    fn on_message(&self, m: Value) {
-        let t = m.get("t").and_then(Value::as_str).unwrap_or("");
-        match t {
-            "voice" => {
-                let utterance = m.get("utterance").and_then(Value::as_str).unwrap_or("");
-                let rate = m.get("rate").and_then(Value::as_u64).unwrap_or(24_000) as u32;
-                let pcm = m
-                    .get("pcm")
-                    .and_then(Value::as_str)
-                    .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
-                    .unwrap_or_default();
-                let marks: Vec<(f32, piair_voice::Shape)> = m
-                    .get("marks")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|k| {
-                                Some((
-                                    k.get("t_ms")?.as_f64()? as f32,
-                                    piair_voice::Shape::parse(k.get("v")?.as_str()?)?,
-                                ))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                piair_voice::push(utterance, rate, &pcm, &marks);
-            }
-            "voice_end" => piair_voice::end(m.get("utterance").and_then(Value::as_str).unwrap_or("")),
-            "voice_cancel" => piair_voice::cancel(m.get("utterance").and_then(Value::as_str)),
-            "face" => {
-                if let Some(mood) = m.get("mood").and_then(Value::as_str) {
-                    face_drive::set_mood(mood);
+    fn on_message(&self, m: Incoming) {
+        match m {
+            Incoming::Voice { utterance, rate, pcm, marks } => piair_voice::push(&utterance, rate, &pcm, &marks),
+            Incoming::VoiceEnd { utterance } => piair_voice::end(&utterance),
+            Incoming::VoiceCancel { utterance } => piair_voice::cancel(utterance.as_deref()),
+            Incoming::Face { mood, look } => {
+                if let Some(mood) = mood {
+                    face_drive::set_mood(&mood);
                 }
-                match m.get("look") {
-                    Some(Value::String(l)) => face_drive::set_look(match l.as_str() {
+                match look {
+                    Some(FaceLook::Named(l)) => face_drive::set_look(match l.as_str() {
                         "chat" => face_drive::Look::Chat,
                         "streamer" => face_drive::Look::Streamer,
                         "pointer" => face_drive::Look::Pointer,
                         _ => face_drive::Look::Camera,
                     }),
-                    Some(Value::Object(o)) => {
-                        let x = o.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
-                        let y = o.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32;
-                        face_drive::set_look_at(x, y);
-                    }
-                    _ => {}
+                    Some(FaceLook::At(x, y)) => face_drive::set_look_at(x, y),
+                    None => {}
                 }
             }
-            "call" => {
+            Incoming::Call { id, method, params } => {
                 let host = self.clone();
                 std::thread::spawn(move || {
-                    let id = m.get("id").cloned().unwrap_or(Value::Null);
-                    let method = m.get("method").and_then(Value::as_str).unwrap_or("").to_string();
-                    let params = m.get("params").cloned().unwrap_or(json!({}));
-                    let reply = host.answer(&method, params);
-                    let msg = match reply {
+                    let msg = match host.answer(&method, params) {
                         Ok(result) => json!({"t": "reply", "id": id, "result": result}),
                         Err(e) => json!({"t": "reply", "id": id, "error": {"code": e.0, "message": e.1}}),
                     };
                     host.send(msg);
                 });
             }
-            "ready" => {
+            Incoming::Ready { settings, providers } => {
                 let mut s = self.state();
                 s.ready = true;
                 s.status = "listening".into();
-                s.settings = m.get("settings").cloned().unwrap_or(Value::Null);
-                s.providers = m.get("providers").cloned().unwrap_or(Value::Null);
                 self.0.listen.store(
-                    s.settings.pointer("/behaviour/listen").and_then(Value::as_bool).unwrap_or(false),
+                    settings.pointer("/behaviour/listen").and_then(Value::as_bool).unwrap_or(false),
                     Ordering::Relaxed,
                 );
+                s.settings = settings;
+                s.providers = providers;
             }
-            "settings" => {
-                let mut s = self.state();
-                s.settings = m.get("values").cloned().unwrap_or(Value::Null);
+            Incoming::Settings { values } => {
                 self.0.listen.store(
-                    s.settings.pointer("/behaviour/listen").and_then(Value::as_bool).unwrap_or(false),
+                    values.pointer("/behaviour/listen").and_then(Value::as_bool).unwrap_or(false),
                     Ordering::Relaxed,
                 );
+                self.state().settings = values;
             }
-            "providers" => self.state().providers = m.get("providers").cloned().unwrap_or(Value::Null),
-            "status" => {
+            Incoming::Providers { providers } => self.state().providers = providers,
+            Incoming::Status { state, detail } => {
                 let mut s = self.state();
-                s.status = m.get("state").and_then(Value::as_str).unwrap_or("idle").to_string();
-                s.detail = m.get("detail").and_then(Value::as_str).map(str::to_owned);
+                s.status = state;
+                s.detail = detail;
             }
-            "transcript" => {
+            Incoming::Transcript(line) => {
                 let mut s = self.state();
-                s.log.push_back(Line {
-                    role: m.get("role").and_then(Value::as_str).unwrap_or("").to_string(),
-                    who: m.get("who").and_then(Value::as_str).map(str::to_owned),
-                    text: m.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
-                });
+                s.log.push_back(line);
                 while s.log.len() > 200 {
                     s.log.pop_front();
                 }
             }
-            "auth" => {
-                let a = Auth {
-                    provider: m.get("provider").and_then(Value::as_str).unwrap_or("").to_string(),
-                    message: m.get("message").and_then(Value::as_str).unwrap_or("").to_string(),
-                    url: m.get("url").and_then(Value::as_str).map(str::to_owned),
-                    code: m.get("code").and_then(Value::as_str).map(str::to_owned),
-                    wants_code: m.get("prompt").and_then(Value::as_bool).unwrap_or(false),
-                    done: m.get("done").and_then(Value::as_bool).unwrap_or(false),
-                    error: m.get("error").and_then(Value::as_bool).unwrap_or(false),
-                };
+            Incoming::Auth(a) => {
                 if let Some(url) = &a.url {
                     open_url(url);
                 }
                 self.state().auth = Some(a);
             }
-            _ => {}
+            Incoming::Other(_) => {}
         }
         self.touch();
     }
@@ -644,6 +598,124 @@ impl Host {
             })
             .ok();
     }
+}
+
+/// Where the co-host looks, as PiAir says it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FaceLook {
+    /// "chat", "streamer", "pointer" or "camera".
+    Named(String),
+    /// A point: x right, y up, -1..1.
+    At(f32, f32),
+}
+
+/// A message from PiAir (piair/docs/design.md §2.2), read from one line.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Incoming {
+    Voice {
+        utterance: String,
+        rate: u32,
+        pcm: Vec<u8>,
+        marks: Vec<(f32, piair_voice::Shape)>,
+    },
+    VoiceEnd {
+        utterance: String,
+    },
+    VoiceCancel {
+        utterance: Option<String>,
+    },
+    Face {
+        mood: Option<String>,
+        look: Option<FaceLook>,
+    },
+    Call {
+        id: Value,
+        method: String,
+        params: Value,
+    },
+    Ready {
+        settings: Value,
+        providers: Value,
+    },
+    Settings {
+        values: Value,
+    },
+    Providers {
+        providers: Value,
+    },
+    Status {
+        state: String,
+        detail: Option<String>,
+    },
+    Transcript(Line),
+    Auth(Auth),
+    /// A kind this Lightair doesn't know (a newer PiAir): ignored.
+    Other(String),
+}
+
+/// Reads one line from PiAir. Missing fields take their defaults (a voice piece's rate 24 kHz,
+/// a status "idle"); a line that isn't a JSON object with a `t` is an error.
+pub fn parse_line(line: &str) -> Result<Incoming, String> {
+    let m: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+    let t = m.get("t").and_then(Value::as_str).ok_or("no message kind (t)")?;
+    let text = |k: &str| m.get(k).and_then(Value::as_str).map(str::to_owned);
+    let flag = |k: &str| m.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let value = |k: &str| m.get(k).cloned().unwrap_or(Value::Null);
+    Ok(match t {
+        "voice" => Incoming::Voice {
+            utterance: text("utterance").unwrap_or_default(),
+            rate: m.get("rate").and_then(Value::as_u64).unwrap_or(24_000) as u32,
+            pcm: text("pcm").and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok()).unwrap_or_default(),
+            marks: m
+                .get("marks")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|k| {
+                            Some((k.get("t_ms")?.as_f64()? as f32, piair_voice::Shape::parse(k.get("v")?.as_str()?)?))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
+        "voice_end" => Incoming::VoiceEnd { utterance: text("utterance").unwrap_or_default() },
+        "voice_cancel" => Incoming::VoiceCancel { utterance: text("utterance") },
+        "face" => Incoming::Face {
+            mood: text("mood"),
+            look: match m.get("look") {
+                Some(Value::String(l)) => Some(FaceLook::Named(l.clone())),
+                Some(Value::Object(o)) => Some(FaceLook::At(
+                    o.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                    o.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                )),
+                _ => None,
+            },
+        },
+        "call" => Incoming::Call {
+            id: value("id"),
+            method: text("method").unwrap_or_default(),
+            params: m.get("params").cloned().unwrap_or(json!({})),
+        },
+        "ready" => Incoming::Ready { settings: value("settings"), providers: value("providers") },
+        "settings" => Incoming::Settings { values: value("values") },
+        "providers" => Incoming::Providers { providers: value("providers") },
+        "status" => Incoming::Status { state: text("state").unwrap_or_else(|| "idle".into()), detail: text("detail") },
+        "transcript" => Incoming::Transcript(Line {
+            role: text("role").unwrap_or_default(),
+            who: text("who"),
+            text: text("text").unwrap_or_default(),
+        }),
+        "auth" => Incoming::Auth(Auth {
+            provider: text("provider").unwrap_or_default(),
+            message: text("message").unwrap_or_default(),
+            url: text("url"),
+            code: text("code"),
+            wants_code: flag("prompt"),
+            done: flag("done"),
+            error: flag("error"),
+        }),
+        other => Incoming::Other(other.to_string()),
+    })
 }
 
 fn code_of(e: &ApiError) -> &'static str {

@@ -420,81 +420,130 @@ impl Computer {
     /// are the display's frame in points.
     fn black_out(&self, img: &mut image::RgbImage, origin: (f32, f32), width: f32) {
         let k = img.width() as f32 / width.max(1.0);
-        let (w, h) = (img.width() as i64, img.height() as i64);
-        let mut keep = vec![false; (w * h) as usize];
         let me = std::process::id() as i32;
         let mut allowed_pid: std::collections::HashMap<i32, bool> = std::collections::HashMap::new();
-        // back to front: an allowed window shows; anything above it covers it again
-        for win in imp::windows_on_screen().into_iter().rev() {
-            let allowed = win.pid != me
-                && *allowed_pid
-                    .entry(win.pid)
-                    .or_insert_with(|| imp::bundle_id(win.pid).is_some_and(|b| self.allowed(&b)));
-            let f = win.frame;
-            // full-screen overlays above the windows (the Dock's, the window server's) cover
-            // nothing; the menu bar, the Dock itself and other apps' panels do
-            let whole = f.size.width as f32 * k >= w as f32 * 0.95 && f.size.height as f32 * k >= h as f32 * 0.95;
-            if win.layer != 0 && whole && !allowed {
-                continue;
-            }
-            let show = allowed;
-            let x0 = (((f.origin.x as f32 - origin.0) * k).floor() as i64).clamp(0, w);
-            let y0 = (((f.origin.y as f32 - origin.1) * k).floor() as i64).clamp(0, h);
-            let x1 = ((((f.origin.x + f.size.width) as f32 - origin.0) * k).ceil() as i64).clamp(0, w);
-            let y1 = ((((f.origin.y + f.size.height) as f32 - origin.1) * k).ceil() as i64).clamp(0, h);
-            for y in y0..y1 {
-                let row = (y * w) as usize;
-                keep[row + x0 as usize..row + x1 as usize].fill(show);
-            }
-            // windows have round corners: what's behind them there stays black too
-            if show {
-                let r = ((12.0 * k).ceil() as i64).min((x1 - x0) / 2).min((y1 - y0) / 2);
-                for dy in 0..r {
-                    for dx in 0..r {
-                        let (cx, cy) = (r - dx, r - dy);
-                        if cx * cx + cy * cy <= r * r {
-                            continue;
-                        }
-                        for (x, y) in [
-                            (x0 + dx, y0 + dy),
-                            (x1 - 1 - dx, y0 + dy),
-                            (x0 + dx, y1 - 1 - dy),
-                            (x1 - 1 - dx, y1 - 1 - dy),
-                        ] {
-                            keep[(y * w + x) as usize] = false;
-                        }
-                    }
+        let windows: Vec<WinInfo> = imp::windows_on_screen()
+            .into_iter()
+            .map(|win| {
+                let allowed = win.pid != me
+                    && *allowed_pid
+                        .entry(win.pid)
+                        .or_insert_with(|| imp::bundle_id(win.pid).is_some_and(|b| self.allowed(&b)));
+                let f = win.frame;
+                WinInfo {
+                    frame: Rect {
+                        x: f.origin.x as f32,
+                        y: f.origin.y as f32,
+                        w: f.size.width as f32,
+                        h: f.size.height as f32,
+                    },
+                    allowed,
+                    layer: win.layer,
                 }
-            }
-        }
-        // the menu bar and the Dock never show, whatever is under them
-        let display = imp::CGRect {
-            origin: imp::CGPoint { x: origin.0 as f64, y: origin.1 as f64 },
-            size: imp::CGSize { width: width as f64, height: h as f64 / k as f64 },
+            })
+            .collect();
+        let display = Rect { x: origin.0, y: origin.1, w: width, h: img.height() as f32 / k };
+        let cg = imp::CGRect {
+            origin: imp::CGPoint { x: display.x as f64, y: display.y as f64 },
+            size: imp::CGSize { width: display.w as f64, height: display.h as f64 },
         };
-        match imp::visible_frame(display) {
-            Some(v) => {
-                let vx0 = (((v.origin.x as f32 - origin.0) * k).ceil() as i64).clamp(0, w);
-                let vy0 = (((v.origin.y as f32 - origin.1) * k).ceil() as i64).clamp(0, h);
-                let vx1 = ((((v.origin.x + v.size.width) as f32 - origin.0) * k).floor() as i64).clamp(0, w);
-                let vy1 = ((((v.origin.y + v.size.height) as f32 - origin.1) * k).floor() as i64).clamp(0, h);
-                for y in 0..h {
-                    for x in 0..w {
-                        if x < vx0 || x >= vx1 || y < vy0 || y >= vy1 {
-                            keep[(y * w + x) as usize] = false;
-                        }
-                    }
-                }
-            }
-            // can't tell where they are: nothing shows
-            None => keep.fill(false),
-        }
+        let visible = imp::visible_frame(cg).map(|v| Rect {
+            x: v.origin.x as f32,
+            y: v.origin.y as f32,
+            w: v.size.width as f32,
+            h: v.size.height as f32,
+        });
+        let keep = mask(&windows, display, visible, (img.width(), img.height()));
         for (i, px) in img.pixels_mut().enumerate() {
             if !keep[i] {
                 *px = image::Rgb([0, 0, 0]);
             }
         }
     }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// A rectangle in global display points (top-left origin).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// A window on screen as the screenshot mask sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WinInfo {
+    pub frame: Rect,
+    /// Its app is on the allowed list (and isn't Lightair).
+    pub allowed: bool,
+    /// 0 for a normal window; the menu bar, the Dock and overlays sit higher.
+    pub layer: i32,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// Which pixels of a `size` picture of `display` may go to the model, row by row: only the
+/// visible parts of allowed windows (`windows` front to back), never their round corners, never
+/// anything outside `visible` (the display without the menu bar and the Dock). No `visible`:
+/// nothing shows. A full-display overlay above the windows (not allowed) covers nothing.
+pub fn mask(windows: &[WinInfo], display: Rect, visible: Option<Rect>, size: (u32, u32)) -> Vec<bool> {
+    let (w, h) = (size.0 as i64, size.1 as i64);
+    let mut keep = vec![false; (w * h) as usize];
+    let Some(v) = visible else { return keep };
+    let k = size.0 as f32 / display.w.max(1.0);
+    let px = |x: f32, lo: bool| -> i64 {
+        (if lo { ((x - display.x) * k).floor() } else { ((x - display.x) * k).ceil() } as i64).clamp(0, w)
+    };
+    let py = |y: f32, lo: bool| -> i64 {
+        (if lo { ((y - display.y) * k).floor() } else { ((y - display.y) * k).ceil() } as i64).clamp(0, h)
+    };
+    // back to front: an allowed window shows; anything above it covers it again
+    for win in windows.iter().rev() {
+        let f = win.frame;
+        let whole = f.w * k >= w as f32 * 0.95 && f.h * k >= h as f32 * 0.95;
+        if win.layer != 0 && whole && !win.allowed {
+            continue;
+        }
+        let (x0, y0, x1, y1) = (px(f.x, true), py(f.y, true), px(f.x + f.w, false), py(f.y + f.h, false));
+        for y in y0..y1 {
+            let row = (y * w) as usize;
+            keep[row + x0 as usize..row + x1 as usize].fill(win.allowed);
+        }
+        // windows have round corners: what's behind them there stays black too
+        if win.allowed {
+            let r = ((12.0 * k).ceil() as i64).min((x1 - x0) / 2).min((y1 - y0) / 2);
+            for dy in 0..r {
+                for dx in 0..r {
+                    let (cx, cy) = (r - dx, r - dy);
+                    if cx * cx + cy * cy <= r * r {
+                        continue;
+                    }
+                    for (x, y) in
+                        [(x0 + dx, y0 + dy), (x1 - 1 - dx, y0 + dy), (x0 + dx, y1 - 1 - dy), (x1 - 1 - dx, y1 - 1 - dy)]
+                    {
+                        keep[(y * w + x) as usize] = false;
+                    }
+                }
+            }
+        }
+    }
+    // the menu bar and the Dock never show, whatever is under them
+    let (vx0, vy0) =
+        ((((v.x - display.x) * k).ceil() as i64).clamp(0, w), (((v.y - display.y) * k).ceil() as i64).clamp(0, h));
+    let (vx1, vy1) = (
+        (((v.x + v.w - display.x) * k).floor() as i64).clamp(0, w),
+        (((v.y + v.h - display.y) * k).floor() as i64).clamp(0, h),
+    );
+    for y in 0..h {
+        for x in 0..w {
+            if x < vx0 || x >= vx1 || y < vy0 || y >= vy1 {
+                keep[(y * w + x) as usize] = false;
+            }
+        }
+    }
+    keep
 }
 
 fn contains_word(text: &str, word: &str) -> bool {
@@ -536,7 +585,17 @@ mod tests {
     /// Quitting, closing and deleting need the streamer's yes, however the combination is written.
     #[test]
     fn destructive_key_combinations_are_caught_however_theyre_written() {
-        for keys in ["cmd+q", "cmd+shift+w", "Shift+Cmd+W", "command+delete", "opt+cmd+escape", "ctrl+shift+delete", "shift+ctrl+delete", "ALT+F4", "shift+delete"] {
+        for keys in [
+            "cmd+q",
+            "cmd+shift+w",
+            "Shift+Cmd+W",
+            "command+delete",
+            "opt+cmd+escape",
+            "ctrl+shift+delete",
+            "shift+ctrl+delete",
+            "ALT+F4",
+            "shift+delete",
+        ] {
             assert!(destructive(keys), "{keys}");
         }
         for keys in ["cmd+t", "cmd+c", "return", "shift+tab", "cmd+shift+t"] {
