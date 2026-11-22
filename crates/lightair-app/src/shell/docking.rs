@@ -405,6 +405,8 @@ impl StudioWindow {
         // Development: open a dialog on launch for screenshots (no clicking needed).
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
             Ok("add-object") => self.open_add_object(window, cx),
+            // a check script steps the window through states (shell/check_driver.rs)
+            Ok("check-driver") => self.start_check_driver(window, cx),
             // a group shown ("add-object:widgets"), or a search typed ("add-object:?chat")
             Ok(hook) if hook.starts_with("add-object:") => {
                 self.open_add_object(window, cx);

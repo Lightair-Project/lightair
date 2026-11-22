@@ -22,6 +22,7 @@ pub(crate) mod app_menu;
 mod add_object;
 mod avatar_props;
 mod avatar_sheets;
+mod check_driver;
 mod editor_sync;
 mod file_drop;
 mod phone_camera;
