@@ -222,6 +222,32 @@ impl StudioWindow {
                     this.tree_drop = None;
                     this.drop_asset_on_tree(&a.0, Some((id, zone)), cx);
                 }))
+                // Files from Finder: the same three places, as their assets would go.
+                .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<ExternalPaths>, _, cx| {
+                    if !ev.bounds.contains(&ev.event.position) {
+                        return;
+                    }
+                    let f = (ev.event.position.y - ev.bounds.origin.y) / ev.bounds.size.height;
+                    let zone = if f < 0.28 {
+                        TreeDrop::Above
+                    } else if f > 0.72 {
+                        TreeDrop::Below
+                    } else {
+                        TreeDrop::Into
+                    };
+                    let count = ev.drag(cx).paths().len();
+                    this.file_drag = Some((count, std::time::Instant::now()));
+                    if this.tree_drop != Some((id, zone)) {
+                        this.tree_drop = Some((id, zone));
+                        cx.notify();
+                    }
+                }))
+                .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                    let zone = this.tree_drop.filter(|(t, _)| *t == id).map_or(TreeDrop::Into, |(_, z)| z);
+                    this.tree_drop = None;
+                    this.file_drag = None;
+                    this.drop_files(paths.paths(), super::file_drop::DropTo::Tree(Some((id, zone))), window, cx);
+                }))
                 // Fold arrow, or room for one.
                 .child(div().id(("fold", i)).size(px(14.)).flex().items_center().justify_center().when(holds, |d| {
                     d.child(
@@ -268,6 +294,25 @@ impl StudioWindow {
                             cx,
                         )
                     })),
+                )
+                // Several files from Finder over this row: how many.
+                .when_some(
+                    self.file_drag
+                        .filter(|(n, t)| *n > 1 && t.elapsed() < std::time::Duration::from_millis(400) && zone.is_some()),
+                    |d, (n, _)| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .right(px(44.))
+                                .top(px(3.))
+                                .px_1p5()
+                                .rounded(px(4.))
+                                .bg(tok::accent_primary())
+                                .text_size(px(10.))
+                                .text_color(gpui_kit::white())
+                                .child(format!("{n} files")),
+                        )
+                    },
                 )
                 // Drop line: above or below this row, indented to where the object would land.
                 .when_some(zone.filter(|z| *z != TreeDrop::Into), |d, z| {
@@ -321,6 +366,12 @@ impl StudioWindow {
                         .on_drop(cx.listener(|this, a: &DraggedAsset, _, cx| {
                             this.tree_drop = None;
                             this.drop_asset_on_tree(&a.0, None, cx);
+                        }))
+                        .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(tok::bg_raised()))
+                        .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                            this.tree_drop = None;
+                            this.file_drag = None;
+                            this.drop_files(paths.paths(), super::file_drop::DropTo::Tree(None), window, cx);
                         }))
                         .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.select_object(None, cx)))
                         .context_menu({

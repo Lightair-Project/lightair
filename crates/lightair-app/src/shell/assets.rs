@@ -26,15 +26,43 @@ pub(crate) enum AssetKind {
     Image,
     Video,
     Audio,
+    /// An avatar model: VRM (or a GLB with VRM data), Live2D (its `.model3.json`, or the folder
+    /// holding one), Inochi2D, Umamo.
+    Avatar,
+    /// A folder of assets.
+    Folder,
     Other,
+}
+
+/// The Live2D model a folder holds (its `.model3.json`), if it holds one.
+pub(crate) fn live2d_model_in(dir: &Path) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().ends_with(".model3.json")))
+        .collect();
+    found.sort();
+    found.into_iter().next()
 }
 
 impl AssetKind {
     pub(crate) fn of(path: &Path) -> AssetKind {
+        if path.is_dir() {
+            return if live2d_model_in(path).is_some() { AssetKind::Avatar } else { AssetKind::Folder };
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if name.ends_with(".model3.json") {
+            return AssetKind::Avatar;
+        }
         let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         match ext.as_str() {
             "prefab" => AssetKind::Prefab,
             "scene" => AssetKind::Scene,
+            "vrm" | "glb" | "inp" | "inx" | "uma" => AssetKind::Avatar,
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tga" | "heic" => AssetKind::Image,
             "mp4" | "mov" | "m4v" | "mkv" | "webm" | "avi" => AssetKind::Video,
             "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "aiff" => AssetKind::Audio,
@@ -49,6 +77,8 @@ impl AssetKind {
             AssetKind::Image => "image",
             AssetKind::Video => "film",
             AssetKind::Audio => "music",
+            AssetKind::Avatar => "person-standing",
+            AssetKind::Folder => "folder",
             AssetKind::Other => "file",
         }
     }
@@ -62,10 +92,16 @@ pub(crate) struct Asset {
 }
 
 impl Asset {
+    /// The model file an avatar asset loads (a Live2D folder's `.model3.json`).
+    pub(crate) fn model_file(&self) -> PathBuf {
+        live2d_model_in(&self.path).unwrap_or_else(|| self.path.clone())
+    }
+
     fn name(&self) -> String {
         let stem = self.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         match self.kind {
             AssetKind::Prefab | AssetKind::Scene => stem,
+            _ if self.path.is_dir() => self.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(stem),
             _ => self.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(stem),
         }
     }
@@ -106,7 +142,7 @@ pub(crate) enum Placement {
 }
 
 /// A name in `dir` like `name` that isn't taken ("Logo.png", "Logo 2.png", …).
-fn free_name(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+pub(super) fn free_name(dir: &Path, stem: &str, ext: &str) -> PathBuf {
     let dot = if ext.is_empty() { String::new() } else { format!(".{ext}") };
     let first = dir.join(format!("{stem}{dot}"));
     if !first.exists() {
@@ -123,27 +159,38 @@ impl StudioWindow {
             return cache.1.clone();
         }
         let mut list: Vec<Asset> = self
-            .studio
-            .read(cx)
-            .assets_dir()
+            .asset_dir(cx)
             .and_then(|dir| std::fs::read_dir(dir).ok())
             .map(|entries| {
                 entries
                     .flatten()
                     .map(|e| e.path())
-                    .filter(|p| p.is_file() && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
+                    .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
                     .map(|path| Asset { kind: AssetKind::of(&path), path })
                     .collect()
             })
             .unwrap_or_default();
-        // Prefabs first, then by name.
-        list.sort_by_key(|a| (a.kind != AssetKind::Prefab, a.name().to_lowercase()));
+        // Folders, then prefabs, then by name.
+        list.sort_by_key(|a| (a.kind != AssetKind::Folder, a.kind != AssetKind::Prefab, a.name().to_lowercase()));
         *cache = (Some(Instant::now()), list.clone());
         list
     }
 
-    fn refresh_assets(&self) {
+    pub(super) fn refresh_assets(&self) {
         self.asset_cache.borrow_mut().0 = None;
+    }
+
+    /// The folder Assets shows: the assets folder, or a folder in it.
+    pub(super) fn asset_dir(&self, cx: &App) -> Option<PathBuf> {
+        let root = self.studio.read(cx).assets_dir()?;
+        Some(self.asset_folder.clone().filter(|f| f.starts_with(&root) && *f != root && f.is_dir()).unwrap_or(root))
+    }
+
+    fn open_asset_folder(&mut self, folder: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.asset_folder = folder;
+        self.selected_asset = None;
+        self.refresh_assets();
+        cx.notify();
     }
 
     pub(super) fn assets_panel(&self, _workspace: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
@@ -189,10 +236,22 @@ impl StudioWindow {
                     .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                         this.selected_asset = Some(a1.path.clone());
                         if ev.click_count() == 2 {
+                            if a1.kind == AssetKind::Folder {
+                                return this.open_asset_folder(Some(a1.path.clone()), cx);
+                            }
                             this.place_asset(&a1, Placement::Centre, cx);
                         }
                         cx.notify();
                     }))
+                    // files from Finder onto a folder: into it
+                    .when(asset.kind == AssetKind::Folder, |d| {
+                        let folder = asset.path.clone();
+                        d.drag_over::<ExternalPaths>(|s, _, _, _| s.bg(tok::bg_selected()))
+                            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                                cx.stop_propagation();
+                                this.drop_files(paths.paths(), super::file_drop::DropTo::Assets(folder.clone()), window, cx);
+                            }))
+                    })
                     .on_drag(DraggedAsset(a2), |a, _, _, cx| cx.new(|_| a.clone()))
                     .child(thumb)
                     .child(
@@ -227,16 +286,37 @@ impl StudioWindow {
             );
         }
         let empty = assets.is_empty();
+        // in a folder: back up to the one holding it
+        let root = self.studio.read(cx).assets_dir();
+        let here = self.asset_dir(cx);
+        let crumb = here.filter(|h| Some(h) != root.as_ref()).map(|h| {
+            let up = h.parent().map(Path::to_path_buf).filter(|p| Some(p) != root.as_ref());
+            div()
+                .id("assets-up")
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .pt_2()
+                .text_size(px(12.))
+                .text_color(tok::text_secondary())
+                .cursor_pointer()
+                .hover(|d| d.text_color(tok::text()))
+                .child(ui::icon("chevron-left").size(px(13.)))
+                .child(h.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+                .on_click(cx.listener(move |this, _, _, cx| this.open_asset_folder(up.clone(), cx)))
+        });
         div()
             .id("assets-panel")
             .size_full()
             .flex()
             .flex_col()
             .overflow_y_scroll()
-            // From Finder: copied in.
+            // From Finder: copied in, into the folder shown.
             .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(tok::bg_raised()))
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                this.import_files(paths.paths(), cx);
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                let Some(folder) = this.asset_dir(cx) else { return };
+                this.drop_files(paths.paths(), super::file_drop::DropTo::Assets(folder), window, cx);
             }))
             // A object from the Hierarchy: saved as a prefab.
             .drag_over::<DraggedRow>(|s, _, _, _| s.bg(tok::bg_raised()))
@@ -249,6 +329,7 @@ impl StudioWindow {
                 this.selected_asset = None;
                 cx.notify();
             }))
+            .children(crumb)
             .child(grid)
             .when(empty, |d| {
                 d.child(
@@ -258,7 +339,7 @@ impl StudioWindow {
                         .text_size(px(12.))
                         .text_color(tok::text_tertiary())
                         .child(
-                            "Drop images, video or sound here. Drag an object from the Hierarchy to make a prefab, or a scene to keep it.",
+                            "Drop images, video, sound or avatars here. Drag an object from the Hierarchy to make a prefab, or a scene to keep it.",
                         ),
                 )
             })
@@ -398,14 +479,58 @@ impl StudioWindow {
         })
     }
 
-    /// Adds an asset to the scene: a prefab instance, or a object for an image, video or sound.
+    /// Adds an asset to the scene: a prefab instance, or a object for an image, video, sound or
+    /// avatar; a folder's assets in order; a scene asset as a new scene.
     pub(super) fn place_asset(&mut self, asset: &Asset, at: Placement, cx: &mut Context<Self>) {
-        if asset.kind == AssetKind::Scene {
-            return self.add_scene_asset(asset, cx);
+        self.place_assets(std::slice::from_ref(asset), at, cx);
+    }
+
+    /// Adds assets in order, as one undo step, and selects the last; a scene asset becomes a new
+    /// scene of its own.
+    pub(super) fn place_assets(&mut self, assets: &[Asset], at: Placement, cx: &mut Context<Self>) {
+        // a folder: what's in it that can be placed
+        let assets: Vec<Asset> = assets
+            .iter()
+            .flat_map(|a| match a.kind {
+                AssetKind::Folder => super::file_drop::placeable_in(&a.path).into_iter().map(|path| Asset { kind: AssetKind::of(&path), path }).collect(),
+                _ => vec![a.clone()],
+            })
+            .collect();
+        let mut commands = Vec::new();
+        let mut last = None;
+        let mut labels = Vec::new();
+        for (n, asset) in assets.iter().enumerate() {
+            if asset.kind == AssetKind::Scene {
+                self.add_scene_asset(asset, cx);
+                continue;
+            }
+            // several into one place: one after another, each in front of the last
+            let at = match at {
+                Placement::Into(p, Some(i)) => Placement::Into(p, Some(i + n)),
+                other => other,
+            };
+            if let Some((c, root, label)) = self.asset_commands(asset, at, cx) {
+                commands.extend(c);
+                last = root.or(last);
+                labels.push(label);
+            }
         }
+        if commands.is_empty() {
+            return;
+        }
+        if let Placement::Into(Some(p), _) = at {
+            self.collapsed_objects.remove(&p);
+        }
+        let label = if labels.len() == 1 { labels.remove(0) } else { format!("Add {} files", labels.len()) };
+        self.exec(Command::Batch { label, commands }, cx);
+        self.select_object(last, cx);
+    }
+
+    /// The commands that add one asset (not a scene or folder), the object they add, and a label.
+    fn asset_commands(&mut self, asset: &Asset, at: Placement, cx: &mut Context<Self>) -> Option<(Vec<Command>, Option<Id>, String)> {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
-        let Some(scene) = studio.selected_scene.and_then(|id| workspace.scene(id)).cloned() else { return };
+        let scene = studio.selected_scene.and_then(|id| workspace.scene(id)).cloned()?;
         let (parent, index) = match at {
             Placement::Into(p, i) => (p, i),
             _ => (None, None),
@@ -418,7 +543,7 @@ impl StudioWindow {
         let (commands, root, label) = match asset.kind {
             AssetKind::Prefab => {
                 let file = asset.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let Some(mut clip) = self.read_prefab(&file, cx) else { return };
+                let mut clip = self.read_prefab(&file, cx)?;
                 // Move the prefab's root so its frame is centred where it's going.
                 if let Some(root) = clip.objects.first_mut() {
                     for f in &workspace.canvases {
@@ -434,11 +559,23 @@ impl StudioWindow {
                 let (commands, root) = clip.instantiate(&workspace, scene.id, &file, parent, index);
                 (commands, root, format!("Place {}", asset.name()))
             }
-            AssetKind::Image | AssetKind::Video | AssetKind::Audio => {
+            AssetKind::Image | AssetKind::Video | AssetKind::Audio | AssetKind::Avatar => {
                 let path = asset.path.to_string_lossy().into_owned();
-                let name = asset.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let mut name = asset.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 let (kind, settings, size) = match asset.kind {
                     AssetKind::Image => ("image_source", json!({"file": path}), (640.0, 360.0)),
+                    // an avatar: kept in the avatar library too, with its look
+                    AssetKind::Avatar => {
+                        let model = asset.model_file();
+                        let entry = self.avatar_library.for_file(&model);
+                        self.avatar_library.save();
+                        let e = self.avatar_library.get(entry).cloned()?;
+                        name = e.name.clone();
+                        let base = json!({"file": e.file, "device": self.face_camera(cx), "width": 1080, "height": 1080, "framing": "bust", "mirror": true, "library": e.id});
+                        let settings = crate::avatar_library::with_look(&base, &e.look);
+                        let size = (settings["width"].as_f64().unwrap_or(1080.0) as f32, settings["height"].as_f64().unwrap_or(1080.0) as f32);
+                        (super::avatar_props::KIND, settings, size)
+                    }
                     _ => (
                         "ffmpeg_source",
                         json!({"local_file": path, "is_local_file": true, "looping": true, "restart_on_activate": true}),
@@ -467,16 +604,9 @@ impl StudioWindow {
                     format!("Add {name}"),
                 )
             }
-            AssetKind::Scene | AssetKind::Other => return,
+            AssetKind::Scene | AssetKind::Folder | AssetKind::Other => return None,
         };
-        if commands.is_empty() {
-            return;
-        }
-        if let Some(p) = parent {
-            self.collapsed_objects.remove(&p);
-        }
-        self.exec(Command::Batch { label, commands }, cx);
-        self.select_object(root, cx);
+        Some((commands, root, label))
     }
 
     /// Drops onto the canvas: assets and files from Finder land where they're dropped.
@@ -490,28 +620,37 @@ impl StudioWindow {
         self.place_asset(asset, placement, cx);
     }
 
-    pub(super) fn drop_files_on_canvas(&mut self, paths: &[PathBuf], window: &Window, cx: &mut Context<Self>) {
-        for path in self.import_files(paths, cx) {
-            let asset = Asset { kind: AssetKind::of(&path), path };
-            self.drop_asset_on_canvas(&asset, window, cx);
-        }
+    pub(super) fn drop_files_on_canvas(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self.studio.read(cx).workspace().clone();
+        let at = window.mouse_position();
+        let placement = self
+            .stage_at(&workspace, at)
+            .and_then(|f| self.to_canvas(&workspace, f, at).map(|p| Placement::At(f, p)))
+            .unwrap_or(Placement::Centre);
+        self.drop_files(paths, super::file_drop::DropTo::Canvas(placement), window, cx);
     }
 
-    /// Drops onto a Hierarchy row (`None`: below the rows).
-    pub(super) fn drop_asset_on_tree(&mut self, asset: &Asset, target: Option<(Id, TreeDrop)>, cx: &mut Context<Self>) {
+    /// Where something dropped on a Hierarchy row goes (`None`: below the rows).
+    pub(super) fn tree_placement(&self, target: Option<(Id, TreeDrop)>, cx: &App) -> Option<Placement> {
         let workspace = self.studio.read(cx).workspace().clone();
-        let Some(scene) = self.studio.read(cx).selected_scene.and_then(|id| workspace.scene(id)) else { return };
-        let placement = match target {
+        let scene = self.studio.read(cx).selected_scene.and_then(|id| workspace.scene(id))?;
+        Some(match target {
             None => Placement::Into(None, Some(0)),
             Some((t, TreeDrop::Into)) => Placement::Into(Some(t), None),
             Some((t, zone)) => {
-                let Some(l) = scene.object(t) else { return };
+                let l = scene.object(t)?;
                 let siblings: Vec<Id> = scene.children(l.parent).map(|s| s.id).collect();
                 let at = siblings.iter().position(|s| *s == t).unwrap_or(0);
                 Placement::Into(l.parent, Some(if zone == TreeDrop::Above { at + 1 } else { at }))
             }
-        };
-        self.place_asset(asset, placement, cx);
+        })
+    }
+
+    /// Drops onto a Hierarchy row (`None`: below the rows).
+    pub(super) fn drop_asset_on_tree(&mut self, asset: &Asset, target: Option<(Id, TreeDrop)>, cx: &mut Context<Self>) {
+        if let Some(placement) = self.tree_placement(target, cx) {
+            self.place_asset(asset, placement, cx);
+        }
     }
 
     // ------------------------------------------------------------ prefab instances

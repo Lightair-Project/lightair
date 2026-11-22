@@ -23,6 +23,7 @@ mod add_object;
 mod avatar_props;
 mod avatar_sheets;
 mod editor_sync;
+mod file_drop;
 mod phone_camera;
 mod phones;
 mod remote;
@@ -409,6 +410,10 @@ pub struct StudioWindow {
     /// The assets folder's files, and when they were read.
     asset_cache: RefCell<(Option<Instant>, Vec<assets::Asset>)>,
     selected_asset: Option<PathBuf>,
+    /// The folder of the assets folder Assets shows (`None`: the assets folder itself).
+    asset_folder: Option<PathBuf>,
+    /// Files from Finder being dragged over the Hierarchy: how many, and when last seen.
+    file_drag: Option<(usize, Instant)>,
     /// Canvas zoom (1 = the canvas fits the stage) and pan (screen pixels from centred).
     zoom: f32,
     pan: (f32, f32),
@@ -801,6 +806,8 @@ impl StudioWindow {
             tree_drop: None,
             asset_cache: RefCell::new((None, Vec::new())),
             selected_asset: None,
+            asset_folder: None,
+            file_drag: None,
             zoom: 1.0,
             pan: (0.0, 0.0),
             macos_fx: None,
