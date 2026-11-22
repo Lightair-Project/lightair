@@ -46,3 +46,25 @@ pub fn current() -> Option<Request> {
     }
     *g
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A "zoom to here" holds for its time, then the zoom goes back out on its own; a new request
+    /// replaces the old, and letting go ends it at once. (One test: the request is process-wide.)
+    #[test]
+    fn a_zoom_request_holds_then_expires() {
+        zoom_to((100.0, 200.0), Some(2.0), Duration::from_secs(60));
+        let r = current().expect("in force while it holds");
+        assert_eq!((r.at, r.scale), ((100.0, 200.0), Some(2.0)));
+
+        zoom_to((5.0, 5.0), None, Duration::ZERO);
+        assert_eq!(current(), None, "its hold over: gone, and the old request with it");
+
+        zoom_to((1.0, 1.0), Some(50.0), Duration::from_secs(60));
+        assert!(current().unwrap().scale.unwrap() <= 6.0, "an absurd scale is held in bounds");
+        release();
+        assert_eq!(current(), None, "let go early");
+    }
+}

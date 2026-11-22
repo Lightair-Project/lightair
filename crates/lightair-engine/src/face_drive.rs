@@ -253,3 +253,21 @@ pub fn merge(source: *mut sys::obs_source_t, seen: Option<Face>) -> (Option<Face
     let face = Face { head, eye_open: [eye; 2], gaze, brow, mouth_open: open, mouth_wide: wide };
     (Some(face), expression)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With no avatar chosen as the co-host's, every avatar's face passes through untouched (the
+    /// check is made before the source is looked at).
+    #[test]
+    fn with_no_co_host_every_face_passes_through() {
+        set_target(None);
+        push_voice(1.0, 0.5);
+        let seen = Face { mouth_open: 0.2, ..Face::default() };
+        let source = std::ptr::NonNull::<sys::obs_source_t>::dangling().as_ptr();
+        let (face, expression) = merge(source, Some(seen));
+        assert_eq!(face, Some(seen));
+        assert_eq!(expression, None);
+    }
+}
