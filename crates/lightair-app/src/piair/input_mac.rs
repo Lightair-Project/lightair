@@ -772,3 +772,27 @@ pub fn capture(index: u32) -> Result<Vec<u8>, String> {
     let _ = std::fs::remove_file(&path);
     Ok(bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::{CGEventCreate, CGEventSetIntegerValueField, HUMAN_AT, TAG, kCGEventSourceUserData, on_event, since_human};
+
+    /// Events Lightair posts carry its tag and aren't the human's; any other event is, and pauses
+    /// the AI (`since_human` restarts).
+    #[test]
+    fn an_event_is_the_humans_unless_it_carries_lightairs_tag() {
+        unsafe {
+            let ai = CGEventCreate(std::ptr::null_mut());
+            CGEventSetIntegerValueField(ai, kCGEventSourceUserData, TAG);
+            let before = HUMAN_AT.load(Ordering::Relaxed);
+            on_event(std::ptr::null_mut(), 1, ai, std::ptr::null_mut());
+            assert_eq!(HUMAN_AT.load(Ordering::Relaxed), before, "Lightair's own event isn't the human");
+
+            let human = CGEventCreate(std::ptr::null_mut());
+            on_event(std::ptr::null_mut(), 1, human, std::ptr::null_mut());
+            assert!(since_human().is_some_and(|d| d.as_secs() < 1), "any other event is the human, just now");
+        }
+    }
+}

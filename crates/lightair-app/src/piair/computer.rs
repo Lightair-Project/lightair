@@ -523,3 +523,49 @@ fn normalize_combo(keys: &str) -> String {
     let rest: Vec<&String> = parts.iter().filter(|p| !order.contains(&p.as_str())).collect();
     mods.into_iter().chain(rest).cloned().collect::<Vec<_>>().join("+")
 }
+
+#[cfg(test)]
+mod tests {
+    // (not `super::*`: gpui's own `test` macro would come with it)
+    use super::{Computer, DESTRUCTIVE_KEYS, DESTRUCTIVE_WORDS, contains_word, normalize_combo};
+
+    fn destructive(keys: &str) -> bool {
+        DESTRUCTIVE_KEYS.contains(&normalize_combo(keys).as_str())
+    }
+
+    /// Quitting, closing and deleting need the streamer's yes, however the combination is written.
+    #[test]
+    fn destructive_key_combinations_are_caught_however_theyre_written() {
+        for keys in ["cmd+q", "cmd+shift+w", "Shift+Cmd+W", "command+delete", "opt+cmd+escape", "ctrl+shift+delete", "shift+ctrl+delete", "ALT+F4", "shift+delete"] {
+            assert!(destructive(keys), "{keys}");
+        }
+        for keys in ["cmd+t", "cmd+c", "return", "shift+tab", "cmd+shift+t"] {
+            assert!(!destructive(keys), "{keys}");
+        }
+    }
+
+    /// A button whose words mean "can't take it back" needs a yes; a word inside another word
+    /// doesn't count.
+    #[test]
+    fn destructive_button_words_are_whole_words() {
+        let flags = |title: &str| DESTRUCTIVE_WORDS.iter().any(|w| contains_word(&title.to_lowercase(), w));
+        for title in ["Delete", "Move to Trash and Delete", "Send message", "Empty Trash", "Buy now", "End stream"] {
+            assert!(flags(title), "{title}");
+        }
+        for title in ["Deleted items", "Undelete", "Sender settings", "Postpone", "Paypal help"] {
+            assert!(!flags(title), "{title}");
+        }
+    }
+
+    /// The AI acts nowhere until the streamer allows an app; then in that app only (bundle ids
+    /// compared without case).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_the_apps_on_the_list_are_allowed() {
+        let c = Computer::default();
+        assert!(!c.allowed("com.apple.TextEdit"), "nothing by default");
+        c.allowed.lock().unwrap().push("com.apple.TextEdit".into());
+        assert!(c.allowed("com.apple.textedit"));
+        assert!(!c.allowed("com.apple.Safari"));
+    }
+}

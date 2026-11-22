@@ -733,3 +733,19 @@ pub fn voice_track_commands(w: &lightair_model::Workspace) -> Option<lightair_mo
         ],
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::voice_track_commands;
+
+    /// Turning PiAir on adds its voice source and the "PiAir" track once; a workspace that has
+    /// them gets no second one.
+    #[test]
+    fn the_piair_track_is_added_once() {
+        let mut w = lightair_model::Workspace::new("Show");
+        let add = voice_track_commands(&w).expect("added the first time");
+        add.apply(&mut w).unwrap();
+        assert_eq!(w.tracks.iter().filter(|t| t.name == "PiAir").count(), 1);
+        assert!(voice_track_commands(&w).is_none(), "already there");
+    }
+}
