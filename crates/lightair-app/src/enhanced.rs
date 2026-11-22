@@ -227,3 +227,7 @@ fn tracks(plan: &Plan, req: &Request) -> (Multitrack, Vec<Id>) {
     };
     (multitrack, canvases)
 }
+
+#[cfg(test)]
+#[path = "enhanced_tests.rs"]
+mod tests;
