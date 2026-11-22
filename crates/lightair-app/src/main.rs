@@ -6,6 +6,7 @@
 mod activity_panel;
 mod assets;
 mod automations_panel;
+mod avatar_library;
 mod browser_import;
 mod console;
 mod stall_watch;

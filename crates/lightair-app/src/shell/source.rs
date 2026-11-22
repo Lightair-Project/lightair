@@ -220,14 +220,28 @@ impl StudioWindow {
     pub(super) fn source_section(&self, source: &Source, cx: &mut Context<Self>) -> Option<AnyElement> {
         let id = source.id;
         if let Some(key) = file_key(&source.kind) {
+            let avatar = source.kind == lightair_engine::avatar::KIND;
             let path = source.settings[key].as_str().unwrap_or("");
             let name =
                 std::path::Path::new(path).file_name().map_or("No file".into(), |n| n.to_string_lossy().into_owned());
             return Some(
                 self.section("Source", None, cx)
                     .child(
-                        self.source_chip("source-file", ui::source_icon(&source.kind), name, String::new(), "Replace…")
-                            .on_click(cx.listener(move |this, _, window, cx| this.replace_file(id, key, window, cx))),
+                        self.source_chip(
+                            "source-file",
+                            ui::source_icon(&source.kind),
+                            name,
+                            String::new(),
+                            if avatar { "Change" } else { "Replace…" },
+                        )
+                        // an avatar's model: from the avatar library
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if avatar {
+                                this.open_avatar_library(Some(id), window, cx)
+                            } else {
+                                this.replace_file(id, key, window, cx)
+                            }
+                        })),
                     )
                     .into_any_element(),
             );
@@ -293,7 +307,7 @@ impl StudioWindow {
     }
 
     /// A full-width row: icon, value with a detail line, and an action word.
-    fn source_chip(
+    pub(super) fn source_chip(
         &self,
         id: &'static str,
         icon: &'static str,

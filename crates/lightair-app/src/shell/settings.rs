@@ -198,22 +198,7 @@ impl StudioWindow {
             return;
         }
         // Wait for a key, not just modifiers.
-        if matches!(k.key.as_str(), "shift" | "control" | "alt" | "cmd" | "platform" | "function" | "") {
-            return;
-        }
-        let mut parts = Vec::new();
-        for (on, name) in [
-            (k.modifiers.control, "ctrl"),
-            (k.modifiers.alt, "alt"),
-            (k.modifiers.shift, "shift"),
-            (k.modifiers.platform, "cmd"),
-        ] {
-            if on {
-                parts.push(name.to_string());
-            }
-        }
-        parts.push(k.key.to_lowercase());
-        let keys = parts.join("-");
+        let Some(keys) = keystroke_keys(k) else { return };
         if crate::shortcuts::parse(&keys).is_none() {
             self.shortcut_note = Some(if cfg!(windows) { "Use Ctrl or Alt with a letter or number, or an F key.".into() } else { "Use ⌘, ⌃ or ⌥ with a letter or number, or an F key.".into() });
             cx.notify();
@@ -666,6 +651,35 @@ impl StudioWindow {
             global = global.child(div().px_1().text_size(px(11.)).text_color(tok::warn()).child(n.clone()));
         }
         let mut page = pages().child(global);
+        // avatars' expressions (set in an avatar's Inspector)
+        let workspace = self.studio.read(cx).workspace().clone();
+        let bound = super::avatar_sheets::expression_keys(&workspace);
+        if !bound.is_empty() {
+            let mut g = group_tip("Avatar expressions", "Set in an avatar's Inspector (the keyboard button by Expression). Press one again to go back to none.");
+            for (i, (source, expression, keys)) in bound.into_iter().enumerate() {
+                let Some(src) = workspace.sources.get(&source) else { continue };
+                let name = if expression.is_empty() { "None".to_string() } else { expression.clone() };
+                let mut all = src.settings["expression_keys"].clone();
+                if let Some(m) = all.as_object_mut() {
+                    m.remove(&expression);
+                }
+                let mut settings = src.settings.clone();
+                settings["expression_keys"] = all;
+                let clear = Command::SetSourceSettings { source, settings };
+                g = g.child(row(
+                    &format!("{}: {name}", src.name),
+                    None,
+                    div().flex().items_center().gap_1().child(value(&display(&keys))).child(
+                        Button::new(("clear-expression-key", i))
+                            .icon(ui::icon("x"))
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| this.exec(clear.clone(), cx))),
+                    ),
+                ));
+            }
+            page = page.child(g);
+        }
         for (title, items) in SHORTCUTS {
             let mut g = group(title);
             for (what, keys) in *items {
@@ -1836,4 +1850,19 @@ fn own_app_paste(provider: &str, part: &str, cx: &mut App) {
     if !text.is_empty() && !text.contains(char::is_whitespace) {
         lightair_live::oauth::set_own_app(provider, part, &text);
     }
+}
+
+/// The keys pressed, as shortcuts are stored ("cmd-shift-r"); `None` while only modifiers are down.
+pub(super) fn keystroke_keys(k: &Keystroke) -> Option<String> {
+    if matches!(k.key.as_str(), "shift" | "control" | "alt" | "cmd" | "platform" | "function" | "") {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for (on, name) in [(k.modifiers.control, "ctrl"), (k.modifiers.alt, "alt"), (k.modifiers.shift, "shift"), (k.modifiers.platform, "cmd")] {
+        if on {
+            parts.push(name.to_string());
+        }
+    }
+    parts.push(k.key.to_lowercase());
+    Some(parts.join("-"))
 }

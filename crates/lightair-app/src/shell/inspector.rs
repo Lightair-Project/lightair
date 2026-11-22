@@ -682,6 +682,12 @@ impl StudioWindow {
             col = col.child(source);
         }
         col = col.child(transform);
+        // under an avatar: what of it this follows
+        if let Some(parent) = object.parent.and_then(|p| scene.object(p))
+            && let Some(avatar) = parent.source.and_then(|i| workspace.sources.get(&i)).filter(|i| i.kind == super::avatar_props::KIND)
+        {
+            col = col.child(self.pin_section(sid, lid, parent.id, avatar, cx));
+        }
         if let Some(source) = &source {
             if let Some(content) = self.content_section(source, cx) {
                 col = col.child(content);

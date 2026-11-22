@@ -21,6 +21,7 @@ use serde_json::json;
 pub(crate) mod app_menu;
 mod add_object;
 mod avatar_props;
+mod avatar_sheets;
 mod editor_sync;
 mod phone_camera;
 mod phones;
@@ -353,6 +354,16 @@ pub struct StudioWindow {
     /// What each avatar is doing (polled while it's selected), and the last Calibrate's word.
     avatar_status: std::collections::HashMap<Id, lightair_engine::avatar::Status>,
     avatar_note: Option<(Id, String)>,
+    /// The avatar library, its sheet, the "Pin to" picker, and the library entries whose picture
+    /// was taken (or tried) since launch.
+    avatar_library: crate::avatar_library::Library,
+    library_sheet: Option<avatar_sheets::LibrarySheet>,
+    anchor_sheet: Option<avatar_sheets::AnchorSheet>,
+    avatar_pictures: HashSet<Id>,
+    /// The Avatar section's shortcut list is open; an expression waiting for its keys (avatar
+    /// source, expression; "" for none).
+    expression_keys_open: bool,
+    expression_capture: Option<(Id, String)>,
     /// Effect control groups toggled from their default (first open, the rest closed).
     fx_groups: std::collections::HashSet<String>,
     /// Colour pickers of the selected object's effects, by "effect:key".
@@ -540,6 +551,7 @@ impl StudioWindow {
                     .update(cx, |this, cx| {
                         this.refresh_presence(cx);
                         this.refresh_avatar(cx);
+                        this.sync_avatars(cx);
                         // (also when the window isn't drawing)
                         this.take_thumbnails(cx);
                     })
@@ -730,6 +742,10 @@ impl StudioWindow {
                 cx.intercept_keystrokes(move |ev, window, cx| {
                     let Some(me) = me.upgrade() else { return };
                     let taken = me.update(cx, |this, cx| {
+                        if this.expression_capture.is_some() {
+                            this.capture_expression_key(&ev.keystroke, cx);
+                            return Some((this.expression_capture.is_none(), this.focus.clone()));
+                        }
                         this.shortcut_capture?;
                         this.capture_shortcut(&ev.keystroke, cx);
                         Some((this.shortcut_capture.is_none(), this.focus.clone()))
@@ -755,6 +771,12 @@ impl StudioWindow {
             presence: Default::default(),
             avatar_status: Default::default(),
             avatar_note: None,
+            avatar_library: crate::avatar_library::Library::load(),
+            library_sheet: None,
+            anchor_sheet: None,
+            avatar_pictures: HashSet::new(),
+            expression_keys_open: false,
+            expression_capture: None,
             fx_groups: Default::default(),
             colour_pickers: Default::default(),
             colours: Default::default(),
@@ -1073,6 +1095,8 @@ impl StudioWindow {
             || self.effect_sheet.is_some()
             || self.go_live_sheet.is_some()
             || self.source_picker.is_some()
+            || self.library_sheet.is_some()
+            || self.anchor_sheet.is_some()
             || self.outputs.read(cx).dialog_open()
     }
 
@@ -1130,6 +1154,18 @@ impl StudioWindow {
     fn global_action(&mut self, action: crate::shortcuts::GlobalAction, window: &mut Window, cx: &mut Context<Self>) {
         use crate::shortcuts::GlobalAction as A;
         match action {
+            A::Expression(i) => {
+                // an expression's key: that expression, or back to none if it's on already
+                if let Some((source, expression)) = crate::shortcuts::expression_for(i) {
+                    let workspace = self.studio.read(cx).workspace().clone();
+                    if let Some(src) = workspace.sources.get(&source) {
+                        let on = src.settings["expression"].as_str().unwrap_or("") == expression;
+                        let mut settings = src.settings.clone();
+                        settings["expression"] = json!(if on { "" } else { expression.as_str() });
+                        self.exec(Command::SetSourceSettings { source, settings }, cx);
+                    }
+                }
+            }
             A::Automation(i) => {
                 if let Some(id) = crate::shortcuts::automation_for(i)
                     && let Err(e) = self.automations.run(&id, None, &[])
@@ -1861,12 +1897,15 @@ impl StudioWindow {
         .detach();
     }
 
-    /// Asks for a VRM (.vrm, or .glb with VRM data), Live2D (.model3.json), Inochi2D (.inp, .inx) or
-    /// Umamo (.uma) model (only those can be chosen) and adds it as an avatar, following the face a camera sees (the
-    /// camera the scenes already use, else the first one).
+    /// Add Avatar: the avatar library to choose from, or a model file when it's empty (only the
+    /// types Lightair loads can be chosen). It follows the face a camera sees ([`face_camera`]).
     pub(super) fn add_avatar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_menu = false;
-        let picked = crate::file_pick::pick(crate::file_pick::AVATAR, cx);
+        self.open_avatar_library(None, window, cx);
+    }
+
+    /// The camera a new avatar follows: the camera the scenes already use, else the first one
+    /// connected (never a virtual camera, nor an iPhone's or iPad's screen).
+    pub(super) fn face_camera(&self, cx: &App) -> String {
         let workspace = self.studio.read(cx).workspace().clone();
         // (an iPhone's or iPad's screen is a "camera" too, without a face in it)
         let screens: Vec<String> = lightair_platform::devices::ios_screens().into_iter().map(|(_, uid)| uid).collect();
@@ -1878,18 +1917,10 @@ impl StudioWindow {
             .filter_map(|i| i.settings["device"].as_str().map(str::to_string))
             .find(|d| face_camera(d));
         let connected: Vec<(String, String)> = self.connected.as_ref().map(|c| c.cameras.clone()).unwrap_or_default();
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(Some(path)) = picked.await else { return };
-            // (a Live2D model's file is <name>.model3.json)
-            let name = path.file_stem().map(|s| s.to_string_lossy().trim_end_matches(".model3").to_string()).unwrap_or_else(|| "Avatar".into());
-            // (Lightair's own virtual camera shows the program: never the face)
-            let device = in_use
-                .or_else(|| connected.iter().find(|(id, name)| face_camera(id) && !name.to_lowercase().contains("virtual")).map(|(id, _)| id.clone()))
-                .unwrap_or_default();
-            let settings = json!({"file": path.to_string_lossy(), "device": device, "width": 1080, "height": 1080, "framing": "bust", "mirror": true});
-            let _ = this.update(cx, |this, cx| this.add_source_object(&name, avatar_props::KIND, settings, (1080.0, 1080.0), cx));
-        })
-        .detach();
+        // (Lightair's own virtual camera shows the program: never the face)
+        in_use
+            .or_else(|| connected.iter().find(|(id, name)| face_camera(id) && !name.to_lowercase().contains("virtual")).map(|(id, _)| id.clone()))
+            .unwrap_or_default()
     }
 
     pub(super) fn add_text(&mut self, cx: &mut Context<Self>) {
@@ -2394,6 +2425,8 @@ impl Render for StudioWindow {
             .children(self.add_object_overlay(cx))
             .children(self.effect_catalog_overlay(cx))
             .children(self.source_picker_overlay(cx))
+            .children(self.library_sheet_overlay(cx))
+            .children(self.anchor_sheet_overlay(cx))
             .children(self.outputs.update(cx, |o, cx| o.dialog(cx)))
             .children(self.go_live_overlay(cx))
             .children(self.start_failure_overlay(cx))
@@ -2484,6 +2517,8 @@ impl StudioWindow {
         self.rotate_tool = false;
         self.renaming = None;
         self.source_picker = None;
+        self.library_sheet = None;
+        self.anchor_sheet = None;
         self.add_object = None;
         self.marquee = None;
         self.zoom = 1.0;

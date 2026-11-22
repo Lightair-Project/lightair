@@ -28,6 +28,14 @@ pub const AVATAR: Choose = Choose {
     suffixes: &[".vrm", ".glb", ".model3.json", ".inp", ".inx", ".uma"],
 };
 
+/// What an avatar can wear: a picture or a video.
+pub const ACCESSORY: Choose = Choose {
+    title: "Choose an accessory",
+    message: "A picture or a video: .png, .jpg, .gif, .webp, .heic, .mov, .mp4 or .webm",
+    button: "Choose",
+    suffixes: &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".mov", ".mp4", ".m4v", ".webm"],
+};
+
 impl Choose {
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub fn takes(&self, path: &std::path::Path) -> bool {

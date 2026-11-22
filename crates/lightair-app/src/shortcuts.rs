@@ -29,6 +29,8 @@ pub enum GlobalAction {
     Scene(u8),
     /// An automation's hotkey (its place in `automation_keys`).
     Automation(u16),
+    /// An avatar expression's shortcut (its place in `expression_keys`).
+    Expression(u16),
 }
 
 impl GlobalAction {
@@ -81,6 +83,7 @@ impl GlobalAction {
             GlobalAction::FollowZoom => "Screen zoom in or out (Toggle zoom)".into(),
             GlobalAction::Scene(n) => format!("Scene {n} on air"),
             GlobalAction::Automation(_) => "An automation".into(),
+            GlobalAction::Expression(_) => "An avatar's expression".into(),
         }
     }
 }
@@ -88,6 +91,8 @@ impl GlobalAction {
 /// The shortcuts from Settings last registered, and automations' hotkeys (automation id, keys).
 static BASE: std::sync::Mutex<Vec<(GlobalAction, String)>> = std::sync::Mutex::new(Vec::new());
 static AUTOMATIONS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+/// Avatars' expression shortcuts: (avatar source, expression ("" for neutral), keys).
+static EXPRESSIONS: std::sync::Mutex<Vec<(lightair_model::Id, String, String)>> = std::sync::Mutex::new(Vec::new());
 
 /// Registers Settings' shortcuts and the automations' hotkeys together: the ones the system
 /// refused.
@@ -100,7 +105,38 @@ pub fn register_all(base: &[(GlobalAction, String)]) -> Vec<GlobalAction> {
             all.push((GlobalAction::Automation(i as u16), keys.clone()));
         }
     }
+    // (and one taken by either stays theirs: an expression's is set only when free)
+    for (i, (_, _, keys)) in EXPRESSIONS.lock().unwrap().iter().enumerate() {
+        if !all.iter().any(|(_, k)| k == keys) {
+            all.push((GlobalAction::Expression(i as u16), keys.clone()));
+        }
+    }
     register(&all)
+}
+
+/// Avatars' expression shortcuts changed: registered again with the others. The ones the system
+/// refused.
+pub fn set_expression_keys(keys: Vec<(lightair_model::Id, String, String)>) -> Vec<GlobalAction> {
+    if *EXPRESSIONS.lock().unwrap() == keys {
+        return Vec::new();
+    }
+    *EXPRESSIONS.lock().unwrap() = keys;
+    let base = BASE.lock().unwrap().clone();
+    register_all(&base)
+}
+
+/// The avatar and expression a shortcut belongs to.
+pub fn expression_for(i: u16) -> Option<(lightair_model::Id, String)> {
+    EXPRESSIONS.lock().unwrap().get(i as usize).map(|(s, e, _)| (*s, e.clone()))
+}
+
+/// What already has these keys: Settings' shortcuts or an automation (for the check before an
+/// expression takes them).
+pub fn taken_by(keys: &str) -> Option<String> {
+    if let Some((a, _)) = BASE.lock().unwrap().iter().find(|(_, k)| k == keys) {
+        return Some(a.label());
+    }
+    AUTOMATIONS.lock().unwrap().iter().any(|(_, k)| k == keys).then(|| "an automation".to_string())
 }
 
 /// The automations' hotkeys changed: registered again with Settings' shortcuts.
