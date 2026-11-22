@@ -25,7 +25,7 @@ Use **ink** versions on light backgrounds and **white** versions on dark backgro
 | On-air red | `#FF3B4A` | The dot, and nothing else in the logo |
 | Edge | `#2A2A2D` | Hairline around the icon body so it stays visible on dark backgrounds |
 
-These are the same values as the app's design system tokens (`bg.app`, `state.live`, `border.hairline`) in [06 · Design System](../docs/06-design-system.md). The interface follows the same rule as the logo: monochrome, with on-air red meaning "live" and nothing else.
+These are the same values as the app's design system tokens (`bg.app`, `state.live`, `border.hairline`) in [06 · Design System](../docs/06-design-system.md). The interface shares the logo's ink, white and on-air red; how much red it uses follows the shipped app (06 · Design System, "Visual character").
 
 ## Construction
 
