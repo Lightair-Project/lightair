@@ -513,18 +513,20 @@ impl StudioWindow {
         let p = &self.remote.phones;
         let devices = p.pairing.devices();
         let on = self.remote.running().is_some();
-        let detail = if !on {
-            "Turn on the remote API to pair Lightair Live on a phone or tablet.".to_string()
+        // on screen: the state (off, an error, how many are paired); what pairing does, in the ⓘ
+        let state = if !on {
+            "Turn on the remote API first".to_string()
         } else if let Some(e) = &p.error {
             e.clone()
         } else if devices.is_empty() {
-            "Lightair Live controls your show from a phone: scenes, audio, chat and going live.".to_string()
+            "None paired".to_string()
         } else {
-            format!("{} paired · Lightair Live finds this computer on your network.", devices.len())
+            format!("{} paired", devices.len())
         };
-        let mut group = super::settings::group("Phones").child(super::settings::row(
+        let mut group = super::settings::group("Phones").child(super::settings::row_status(
             "Pair a phone",
-            Some(&detail),
+            &state,
+            "Lightair Live controls your show from a phone or tablet: scenes, audio, chat and going live. It finds this computer on your network once paired.",
             if p.offer.is_some() {
                 Button::new("phones-cancel")
                     .label("Done")
@@ -581,7 +583,7 @@ impl StudioWindow {
             // unseen for 180 days: suggest removing it (05 §2)
             let unseen = d.last_seen.or(Some(d.paired_at)).is_some_and(|t| unix_now().saturating_sub(t) > 180 * 86_400);
             let line = if unseen { format!("{line} · Not seen for 6 months: remove it?") } else { line };
-            group = group.child(super::settings::row(
+            group = group.child(super::settings::row_line(
                 &d.name,
                 Some(&line),
                 Button::new(SharedString::from(format!("phones-remove-{}", d.id)))

@@ -372,14 +372,7 @@ impl StudioWindow {
                             }
                         }))
                         .child(
-                            nav.child(div().flex_1()).child(
-                                div()
-                                    .px_2()
-                                    .pb_1()
-                                    .text_size(px(10.))
-                                    .text_color(tok::text_tertiary())
-                                    .child("Saved as you change them"),
-                            ),
+                            nav.child(div().flex_1()),
                         )
                         .child(
                             div()
@@ -463,12 +456,11 @@ impl StudioWindow {
                         ),
                     )),
             )
-            .child(group("Workspace").child(row(
+            .child(group_tip("Workspace", format!("General settings belong to this {}. The rest are saved with the workspace.", ui::MACHINE)).child(row_line(
                 name.as_str(),
                 workspace_dir.as_ref().map(|d| d.to_string_lossy().into_owned()).as_deref(),
                 reveal_button("reveal-workspace", workspace_dir),
             )))
-            .child(note(&format!("General settings belong to this {}. The rest are saved with the workspace.", ui::MACHINE)))
     }
 
     fn audio_page(&self, cx: &mut Context<Self>) -> Div {
@@ -536,7 +528,7 @@ impl StudioWindow {
                     .on_click(cx.listener(move |this, _, _, cx| this.set_audio_block(frames, cx))),
             );
         }
-        let mut templates = group("Start from a template");
+        let mut templates = group_tip("Start from a template", "Replaces the mixer's tracks, buses and mixes. Undo brings them back.");
         for (i, t) in lightair_model::templates::Template::ALL.into_iter().enumerate() {
             templates = templates.child(row(
                 t.name(),
@@ -546,7 +538,6 @@ impl StudioWindow {
                 ),
             ));
         }
-        templates = templates.child(note("Replaces the mixer's tracks, buses and mixes. Undo brings them back."));
         let target = prefs.loudness_target;
         let mut targets = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
         for (i, (t, label)) in
@@ -575,9 +566,8 @@ impl StudioWindow {
             )
             .child(templates)
             .child(
-                group("Loudness")
-                    .child(row("Target", Some("The mixer's LUFS readout turns green on it."), targets))
-                    .child(note("YouTube, Twitch and Spotify even out to about −14 LUFS; Apple Podcasts −16; TV −23.")),
+                group_tip("Loudness", "YouTube, Twitch and Spotify even out to about −14 LUFS; Apple Podcasts −16; TV −23.")
+                    .child(row("Target", Some("The mixer's LUFS readout turns green on it."), targets)),
             )
             .child(
                 group("Engine")
@@ -617,7 +607,7 @@ impl StudioWindow {
         let studio_on = cam.studio_on;
         pages()
             .child(
-                group("New cameras")
+                group_tip("New cameras", "Cameras already added keep their settings; change them in their Inspector.")
                     .child(row("Resolution", Some("Best uses the most the camera offers."), sizes))
                     .child(row(
                         "Beauty on",
@@ -627,13 +617,15 @@ impl StudioWindow {
                         ),
                     )),
             )
-            .child(note("Cameras already added keep their settings; change them in their Inspector."))
     }
 
     fn shortcuts_page(&self, cx: &mut Context<Self>) -> Div {
         use crate::shortcuts::{GlobalAction, display};
         let destinations = self.studio.read(cx).workspace().outputs.destinations.clone();
-        let mut global = group(if cfg!(windows) { "Anywhere on your PC" } else { "Anywhere on your Mac" });
+        let mut global = group_tip(
+            if cfg!(windows) { "Anywhere on your PC" } else { "Anywhere on your Mac" },
+            "These work whichever app is in front: start a recording or switch scenes from a game or a call.",
+        );
         for (i, action) in GlobalAction::ALL.iter().copied().enumerate() {
             let keys = self.prefs.global_shortcuts.iter().find(|h| h.action == action).map(|h| h.keys.clone());
             let capturing = self.shortcut_capture == Some(action);
@@ -673,9 +665,7 @@ impl StudioWindow {
         if let Some(n) = &self.shortcut_note {
             global = global.child(div().px_1().text_size(px(11.)).text_color(tok::warn()).child(n.clone()));
         }
-        let mut page = pages().child(global.child(note(
-            "These work whichever app is in front: start a recording or switch scenes from a game or a call.",
-        )));
+        let mut page = pages().child(global);
         for (title, items) in SHORTCUTS {
             let mut g = group(title);
             for (what, keys) in *items {
@@ -694,7 +684,7 @@ impl StudioWindow {
         let rec = workspace.outputs.recording.clone();
         let targets = rec.targets(&workspace);
 
-        let mut canvases = group("Canvases");
+        let mut canvases = group_tip("Canvases", "Record records each canvas that's on, each to its own file.");
         for (i, f) in workspace.canvases.iter().enumerate() {
             let on = targets.contains(&f.id);
             let (fid, r2, p2) = (f.id, rec.clone(), workspace.clone());
@@ -761,10 +751,10 @@ impl StudioWindow {
             settings: RecordingSettings { bitrate_kbps: kbps.clamp(2_000, 150_000), ..rec.clone() },
         };
         pages()
-            .child(canvases.child(note("Record records each canvas that's on, each to its own file.")))
+            .child(canvases)
             .child(
                 group("Files")
-                    .child(row(
+                    .child(row_line(
                         "Folder",
                         Some(folder.to_string_lossy().as_ref()),
                         Button::new("rec-folder")
@@ -909,9 +899,17 @@ impl StudioWindow {
             .map(|d| (format!("{d} s"), rc.delay_s == d, rc.retries > 0, set(Reconnect { delay_s: d, ..rc })))
             .collect();
         let custom = workspace.outputs.destinations.iter().filter(|d| d.encoding.is_some()).count();
+        let quality_tip = format!(
+            "1080p60 wants 6–9 Mbps, 720p 3–5. {}",
+            if custom > 0 {
+                format!("{custom} destination{} use{} their own settings.", plural(custom), if custom == 1 { "s" } else { "" })
+            } else {
+                "Click a destination in Outputs to give it its own encoder, bitrate and size.".to_string()
+            }
+        );
         pages()
             .child(
-                group("Quality")
+                group_tip("Quality", quality_tip)
                     .child(row(
                         "Bitrate",
                         Some("For destinations on Automatic, capped at what each platform takes."),
@@ -922,25 +920,13 @@ impl StudioWindow {
                             Command::SetStreamBitrate { kbps: (kbps + 500).min(51_000) },
                             cx,
                         ),
-                    ))
-                    .child(note(&format!(
-                        "1080p60 wants 6–9 Mbps, 720p 3–5. {}",
-                        if custom > 0 {
-                            format!(
-                                "{custom} destination{} use{} their own settings.",
-                                plural(custom),
-                                if custom == 1 { "s" } else { "" }
-                            )
-                        } else {
-                            "Click a destination in Outputs to give it its own encoder, bitrate and size.".to_string()
-                        }
-                    ))),
+                    )),
             )
             .child(
                 group("When the connection drops")
                     .child(row(
                         "Reconnect",
-                        Some("Keep the stream going through short drop-outs."),
+                        None,
                         chips("reconnect", retries, cx),
                     ))
                     .child(row("Between tries", None, chips("reconnect-delay", delays, cx))),
@@ -961,7 +947,7 @@ impl StudioWindow {
             .collect();
         // a buffer for each canvas chosen (the Clip button saves them together)
         let targets = clips.targets(&workspace);
-        let mut buffers = group("Canvases");
+        let mut buffers = group_tip("Canvases", "Each canvas keeps its own buffer; the Clip button saves them all, a file each.");
         for (i, f) in workspace.canvases.iter().enumerate() {
             let on = targets.contains(&f.id);
             let (fid, c2, w2) = (f.id, clips.clone(), workspace.clone());
@@ -985,7 +971,7 @@ impl StudioWindow {
                 .child(row("Length", None, chips("clips-length", seconds, cx)))
         )
         .when(workspace.canvases.len() > 1, |p| {
-            p.child(buffers.child(note("Each canvas keeps its own buffer; the Clip button saves them all, a file each.")))
+            p.child(buffers)
         })
     }
 
@@ -994,7 +980,7 @@ impl StudioWindow {
         let primary = workspace.primary_canvas().id;
         let busy = lightair_engine::outputs::runtime().any_stream_running()
             || lightair_engine::outputs::runtime().any_recording_running();
-        let mut list = group("Canvases");
+        let mut list = group_tip("Canvases", "Each canvas is another shape of every scene (vertical for TikTok, say), recorded and streamed on its own.");
         for (i, f) in workspace.canvases.iter().enumerate() {
             let id = f.id;
             if let Some(edit) = self.canvas_edit.as_ref().filter(|e| e.id == id) {
@@ -1024,7 +1010,7 @@ impl StudioWindow {
                         )
                         .into_any_element()
                 });
-            list = list.child(row(&f.name, Some(&detail), actions));
+            list = list.child(row_line(&f.name, Some(&detail), actions));
         }
         let has = |w: u32, h: u32| workspace.canvases.iter().any(|f| f.width == w && f.height == h);
         let mut add = div().flex().flex_wrap().gap_1();
@@ -1041,9 +1027,7 @@ impl StudioWindow {
             );
         }
         pages()
-            .child(list.child(note(
-                "Each canvas is another shape of every scene (vertical for TikTok, say), recorded and streamed on its own.",
-            )))
+            .child(list)
             .child(group("Add a canvas").child(div().px_3().py_2().child(add)))
     }
 
@@ -1125,7 +1109,6 @@ impl StudioWindow {
             )
             .child(div().flex().items_center().gap_2().child(div().w(px(90.))).child(sizes))
             .child(div().flex().items_center().gap_2().child(label("Frame rate")).child(rates))
-            .child(note("Objects are reframed to keep their place when the size changes."))
             .when(busy, |d| {
                 d.child(
                     div()
@@ -1188,7 +1171,14 @@ impl StudioWindow {
             })
             .detach();
         }
-        let mut list = group("What Lightair needs");
+        let mut list = group_tip(
+            "What Lightair needs",
+            if cfg!(windows) {
+                "Windows has a switch for desktop apps under each of these in Settings › Privacy & security: with it off, a camera shows black and a microphone stays silent."
+            } else {
+                "After allowing screen recording or input monitoring in System Settings, macOS may ask to quit and reopen Lightair before it takes effect."
+            },
+        );
         for p in crate::permissions::all() {
             let (text, colour) = match p.state {
                 State::Allowed => ("Allowed", tok::ok()),
@@ -1215,27 +1205,21 @@ impl StudioWindow {
                 });
             list = list.child(row(p.name, Some(p.why), control));
         }
-        pages().child(list).child(
-            group("Good to know").child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_size(px(12.))
-                    .text_color(tok::text_tertiary())
-                    .child(if cfg!(windows) { "Windows has a switch for desktop apps under each of these in Settings › Privacy & security: with it off, a camera shows black and a microphone stays silent." } else { "After allowing screen recording or input monitoring in System Settings, macOS may ask to quit and reopen Lightair before it takes effect." }),
-            ),
-        )
+        pages().child(list)
     }
 
     fn connections_page(&self, cx: &mut Context<Self>) -> Div {
         let status = self.studio.read(cx).chat.status();
-        let mut tips = group("Tips and donations");
+        let mut tips = group_tip(
+            "Tips and donations",
+            "Copy the token from the service's own dashboard, then choose Paste token: Lightair keeps it in the system's credential store and never shows it. Tips arrive like any other event, in Activity, alert boxes, goals and automations.",
+        );
         for (service, name, hint) in super::connections::SERVICES {
             let channel = lightair_live::Channel { platform: (*service).into(), channel: "tips".into() };
             let connected = self.studio.read(cx).services.iter().any(|c| c.platform == *service);
             let (text, colour) = match (connected, status.get(&channel)) {
                 (false, _) => ("Not connected".to_string(), tok::text_tertiary()),
-                (true, Some(lightair_live::Status::Connected)) => ("Connected: tips show in Activity and alerts".into(), tok::ok()),
+                (true, Some(lightair_live::Status::Connected)) => ("Connected".into(), tok::ok()),
                 (true, Some(lightair_live::Status::Error { message })) => (message.clone(), tok::error()),
                 (true, _) => ("Connecting…".into(), tok::warn()),
             };
@@ -1252,20 +1236,21 @@ impl StudioWindow {
                         move |this, _, _, cx| this.disconnect(s, cx),
                     )))
                 });
-            tips = tips.child(row(name, Some(&format!("{text}. {hint}")), control).text_color(colour));
+            tips = tips.child(row_status(name, &text, hint, control).text_color(colour));
         }
         // Ko-fi: its own stream alerts page, read on this computer
         let kofi_set = lightair_live::donations::has_token("kofi");
         let kofi_channel = lightair_live::Channel { platform: "kofi".into(), channel: "tips".into() };
         let kofi_status = match status.get(&kofi_channel) {
-            Some(lightair_live::Status::Connected) => "Connected: Ko-fi tips, memberships and shop orders show in Activity and alerts".to_string(),
+            Some(lightair_live::Status::Connected) => "Connected".to_string(),
             Some(lightair_live::Status::Error { message }) => message.clone(),
-            _ if !kofi_set => "Not connected. Its link: ko-fi.com › Stream Alerts › Copy the link (the one for OBS); no server or webhook needed.".into(),
+            _ if !kofi_set => "Not connected".into(),
             _ => "Connecting…".into(),
         };
-        tips = tips.child(row(
+        tips = tips.child(row_status(
             "Ko-fi",
-            Some(&kofi_status),
+            &kofi_status,
+            "Its link: ko-fi.com › Stream Alerts › Copy the link (the one for OBS); no server or webhook needed. Ko-fi tips, memberships and shop orders show in Activity and alerts.",
             div()
                 .flex()
                 .items_center()
@@ -1275,13 +1260,14 @@ impl StudioWindow {
         ));
         let heart = self.heart_rate.is_some();
         let bpm = self.studio.read(cx).widgets.as_ref().map(|w| w.data("heart_rate")).filter(|v| !v.is_null());
-        let devices = group("Devices").child(row(
+        let devices = group("Devices").child(row_status(
             "Heart rate (Pulsoid)",
-            Some(&match (heart, bpm) {
-                (true, Some(b)) => format!("Connected: {b} BPM. Add Widgets › Heart rate; automations read {{{{ vars.heart_rate }}}}."),
+            &match (heart, bpm) {
+                (true, Some(b)) => format!("Connected: {b} BPM"),
                 (true, None) => "Connected, waiting for a reading (is the sensor on?)".to_string(),
-                _ => "Not connected. Its token: pulsoid.net › Keys › Create new key (heart rate, read).".to_string(),
-            }),
+                _ => "Not connected".to_string(),
+            },
+            "Its token: pulsoid.net › Keys › Create new key (heart rate, read). Then add Widgets › Heart rate; automations read {{ vars.heart_rate }}.",
             div()
                 .flex()
                 .items_center()
@@ -1291,13 +1277,14 @@ impl StudioWindow {
         ));
         let hue = lightair_live::integrations::hue_bridge();
         let pairing = self.hue_note.as_deref().is_some_and(|n| n.ends_with('…'));
-        let devices = devices.child(row(
+        let devices = devices.child(row_status(
             "Philips Hue",
-            Some(&match (&self.hue_note, &hue) {
+            &match (&self.hue_note, &hue) {
                 (Some(n), _) => n.clone(),
-                (None, Some((a, _))) => format!("Paired with the bridge at {a}. Automations: Add step › Philips Hue light."),
-                _ => "Not paired. Pair finds the bridge on this network, then asks you to press its button.".to_string(),
-            }),
+                (None, Some((a, _))) => format!("Paired with the bridge at {a}"),
+                _ => "Not paired".to_string(),
+            },
+            "Pair finds the bridge on this network, then asks you to press its button. Automations: Add step › Philips Hue light.",
             div()
                 .flex()
                 .items_center()
@@ -1319,13 +1306,19 @@ impl StudioWindow {
             let busy = self.oauth_notes.get(provider).is_some_and(|n| n.ends_with('…') || n.contains("code"));
             let status = match (self.oauth_notes.get(provider), &account, available) {
                 (Some(n), _, _) => n.clone(),
-                (None, Some((_, who)), _) => format!("Signed in as {who}: Lightair uses {name}'s own API for {does}."),
-                (None, None, true) => format!("Sign in, as with OBS, and Lightair uses {name}'s own API for {does}."),
-                (None, None, false) => format!("No {name} app in this copy of Lightair: register your own (docs/official-apis.md) and choose Use your own app; meanwhile the signed-in pages are used."),
+                (None, Some((_, who)), _) => format!("Signed in as {who}"),
+                (None, None, true) => "Not signed in".to_string(),
+                (None, None, false) => "No app in this copy: use your own".to_string(),
             };
-            official = official.child(row(
+            let tip = if available {
+                format!("Signed in, as with OBS, Lightair uses {name}'s own API for {does}.")
+            } else {
+                format!("No {name} app in this copy of Lightair: register your own (docs/official-apis.md) and choose Use your own app; meanwhile the signed-in pages are used.")
+            };
+            official = official.child(row_status(
                 name,
-                Some(&status),
+                &status,
+                &tip,
                 div()
                     .flex()
                     .items_center()
@@ -1367,16 +1360,7 @@ impl StudioWindow {
                     }),
             ));
         }
-        pages().child(official).child(tips).child(devices).child(
-            group("How it works").child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_size(px(12.))
-                    .text_color(tok::text_tertiary())
-                    .child("Copy the token from the service's own dashboard, then choose Paste token: Lightair keeps it in the system's credential store and never shows it. Tips arrive like any other event, in Activity, alert boxes, goals and automations."),
-            ),
-        )
+        pages().child(official).child(tips).child(devices)
     }
 
     fn remote_page(&self, cx: &mut Context<Self>) -> Div {
@@ -1406,7 +1390,7 @@ impl StudioWindow {
         };
         let mut page = pages().child(
             group("Remote API")
-                .child(row(
+                .child(row_line(
                     "Let other apps control Lightair",
                     Some(status.as_str()),
                     switch("remote-on", r.enabled)
@@ -1503,7 +1487,7 @@ impl StudioWindow {
             (true, Some(_)) => format!("Keys for scenes, going live, recording, clips, automations and mute, lit with what's on. Its key settings take this port ({port}){}.", if asks { " and the password" } else { "" }),
         };
         page.child(self.phones_group(cx)).child(
-            group("Connect")
+            group_tip("Connect", "Agents and tools change the workspace like you do: every change can be undone, named after who made it.")
                 .child(row(
                     "Stream Deck",
                     Some(&deck_note),
@@ -1516,12 +1500,11 @@ impl StudioWindow {
                         }
                     }),
                 ))
-                .child(row("AI agents (MCP)", Some(&agent), copy("remote-copy-agent", agent.clone())))
-                .child(row("MCP over HTTP", Some(&format!("{mcp_url} · Authorization: Bearer <password>")), copy("remote-copy-mcp", mcp_url.clone())))
-                .child(row("OBS tools (obs-websocket 5)", Some(&format!("{obs} · connect as to OBS")), copy("remote-copy-obs", obs.clone())))
-                .child(row("Lightair JSON-RPC", Some(&rpc), copy("remote-copy-rpc", rpc.clone()))),
+                .child(row_line("AI agents (MCP)", Some(&agent), copy("remote-copy-agent", agent.clone())))
+                .child(row_line("MCP over HTTP", Some(&format!("{mcp_url} · Authorization: Bearer <password>")), copy("remote-copy-mcp", mcp_url.clone())))
+                .child(row_line("OBS tools (obs-websocket 5)", Some(&obs), copy("remote-copy-obs", obs.clone())))
+                .child(row_line("Lightair JSON-RPC", Some(&rpc), copy("remote-copy-rpc", rpc.clone()))),
         )
-        .child(note("Agents and tools change the workspace like you do: every change can be undone, named after who made it."))
     }
 
     fn about_page(&self, cx: &mut Context<Self>) -> Div {
@@ -1625,6 +1608,19 @@ fn pages() -> Div {
     div().flex().flex_col().gap_5().pt_1()
 }
 
+/// A titled card of rows whose help is behind an ⓘ on its title (docs/ui-sweep.md: a control
+/// shows its label and value; explanations go in a tooltip).
+pub(super) fn group_tip(title: &str, tip: impl Into<SharedString>) -> Div {
+    div().flex().flex_col().gap_1p5().child(
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(tok::text_tertiary()).child(title.to_uppercase()))
+            .child(ui::info(SharedString::from(format!("group-tip-{title}")), tip)),
+    )
+}
+
 /// A titled card of rows.
 pub(super) fn group(title: &str) -> Div {
     div().flex().flex_col().gap_1p5().child(
@@ -1636,8 +1632,64 @@ pub(super) fn group(title: &str) -> Div {
     )
 }
 
-/// A setting: its name (and what it does) on the left, its control on the right.
+/// A setting: its name on the left (what it does behind an ⓘ), its control on the right.
 pub(super) fn row(label: &str, detail: Option<&str>, control: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_4()
+        .min_h(px(44.))
+        .px_3()
+        .py_2()
+        .rounded(px(8.))
+        .bg(tok::bg_raised())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .flex_1()
+                .min_w_0()
+                .child(div().min_w_0().truncate().text_size(px(13.)).child(label.to_string()))
+                .children(detail.map(|d| ui::info(SharedString::from(format!("row-tip-{label}")), d.to_string()))),
+        )
+        .child(div().flex_none().child(control))
+}
+
+/// A setting with a short state under its name ("Connected", "Not connected") and how to set it
+/// up behind an ⓘ.
+pub(super) fn row_status(label: &str, status: &str, tip: &str, control: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_4()
+        .min_h(px(44.))
+        .px_3()
+        .py_2()
+        .rounded(px(8.))
+        .bg(tok::bg_raised())
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(div().text_size(px(13.)).child(label.to_string()))
+                        .child(ui::info(SharedString::from(format!("row-tip-{label}")), tip.to_string())),
+                )
+                .child(div().text_size(px(11.)).text_color(tok::text_tertiary()).truncate().child(status.to_string())),
+        )
+        .child(div().flex_none().child(control))
+}
+
+/// A setting whose line under its name is a value or a state to act on (a folder, an address,
+/// "Not connected"), not an explanation: shown, one line.
+pub(super) fn row_line(label: &str, line: Option<&str>, control: impl IntoElement) -> Div {
     div()
         .flex()
         .items_center()
@@ -1654,7 +1706,7 @@ pub(super) fn row(label: &str, detail: Option<&str>, control: impl IntoElement) 
                 .flex_1()
                 .min_w_0()
                 .child(div().text_size(px(13.)).child(label.to_string()))
-                .children(detail.map(|d| {
+                .children(line.map(|d| {
                     div()
                         .text_size(px(11.))
                         .text_color(tok::text_tertiary())
@@ -1664,10 +1716,6 @@ pub(super) fn row(label: &str, detail: Option<&str>, control: impl IntoElement) 
                 })),
         )
         .child(div().flex_none().child(control))
-}
-
-fn note(text: &str) -> Div {
-    div().px_1().text_size(px(11.)).text_color(tok::text_tertiary()).child(text.to_string())
 }
 
 fn value(text: &str) -> Div {
