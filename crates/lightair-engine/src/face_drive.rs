@@ -156,7 +156,7 @@ fn mood_parts(mood: &str) -> ([f32; 2], Option<&'static str>, f32) {
 /// (name, weight) that overrides the avatar's own while the co-host has a mood. The target is
 /// the source's Id (its libobs name), so renaming the object doesn't lose it. Costs one atomic
 /// load when no avatar is the co-host's.
-pub fn merge(source: *mut sys::obs_source_t, seen: Option<Face>) -> (Option<Face>, Option<(&'static str, f32)>) {
+pub(crate) fn merge(source: *mut sys::obs_source_t, seen: Option<Face>) -> (Option<Face>, Option<(&'static str, f32)>) {
     if source.is_null() || !ON.load(std::sync::atomic::Ordering::Relaxed) {
         return (seen, None);
     }
@@ -165,12 +165,17 @@ pub fn merge(source: *mut sys::obs_source_t, seen: Option<Face>) -> (Option<Face
         return (seen, None);
     }
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
+    merge_at(&name, Instant::now(), seen)
+}
+
+/// [`merge`] for the avatar source named `name` (its Id) at `now`: the AI face, or `seen` as it is
+/// when `name` isn't the co-host's avatar.
+pub fn merge_at(name: &str, now: Instant, seen: Option<Face>) -> (Option<Face>, Option<(&'static str, f32)>) {
     let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(s) = g.as_mut() else { return (seen, None) };
-    if s.target.as_deref() != Some(&*name) {
+    if s.target.as_deref() != Some(name) {
         return (seen, None);
     }
-    let now = Instant::now();
     let t = now.duration_since(s.started).as_secs_f32();
     let voice = voice_now(s, now);
     // a mood lasts 6 s

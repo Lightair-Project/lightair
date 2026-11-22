@@ -94,7 +94,7 @@ pub fn push(utterance: &str, rate: u32, pcm: &[u8], marks: &[(f32, Shape)]) {
     if rate == 0 || pcm.len() < 2 {
         return;
     }
-    let input: Vec<f32> = pcm.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect();
+    let input: Vec<f32> = pcm.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b) as f32 / 32768.0).collect();
     let samples = resample(&input, rate, RATE);
     let k = RATE as f32 / 1000.0;
     let marks = marks.iter().map(|&(ms, s)| ((ms.max(0.0) * k) as usize, s)).collect();
