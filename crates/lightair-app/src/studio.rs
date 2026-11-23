@@ -382,7 +382,7 @@ impl Studio {
 
     /// Applies, journals and reconciles a command. Errors are shown in the status bar.
     pub fn execute(&mut self, command: Command, cx: &mut Context<Self>) -> Result<(), CommandError> {
-        let command = with_page_cleanup(self.workspace(), command);
+        let command = crate::piair::with_cohost_voice(self.workspace(), with_page_cleanup(self.workspace(), command));
         match self.doc.apply(&command) {
             Ok(change) => {
                 if let Some(pkg) = &mut self.package

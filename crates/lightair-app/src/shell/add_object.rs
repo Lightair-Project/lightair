@@ -80,6 +80,7 @@ enum Kind {
     Phone,
     PhoneCamera,
     Avatar,
+    CoHost,
 }
 
 /// (kind, group, icon, name, what it is), in the order shown.
@@ -98,6 +99,7 @@ const KINDS: &[(Kind, Group, &str, &str, &str)] = &[
         "Avatar",
         "A VRM, Live2D, Inochi2D or Umamo character that moves with you",
     ),
+    (Kind::CoHost, Group::Capture, "bot", "AI co-host", "An avatar that talks with chat, hears you and can use the computer"),
     (Kind::Image, Group::Media, "image", "Image", "A picture or logo"),
     (Kind::Video, Group::Media, "clapperboard", "Video", "A video file, looped"),
     (Kind::Text, Group::Graphics, "type", "Text", "A title or caption"),
@@ -374,6 +376,10 @@ impl StudioWindow {
             }
             Kind::Image => self.add_image(window, cx),
             Kind::Avatar => self.add_avatar(window, cx),
+            Kind::CoHost => {
+                self.adding_cohost = true;
+                self.add_avatar(window, cx);
+            }
             Kind::PhoneCamera => self.add_phone_camera(cx),
             Kind::Video => self.add_video(window, cx),
             Kind::Text => self.add_text(cx),

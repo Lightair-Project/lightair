@@ -12,7 +12,7 @@
 pub mod computer;
 #[cfg(target_os = "macos")]
 pub mod input_mac;
-pub mod panel;
+pub mod view;
 mod path;
 
 use std::collections::VecDeque;
@@ -105,6 +105,8 @@ pub struct Shared {
     pub wanted: AtomicBool,
     /// Listen to the streamer (on-device speech), from PiAir's settings.
     listen: AtomicBool,
+    /// The co-host object's settings PiAir was started with (sent again on a restart).
+    start_settings: Mutex<Value>,
 }
 
 #[derive(Clone)]
@@ -126,8 +128,10 @@ impl Host {
             mics: Mutex::new(Vec::new()),
             wanted: AtomicBool::new(false),
             listen: AtomicBool::new(false),
+            start_settings: Mutex::new(Value::Null),
         });
         let host = Host(shared);
+        *host.0.computer.allowed.lock().unwrap_or_else(|e| e.into_inner()) = ComputerPrefs::load().allowed;
         host.pump();
         host
     }
@@ -141,7 +145,7 @@ impl Host {
         self.0.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn touch(&self) {
+    pub(crate) fn touch(&self) {
         self.0.dirty.store(true, Ordering::Relaxed);
     }
 
@@ -188,8 +192,13 @@ impl Host {
         built.exists().then(|| vec![built.to_string_lossy().into_owned()])
     }
 
-    /// Starts PiAir (if it isn't running).
-    pub fn start(&self) {
+    /// Starts PiAir (if it isn't running) with the co-host object's settings.
+    pub fn start(&self, settings: Value) {
+        *self.0.start_settings.lock().unwrap_or_else(|e| e.into_inner()) = settings;
+        self.launch();
+    }
+
+    fn launch(&self) {
         self.0.wanted.store(true, Ordering::Relaxed);
         if self.running() {
             return;
@@ -257,6 +266,7 @@ impl Host {
             "platform": std::env::consts::OS,
             "data_dir": self.0.data_dir,
             "lightair": {"version": env!("CARGO_PKG_VERSION")},
+            "settings": self.0.start_settings.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         }));
     }
 
@@ -353,7 +363,7 @@ impl Host {
         if restart {
             tracing::warn!("piair stopped; starting it again");
             std::thread::sleep(Duration::from_millis(500));
-            self.start();
+            self.launch();
         }
     }
 
@@ -728,6 +738,139 @@ fn code_of(e: &ApiError) -> &'static str {
     }
 }
 
+// -------------------------------------------------------------------- the AI co-host object
+
+/// The settings key an avatar source carries when it's an AI co-host: `{on, active, voice_track,
+/// piair: {provider, model, voice, persona, behaviour}}` (piair/docs/design.md §9).
+pub const COHOST: &str = "cohost";
+
+/// An avatar source that is an AI co-host.
+pub fn is_cohost(source: &lightair_model::Source) -> bool {
+    source.kind == lightair_engine::avatar::KIND && source.settings.get(COHOST).is_some_and(Value::is_object)
+}
+
+/// The Hierarchy's and Inspector's icon for a source: the co-host's own, else the kind's.
+pub fn icon_for(source: Option<&lightair_model::Source>, kind: &str) -> &'static str {
+    if source.is_some_and(is_cohost) { "bot" } else { crate::ui::source_icon(kind) }
+}
+
+/// A command as the co-host's voice track should follow it, in the same undo step: removing a
+/// co-host's last object removes its voice track (and the track's source), renaming the object
+/// renames the track. Other commands as they are.
+pub fn with_cohost_voice(before: &lightair_model::Workspace, command: lightair_model::Command) -> lightair_model::Command {
+    use lightair_model::Command;
+    fn touches(c: &Command) -> bool {
+        match c {
+            Command::RemoveObject { .. } | Command::RemoveScene { .. } | Command::RenameObject { .. } => true,
+            Command::Batch { commands, .. } => commands.iter().any(touches),
+            _ => false,
+        }
+    }
+    if !touches(&command) || !before.sources.values().any(|s| is_cohost(s)) {
+        return command;
+    }
+    let mut after = before.clone();
+    if command.apply(&mut after).is_err() {
+        return command;
+    }
+    let mut extra = vec![];
+    for (id, source) in &before.sources {
+        if !is_cohost(source) {
+            continue;
+        }
+        let Some(track) = source.settings[COHOST]["voice_track"].as_str().and_then(|t| after.tracks.iter().find(|x| x.id.to_string() == t)) else {
+            continue;
+        };
+        let was = before.objects_using(*id).next().map(|(_, o)| o.name.clone());
+        let now = after.objects_using(*id).next().map(|(_, o)| o.name.clone());
+        match (was, now) {
+            (Some(_), None) => {
+                extra.push(Command::RemoveTrack { track: track.id });
+                extra.push(Command::RemoveSource { source: track.source });
+            }
+            (Some(a), Some(b)) if a != b && track.name != b => extra.push(Command::RenameTrack { track: track.id, name: b }),
+            _ => {}
+        }
+    }
+    if extra.is_empty() {
+        return command;
+    }
+    let label = command.label();
+    let mut commands = vec![command];
+    commands.extend(extra);
+    Command::Batch { label, commands }
+}
+
+/// What the computer allows PiAir, kept on this Mac (Settings → AI co-host), not in a project.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ComputerPrefs {
+    /// Bundle ids (macOS) or executable names (Windows) PiAir may act in.
+    pub allowed: Vec<String>,
+}
+
+impl ComputerPrefs {
+    fn path() -> PathBuf {
+        lightair_platform::paths::data_dir().join("PiAir").join("lightair.json")
+    }
+    pub fn load() -> ComputerPrefs {
+        let mut p: ComputerPrefs =
+            std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        p.allowed.retain(|a| seen.insert(a.to_lowercase()));
+        p
+    }
+    pub fn save(&self) {
+        let p = Self::path();
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(p, serde_json::to_string_pretty(self).unwrap_or_default());
+    }
+}
+
+impl Host {
+    /// The allowed apps, saved and in force.
+    pub fn set_allowed(&self, mut allowed: Vec<String>) {
+        let mut seen = std::collections::HashSet::new();
+        allowed.retain(|a| seen.insert(a.to_lowercase()));
+        ComputerPrefs { allowed: allowed.clone() }.save();
+        *self.0.computer.allowed.lock().unwrap_or_else(|e| e.into_inner()) = allowed;
+        self.touch();
+    }
+
+    pub fn allowed(&self) -> Vec<String> {
+        self.0.computer.allowed.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn ai_drives(&self) -> bool {
+        self.0.computer.ai_drives.load(Ordering::Relaxed)
+    }
+
+    /// Turns AI drives on or off. On needs Input Monitoring (so the human can always take over)
+    /// and Accessibility; without them it stays off and says why.
+    pub fn set_ai_drives(&self, on: bool) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        if on {
+            if !input_mac::watch() {
+                lightair_platform::input::request_listen();
+                return Err("Allow Lightair in Input Monitoring so you can always take over.".into());
+            }
+            if !input_mac::can_post(true) {
+                return Err("Allow Lightair in Accessibility so PiAir can move the pointer.".into());
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        if on {
+            return Err("Computer use isn't available on this system yet.".into());
+        }
+        self.0.computer.ai_drives.store(on, Ordering::Relaxed);
+        self.send(json!({"t": "computer", "ai_drives": on, "paused": false}));
+        self.touch();
+        Ok(())
+    }
+}
+
 /// Opens a sign-in page in the browser (from any thread).
 fn open_url(url: &str) {
     if !(url.starts_with("https://") || url.starts_with("http://localhost") || url.starts_with("http://127.0.0.1")) {
@@ -790,7 +933,9 @@ impl Drop for Speech {
 }
 
 /// Makes sure the workspace has PiAir's voice source and its "PiAir" track: the commands to add
-/// them, or `None` when they're there.
+/// them, or `None` when they're there. (From before the co-host object, which has a voice track
+/// of its own; kept while a test still names it.)
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn voice_track_commands(w: &lightair_model::Workspace) -> Option<lightair_model::Command> {
     if w.sources.values().any(|s| s.kind == piair_voice::KIND) {
         return None;

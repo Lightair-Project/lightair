@@ -111,7 +111,7 @@ impl StudioWindow {
             } else if object.is_empty() {
                 "box"
             } else {
-                ui::source_icon(&kind)
+                crate::piair::icon_for(object.source.and_then(|i| workspace.sources.get(&i)).map(|s| &**s), &kind)
             };
             let own_visible = object.layouts.get(&canvas).is_some_and(|l| l.visible);
             let shown = scene.shown(id, canvas);

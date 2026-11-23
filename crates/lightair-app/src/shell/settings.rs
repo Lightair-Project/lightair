@@ -37,6 +37,7 @@ pub(crate) enum Page {
     Remote,
     Connections,
     Permissions,
+    CoHost,
     About,
 }
 
@@ -52,6 +53,7 @@ const PAGES: &[(Page, &str, &str)] = &[
     (Page::Remote, "Remote API", "radio-tower"),
     (Page::Connections, "Connections", "plug"),
     (Page::Permissions, "Permissions", "shield-check"),
+    (Page::CoHost, "AI co-host", "bot"),
     (Page::About, "About", "info"),
 ];
 
@@ -316,6 +318,7 @@ impl StudioWindow {
             Page::Remote => self.remote_page(cx),
             Page::Connections => self.connections_page(cx),
             Page::Permissions => self.permissions_page(cx),
+            Page::CoHost => self.cohost_page(cx),
             Page::About => self.about_page(cx),
         };
         let title = PAGES.iter().find(|(p, ..)| *p == page).map_or("", |(_, l, _)| *l);
@@ -576,6 +579,80 @@ impl StudioWindow {
                         )
                     }),
             )
+    }
+
+    /// AI co-host: what the computer allows it (not about any one co-host object).
+    fn cohost_page(&self, cx: &mut Context<Self>) -> Div {
+        let drives = self.piair.ai_drives();
+        let allowed = self.piair.allowed();
+        #[cfg(target_os = "macos")]
+        let apps = crate::piair::input_mac::running_apps();
+        #[cfg(not(target_os = "macos"))]
+        let apps: Vec<(String, String)> = Vec::new();
+        let name_of = |id: &str| apps.iter().find(|a| a.0 == id).map_or_else(|| id.rsplit('.').next().unwrap_or(id).to_string(), |a| a.1.clone());
+        let me = cx.entity().downgrade();
+        let add: Vec<(String, String)> = apps.iter().filter(|a| !allowed.contains(&a.0) && !a.0.contains("lightair")).cloned().collect();
+        let add_app = Button::new("cohost-add-app").label("Add app").xsmall().outline().dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            for (id, name) in &add {
+                let (me, id) = (me.clone(), id.clone());
+                menu = menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
+                    if let Some(me) = me.upgrade() {
+                        me.update(cx, |this, cx| {
+                            let mut a = this.piair.allowed();
+                            a.push(id.clone());
+                            this.piair.set_allowed(a);
+                            cx.notify();
+                        });
+                    }
+                }));
+            }
+            menu
+        });
+        let keys = self
+            .prefs
+            .global_shortcuts
+            .iter()
+            .find(|h| h.action == crate::shortcuts::GlobalAction::PiAirStop)
+            .map_or(crate::shortcuts::PIAIR_STOP_KEYS.to_string(), |h| h.keys.clone());
+        let mut computer = group_tip(
+            "Computer",
+            "When you ask, your co-host can move the pointer, click and type in the apps you allow, and zoom the stream's screen capture. It never acts in Lightair, never types into password fields, and asks before anything that quits, deletes, sends or buys. Pictures of the screen go to its AI provider only while AI drives is on, and show only the allowed apps' windows; everything else is black.",
+        )
+        .child(row(
+            "AI drives",
+            Some("Off again when Lightair restarts. Touching the mouse or keyboard pauses it at once."),
+            switch("cohost-drives", drives).on_click(cx.listener(move |this, _, _, cx| {
+                if let Err(e) = this.piair.set_ai_drives(!drives) {
+                    this.studio.update(cx, |s, _| s.issue = Some(e.into()));
+                }
+                cx.notify();
+            })),
+        ))
+        .child(row("Allowed apps", Some("The only apps it may act in."), add_app));
+        for (i, id) in allowed.iter().enumerate() {
+            let gone = id.clone();
+            computer = computer.child(row(
+                &name_of(id),
+                None,
+                Button::new(("cohost-remove-app", i)).icon(ui::icon("x")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
+                    let a: Vec<String> = this.piair.allowed().into_iter().filter(|x| *x != gone).collect();
+                    this.piair.set_allowed(a);
+                    cx.notify();
+                })),
+            ));
+        }
+        pages().child(computer).child(
+            group("Kill switch").child(row(
+                "Stop everything",
+                Some("Turns AI drives off, cuts its speech and stops whatever it's doing, from any app. Change the keys in Shortcuts."),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(crate::shortcuts::display(&keys)))
+                    .child(Button::new("cohost-keys").label("Change").xsmall().outline().on_click(cx.listener(|this, _, _, cx| this.open_settings(Page::Shortcuts, cx)))),
+            )),
+        )
     }
 
     fn camera_page(&self, cx: &mut Context<Self>) -> Div {

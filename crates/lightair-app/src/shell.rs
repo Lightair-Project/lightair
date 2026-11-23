@@ -23,6 +23,7 @@ mod add_object;
 mod avatar_props;
 mod avatar_sheets;
 mod check_driver;
+mod cohost;
 mod editor_sync;
 mod file_drop;
 mod phone_camera;
@@ -312,9 +313,12 @@ pub struct StudioWindow {
     chat: Entity<crate::chat_panel::ChatPanel>,
     /// Follows, subs, donations and raids (a tab beside Chat).
     activity: Entity<crate::activity_panel::ActivityPanel>,
-    /// PiAir, the AI co-host (crate::piair), and its panel.
+    /// PiAir, the AI co-host (crate::piair); the co-host object's Inspector sections; what the
+    /// co-host check last did (shell/cohost.rs); an AI co-host is being added (the library open).
     pub(crate) piair: crate::piair::Host,
-    piair_panel: Entity<crate::piair::panel::PiAirPanel>,
+    cohost_view: Entity<crate::piair::view::CohostView>,
+    cohost: cohost::CohostSync,
+    adding_cohost: bool,
     /// How each platform shows the stream (a tab beside Activity).
     stream: Entity<crate::stream_panel::StreamPanel>,
     /// Automations (a tab beside the mixer).
@@ -650,7 +654,12 @@ impl StudioWindow {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(40)).await;
                 // macOS's camera effects follow the scene on air (at once, not on a slow timer)
-                if this.update(cx, |this, cx| this.sync_macos_effects(cx)).is_err() {
+                if this.update(cx, |this, cx| {
+                    this.sync_macos_effects(cx);
+                    this.sync_cohost(cx);
+                })
+                .is_err()
+                {
                     break;
                 }
                 let pressed = crate::shortcuts::take_pressed();
@@ -720,9 +729,9 @@ impl StudioWindow {
         let remote = Self::new_remote(window, cx);
         let automations = live_api::start_automations(&studio.read(cx).chat, remote.jobs());
         let piair = crate::piair::Host::new(remote.jobs(), studio.read(cx).chat.clone());
-        let piair_panel = {
+        let cohost_view = {
             let (h, st) = (piair.clone(), studio.clone());
-            cx.new(|cx| crate::piair::panel::PiAirPanel::new(h, st, window, cx))
+            cx.new(|cx| crate::piair::view::CohostView::new(h, st, window, cx))
         };
         live_api::feed_widgets(automations.clone(), studio.read(cx).widgets.clone());
         let automations_panel = {
@@ -761,7 +770,9 @@ impl StudioWindow {
             chat,
             activity,
             piair,
-            piair_panel,
+            cohost_view,
+            cohost: Default::default(),
+            adding_cohost: false,
             stream,
             confirm_end: None,
             studio,

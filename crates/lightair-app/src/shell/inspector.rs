@@ -446,7 +446,7 @@ impl StudioWindow {
             .items_center()
             .gap_2()
             .py_2()
-            .child(ui::icon(ui::source_icon(&kind)).size(px(16.)).text_color(tok::text_secondary()))
+            .child(ui::icon(crate::piair::icon_for(source.as_deref(), &kind)).size(px(16.)).text_color(tok::text_secondary()))
             .child(
                 div()
                     .flex_1()

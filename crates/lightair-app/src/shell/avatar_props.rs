@@ -401,6 +401,10 @@ impl StudioWindow {
         // a PNGtuber listens to a mic; the others follow a face
         let png = crate::avatar_library::kind_of(source.settings["file"].as_str().unwrap_or("")) == "PNGtuber";
         let follow = if png { self.voice_section(source, cx) } else { self.tracking_section(source, cx) };
+        // an AI co-host: PiAir's sections instead of tracking and the rest
+        if crate::piair::is_cohost(source) {
+            return vec![self.avatar_card(source, cx), self.cohost_sections(source, cx)];
+        }
         let mut out = vec![self.avatar_card(source, cx), follow, self.framing_section(source, cx)];
         out.extend(self.expressions_section(source, cx));
         out.push(self.accessories_section(scene, object, source, cx));
@@ -445,6 +449,11 @@ impl StudioWindow {
             (tok::ok(), "Following your face".to_string())
         } else {
             (tok::warn(), "Looking for your face…".to_string())
+        };
+        // an AI co-host says what PiAir is doing, once its model is in
+        let (dot, line) = match self.cohost_line(source, cx) {
+            Some(c) if !file.is_empty() && status.error.is_empty() && status.loaded => c,
+            _ => (dot, line),
         };
         // the body only when it needs something: following it, and not seeing it
         let body = s["body"].as_str().unwrap_or("upper");
@@ -534,7 +543,8 @@ impl StudioWindow {
             .children(
                 body_line.map(|l| div().pl(px(15.)).text_size(px(11.)).text_color(tok::text_tertiary()).child(l)),
             );
-        self.section("Avatar", None, cx).child(card).child(state).into_any_element()
+        let action = self.cohost_switch(source, cx);
+        self.section("Avatar", action, cx).child(card).child(state).into_any_element()
     }
 
     /// A PNGtuber's Voice: the mixer track whose sound makes it talk.

@@ -203,6 +203,7 @@ impl StudioWindow {
 
     fn close_avatar_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.library_sheet = None;
+        self.adding_cohost = false;
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -238,6 +239,7 @@ impl StudioWindow {
                 settings["expression"] = json!("");
                 self.exec(Command::SetSourceSettings { source, settings }, cx);
             }
+            None if std::mem::take(&mut self.adding_cohost) => self.add_cohost_object(&e, cx),
             None => {
                 let device = self.face_camera(cx);
                 let mut base = json!({"file": e.file, "device": device, "width": 1080, "height": 1080, "framing": "bust", "mirror": true, "library": e.id});
