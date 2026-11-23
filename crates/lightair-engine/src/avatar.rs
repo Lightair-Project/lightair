@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec3};
 use lightair_avatar::body::{BodyFrame, BodyMode, BodyState, HAND_POINTS, JOINTS};
+use lightair_avatar::vrm::AlphaMode;
 use lightair_avatar::{Avatar, Calibration, Controls, Face, Framing, Landmarks, Measures, Model, Smoother};
 use parking_lot::Mutex;
 use serde_json::json;
@@ -260,13 +261,30 @@ fn v4(x: [f32; 4]) -> sys::vec4 {
     sys::vec4 { __bindgen_anon_1: sys::vec4__bindgen_ty_1 { ptr: x } }
 }
 
+/// One draw: the primitives of a material merged into one vertex and index buffer (a blended
+/// material's primitives each on their own, as they're sorted by depth every frame).
 struct GpuPrim {
     vb: *mut sys::gs_vertbuffer_t,
     ib: *mut sys::gs_indexbuffer_t,
     indices: u32,
+    material: usize,
+    /// The primitives in it, each with where its vertices start in the buffer.
+    parts: Vec<(usize, usize)>,
 }
 
-/// The model on the GPU: a dynamic vertex buffer a primitive, its textures.
+/// Development checks (`LIGHTAIR_AVATAR_CHECK`): `still` holds the pose (no time passes, for
+/// pictures that can be compared), `still-unmerged` also draws each primitive on its own, as
+/// before draws were merged.
+fn check_mode() -> (bool, bool) {
+    static MODE: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("LIGHTAIR_AVATAR_CHECK").as_deref() {
+        Ok("still") => (true, false),
+        Ok("still-unmerged") => (true, true),
+        _ => (false, false),
+    })
+}
+
+/// The model on the GPU: its draws (dynamic vertex buffers), its textures.
 struct Gpu {
     path: String,
     prims: Vec<GpuPrim>,
@@ -293,35 +311,68 @@ impl Gpu {
             };
             textures.push(t);
         }
+        // the primitives grouped by material, in the order the materials first come (a draw
+        // call each costs far more than its vertices: Apple's OpenGL checks every texture)
+        let unmerged = check_mode().1;
+        let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+        for (i, p) in model.primitives.iter().enumerate() {
+            let blended = model.materials.get(p.material).is_some_and(|m| m.alpha == AlphaMode::Blend);
+            match groups.iter_mut().find(|(m, _)| *m == p.material && !blended && !unmerged) {
+                Some((_, list)) => list.push(i),
+                None => groups.push((p.material, vec![i])),
+            }
+        }
         let mut prims = Vec::new();
-        for p in &model.primitives {
-            let n = p.positions.len();
+        for (material, list) in groups {
+            let n: usize = list.iter().map(|&i| model.primitives[i].positions.len()).sum();
+            let ni: usize = list.iter().map(|&i| model.primitives[i].indices.len()).sum();
             unsafe {
                 let vbd = bzalloc(std::mem::size_of::<sys::gs_vb_data>()) as *mut sys::gs_vb_data;
                 (*vbd).num = n;
-                (*vbd).points = bzalloc(16 * n) as *mut sys::vec3;
-                (*vbd).normals = bzalloc(16 * n) as *mut sys::vec3;
+                (*vbd).points = bzalloc(16 * n.max(1)) as *mut sys::vec3;
+                (*vbd).normals = bzalloc(16 * n.max(1)) as *mut sys::vec3;
                 (*vbd).num_tex = 1;
                 let tv = bzalloc(std::mem::size_of::<sys::gs_tvertarray>()) as *mut sys::gs_tvertarray;
                 (*tv).width = 2;
-                let uvs = sys::bmalloc(8 * n) as *mut [f32; 2];
-                std::ptr::copy_nonoverlapping(p.uvs.as_ptr(), uvs, n);
+                let uvs = bzalloc(8 * n.max(1)) as *mut [f32; 2];
+                let ib_data = sys::bmalloc(4 * ni.max(1)) as *mut u32;
+                let (mut at, mut at_i, mut parts) = (0usize, 0usize, Vec::new());
+                for &i in &list {
+                    let p = &model.primitives[i];
+                    let k = p.positions.len();
+                    std::ptr::copy_nonoverlapping(p.uvs.as_ptr(), uvs.add(at), p.uvs.len().min(k));
+                    for (j, &x) in p.indices.iter().enumerate() {
+                        *ib_data.add(at_i + j) = x + at as u32;
+                    }
+                    parts.push((i, at));
+                    at += k;
+                    at_i += p.indices.len();
+                }
                 (*tv).array = uvs as *mut c_void;
                 (*vbd).tvarray = tv;
                 let vb = sys::gs_vertexbuffer_create(vbd, sys::GS_DYNAMIC);
-                let ni = p.indices.len();
-                let ib_data = sys::bmalloc(4 * ni.max(1)) as *mut u32;
-                std::ptr::copy_nonoverlapping(p.indices.as_ptr(), ib_data, ni);
                 let ib = sys::gs_indexbuffer_create(sys::GS_UNSIGNED_LONG, ib_data as *mut c_void, ni, 0);
-                prims.push(GpuPrim { vb, ib, indices: ni as u32 });
+                prims.push(GpuPrim { vb, ib, indices: ni as u32, material, parts });
             }
         }
+        let draws = prims.iter().filter(|g| g.indices > 0).count();
+        let outlines = prims
+            .iter()
+            .filter(|g| {
+                g.indices > 0
+                    && model
+                        .materials
+                        .get(g.material)
+                        .is_some_and(|m| m.outline_width > 0.0 && m.alpha != AlphaMode::Blend)
+            })
+            .count();
+        tracing::info!(path, primitives = model.primitives.len(), draws, outlines, "VRM on the GPU");
         Gpu { path: path.to_string(), prims, textures }
     }
 
     /// (Graphics context held.)
     unsafe fn upload(&self, a: &Avatar) {
-        for (i, g) in self.prims.iter().enumerate() {
+        for g in &self.prims {
             if g.vb.is_null() {
                 continue;
             }
@@ -332,9 +383,11 @@ impl Gpu {
                 }
                 let pts = (*d).points as *mut [f32; 4];
                 let nrm = (*d).normals as *mut [f32; 4];
-                for (k, (p, n)) in a.positions[i].iter().zip(&a.normals[i]).enumerate() {
-                    *pts.add(k) = [p.x, p.y, p.z, 1.0];
-                    *nrm.add(k) = [n.x, n.y, n.z, 0.0];
+                for &(i, at) in &g.parts {
+                    for (k, (p, n)) in a.positions[i].iter().zip(&a.normals[i]).enumerate() {
+                        *pts.add(at + k) = [p.x, p.y, p.z, 1.0];
+                        *nrm.add(at + k) = [n.x, n.y, n.z, 0.0];
+                    }
                 }
                 sys::gs_vertexbuffer_flush(g.vb);
             }
@@ -817,9 +870,11 @@ impl Render {
             sys::gs_effect_set_vec4(param(c"light_dir"), &v4([light.x, light.y, light.z, 0.0]));
             sys::gs_effect_set_vec4(param(c"eye_pos"), &v4([cam.eye.x, cam.eye.y, cam.eye.z, 1.0]));
 
-            // opaque and cut out first, then the blended ones far to near
-            let mut order: Vec<usize> = (0..model.primitives.len()).collect();
-            let depth = |i: usize| {
+            // opaque and cut out first, then the blended ones far to near (a blended draw is one
+            // primitive: its depth is that primitive's)
+            let mut order: Vec<usize> = (0..gpu.prims.len()).collect();
+            let depth = |g: &GpuPrim| {
+                let Some(&(i, _)) = g.parts.first() else { return 0.0 };
                 let ps = &avatar.positions[i];
                 if ps.is_empty() {
                     return 0.0;
@@ -828,15 +883,13 @@ impl Render {
                     / ps.iter().step_by((ps.len() / 16).max(1)).count() as f32;
                 c.distance(cam.eye)
             };
-            let blended = |i: usize| {
-                model.materials[model.primitives[i].material].alpha == lightair_avatar::vrm::AlphaMode::Blend
-            };
-            let depths: Vec<f32> = order.iter().map(|&i| if blended(i) { depth(i) } else { 0.0 }).collect();
+            let blended = |g: &GpuPrim| model.materials[g.material].alpha == AlphaMode::Blend;
+            let depths: Vec<f32> = gpu.prims.iter().map(|g| if blended(g) { depth(g) } else { 0.0 }).collect();
             order.sort_by(|&a, &b| {
-                let (ma, mb) =
-                    (&model.materials[model.primitives[a].material], &model.materials[model.primitives[b].material]);
-                blended(a)
-                    .cmp(&blended(b))
+                let (ga, gb) = (&gpu.prims[a], &gpu.prims[b]);
+                let (ma, mb) = (&model.materials[ga.material], &model.materials[gb.material]);
+                blended(ga)
+                    .cmp(&blended(gb))
                     .then(ma.queue_offset.cmp(&mb.queue_offset))
                     .then(depths[b].total_cmp(&depths[a]))
             });
@@ -845,18 +898,17 @@ impl Render {
             };
             for pass in [false, true] {
                 for &i in &order {
-                    let p = &model.primitives[i];
                     let g = &gpu.prims[i];
-                    let mat = &model.materials[p.material];
+                    let mat = &model.materials[g.material];
                     if g.vb.is_null() || g.ib.is_null() || g.indices == 0 {
                         continue;
                     }
                     let outline = pass;
-                    if outline && (mat.outline_width <= 0.0 || mat.alpha == lightair_avatar::vrm::AlphaMode::Blend) {
+                    if outline && (mat.outline_width <= 0.0 || mat.alpha == AlphaMode::Blend) {
                         continue;
                     }
                     let cutoff = match mat.alpha {
-                        lightair_avatar::vrm::AlphaMode::Mask(c) => c,
+                        AlphaMode::Mask(c) => c,
                         _ => -1.0,
                     };
                     sys::gs_effect_set_texture(param(c"base_tex"), tex(mat.base_texture));
@@ -864,7 +916,7 @@ impl Render {
                     sys::gs_effect_set_texture(param(c"emissive_tex"), tex(mat.emissive_texture));
                     sys::gs_effect_set_texture(param(c"matcap_tex"), tex(mat.matcap_texture));
                     let bc = mat.base_color;
-                    let opaque = mat.alpha == lightair_avatar::vrm::AlphaMode::Opaque;
+                    let opaque = mat.alpha == AlphaMode::Opaque;
                     sys::gs_effect_set_vec4(
                         param(c"base_color"),
                         &v4([bc[0], bc[1], bc[2], if opaque { 1.0 } else { bc[3] }]),
@@ -1413,6 +1465,7 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
     let mut r = s.render.lock();
     let now = Instant::now();
     let dt = r.last_tick.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32());
+    let dt = if check_mode().0 { 0.0 } else { dt };
     r.last_tick = Some(now);
     r.measures = measures;
     if settings.show_tracking {
