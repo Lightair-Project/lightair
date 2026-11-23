@@ -5,14 +5,35 @@
 //   DONE            (the utterance ended; the next TEXT starts a new one)
 //   ERROR <why>
 // Runs until its stdin closes (Lightair quitting or no automation listening any more).
+// Arguments, both optional: a language ("en-US"; "-" for the system's) and a Core Audio input
+// device's UID (the default input otherwise).
 
 import AVFoundation
+import AudioToolbox
+import CoreAudio
 import Foundation
 import Speech
 
 setvbuf(stdout, nil, _IOLBF, 0)
 
-let locale = CommandLine.arguments.count > 1 ? Locale(identifier: CommandLine.arguments[1]) : Locale.current
+let args = CommandLine.arguments
+let locale = args.count > 1 && args[1] != "-" && !args[1].isEmpty ? Locale(identifier: args[1]) : Locale.current
+let deviceUID = args.count > 2 && !args[2].isEmpty && args[2] != "default" ? args[2] : nil
+
+/// A Core Audio device by its UID.
+func device(uid: String) -> AudioDeviceID? {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var cf = uid as CFString
+    var id = AudioDeviceID(0)
+    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    let status = withUnsafePointer(to: &cf) { p in
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, UInt32(MemoryLayout<CFString>.size), p, &size, &id)
+    }
+    return status == noErr && id != 0 ? id : nil
+}
 var recognizer: SFSpeechRecognizer?
 let engine = AVAudioEngine()
 var request: SFSpeechAudioBufferRecognitionRequest?
@@ -54,6 +75,10 @@ func start() {
     }
     recognizer = r
     let input = engine.inputNode
+    // a chosen microphone instead of the default input
+    if let uid = deviceUID, var id = device(uid: uid), let unit = input.audioUnit {
+        AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &id, UInt32(MemoryLayout<AudioDeviceID>.size))
+    }
     let format = input.outputFormat(forBus: 0)
     input.removeTap(onBus: 0)
     input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
