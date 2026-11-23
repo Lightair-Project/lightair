@@ -349,6 +349,7 @@ impl StudioWindow {
             "!stop" => self.piair.kill_switch(),
             "!settings" => self.open_settings(super::settings::Page::CoHost, cx),
             "!connections" => self.open_settings(super::settings::Page::Connections, cx),
+            "!voices" => self.cohost_view.update(cx, |v, cx| v.open_voices(cx)),
             l if l.starts_with("!settings-scroll ") => {
                 let y: f32 = l[17..].trim().parse().unwrap_or(0.0);
                 self.settings_scroll.set_offset(point(px(0.), px(-y)));

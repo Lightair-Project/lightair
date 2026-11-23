@@ -187,8 +187,9 @@ pub enum Voices {
 pub struct AiState {
     pub keys: std::collections::HashMap<String, KeyState>,
     pub voices: std::collections::HashMap<String, Voices>,
-    /// The voice a preview is being made for.
+    /// The voice a preview is being made for, and the one playing.
     pub previewing: Option<String>,
+    pub playing: Option<String>,
     pub preview_error: Option<String>,
 }
 
@@ -1020,6 +1021,25 @@ impl Host {
         Voices::Loading
     }
 
+    /// Stops the voice preview.
+    pub fn stop_preview(&self) {
+        voices::stop();
+        let mut ai = self.0.ai.lock().unwrap_or_else(|e| e.into_inner());
+        ai.playing = None;
+        ai.previewing = None;
+        drop(ai);
+        self.touch();
+    }
+
+    /// Which voice's preview is loading or playing (`None` when it's over).
+    pub fn preview_state(&self) -> (Option<String>, Option<String>) {
+        let mut ai = self.0.ai.lock().unwrap_or_else(|e| e.into_inner());
+        if ai.playing.is_some() && !voices::playing() {
+            ai.playing = None;
+        }
+        (ai.previewing.clone(), ai.playing.clone())
+    }
+
     /// Plays a voice's preview through this computer's own output.
     pub fn preview_voice(&self, vendor: &str, voice: voices::VoiceInfo) {
         {
@@ -1032,9 +1052,16 @@ impl Host {
         std::thread::spawn(move || {
             let r = voices::preview(&vendor, &voice);
             let mut ai = host.0.ai.lock().unwrap_or_else(|e| e.into_inner());
+            // another was asked for meanwhile: that one plays
+            if ai.previewing.as_deref() != Some(voice.id.as_str()) {
+                return;
+            }
             ai.previewing = None;
             match r {
-                Ok(file) => voices::play(&file),
+                Ok(file) => {
+                    voices::play(&file);
+                    ai.playing = Some(voice.id.clone());
+                }
                 Err(e) => ai.preview_error = Some(e),
             }
             drop(ai);

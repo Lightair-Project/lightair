@@ -18,6 +18,10 @@ pub struct VoiceInfo {
     pub name: String,
     /// A few words about it ("American, young, warm").
     pub detail: String,
+    /// Those words one by one (accent, age, style, what it's for), for the picker's tags.
+    pub tags: Vec<String>,
+    /// "female", "male" or "neutral", when the vendor says.
+    pub gender: Option<String>,
     /// The vendor's own sample, when it has one.
     pub preview_url: Option<String>,
 }
@@ -90,7 +94,14 @@ pub fn list(vendor: &str) -> Result<Vec<VoiceInfo>, String> {
     match vendor {
         "gemini" => Ok(GEMINI
             .iter()
-            .map(|(n, d)| VoiceInfo { id: (*n).into(), name: (*n).into(), detail: (*d).into(), preview_url: None })
+            .map(|(n, d)| VoiceInfo {
+                id: (*n).into(),
+                name: (*n).into(),
+                detail: (*d).into(),
+                tags: vec![(*d).into()],
+                gender: None,
+                preview_url: None,
+            })
             .collect()),
         "elevenlabs" => {
             let key = key_for(vendor)?;
@@ -100,14 +111,24 @@ pub fn list(vendor: &str) -> Result<Vec<VoiceInfo>, String> {
                 .map(|a| {
                     a.iter()
                         .filter_map(|x| {
-                            let labels = x["labels"]
-                                .as_object()
-                                .map(|l| l.values().filter_map(|v| v.as_str()).take(3).collect::<Vec<_>>().join(", "))
-                                .unwrap_or_default();
+                            let l = &x["labels"];
+                            let word =
+                                |k: &str| l[k].as_str().map(|v| cap(&v.replace('_', " "))).filter(|v| !v.is_empty());
+                            let mut tags: Vec<String> = ["accent", "age", "descriptive", "description", "use_case"]
+                                .iter()
+                                .filter_map(|k| word(k))
+                                .collect();
+                            tags.dedup();
+                            if matches!(x["category"].as_str(), Some("cloned" | "generated" | "professional")) {
+                                tags.insert(0, "Yours".into());
+                            }
+                            let gender = l["gender"].as_str().map(|g| g.to_lowercase());
                             Some(VoiceInfo {
                                 id: x["voice_id"].as_str()?.into(),
-                                name: x["name"].as_str()?.into(),
-                                detail: labels,
+                                name: x["name"].as_str()?.split(" - ").next().unwrap_or_default().trim().into(),
+                                detail: tags.join(", "),
+                                tags,
+                                gender,
                                 preview_url: x["preview_url"]
                                     .as_str()
                                     .filter(|u| u.starts_with("https://"))
@@ -130,17 +151,26 @@ pub fn list(vendor: &str) -> Result<Vec<VoiceInfo>, String> {
                 .map(|a| {
                     a.iter()
                         .filter_map(|x| {
+                            let mut tags: Vec<String> = Vec::new();
+                            if let Some(lang) = x["language"].as_str() {
+                                tags.push(lang.to_uppercase());
+                            }
+                            if let Some(d) = x["description"].as_str() {
+                                // the description's first few words
+                                let short: String = d.split_whitespace().take(5).collect::<Vec<_>>().join(" ");
+                                tags.push(short.trim_end_matches(['.', ',']).to_string());
+                            }
+                            let gender = x["gender"].as_str().map(|g| match g {
+                                "feminine" | "female" => "female".to_string(),
+                                "masculine" | "male" => "male".to_string(),
+                                _ => "neutral".to_string(),
+                            });
                             Some(VoiceInfo {
                                 id: x["id"].as_str()?.into(),
                                 name: x["name"].as_str()?.into(),
-                                detail: [x["language"].as_str(), x["description"].as_str()]
-                                    .into_iter()
-                                    .flatten()
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                                    .chars()
-                                    .take(60)
-                                    .collect(),
+                                detail: tags.join(", "),
+                                tags,
+                                gender,
                                 preview_url: None,
                             })
                         })
@@ -270,6 +300,34 @@ fn wav(pcm: &[u8], rate: u32) -> Vec<u8> {
 }
 
 static PLAYING: Mutex<Option<Child>> = Mutex::new(None);
+
+/// A preview is playing.
+pub fn playing() -> bool {
+    let mut g = PLAYING.lock().unwrap_or_else(|e| e.into_inner());
+    match g.as_mut() {
+        Some(c) => match c.try_wait() {
+            Ok(None) => true,
+            _ => {
+                *g = None;
+                false
+            }
+        },
+        None => false,
+    }
+}
+
+/// Stops the preview playing.
+pub fn stop() {
+    if let Some(mut c) = PLAYING.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+}
+
+fn cap(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
 
 /// Plays a preview through this computer's own output (stopping the one before).
 pub fn play(file: &std::path::Path) {

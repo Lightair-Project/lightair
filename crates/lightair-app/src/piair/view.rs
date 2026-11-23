@@ -7,16 +7,16 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_model::{Command, Id};
 use serde_json::{Value, json};
 
-use super::{COHOST, Host, KeyState, Voices, keys};
+use super::{COHOST, Host, KeyState, Voices, keys, voices};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 
@@ -42,6 +42,11 @@ pub struct CohostView {
     name: Entity<InputState>,
     personality: Entity<TextareaState>,
     code: Entity<InputState>,
+    /// The voice picker: open, its search, its gender filter, and the preview last drawn.
+    voice_open: bool,
+    voice_search: Entity<InputState>,
+    voice_gender: Option<&'static str>,
+    shown_preview: (Option<String>, Option<String>),
     collapsed: HashSet<&'static str>,
     _subs: Vec<Subscription>,
 }
@@ -56,7 +61,13 @@ impl CohostView {
             TextareaState::new(window, cx).auto_grow(3, 8).placeholder("How it talks: warm, quick and playful…")
         });
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("Code from the sign-in page"));
+        let voice_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search voices"));
         let mut subs = Vec::new();
+        subs.push(cx.subscribe(&voice_search, |_, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                cx.notify();
+            }
+        }));
         subs.push(cx.subscribe_in(&prompt, window, |this, state, ev: &InputEvent, window, cx| {
             if matches!(ev, InputEvent::PressEnter { .. }) {
                 let text = state.read(cx).value().trim().to_string();
@@ -110,6 +121,12 @@ impl CohostView {
                     {
                         area.update(cx, |s, cx| s.set_value(want, window, cx));
                     }
+                    // a preview started or ended: its button shows it
+                    let preview = this.host.preview_state();
+                    if preview != this.shown_preview {
+                        this.shown_preview = preview;
+                        cx.notify();
+                    }
                     if this.host.0.dirty.swap(false, Ordering::Relaxed) {
                         cx.notify();
                     }
@@ -129,9 +146,19 @@ impl CohostView {
             name,
             personality,
             code,
+            voice_open: false,
+            voice_search,
+            voice_gender: None,
+            shown_preview: (None, None),
             collapsed: HashSet::new(),
             _subs: subs,
         }
+    }
+
+    /// Opens the voice picker (a development aid for captures).
+    pub fn open_voices(&mut self, cx: &mut Context<Self>) {
+        self.voice_open = true;
+        cx.notify();
     }
 
     /// Shows this co-host object's settings (`active`: it's the one PiAir runs for).
@@ -478,7 +505,11 @@ impl CohostView {
 
     fn voice(&self, cx: &mut Context<Self>) -> AnyElement {
         let vendor = self.setting("/voice/vendor", cx).as_str().unwrap_or("gemini").to_string();
-        let chosen = self.setting("/voice/voice", cx).as_str().unwrap_or("").to_string();
+        let mut chosen = self.setting("/voice/voice", cx).as_str().unwrap_or("").to_string();
+        // Gemini speaks as Puck until another is chosen
+        if chosen.is_empty() && vendor == "gemini" {
+            chosen = "Puck".into();
+        }
         let chips = chips(
             "cohost-vendor",
             VENDORS.iter().map(|(id, name)| (name.to_string(), vendor == *id)).collect(),
@@ -496,83 +527,208 @@ impl CohostView {
             return self.section("Voice", body, cx);
         }
         let service = keys::service_for_voice(&vendor);
-        let has_key = matches!(self.host.key_state(service), KeyState::Saved | KeyState::Works(_) | KeyState::Checking);
-        if has_key {
-            body.push(stacked(
-                "Voice",
-                Some("Picking one plays a short sample on this computer, never on stream."),
-                self.voice_picker(&vendor, &chosen, cx),
-            ));
-        }
+        body.push(stacked(
+            "Voice",
+            Some("▶ plays a short sample on this computer, never on stream."),
+            self.voice_picker(&vendor, &chosen, cx),
+        ));
         body.push(self.key_line(service, cx));
         self.section("Voice", body, cx)
     }
 
-    /// The vendor's voices to pick from (a sample plays on picking), and ▶ to hear the chosen one.
+    /// The chosen voice (▶ to hear it, Change to pick another) and, open, the picker: search,
+    /// a gender filter where the vendor says, and every voice with its own ▶ to audition it.
     fn voice_picker(&self, vendor: &str, chosen: &str, cx: &mut Context<Self>) -> AnyElement {
         let voices = self.host.voices(vendor);
-        let (previewing, preview_error) = {
-            let ai = self.host.0.ai.lock().unwrap_or_else(|e| e.into_inner());
-            (ai.previewing.clone(), ai.preview_error.clone())
-        };
+        let (loading, playing) = self.host.preview_state();
+        let preview_error = self.host.0.ai.lock().unwrap_or_else(|e| e.into_inner()).preview_error.clone();
         let list = match &voices {
             Voices::Ready(l) => l.clone(),
             _ => Vec::new(),
         };
         let current = list.iter().find(|v| v.id == chosen).cloned();
-        let label = match (&voices, &current) {
-            (_, Some(v)) => v.name.clone(),
-            (Voices::Loading, _) => "Loading voices…".into(),
-            (Voices::Failed(_), _) => "Voices unavailable".into(),
-            (Voices::Ready(_), None) if chosen.is_empty() => "Choose a voice".into(),
-            (Voices::Ready(_), None) => chosen.to_string(),
-        };
-        let me = cx.entity().downgrade();
-        let vendor_s = vendor.to_string();
-        let picker =
-            Button::new("cohost-voice").label(label).xsmall().outline().dropdown_caret(true).w_full().dropdown_menu(
-                move |mut menu, _, _| {
-                    for v in list.iter() {
-                        let item =
-                            if v.detail.is_empty() { v.name.clone() } else { format!("{}  ·  {}", v.name, v.detail) };
-                        let (me, v, vendor) = (me.clone(), v.clone(), vendor_s.clone());
-                        menu = menu.item(PopupMenuItem::new(item).on_click(move |_, _, cx| {
-                            if let Some(me) = me.upgrade() {
-                                me.update(cx, |this, cx| {
-                                    this.set(json!({"voice": {"voice": v.id}}), cx);
-                                    this.host.preview_voice(&vendor, v.clone());
-                                });
-                            }
-                        }));
-                    }
-                    menu
-                },
-            );
-        let busy = previewing.is_some();
-        let play = current.clone().map(|v| {
+        // ▶ / a spinner while the sample's made / ■ while it plays
+        let play_button = |id: SharedString, v: voices::VoiceInfo, cx: &mut Context<Self>| {
+            let (is_loading, is_playing) =
+                (loading.as_deref() == Some(v.id.as_str()), playing.as_deref() == Some(v.id.as_str()));
             let vendor = vendor.to_string();
-            Button::new("cohost-voice-play")
-                .icon(ui::icon(if busy { "loader" } else { "play" }))
+            Button::new(id)
+                .icon(ui::icon(if is_playing {
+                    "square"
+                } else if is_loading {
+                    "loader"
+                } else {
+                    "play"
+                }))
                 .xsmall()
                 .ghost()
-                .tooltip("Hear it (on this computer only)")
+                .tooltip(if is_playing { "Stop" } else { "Hear it (on this computer only)" })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.host.preview_voice(&vendor, v.clone());
+                    if is_playing {
+                        this.host.stop_preview();
+                    } else {
+                        this.host.preview_voice(&vendor, v.clone());
+                    }
                     cx.notify();
                 }))
-        });
+        };
+        let tags = |v: &voices::VoiceInfo| {
+            div().flex().flex_wrap().gap_1().children(v.tags.iter().take(4).map(|t| {
+                div()
+                    .px_1p5()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(tok::border_strong())
+                    .text_size(px(10.))
+                    .text_color(tok::text_secondary())
+                    .child(t.clone())
+            }))
+        };
+        // the chosen one
+        let open = self.voice_open;
+        let card = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .p_2()
+            .rounded(px(8.))
+            .bg(tok::bg_raised())
+            .children(current.clone().map(|v| play_button("cohost-voice-play".into(), v, cx)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).truncate().child(
+                        match (&voices, &current) {
+                            (_, Some(v)) => v.name.clone(),
+                            (Voices::Loading, _) => "Loading voices…".into(),
+                            (Voices::Failed(_), _) => "Voices unavailable".into(),
+                            _ if chosen.is_empty() => "No voice chosen".into(),
+                            _ => chosen.to_string(),
+                        },
+                    ))
+                    .children(current.as_ref().filter(|v| !v.tags.is_empty()).map(|v| tags(v))),
+            )
+            .child(
+                Button::new("cohost-voice-change")
+                    .label(if open {
+                        "Done"
+                    } else if current.is_some() {
+                        "Change"
+                    } else {
+                        "Choose"
+                    })
+                    .xsmall()
+                    .outline()
+                    .disabled(!matches!(voices, Voices::Ready(_)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.voice_open = !open;
+                        cx.notify();
+                    })),
+            );
+        let mut out = div().flex().flex_col().gap_1p5().child(card);
         let problem = match (&voices, preview_error) {
             (Voices::Failed(e), _) => Some(e.clone()),
             (_, Some(e)) => Some(e),
             _ => None,
         };
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(div().flex().items_center().gap_1().child(div().flex_1().min_w_0().child(picker)).children(play))
-            .children(problem.map(|e| div().text_size(px(11.)).text_color(tok::error()).child(e)))
-            .into_any_element()
+        if let Some(e) = problem {
+            out = out.child(div().text_size(px(11.)).text_color(tok::error()).child(e));
+        }
+        if !open || list.is_empty() {
+            return out.into_any_element();
+        }
+        // the picker
+        let query = self.voice_search.read(cx).value().trim().to_lowercase();
+        let has_gender = list.iter().any(|v| v.gender.is_some());
+        let gender = self.voice_gender;
+        let shown: Vec<voices::VoiceInfo> = list
+            .iter()
+            .filter(|v| gender.is_none_or(|g| v.gender.as_deref() == Some(g)))
+            .filter(|v| {
+                query.is_empty()
+                    || v.name.to_lowercase().contains(&query)
+                    || v.tags.iter().any(|t| t.to_lowercase().contains(&query))
+            })
+            .cloned()
+            .collect();
+        let mut filters = div().flex().gap_0p5().p_0p5().rounded(px(6.)).bg(tok::bg_panel());
+        if has_gender {
+            for (i, (label, g)) in
+                [("All", None), ("Female", Some("female")), ("Male", Some("male"))].into_iter().enumerate()
+            {
+                let on = gender == g;
+                filters = filters.child(seg(("cohost-voice-gender", i), label, on).flex_1().justify_center().when(
+                    !on,
+                    |d| {
+                        d.on_click(cx.listener(move |this, _, _, cx| {
+                            this.voice_gender = g;
+                            cx.notify();
+                        }))
+                    },
+                ));
+            }
+        }
+        let mut rows = div().id("cohost-voices").flex().flex_col().gap_0p5().max_h(px(320.)).overflow_y_scroll();
+        for (i, v) in shown.iter().enumerate() {
+            let is_current = v.id == chosen;
+            let pick = v.id.clone();
+            rows = rows.child(
+                div()
+                    .id(("cohost-voice-row", i))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .p_1p5()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .when(is_current, |d| d.bg(tok::bg_selected()))
+                    .when(!is_current, |d| d.hover(|d| d.bg(tok::bg_raised())))
+                    .child(play_button(SharedString::from(format!("cohost-voice-play-{i}")), v.clone(), cx))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_size(px(12.)).truncate().child(v.name.clone()))
+                            .child(tags(v)),
+                    )
+                    .when(is_current, |d| d.child(ui::icon("check").size(px(13.)).text_color(tok::ok())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set(json!({"voice": {"voice": pick}}), cx);
+                        this.voice_open = false;
+                        cx.notify();
+                    })),
+            );
+        }
+        if shown.is_empty() {
+            rows =
+                rows.child(div().p_2().text_size(px(12.)).text_color(tok::text_tertiary()).child("No voice matches."));
+        }
+        out.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .p_2()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(tok::border())
+                .child(TextInput::new(&self.voice_search).xsmall())
+                .when(has_gender, |d| d.child(filters))
+                .child(rows)
+                .child(div().text_size(px(10.)).text_color(tok::text_tertiary()).child(format!(
+                    "{} of {} voices",
+                    shown.len(),
+                    list.len()
+                ))),
+        )
+        .into_any_element()
     }
 
     // ---------------------------------------------------------------- Persona, Behaviour
