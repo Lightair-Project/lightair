@@ -730,7 +730,7 @@ impl StudioWindow {
         .detach();
         let remote = Self::new_remote(window, cx);
         let automations = live_api::start_automations(&studio.read(cx).chat, remote.jobs());
-        let piair = crate::piair::Host::new(remote.jobs(), studio.read(cx).chat.clone());
+        let piair = crate::piair::Host::new(remote.jobs(), studio.read(cx).chat.clone(), studio.read(cx).engine().clone());
         let cohost_view = {
             let (h, st) = (piair.clone(), studio.clone());
             cx.new(|cx| crate::piair::view::CohostView::new(h, st, window, cx))

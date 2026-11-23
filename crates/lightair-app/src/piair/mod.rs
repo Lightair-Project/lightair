@@ -109,10 +109,58 @@ pub struct Shared {
     listen: AtomicBool,
     /// The co-host object's settings PiAir was started with (sent again on a restart).
     start_settings: Mutex<Value>,
-    /// The input device the co-host hears (its "Hears" mic's), for on-device speech.
-    pub hears_device: Mutex<Option<String>>,
+    /// The mixer tracks the co-host hears, and as what (the active co-host's "Hears").
+    pub hears: Mutex<Vec<Hearing>>,
+    /// The engine, to tap what it hears.
+    engine: std::sync::Arc<lightair_engine::Engine>,
     /// AI keys, voice lists and previews (Settings → Connections, the Voice section).
     pub ai: Mutex<AiState>,
+}
+
+/// What a heard track is to the co-host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// People talking to it: it waits while they speak, understands them, answers its name.
+    Conversation,
+    /// Something playing (a video, a game): context it may react to, never someone addressing it.
+    Content,
+}
+
+/// A mixer track the co-host hears.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hearing {
+    pub track: Id,
+    pub source: Id,
+    pub name: String,
+    pub role: Role,
+}
+
+/// What a co-host hears, from its `cohost.hears` (`[{track, role}]`; an older single track id is
+/// a conversation track). Not set: the first mic in the mixer, as conversation. Tracks that are
+/// gone and co-host voices are left out.
+pub fn hearing(w: &lightair_model::Workspace, cohost: &Value) -> Vec<crate::piair::Hearing> {
+        let make = |track: &str, role: Role| -> Option<Hearing> {
+        let t = w.tracks.iter().find(|t| t.id.to_string() == track)?;
+        let source = w.sources.get(&t.source)?;
+        (source.kind != lightair_engine::piair_voice::KIND).then(|| Hearing { track: t.id, source: t.source, name: t.name.clone(), role })
+    };
+    match &cohost["hears"] {
+        Value::Array(list) => list
+            .iter()
+            .filter_map(|h| {
+                let role = if h["role"] == "content" { Role::Content } else { Role::Conversation };
+                make(h["track"].as_str()?, role)
+            })
+            .collect(),
+        Value::String(t) => make(t, Role::Conversation).into_iter().collect(),
+        _ => w
+            .tracks
+            .iter()
+            .find(|t| w.sources.get(&t.source).is_some_and(|s| s.kind == lightair_model::kinds::MIC))
+            .and_then(|t| make(&t.id.to_string(), Role::Conversation))
+            .into_iter()
+            .collect(),
+    }
 }
 
 /// Whether a service's key is there and works.
@@ -148,7 +196,7 @@ pub struct AiState {
 pub struct Host(pub Arc<Shared>);
 
 impl Host {
-    pub fn new(jobs: Jobs, hub: lightair_live::Hub) -> Host {
+    pub fn new(jobs: Jobs, hub: lightair_live::Hub, engine: std::sync::Arc<lightair_engine::Engine>) -> Host {
         let shared = Arc::new(Shared {
             state: Mutex::new(State { status: "idle".into(), ..Default::default() }),
             stdin: Mutex::new(None),
@@ -164,7 +212,8 @@ impl Host {
             wanted: AtomicBool::new(false),
             listen: AtomicBool::new(false),
             start_settings: Mutex::new(Value::Null),
-            hears_device: Mutex::new(None),
+            hears: Mutex::new(Vec::new()),
+            engine,
             ai: Mutex::new(AiState::default()),
         });
         let host = Host(shared);
@@ -580,7 +629,7 @@ impl Host {
                 let mut talking = false;
                 let mut loud_until = Instant::now();
                 let mut paused = false;
-                let mut speech: Option<Speech> = None;
+                let mut listeners: std::collections::HashMap<Id, Listener> = std::collections::HashMap::new();
                 loop {
                     std::thread::sleep(Duration::from_millis(20));
                     for e in piair_voice::take_events() {
@@ -598,7 +647,7 @@ impl Host {
                         host.touch();
                     }
                     if !host.running() {
-                        speech = None;
+                        listeners.clear();
                         continue;
                     }
                     for ev in host.0.hub.since(last_chat) {
@@ -635,24 +684,25 @@ impl Host {
                     }
                     #[cfg(not(target_os = "macos"))]
                     let _ = &mut paused;
-                    // listening: the on-device speech helper
-                    let listen = host.0.listen.load(Ordering::Relaxed) && host.state().ready;
-                    let device = host.0.hears_device.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    if speech.as_ref().is_some_and(|s| s.device != device) {
-                        speech = None;
+                    // listening: one on-device speech helper per heard track, while PiAir runs
+                    let ready = host.state().ready;
+                    let hears = if ready { host.0.hears.lock().unwrap_or_else(|e| e.into_inner()).clone() } else { Vec::new() };
+                    listeners.retain(|track, l| hears.iter().any(|h| h.track == *track && h.role == l.role && h.source == l.source) && !l.dead());
+                    for h in &hears {
+                        if !listeners.contains_key(&h.track)
+                            && let Some(l) = Listener::start(&host.0.engine, h)
+                        {
+                            listeners.insert(h.track, l);
+                        }
                     }
-                    match (&mut speech, listen) {
-                        (None, true) => speech = Speech::start(device),
-                        (Some(_), false) => speech = None,
-                        (Some(s), true) => {
-                            for (text, done) in s.take() {
-                                host.send(json!({"t": "heard", "text": text, "final": done}));
-                            }
-                            if s.dead() {
-                                speech = None;
+                    for l in listeners.values_mut() {
+                        for (text, done) in l.take() {
+                            match l.role {
+                                Role::Conversation => host.send(json!({"t": "heard", "text": text, "final": done, "who": l.name})),
+                                Role::Content if done => host.send(json!({"t": "content", "text": text, "source": l.name})),
+                                Role::Content => {}
                             }
                         }
-                        (None, false) => {}
                     }
                 }
             })
@@ -1074,50 +1124,71 @@ fn open_url(url: &str) {
     let _ = Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
 }
 
-/// The bundled `lightair-speech` helper (Apple's on-device speech recognition) while PiAir
-/// listens: utterances as they end.
-struct Speech {
+/// Listening to one heard track: Lightair taps its sound (`lightair_engine::audio_tap`) and the
+/// bundled `lightair-speech` helper (Apple's on-device speech recognition) turns it into text.
+struct Listener {
     child: Child,
-    /// The input device it hears (`None`: the default input).
-    device: Option<String>,
+    role: Role,
+    source: Id,
+    name: String,
     lines: std::sync::mpsc::Receiver<(String, bool)>,
+    stop: std::sync::Arc<AtomicBool>,
 }
 
-impl Speech {
-    fn start(device: Option<String>) -> Option<Speech> {
+impl Listener {
+    fn start(engine: &std::sync::Arc<lightair_engine::Engine>, h: &Hearing) -> Option<Listener> {
         if !cfg!(target_os = "macos") {
             return None;
         }
         let exe = std::env::current_exe().ok()?;
         let dir = exe.parent()?;
         let helper = [dir.join("lightair-speech"), dir.join("../lightair-speech")].into_iter().find(|p| p.exists())?;
-        let mut child = Command::new(helper)
-            .arg("-")
-            .arg(device.clone().unwrap_or_default())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
+        let source = h.source;
+        let (tap, mut consumer) = engine.call(move |e| e.reconciler.source_ref(source).map(|p| unsafe { lightair_engine::audio_tap::Tap::open(p) }))?;
+        let mut child = Command::new(helper).args(["-", "-pcm"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+        let mut stdin = child.stdin.take()?;
         let out = child.stdout.take()?;
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        // the track's sound into the helper
+        let s = stop.clone();
+        std::thread::spawn(move || {
+            let _tap = tap;
+            let mut bytes = Vec::with_capacity(8192);
+            while !s.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(40));
+                let n = consumer.slots();
+                if n == 0 {
+                    continue;
+                }
+                let Ok(chunk) = consumer.read_chunk(n) else { continue };
+                bytes.clear();
+                bytes.extend(chunk.into_iter().flat_map(i16::to_le_bytes));
+                if stdin.write_all(&bytes).is_err() {
+                    break;
+                }
+            }
+        });
+        // its words out
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut last = String::new();
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 if let Some(text) = line.strip_prefix("TEXT ") {
                     last = text.to_string();
-                } else if line == "DONE" && !last.is_empty() {
-                    if tx.send((std::mem::take(&mut last), true)).is_err() {
+                    if tx.send((last.clone(), false)).is_err() {
                         break;
                     }
+                } else if line == "DONE" && !last.is_empty() && tx.send((std::mem::take(&mut last), true)).is_err() {
+                    break;
                 }
             }
         });
-        Some(Speech { child, device, lines: rx })
+        Some(Listener { child, role: h.role, source: h.source, name: h.name.clone(), lines: rx, stop })
     }
 
+    /// What it heard since last time: (text so far, whether the utterance ended).
     fn take(&mut self) -> Vec<(String, bool)> {
-        self.lines.try_iter().collect()
+        self.lines.try_iter().filter(|(_, done)| *done).collect()
     }
 
     fn dead(&mut self) -> bool {
@@ -1125,8 +1196,9 @@ impl Speech {
     }
 }
 
-impl Drop for Speech {
+impl Drop for Listener {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

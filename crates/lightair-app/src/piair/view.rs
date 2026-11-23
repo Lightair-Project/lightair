@@ -601,11 +601,7 @@ impl CohostView {
     fn behaviour(&self, cx: &mut Context<Self>) -> AnyElement {
         let chattiness = self.setting("/behaviour/chattiness", cx).as_u64().unwrap_or(1) as usize;
         let flag = |pointer: &str, default: bool| self.setting(pointer, cx).as_bool().unwrap_or(default);
-        let (answer, listen, yield_) = (
-            flag("/behaviour/answerChat", true),
-            flag("/behaviour/listen", true),
-            flag("/behaviour/stopWhenStreamerTalks", true),
-        );
+        let (answer, yield_) = (flag("/behaviour/answerChat", true), flag("/behaviour/stopWhenStreamerTalks", true));
         let chatty = chips(
             "cohost-chatty",
             CHATTINESS.iter().enumerate().map(|(i, n)| (n.to_string(), i == chattiness)).collect(),
@@ -617,49 +613,135 @@ impl CohostView {
                 .on_click(cx.listener(move |this, _, _, cx| this.set(json!({"behaviour": {key: !on}}), cx)))
                 .into_any_element()
         };
-        // the mic it hears: mics and audio inputs in the mixer
-        let w = self.studio.read(cx).workspace().clone();
-        let mics: Vec<(String, String)> = w
-            .tracks
-            .iter()
-            .filter(|t| {
-                w.sources.get(&t.source).is_some_and(|s| {
-                    s.kind == lightair_model::kinds::MIC || s.kind == lightair_model::kinds::AUDIO_DEVICE
-                })
-            })
-            .map(|t| (t.id.to_string(), t.name.clone()))
-            .collect();
-        let hears = self.cohost(cx)["hears"].as_str().map(str::to_owned);
-        let current =
-            hears.as_ref().and_then(|h| mics.iter().find(|m| m.0 == *h)).or(mics.first()).map(|m| m.1.clone());
-        let me = cx.entity().downgrade();
-        let hears_menu = Button::new("cohost-hears")
-            .label(current.unwrap_or_else(|| "No mic in the mixer".into()))
-            .xsmall()
-            .outline()
-            .dropdown_caret(true)
-            .dropdown_menu(move |mut menu, _, _| {
-                for (id, name) in &mics {
-                    let (me, id) = (me.clone(), id.clone());
-                    menu = menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
-                        if let Some(me) = me.upgrade() {
-                            me.update(cx, |this, cx| this.set_cohost(json!({"hears": id}), cx));
-                        }
-                    }));
-                }
-                menu
-            });
         self.section(
             "Behaviour",
             vec![
-                stacked("Chattiness", Some("Quiet: only when spoken to. Normal: also picks a chat message now and then. Lively and Chatty: more often."), chatty),
+                stacked("Chattiness", Some("Quiet: only when spoken to. Normal: also picks a chat message, or something playing, now and then. Lively and Chatty: more often."), chatty),
                 row("Answer chat", Some("Reads chat from every platform and answers some of it. Chat can never make it change Lightair or use the computer."), toggle("cohost-chat", "answerChat", answer, cx)),
-                row("Hears", Some("The mic it listens to: when you're talking (so it doesn't talk over you) and, with Listen to me on, what you say."), hears_menu.into_any_element()),
-                row("Listen to me", Some("Understands what you say with on-device speech recognition (nothing leaves this computer for it) and answers when you say its name."), toggle("cohost-listen", "listen", listen, cx)),
-                row("Stop when I talk", Some("It goes quiet when the mic it hears picks you up."), toggle("cohost-yield", "stopWhenStreamerTalks", yield_, cx)),
+                stacked(
+                    "Hears",
+                    Some("Mixer tracks it listens to, with on-device speech recognition (nothing leaves this computer for it). Conversation: people talking to it (your mic, a guest's): it waits while they speak and answers its name. Content: something playing (a video, a game): it follows along, may react now and then, and never takes it as someone talking to it."),
+                    self.hears_list(cx),
+                ),
+                row("Stop when someone talks", Some("It goes quiet when a conversation track picks someone up."), toggle("cohost-yield", "stopWhenStreamerTalks", yield_, cx)),
             ],
             cx,
         )
+    }
+
+    /// The tracks it hears, each as conversation or content, and a way to add one.
+    fn hears_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        let w = self.studio.read(cx).workspace().clone();
+        let cohost = self.cohost(cx);
+        let hears = super::hearing(&w, &cohost);
+        // as it'll be saved: [{track, role}]
+        let saved: Vec<Value> = hears
+            .iter()
+            .map(|h| json!({"track": h.track.to_string(), "role": if h.role == super::Role::Content { "content" } else { "conversation" }}))
+            .collect();
+        let mut list = div().flex().flex_col().gap_1();
+        for (i, h) in hears.iter().enumerate() {
+            let content = h.role == super::Role::Content;
+            let set_role = {
+                let saved = saved.clone();
+                move |this: &mut CohostView, role: &str, cx: &mut Context<CohostView>| {
+                    let mut s = saved.clone();
+                    s[i]["role"] = json!(role);
+                    this.set_cohost(json!({"hears": s}), cx);
+                }
+            };
+            let (to_conv, to_content) = (set_role.clone(), set_role);
+            let remove = {
+                let mut s = saved.clone();
+                s.remove(i);
+                s
+            };
+            let seg =
+                |id: &'static str, label: &'static str, on: bool| seg((id, i), label, on).flex_1().justify_center();
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .p_2()
+                    .rounded(px(7.))
+                    .bg(tok::bg_raised())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                ui::icon(if content { "monitor-play" } else { "mic" })
+                                    .size(px(13.))
+                                    .text_color(tok::text_secondary()),
+                            )
+                            .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).child(h.name.clone()))
+                            .child(
+                                div()
+                                    .id(("cohost-hears-remove", i))
+                                    .cursor_pointer()
+                                    .p_0p5()
+                                    .child(ui::icon("x").size(px(12.)).text_color(tok::text_tertiary()))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_cohost(json!({"hears": remove.clone()}), cx)
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_0p5()
+                            .p_0p5()
+                            .rounded(px(6.))
+                            .bg(tok::bg_panel())
+                            .child(seg("cohost-hears-conv", "Conversation", !content).when(content, |d| {
+                                d.on_click(cx.listener(move |this, _, _, cx| to_conv(this, "conversation", cx)))
+                            }))
+                            .child(seg("cohost-hears-content", "Content", content).when(!content, |d| {
+                                d.on_click(cx.listener(move |this, _, _, cx| to_content(this, "content", cx)))
+                            })),
+                    ),
+            );
+        }
+        // every mixer track but the co-hosts' own voices and those already heard
+        let candidates: Vec<(String, String, bool)> = w
+            .tracks
+            .iter()
+            .filter(|t| !hears.iter().any(|h| h.track == t.id))
+            .filter_map(|t| {
+                let s = w.sources.get(&t.source)?;
+                if s.kind == lightair_engine::piair_voice::KIND {
+                    return None;
+                }
+                let talk = s.kind == lightair_model::kinds::MIC || s.kind == lightair_model::kinds::AUDIO_DEVICE;
+                Some((t.id.to_string(), t.name.clone(), talk))
+            })
+            .collect();
+        let me = cx.entity().downgrade();
+        let add =
+            Button::new("cohost-hears-add").label("Add a track").xsmall().outline().dropdown_caret(true).dropdown_menu(
+                move |mut menu, _, _| {
+                    for (id, name, talk) in &candidates {
+                        let (me, id, saved) = (me.clone(), id.clone(), saved.clone());
+                        // a mic starts as conversation, anything else as content
+                        let role = if *talk { "conversation" } else { "content" };
+                        menu = menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
+                            if let Some(me) = me.upgrade() {
+                                let mut s = saved.clone();
+                                s.push(json!({"track": id, "role": role}));
+                                me.update(cx, |this, cx| this.set_cohost(json!({"hears": s}), cx));
+                            }
+                        }));
+                    }
+                    menu
+                },
+            );
+        if hears.is_empty() {
+            list = list
+                .child(div().text_size(px(12.)).text_color(tok::text_tertiary()).child("Nothing: it only reads chat."));
+        }
+        list.child(div().flex().child(add)).into_any_element()
     }
 }
 
@@ -703,6 +785,21 @@ fn tool_label(name: &str) -> String {
         "recall" => "Recalling".into(),
         other => other.replace('_', " "),
     }
+}
+
+/// One choice of a small segmented control.
+fn seg(id: impl Into<ElementId>, label: &'static str, on: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px_2()
+        .h(px(20.))
+        .flex()
+        .items_center()
+        .rounded(px(5.))
+        .text_size(px(11.))
+        .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+        .when(!on, |d| d.cursor_pointer().text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
+        .child(label)
 }
 
 fn card(color: Hsla) -> Div {

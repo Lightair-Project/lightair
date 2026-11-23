@@ -153,20 +153,16 @@ impl StudioWindow {
             .and_then(|t| workspace.tracks.iter().find(|x| x.id.to_string() == t))
             .map(|t| t.source.to_string());
         piair_voice::set_active(voice_source);
-        // the mic it hears: for "the streamer is talking" and on-device speech
-        let mics = hearing_tracks(&workspace);
-        let hears = want
-            .and_then(|s| s.settings[COHOST]["hears"].as_str())
-            .and_then(|t| mics.iter().find(|(id, _)| id.to_string() == t))
-            .or(mics.first());
+        // what it hears: people talking to it (they also tell it when someone's talking) and
+        // content playing
+        let hears = want.map(|s| crate::piair::hearing(&workspace, &s.settings[COHOST])).unwrap_or_default();
         *self.piair.0.mics.lock().unwrap_or_else(|e| e.into_inner()) =
-            hears.map(|(id, _)| vec![*id]).unwrap_or_default();
-        let device = hears
-            .and_then(|(_, source)| workspace.sources.get(source))
-            .filter(|s| s.kind == lightair_model::kinds::MIC)
-            .and_then(|s| s.settings["device"].as_str().map(str::to_owned))
-            .filter(|d| !d.is_empty() && d != "default");
-        *self.piair.0.hears_device.lock().unwrap_or_else(|e| e.into_inner()) = device;
+            hears.iter().filter(|h| h.role == crate::piair::Role::Conversation).map(|h| h.track).collect();
+        let mut current = self.piair.0.hears.lock().unwrap_or_else(|e| e.into_inner());
+        if *current != hears {
+            *current = hears;
+        }
+        drop(current);
         // the computer is waiting on the streamer's yes: show the co-host so they see it
         let asking = self.piair.state().question.is_some();
         if asking && !self.cohost.surfaced {
@@ -406,19 +402,6 @@ impl StudioWindow {
         }
         cx.notify();
     }
-}
-
-/// The mixer tracks a co-host can hear the streamer on: mics and audio inputs, as (track, source).
-pub(crate) fn hearing_tracks(w: &lightair_model::Workspace) -> Vec<(Id, Id)> {
-    w.tracks
-        .iter()
-        .filter(|t| {
-            w.sources
-                .get(&t.source)
-                .is_some_and(|s| s.kind == lightair_model::kinds::MIC || s.kind == lightair_model::kinds::AUDIO_DEVICE)
-        })
-        .map(|t| (t.id, t.source))
-        .collect()
 }
 
 /// Co-host sources that an object still uses, in the workspace's order.
