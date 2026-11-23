@@ -7,6 +7,7 @@
 pub mod access;
 pub mod audio;
 pub mod audio_host;
+pub mod audio_tap;
 pub mod avatar;
 pub mod avatar_pins;
 mod avatar2d;
