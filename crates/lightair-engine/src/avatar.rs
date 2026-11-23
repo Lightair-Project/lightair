@@ -52,6 +52,12 @@ struct Settings {
     body: BodyMode,
     /// The camera's picture in a corner, with what the trackers see marked on it.
     show_tracking: bool,
+    /// A PNGtuber's mic: a mixer track's id (its meter's level drives it).
+    mic: String,
+    /// Raised when the file changed in place (the PNGtuber editor saved it): read it again.
+    revision: i64,
+    /// A PNGtuber talks only while its push to talk is held (it has keys for it).
+    push_to_talk: bool,
 }
 
 fn read(settings: *mut sys::obs_data_t) -> Settings {
@@ -63,6 +69,9 @@ fn read(settings: *mut sys::obs_data_t) -> Settings {
     let float = |k: &CStr| unsafe { sys::obs_data_get_double(settings, k.as_ptr()) } as f32;
     Settings {
         file: st(c"file"),
+        mic: st(c"mic"),
+        revision: int(c"revision"),
+        push_to_talk: !st(c"push_to_talk_keys").is_empty(),
         device: st(c"device"),
         mirror: unsafe { sys::obs_data_get_bool(settings, c"mirror".as_ptr()) },
         framing: Framing::from_name(&st(c"framing")),
@@ -390,6 +399,8 @@ struct Render {
     rest: Option<Avatar>,
     /// A flat model's meshes at rest.
     rest2d: Vec<MeshRest>,
+    /// A flat model read again (same path): its GPU side is made again.
+    gpu2d_stale: bool,
 }
 
 struct Shared {
@@ -401,6 +412,8 @@ struct Shared {
     tracker: Mutex<usize>,
     body_tracker: Mutex<usize>,
     render: Mutex<Render>,
+    /// The `revision` the model was last read at.
+    revision: Mutex<i64>,
 }
 
 // SAFETY: libobs objects are reference counted and thread-safe; the graphics objects in
@@ -415,13 +428,18 @@ fn shared<'a>(data: *mut c_void) -> &'a Arc<Shared> {
 impl Shared {
     /// Reads the model in the background when the file changed.
     fn load_if_changed(self: &Arc<Self>) {
-        let file = self.settings.lock().file.clone();
+        let (file, revision) = {
+            let s = self.settings.lock();
+            (s.file.clone(), s.revision)
+        };
         let mut load = self.load.lock();
         let current = match &*load {
             Load::None => None,
             Load::Loading(p) | Load::Ready(p, _) | Load::Failed(p, _) => Some(p.clone()),
         };
-        if current.as_deref() == Some(file.as_str()) || file.is_empty() && current.is_none() {
+        // (the same file, saved again: its revision moved on)
+        let same_revision = std::mem::replace(&mut *self.revision.lock(), revision) == revision;
+        if current.as_deref() == Some(file.as_str()) && same_revision || file.is_empty() && current.is_none() {
             return;
         }
         if file.is_empty() {
@@ -1130,6 +1148,7 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         hidden_since: Mutex::new(None),
         tracker: Mutex::new(0),
         body_tracker: Mutex::new(0),
+        revision: Mutex::new(0),
         render: Mutex::new(Render {
             avatar: None,
             puppet: None,
@@ -1162,6 +1181,7 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
             anchors: Default::default(),
             rest: None,
             rest2d: Vec::new(),
+            gpu2d_stale: false,
         }),
     });
     s.load_if_changed();
@@ -1273,11 +1293,35 @@ fn anchor_lines(anchors: &[(Anchor, usize)]) -> String {
     anchors.iter().map(|(a, _)| format!("{}\t{}\t{}", a.group, a.label, a.key)).collect::<Vec<_>>().join("\n")
 }
 
+/// PNGtubers whose push to talk is held, by source.
+static PUSH_TO_TALK: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// A PNGtuber's push to talk held (or let go).
+pub fn set_push_to_talk(source: *mut sys::obs_source_t, held: bool) {
+    let mut on = PUSH_TO_TALK.lock();
+    on.retain(|s| *s != source as usize);
+    if held {
+        on.push(source as usize);
+    }
+}
+
+fn push_to_talk_held(source: usize) -> bool {
+    PUSH_TO_TALK.lock().contains(&source)
+}
+
+/// A mixer track's level now (dBFS, its louder channel's), for a PNGtuber's mic.
+fn mic_level(track: &str) -> f32 {
+    let Ok(id) = serde_json::from_value::<lightair_model::Id>(serde_json::Value::String(track.to_string())) else {
+        return f32::NEG_INFINITY;
+    };
+    crate::meters::meters().get(id).map_or(f32::NEG_INFINITY, |m| m.levels().magnitude.iter().copied().fold(f32::NEG_INFINITY, f32::max))
+}
+
 /// A model's name from its file ("mao_pro" for mao_pro.model3.json).
 fn model_name(path: &str) -> String {
     let file = std::path::Path::new(path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     let lower = file.to_ascii_lowercase();
-    for ext in [".model3.json", ".vrm", ".inp", ".inx", ".uma"] {
+    for ext in [".model3.json", ".vrm", ".inp", ".inx", ".uma", ".lairava"] {
         if lower.ends_with(ext) {
             return file[..file.len() - ext.len()].to_string();
         }
@@ -1378,9 +1422,9 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
         }
         Some((path, Loaded::Flat(slot, _, anchors))) => {
             r.avatar = None;
-            if r.puppet.as_ref().is_none_or(|(p, _)| *p != path)
-                && let Some(mut l) = slot.lock().take()
-            {
+            // (a new load of it: the same path, read again)
+            if let Some(mut l) = slot.lock().take() {
+                r.gpu2d_stale = true;
                 // its meshes at rest: posed once with nothing tracked
                 l.update(&Face::default(), None, 0.0);
                 r.rest2d = (0..anchors.iter().map(|(_, i)| i + 1).max().unwrap_or(0))
@@ -1415,6 +1459,7 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
     }
     if let Some((_, l)) = r.puppet.as_mut() {
         l.set_expression_weight(expression.map_or(1.0, |e| e.1));
+        l.set_mic(mic_level(&settings.mic), settings.push_to_talk.then(|| push_to_talk_held(s.source)));
         l.update(&face, expression.map(|e| e.0), dt);
         r.dirty = true;
     }
@@ -1503,7 +1548,7 @@ unsafe extern "C" fn video_render(data: *mut c_void, _: *mut sys::gs_effect_t) {
             }
             // a flat model
             let path2d = r.puppet.as_ref().map(|(p, _)| p.clone());
-            if r.gpu2d.as_ref().map(|g| g.path()) != path2d.as_deref() {
+            if r.gpu2d.as_ref().map(|g| g.path()) != path2d.as_deref() || std::mem::take(&mut r.gpu2d_stale) {
                 if let Some(mut g) = r.gpu2d.take() {
                     g.destroy();
                 }
@@ -1676,6 +1721,7 @@ pub fn track_body_once(bgra: &[u8], width: u32, height: u32) -> Option<BodyFrame
         hidden_since: Mutex::new(None),
         tracker: Mutex::new(0),
         body_tracker: Mutex::new(tracker as usize),
+        revision: Mutex::new(0),
         render: Mutex::new(Render {
             avatar: None,
             puppet: None,
@@ -1708,6 +1754,7 @@ pub fn track_body_once(bgra: &[u8], width: u32, height: u32) -> Option<BodyFrame
             anchors: Default::default(),
             rest: None,
             rest2d: Vec::new(),
+            gpu2d_stale: false,
         }),
     };
     if let Some(mut cd) = tracker_call(c"lightair_body_tracker_submit", |cd| {
@@ -1737,6 +1784,9 @@ pub fn track_body_once(bgra: &[u8], width: u32, height: u32) -> Option<BodyFrame
 fn read_defaults() -> Settings {
     Settings {
         file: String::new(),
+        mic: String::new(),
+        revision: 0,
+        push_to_talk: false,
         device: String::new(),
         mirror: true,
         framing: Framing::Bust,

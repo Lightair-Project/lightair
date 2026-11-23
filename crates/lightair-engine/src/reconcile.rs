@@ -780,6 +780,13 @@ impl Reconciler {
     }
 
     /// Where an avatar's anchor is in its picture at rest (pixels).
+    /// A PNGtuber's push to talk held, or let go.
+    pub fn avatar_push_to_talk(&self, source: Id, held: bool) {
+        if let Some(s) = self.sources.get(&source) {
+            crate::avatar::set_push_to_talk(s.as_ptr(), held);
+        }
+    }
+
     /// `size`: at that size of its picture instead.
     pub fn avatar_anchor_rest(&self, source: Id, key: &str, size: Option<(u32, u32)>) -> Option<crate::avatar_pins::Spot> {
         crate::avatar::anchor_rest(self.sources.get(&source)?.as_ptr(), key, size)

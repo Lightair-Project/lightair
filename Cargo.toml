@@ -40,6 +40,7 @@ lightair-widgets = { git = "https://github.com/Lightair-Project/lightair-core", 
 lightair-automation = { git = "https://github.com/Lightair-Project/lightair-core", rev = "9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb" }
 lightair-remote = { git = "https://github.com/Lightair-Project/lightair-core", rev = "9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb" }
 lightair-platform = { git = "https://github.com/Lightair-Project/lightair-core", rev = "9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb" }
+lightair-pngtuber = { git = "https://github.com/Lightair-Project/lightair-core", rev = "9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb" }
 
 anyhow = "1"
 thiserror = "2"

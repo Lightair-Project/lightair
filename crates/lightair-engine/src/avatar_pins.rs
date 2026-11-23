@@ -133,6 +133,7 @@ fn flat_names(f: &Flat) -> Vec<(String, String)> {
             .collect(),
         Flat::Inochi2d(l) => l.puppet.parts().iter().map(|p| (p.name.clone(), "Parts".into())).collect(),
         Flat::Uma(l) => l.puppet.drawables().iter().map(|d| (d.name.clone(), "Art meshes".into())).collect(),
+        Flat::Png(l) => l.anchor_names(),
     }
 }
 
@@ -169,6 +170,7 @@ pub(crate) fn flat_points(f: &Flat, i: usize) -> Vec<[f32; 2]> {
         Flat::Uma(l) => {
             l.puppet.drawables().get(i).filter(|d| d.posed).map(|d| d.positions.clone()).unwrap_or_default()
         }
+        Flat::Png(l) => l.anchor_points(i),
     }
 }
 
@@ -178,6 +180,7 @@ pub(crate) fn flat_frame(f: &Flat, framing: lightair_avatar::Framing, aspect: f3
         Flat::Live2d(l) => l.puppet.frame(framing, aspect, zoom),
         Flat::Inochi2d(l) => l.puppet.frame(framing, aspect, zoom),
         Flat::Uma(l) => l.puppet.frame(framing, aspect, zoom),
+        Flat::Png(l) => l.frame(framing, aspect, zoom),
     }
 }
 

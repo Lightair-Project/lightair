@@ -11,6 +11,7 @@ lightair-web.workspace = true
 libobs-sys.workspace = true
 lightair-model.workspace = true
 lightair-avatar.workspace = true
+lightair-pngtuber.workspace = true
 glam = "0.30"
 lightair-audio.workspace = true
 uuid.workspace = true

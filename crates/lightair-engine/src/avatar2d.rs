@@ -353,11 +353,17 @@ pub enum Flat {
     Live2d(Loaded2d),
     Inochi2d(crate::avatar_inochi2d::LoadedInochi),
     Uma(crate::avatar_uma::LoadedUma),
+    Png(crate::avatar_png::LoadedPng),
 }
 
-/// Whether a file is a flat avatar's (`.model3.json`, `.inp`, `.inx`, `.uma`).
+/// Whether a file is a flat avatar's (`.model3.json`, `.inp`, `.inx`, `.uma`, `.lairava`).
 pub fn is_flat(file: &str) -> bool {
-    is_live2d(file) || is_inochi2d(file) || is_uma(file)
+    is_live2d(file) || is_inochi2d(file) || is_uma(file) || is_png(file)
+}
+
+/// A Lightair PNGtuber (`.lairava`).
+pub fn is_png(file: &str) -> bool {
+    file.to_ascii_lowercase().ends_with(".lairava")
 }
 
 pub fn is_uma(file: &str) -> bool {
@@ -376,7 +382,9 @@ pub fn is_inochi2d(file: &str) -> bool {
 impl Flat {
     pub fn load(path: &std::path::Path) -> Result<Flat, String> {
         let file = path.to_string_lossy();
-        if is_inochi2d(&file) {
+        if is_png(&file) {
+            crate::avatar_png::LoadedPng::load(path).map(Flat::Png)
+        } else if is_inochi2d(&file) {
             crate::avatar_inochi2d::LoadedInochi::load(path).map(Flat::Inochi2d)
         } else if is_uma(&file) {
             crate::avatar_uma::LoadedUma::load(path).map(Flat::Uma)
@@ -392,8 +400,17 @@ impl Flat {
             Flat::Live2d(l) => l.expressions.clone(),
             Flat::Inochi2d(l) => l.puppet.toggles(),
             Flat::Uma(l) => l.puppet.toggles(),
+            Flat::Png(l) => l.puppet.expressions(),
         }
     }
+
+    /// A PNGtuber's mic: its level (dBFS) and push to talk, for the next frame.
+    pub fn set_mic(&mut self, level_db: f32, push_to_talk: Option<bool>) {
+        if let Flat::Png(l) = self {
+            l.set_mic(level_db, push_to_talk);
+        }
+    }
+
 
     /// How strongly a Live2D model's expression shows (`0..=1`); Inochi2D and Umamo hold theirs
     /// at full.
@@ -419,6 +436,7 @@ impl Flat {
                     l.puppet.pose();
                 }
             }
+            Flat::Png(l) => l.update(expression, dt),
         }
     }
 }
@@ -428,6 +446,7 @@ pub enum FlatGpu {
     Live2d(Gpu2d),
     Inochi2d(crate::avatar_inochi2d::GpuInochi),
     Uma(crate::avatar_uma::GpuUma),
+    Png(crate::avatar_png::GpuPng),
 }
 
 impl FlatGpu {
@@ -437,6 +456,7 @@ impl FlatGpu {
             Flat::Live2d(l) => FlatGpu::Live2d(unsafe { Gpu2d::new(path, l) }),
             Flat::Inochi2d(l) => FlatGpu::Inochi2d(unsafe { crate::avatar_inochi2d::GpuInochi::new(path, l) }),
             Flat::Uma(l) => FlatGpu::Uma(unsafe { crate::avatar_uma::GpuUma::new(path, l) }),
+            Flat::Png(l) => FlatGpu::Png(unsafe { crate::avatar_png::GpuPng::new(path, l) }),
         }
     }
 
@@ -445,6 +465,7 @@ impl FlatGpu {
             FlatGpu::Live2d(g) => &g.path,
             FlatGpu::Inochi2d(g) => &g.path,
             FlatGpu::Uma(g) => &g.path,
+            FlatGpu::Png(g) => &g.path,
         }
     }
 
@@ -464,6 +485,7 @@ impl FlatGpu {
                     g.upload(&l.puppet);
                     g.draw(&l.puppet, target, w, h, framing, zoom);
                 }
+                (FlatGpu::Png(g), Flat::Png(l)) => g.draw(l, target, w, h, framing, zoom),
                 _ => {}
             }
         }
@@ -476,6 +498,7 @@ impl FlatGpu {
                 FlatGpu::Live2d(g) => g.destroy(),
                 FlatGpu::Inochi2d(g) => g.destroy(),
                 FlatGpu::Uma(g) => g.destroy(),
+                FlatGpu::Png(g) => g.destroy(),
             }
         }
     }

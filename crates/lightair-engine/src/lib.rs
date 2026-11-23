@@ -11,6 +11,7 @@ pub mod avatar;
 pub mod avatar_pins;
 mod avatar2d;
 mod avatar_inochi2d;
+mod avatar_png;
 mod avatar_uma;
 pub mod backdrop;
 pub mod devices;
