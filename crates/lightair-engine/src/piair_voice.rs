@@ -78,6 +78,23 @@ struct Queue {
 static QUEUE: Mutex<Option<Queue>> = Mutex::new(None);
 /// Voice sources alive (no source: nothing would play it).
 static ALIVE: AtomicUsize = AtomicUsize::new(0);
+/// The voice source that plays PiAir's speech (the active AI co-host's, by its source Id, the
+/// libobs name); the others stay silent. `None`: none plays.
+static ACTIVE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Which voice source plays the speech: the active co-host's (its source Id).
+pub fn set_active(source: Option<String>) {
+    *ACTIVE.lock().unwrap_or_else(|e| e.into_inner()) = source;
+}
+
+fn is_active(source: *mut sys::obs_source_t) -> bool {
+    let name = unsafe { sys::obs_source_get_name(source) };
+    if name.is_null() {
+        return false;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
+    ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).as_deref() == Some(&*name)
+}
 
 fn with<R>(f: impl FnOnce(&mut Queue) -> R) -> R {
     let mut g = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
@@ -304,7 +321,12 @@ unsafe extern "C" fn create(_settings: *mut sys::obs_data_t, source: *mut sys::o
             let start = unsafe { sys::os_gettime_ns() };
             let mut sent = 0u64;
             while !s.load(Ordering::Relaxed) {
-                next_block(&mut block, &mut mouth);
+                // only the active co-host's voice takes the speech; the others are silent
+                if is_active(src.0) {
+                    next_block(&mut block, &mut mouth);
+                } else {
+                    block.fill(0.0);
+                }
                 let audio = sys::obs_source_audio {
                     data: [
                         block.as_ptr() as *const u8,
