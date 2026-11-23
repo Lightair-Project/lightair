@@ -401,9 +401,15 @@ impl StudioWindow {
         // a PNGtuber listens to a mic; the others follow a face
         let png = crate::avatar_library::kind_of(source.settings["file"].as_str().unwrap_or("")) == "PNGtuber";
         let follow = if png { self.voice_section(source, cx) } else { self.tracking_section(source, cx) };
-        // an AI co-host: PiAir's sections instead of tracking and the rest
+        // an AI co-host: PiAir's sections instead of tracking and expressions (PiAir drives
+        // those); how it sits on screen and what it wears stay
         if crate::piair::is_cohost(source) {
-            return vec![self.avatar_card(source, cx), self.cohost_sections(source, cx)];
+            return vec![
+                self.avatar_card(source, cx),
+                self.cohost_sections(source, cx),
+                self.framing_section(source, cx),
+                self.accessories_section(scene, object, source, cx),
+            ];
         }
         let mut out = vec![self.avatar_card(source, cx), follow, self.framing_section(source, cx)];
         out.extend(self.expressions_section(source, cx));

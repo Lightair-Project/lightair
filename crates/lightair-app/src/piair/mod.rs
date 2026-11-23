@@ -756,7 +756,8 @@ pub fn icon_for(source: Option<&lightair_model::Source>, kind: &str) -> &'static
 
 /// A command as the co-host's voice track should follow it, in the same undo step: removing a
 /// co-host's last object removes its voice track (and the track's source), renaming the object
-/// renames the track. Other commands as they are.
+/// renames the track and its source; a copied co-host gets a voice track of its own and comes in
+/// inactive while another is active. Other commands as they are.
 pub fn with_cohost_voice(before: &lightair_model::Workspace, command: lightair_model::Command) -> lightair_model::Command {
     use lightair_model::Command;
     fn touches(c: &Command) -> bool {
@@ -765,6 +766,16 @@ pub fn with_cohost_voice(before: &lightair_model::Workspace, command: lightair_m
             Command::Batch { commands, .. } => commands.iter().any(touches),
             _ => false,
         }
+    }
+    // a co-host copied in (paste, duplicate): inactive while another is active, and a voice
+    // track of its own, not the original's
+    let mut command = command;
+    let copies = adopt_copies(before, &mut command);
+    if !copies.is_empty() {
+        let label = command.label();
+        let mut commands = vec![command];
+        commands.extend(copies);
+        return Command::Batch { label, commands };
     }
     if !touches(&command) || !before.sources.values().any(|s| is_cohost(s)) {
         return command;
@@ -788,7 +799,11 @@ pub fn with_cohost_voice(before: &lightair_model::Workspace, command: lightair_m
                 extra.push(Command::RemoveTrack { track: track.id });
                 extra.push(Command::RemoveSource { source: track.source });
             }
-            (Some(a), Some(b)) if a != b && track.name != b => extra.push(Command::RenameTrack { track: track.id, name: b }),
+            (Some(a), Some(b)) if a != b && track.name != b => {
+                // the track and its source (what the mixer strip's picker shows) both
+                extra.push(Command::RenameTrack { track: track.id, name: b.clone() });
+                extra.push(Command::RenameSource { source: track.source, name: b });
+            }
             _ => {}
         }
     }
@@ -799,6 +814,56 @@ pub fn with_cohost_voice(before: &lightair_model::Workspace, command: lightair_m
     let mut commands = vec![command];
     commands.extend(extra);
     Command::Batch { label, commands }
+}
+
+/// Co-host sources `command` adds as copies of others (their voice track already some other
+/// co-host's, or not in this workspace): given a voice track of their own, and made inactive
+/// while another co-host is active. Returns the commands that add the new voice tracks.
+fn adopt_copies(before: &lightair_model::Workspace, command: &mut lightair_model::Command) -> Vec<lightair_model::Command> {
+    use lightair_model::Command;
+    fn added_tracks(c: &Command, out: &mut Vec<String>) {
+        match c {
+            Command::AddTrack { track, .. } => out.push(track.id.to_string()),
+            Command::Batch { commands, .. } => commands.iter().for_each(|c| added_tracks(c, out)),
+            _ => {}
+        }
+    }
+    fn walk(c: &mut Command, f: &mut dyn FnMut(&mut lightair_model::Source)) {
+        match c {
+            Command::AddSource { source } => f(source),
+            Command::Batch { commands, .. } => commands.iter_mut().for_each(|c| walk(c, f)),
+            _ => {}
+        }
+    }
+    let mut ours = Vec::new();
+    added_tracks(command, &mut ours);
+    let live: Vec<&lightair_model::Source> =
+        before.sources.values().map(|s| &**s).filter(|s| is_cohost(s) && before.objects_using(s.id).next().is_some()).collect();
+    let another_active = live.iter().any(|s| s.settings[COHOST]["active"].as_bool() != Some(false));
+    let mut extra = Vec::new();
+    walk(command, &mut |source| {
+        if !is_cohost(source) || before.sources.contains_key(&source.id) {
+            return;
+        }
+        let vt = source.settings[COHOST]["voice_track"].as_str().unwrap_or("").to_string();
+        let shared = before.sources.values().any(|o| is_cohost(o) && o.settings[COHOST]["voice_track"].as_str() == Some(vt.as_str()));
+        let missing = !before.tracks.iter().any(|t| t.id.to_string() == vt) && !ours.contains(&vt);
+        if !(shared || missing) {
+            return;
+        }
+        let voice = lightair_model::Source::new(source.name.clone(), lightair_engine::piair_voice::KIND, json!({}));
+        let track = lightair_model::Track::new(source.name.clone(), voice.id);
+        source.settings[COHOST]["voice_track"] = json!(track.id.to_string());
+        if crate::avatar_library::kind_of(source.settings["file"].as_str().unwrap_or("")) == "PNGtuber" {
+            source.settings["mic"] = json!(track.id.to_string());
+        }
+        if another_active {
+            source.settings[COHOST]["active"] = json!(false);
+        }
+        extra.push(Command::AddSource { source: voice });
+        extra.push(Command::AddTrack { track, index: None });
+    });
+    extra
 }
 
 /// What the computer allows PiAir, kept on this Mac (Settings → AI co-host), not in a project.
