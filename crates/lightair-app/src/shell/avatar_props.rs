@@ -1180,3 +1180,28 @@ fn load_problem(file: &str, error: &str) -> String {
         "The model couldn't be read: try exporting it again".into()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::expression_label;
+
+    #[test]
+    fn model_parameter_names_read_as_words_with_the_side_last() {
+        for (name, label) in [
+            ("ParamBrowLAngle", "Brow angle (left)"),
+            ("ParamEyeROpen", "Eye open (right)"),
+            ("ParamMouthOpenY", "Mouth open y"),
+            ("Arm:: Left:: Move", "Arm move (left)"),
+            ("eyeBlinkRight", "Eye blink (right)"),
+        ] {
+            assert_eq!(expression_label(name), label, "{name}");
+        }
+    }
+
+    #[test]
+    fn presets_are_capitalised_and_no_expression_reads_none() {
+        assert_eq!(expression_label("happy"), "Happy");
+        assert_eq!(expression_label(""), "None");
+        assert_eq!(expression_label("Paramedic"), "Paramedic", "only a \"Param\" prefix is dropped");
+    }
+}

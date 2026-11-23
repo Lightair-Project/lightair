@@ -1306,3 +1306,63 @@ impl Render for PngEditor {
             .child(footer)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // (not `super::*`: gpui's `test` attribute would shadow the standard one)
+    use super::{free_expression_name, layer_name, unique_names};
+    use lightair_pngtuber::{Avatar, Expression};
+
+    fn with_expressions(names: &[&str]) -> Avatar {
+        let mut a = Avatar::new("Test", 8, 8);
+        a.expressions = names.iter().map(|n| Expression { name: (*n).into(), ..Default::default() }).collect();
+        a
+    }
+
+    fn names(a: &Avatar) -> Vec<&str> {
+        a.expressions.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_pictures_file_numbering_and_separators_leave_its_layer_name() {
+        for (file, layer) in [
+            ("08 hat", "Hat"),
+            ("04_mouth-closed", "Mouth closed"),
+            ("12.eyes open", "Eyes open"),
+            ("blush", "Blush"),
+            ("mouth2", "Mouth2"),
+        ] {
+            assert_eq!(layer_name(file), layer, "{file}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_only_a_number_keeps_it() {
+        assert_eq!(layer_name("007"), "007");
+    }
+
+    #[test]
+    fn a_new_or_renamed_expression_never_takes_anothers_name() {
+        let a = with_expressions(&["Shy", "Hat"]);
+        assert_eq!(free_expression_name(&a, "Angry", None), "Angry", "a free name is kept");
+        assert_eq!(free_expression_name(&a, "Shy", None), "Shy 2");
+        assert_eq!(free_expression_name(&a, "shy", None), "shy 2", "names differ only in case are the same name");
+        assert_eq!(free_expression_name(&a, "Hat", None), "Hat 2", "costumes and expressions share names");
+        assert_eq!(free_expression_name(&a, "Shy", Some(0)), "Shy", "renaming one to its own name keeps it");
+        assert_eq!(free_expression_name(&a, "Hat", Some(0)), "Hat 2", "renaming one to another's name");
+        let b = with_expressions(&["Shy", "Shy 2"]);
+        assert_eq!(free_expression_name(&b, "Shy", None), "Shy 3");
+    }
+
+    #[test]
+    fn an_older_files_duplicate_expression_names_are_numbered() {
+        let mut a = with_expressions(&["Shy", "shy", "Shy 2", "Hat", "Shy"]);
+        unique_names(&mut a);
+        let n = names(&a);
+        assert_eq!((n[0], n[2], n[3]), ("Shy", "Shy 2", "Hat"), "the first of a name, and unique ones, stay: {n:?}");
+        let lower: Vec<String> = n.iter().map(|s| s.to_lowercase()).collect();
+        for (i, x) in lower.iter().enumerate() {
+            assert!(!lower[..i].contains(x), "{n:?}");
+        }
+    }
+}
