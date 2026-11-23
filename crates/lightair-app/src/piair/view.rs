@@ -1,7 +1,7 @@
 //! The AI co-host's sections in the Inspector, under its Avatar card: Talk, Brain, Voice, Persona
-//! and Behaviour. The co-host's settings live on its object (the avatar source's `cohost.piair`),
-//! so they're saved with the project and undoable; Lightair passes them on to PiAir. Keys and
-//! sign-ins stay in the Keychain. Labels and values only; what each does is behind an ⓘ.
+//! and Behaviour. The co-host's settings live on its object (the avatar source's `cohost` block),
+//! so they're saved with the project and undoable; Lightair passes them on to PiAir. Keys live in
+//! Settings → Connections (the Keychain). Labels and values only; what each does is behind an ⓘ.
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -9,14 +9,14 @@ use std::time::Duration;
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
+use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_model::{Command, Id};
 use serde_json::{Value, json};
 
-use super::{COHOST, Host};
+use super::{COHOST, Host, KeyState, Voices, keys};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 
@@ -26,6 +26,12 @@ const CHATTINESS: &[&str] = &["Quiet", "Normal", "Lively", "Chatty"];
 /// Lines of the conversation the Talk section shows.
 const TALK_LINES: usize = 6;
 
+/// What the co-host's sections ask the window for.
+pub enum CohostEvent {
+    /// Settings → Connections (to add a key).
+    OpenConnections,
+}
+
 pub struct CohostView {
     host: Host,
     studio: Entity<Studio>,
@@ -33,22 +39,22 @@ pub struct CohostView {
     source: Option<Id>,
     active: bool,
     prompt: Entity<InputState>,
-    key: Entity<InputState>,
-    voice_key: Entity<InputState>,
     name: Entity<InputState>,
-    personality: Entity<InputState>,
+    personality: Entity<TextareaState>,
     code: Entity<InputState>,
     collapsed: HashSet<&'static str>,
     _subs: Vec<Subscription>,
 }
 
+impl EventEmitter<CohostEvent> for CohostView {}
+
 impl CohostView {
     pub fn new(host: Host, studio: Entity<Studio>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prompt = cx.new(|cx| InputState::new(window, cx).placeholder("Talk to your co-host…"));
-        let key = cx.new(|cx| InputState::new(window, cx).placeholder("API key").masked(true));
-        let voice_key = cx.new(|cx| InputState::new(window, cx).placeholder("Voice API key").masked(true));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Pi"));
-        let personality = cx.new(|cx| InputState::new(window, cx).placeholder("Warm, quick and playful"));
+        let personality = cx.new(|cx| {
+            TextareaState::new(window, cx).auto_grow(3, 8).placeholder("How it talks: warm, quick and playful…")
+        });
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("Code from the sign-in page"));
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(&prompt, window, |this, state, ev: &InputEvent, window, cx| {
@@ -60,39 +66,22 @@ impl CohostView {
                 }
             }
         }));
-        subs.push(cx.subscribe_in(&key, window, |this, state, ev: &InputEvent, window, cx| {
+        subs.push(cx.subscribe_in(&name, window, |this, state, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                let k = state.read(cx).value().trim().to_string();
-                if !k.is_empty() {
-                    let provider = this.setting("/provider", cx).as_str().unwrap_or("google").to_string();
-                    this.host.send(json!({"t": "login", "provider": provider, "kind": "api_key", "key": k}));
-                    state.update(cx, |s, cx| s.set_value("", window, cx));
+                let v = state.read(cx).value().trim().to_string();
+                if !v.is_empty() && this.setting("/persona/name", cx).as_str() != Some(v.as_str()) {
+                    this.set(json!({"persona": {"name": v}}), cx);
                 }
             }
         }));
-        subs.push(cx.subscribe_in(&voice_key, window, |this, state, ev: &InputEvent, window, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                let k = state.read(cx).value().trim().to_string();
-                if !k.is_empty() {
-                    let vendor = this.setting("/voice/vendor", cx).as_str().unwrap_or("gemini").to_string();
-                    if let Ok(e) = keyring::Entry::new(super::KEYCHAIN_SERVICE, &format!("voice:{vendor}")) {
-                        let _ = e.set_password(&k);
-                    }
-                    this.host.send(json!({"t": "voice_key"}));
-                    state.update(cx, |s, cx| s.set_value("", window, cx));
+        subs.push(cx.subscribe_in(&personality, window, |this, state, ev: &InputEvent, _, cx| {
+            if matches!(ev, InputEvent::Blur) {
+                let v = state.read(cx).value().trim().to_string();
+                if !v.is_empty() && this.setting("/persona/personality", cx).as_str() != Some(v.as_str()) {
+                    this.set(json!({"persona": {"personality": v}}), cx);
                 }
             }
         }));
-        for (input, field) in [(name.clone(), "name"), (personality.clone(), "personality")] {
-            subs.push(cx.subscribe_in(&input, window, move |this, state, ev: &InputEvent, _, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                    let v = state.read(cx).value().trim().to_string();
-                    if !v.is_empty() && this.setting(&format!("/persona/{field}"), cx).as_str() != Some(v.as_str()) {
-                        this.set(json!({"persona": {field: v}}), cx);
-                    }
-                }
-            }));
-        }
         subs.push(cx.subscribe_in(&code, window, |this, state, ev: &InputEvent, window, cx| {
             if matches!(ev, InputEvent::PressEnter { .. }) {
                 let c = state.read(cx).value().trim().to_string();
@@ -105,16 +94,21 @@ impl CohostView {
             loop {
                 cx.background_executor().timer(Duration::from_millis(120)).await;
                 let ok = this.update_in(cx, |this, window, cx| {
-                    for (input, pointer) in
-                        [(this.name.clone(), "/persona/name"), (this.personality.clone(), "/persona/personality")]
+                    let want = this.setting("/persona/name", cx).as_str().unwrap_or("").to_string();
+                    let input = this.name.clone();
+                    if !want.is_empty()
+                        && !input.read(cx).focus_handle(cx).is_focused(window)
+                        && input.read(cx).value() != want.as_str()
                     {
-                        let want = this.setting(pointer, cx).as_str().unwrap_or("").to_string();
-                        if !want.is_empty()
-                            && !input.read(cx).focus_handle(cx).is_focused(window)
-                            && input.read(cx).value() != want.as_str()
-                        {
-                            input.update(cx, |s, cx| s.set_value(want, window, cx));
-                        }
+                        input.update(cx, |s, cx| s.set_value(want, window, cx));
+                    }
+                    let want = this.setting("/persona/personality", cx).as_str().unwrap_or("").to_string();
+                    let area = this.personality.clone();
+                    if !want.is_empty()
+                        && !area.read(cx).focus_handle(cx).is_focused(window)
+                        && area.read(cx).value() != want.as_str()
+                    {
+                        area.update(cx, |s, cx| s.set_value(want, window, cx));
                     }
                     if this.host.0.dirty.swap(false, Ordering::Relaxed) {
                         cx.notify();
@@ -132,8 +126,6 @@ impl CohostView {
             source: None,
             active: false,
             prompt,
-            key,
-            voice_key,
             name,
             personality,
             code,
@@ -148,37 +140,31 @@ impl CohostView {
         self.active = active;
     }
 
-    /// The object's own PiAir settings (`cohost.piair`), or Null.
-    fn object_settings(&self, cx: &App) -> Value {
+    /// The object's `cohost` block, or Null.
+    fn cohost(&self, cx: &App) -> Value {
         let Some(id) = self.source else { return Value::Null };
-        self.studio
-            .read(cx)
-            .workspace()
-            .sources
-            .get(&id)
-            .map(|s| s.settings[COHOST]["piair"].clone())
-            .unwrap_or(Value::Null)
+        self.studio.read(cx).workspace().sources.get(&id).map(|s| s.settings[COHOST].clone()).unwrap_or(Value::Null)
     }
 
-    /// A setting: the object's, else what PiAir is using (its defaults).
+    /// A PiAir setting: the object's, else what PiAir is using (its defaults).
     fn setting(&self, pointer: &str, cx: &App) -> Value {
-        let own = self.object_settings(cx).pointer(pointer).cloned().filter(|v| !v.is_null());
+        let own = self.cohost(cx)["piair"].pointer(pointer).cloned().filter(|v| !v.is_null());
         own.or_else(|| self.host.state().settings.pointer(pointer).cloned()).unwrap_or(Value::Null)
     }
 
-    /// Changes the object's settings (one undo step); Lightair passes them on to PiAir.
-    fn set(&mut self, patch: Value, cx: &mut Context<Self>) {
+    /// Changes the object's `cohost` block (one undo step).
+    fn set_cohost(&mut self, patch: Value, cx: &mut Context<Self>) {
         let Some(id) = self.source else { return };
         let Some(source) = self.studio.read(cx).workspace().sources.get(&id).cloned() else { return };
         let mut settings = source.settings.clone();
-        let mut piair = settings[COHOST]["piair"].clone();
-        if !piair.is_object() {
-            piair = json!({});
-        }
-        merge(&mut piair, &patch);
-        settings[COHOST]["piair"] = piair;
+        merge(&mut settings[COHOST], &patch);
         let _ = self.studio.update(cx, |s, cx| s.execute(Command::SetSourceSettings { source: id, settings }, cx));
         cx.notify();
+    }
+
+    /// Changes the object's PiAir settings; Lightair passes them on to PiAir.
+    fn set(&mut self, patch: Value, cx: &mut Context<Self>) {
+        self.set_cohost(json!({"piair": patch}), cx);
     }
 
     fn header(&self, title: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
@@ -209,12 +195,41 @@ impl CohostView {
         div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_2p5()
             .pb_3()
             .border_b_1()
             .border_color(tok::border())
             .child(self.header(title, cx))
             .when(open, |d| d.children(body))
+            .into_any_element()
+    }
+
+    /// A key's state in a line, with a way to Settings → Connections when it's needed.
+    fn key_line(&self, service: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let state = self.host.key_state(service);
+        let name = keys::name_of(service);
+        let (text, colour, needs) = match state {
+            KeyState::Saved | KeyState::Works(None) => (format!("{name} key saved"), tok::ok(), false),
+            KeyState::Works(Some(note)) => (note, tok::warn(), false),
+            KeyState::Checking => ("Checking the key…".into(), tok::warn(), false),
+            KeyState::Problem(e) => (e, tok::error(), true),
+            KeyState::Missing => (format!("No {name} key"), tok::warn(), true),
+            KeyState::Unknown => ("…".into(), tok::text_tertiary(), false),
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().flex_none().size(px(7.)).rounded_full().bg(colour))
+            .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(tok::text_secondary()).child(text))
+            .child(
+                Button::new(SharedString::from(format!("cohost-keys-{service}")))
+                    .label(if needs { "Add key" } else { "Keys" })
+                    .xsmall()
+                    .when(needs, |b| b.outline())
+                    .when(!needs, |b| b.ghost())
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(CohostEvent::OpenConnections))),
+            )
             .into_any_element()
     }
 
@@ -404,39 +419,66 @@ impl CohostView {
                 },
             )
         };
-        let sign_in: AnyElement = if signed_in {
-            div().text_size(px(12.)).text_color(tok::ok()).child("Signed in").into_any_element()
-        } else if oauth {
-            let provider = provider.clone();
-            div()
+        let mut body = vec![
+            row(
+                "Provider",
+                Some(
+                    "Any provider Pi supports, with an API key (Settings → Connections) or a subscription (Claude Pro/Max, ChatGPT, GitHub Copilot) where it has one.",
+                ),
+                provider_menu.into_any_element(),
+            ),
+            row(
+                "Model",
+                Some("A fast model answers sooner. Using the computer needs a model that can see images."),
+                model_menu.into_any_element(),
+            ),
+        ];
+        // signed in, or how to: a subscription here, a key in Connections
+        let has_key_service = keys::SERVICES.iter().any(|s| s.0 == provider.as_str());
+        if signed_in {
+            body.push(status_line(tok::ok(), "Signed in".into()));
+        } else {
+            let mut line = div()
                 .flex()
-                .gap_1()
-                .child(Button::new("cohost-oauth").label("Use subscription").xsmall().outline().on_click(cx.listener(
-                    move |this, _, _, cx| {
+                .items_center()
+                .gap_2()
+                .child(div().flex_none().size(px(7.)).rounded_full().bg(tok::warn()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.))
+                        .text_color(tok::text_secondary())
+                        .child("Not signed in"),
+                );
+            if oauth {
+                let provider = provider.clone();
+                line = line.child(Button::new("cohost-oauth").label("Use subscription").xsmall().outline().on_click(
+                    cx.listener(move |this, _, _, cx| {
                         this.host.send(json!({"t": "login", "provider": provider, "kind": "oauth"}));
                         cx.notify();
-                    },
-                )))
-                .child(field(&self.key, 120.))
-                .into_any_element()
-        } else {
-            field(&self.key, 170.).into_any_element()
-        };
-        self.section(
-            "Brain",
-            vec![
-                row("Provider", Some("Any provider Pi supports: an API key, or a subscription (Claude Pro/Max, ChatGPT, GitHub Copilot) where it has one. Keys stay in the Keychain."), provider_menu.into_any_element()),
-                row("Model", Some("A fast model answers sooner. Using the computer needs a model that can see images."), model_menu.into_any_element()),
-                row("Sign in", None, sign_in),
-            ],
-            cx,
-        )
+                    }),
+                ));
+            }
+            if has_key_service {
+                line = line.child(
+                    Button::new("cohost-brain-key")
+                        .label("Add key")
+                        .xsmall()
+                        .outline()
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(CohostEvent::OpenConnections))),
+                );
+            }
+            body.push(line.into_any_element());
+        }
+        self.section("Brain", body, cx)
     }
 
-    // ---------------------------------------------------------------- Voice, Persona, Behaviour
+    // ---------------------------------------------------------------- Voice
 
     fn voice(&self, cx: &mut Context<Self>) -> AnyElement {
         let vendor = self.setting("/voice/vendor", cx).as_str().unwrap_or("gemini").to_string();
+        let chosen = self.setting("/voice/voice", cx).as_str().unwrap_or("").to_string();
         let chips = chips(
             "cohost-vendor",
             VENDORS.iter().map(|(id, name)| (name.to_string(), vendor == *id)).collect(),
@@ -446,41 +488,110 @@ impl CohostView {
         let mut body = vec![stacked(
             "Provider",
             Some(
-                "Cartesia and ElevenLabs answer in about a tenth of a second and give timings for the mouth. Gemini works with a Gemini key. None: it writes in Talk instead of speaking. It plays on the co-host's own mixer track.",
+                "Cartesia and ElevenLabs answer in about a tenth of a second and give timings for the mouth. Gemini works with a Google key. None: it writes in Talk instead of speaking. It plays on the co-host's own mixer track.",
             ),
             chips,
         )];
-        if vendor != "none" {
-            body.push(row("Key", Some("Kept in the Keychain."), field(&self.voice_key, 170.).into_any_element()));
+        if vendor == "none" {
+            return self.section("Voice", body, cx);
         }
+        let service = keys::service_for_voice(&vendor);
+        let has_key = matches!(self.host.key_state(service), KeyState::Saved | KeyState::Works(_) | KeyState::Checking);
+        if has_key {
+            body.push(stacked(
+                "Voice",
+                Some("Picking one plays a short sample on this computer, never on stream."),
+                self.voice_picker(&vendor, &chosen, cx),
+            ));
+        }
+        body.push(self.key_line(service, cx));
         self.section("Voice", body, cx)
     }
+
+    /// The vendor's voices to pick from (a sample plays on picking), and ▶ to hear the chosen one.
+    fn voice_picker(&self, vendor: &str, chosen: &str, cx: &mut Context<Self>) -> AnyElement {
+        let voices = self.host.voices(vendor);
+        let (previewing, preview_error) = {
+            let ai = self.host.0.ai.lock().unwrap_or_else(|e| e.into_inner());
+            (ai.previewing.clone(), ai.preview_error.clone())
+        };
+        let list = match &voices {
+            Voices::Ready(l) => l.clone(),
+            _ => Vec::new(),
+        };
+        let current = list.iter().find(|v| v.id == chosen).cloned();
+        let label = match (&voices, &current) {
+            (_, Some(v)) => v.name.clone(),
+            (Voices::Loading, _) => "Loading voices…".into(),
+            (Voices::Failed(_), _) => "Voices unavailable".into(),
+            (Voices::Ready(_), None) if chosen.is_empty() => "Choose a voice".into(),
+            (Voices::Ready(_), None) => chosen.to_string(),
+        };
+        let me = cx.entity().downgrade();
+        let vendor_s = vendor.to_string();
+        let picker =
+            Button::new("cohost-voice").label(label).xsmall().outline().dropdown_caret(true).w_full().dropdown_menu(
+                move |mut menu, _, _| {
+                    for v in list.iter() {
+                        let item =
+                            if v.detail.is_empty() { v.name.clone() } else { format!("{}  ·  {}", v.name, v.detail) };
+                        let (me, v, vendor) = (me.clone(), v.clone(), vendor_s.clone());
+                        menu = menu.item(PopupMenuItem::new(item).on_click(move |_, _, cx| {
+                            if let Some(me) = me.upgrade() {
+                                me.update(cx, |this, cx| {
+                                    this.set(json!({"voice": {"voice": v.id}}), cx);
+                                    this.host.preview_voice(&vendor, v.clone());
+                                });
+                            }
+                        }));
+                    }
+                    menu
+                },
+            );
+        let busy = previewing.is_some();
+        let play = current.clone().map(|v| {
+            let vendor = vendor.to_string();
+            Button::new("cohost-voice-play")
+                .icon(ui::icon(if busy { "loader" } else { "play" }))
+                .xsmall()
+                .ghost()
+                .tooltip("Hear it (on this computer only)")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.host.preview_voice(&vendor, v.clone());
+                    cx.notify();
+                }))
+        });
+        let problem = match (&voices, preview_error) {
+            (Voices::Failed(e), _) => Some(e.clone()),
+            (_, Some(e)) => Some(e),
+            _ => None,
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().flex().items_center().gap_1().child(div().flex_1().min_w_0().child(picker)).children(play))
+            .children(problem.map(|e| div().text_size(px(11.)).text_color(tok::error()).child(e)))
+            .into_any_element()
+    }
+
+    // ---------------------------------------------------------------- Persona, Behaviour
 
     fn persona(&self, cx: &mut Context<Self>) -> AnyElement {
         let ff = self.setting("/persona/familyFriendly", cx).as_bool().unwrap_or(true);
         self.section(
             "Persona",
             vec![
-                row(
-                    "Name",
-                    Some("It answers when chat or you say its name."),
-                    field(&self.name, 170.).into_any_element(),
-                ),
-                row(
+                stacked("Name", Some("It answers when chat or you say its name."), TextInput::new(&self.name).small().into_any_element()),
+                stacked(
                     "Personality",
-                    Some("A few words on how it talks."),
-                    field(&self.personality, 190.).into_any_element(),
+                    Some("How it talks and what it's like, in your words: its humour, what it knows about you and your stream, what to avoid."),
+                    Textarea::new(&self.personality).into_any_element(),
                 ),
                 row(
                     "Family friendly",
                     Some("No swearing or adult topics; anything that slips through is cut before it's said."),
-                    switch("cohost-ff", ff)
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.set(json!({"persona": {"familyFriendly": !ff}}), cx)
-                            }),
-                        )
-                        .into_any_element(),
+                    switch("cohost-ff", ff).on_click(cx.listener(move |this, _, _, cx| this.set(json!({"persona": {"familyFriendly": !ff}}), cx))).into_any_element(),
                 ),
             ],
             cx,
@@ -506,13 +617,46 @@ impl CohostView {
                 .on_click(cx.listener(move |this, _, _, cx| this.set(json!({"behaviour": {key: !on}}), cx)))
                 .into_any_element()
         };
+        // the mic it hears: mics and audio inputs in the mixer
+        let w = self.studio.read(cx).workspace().clone();
+        let mics: Vec<(String, String)> = w
+            .tracks
+            .iter()
+            .filter(|t| {
+                w.sources.get(&t.source).is_some_and(|s| {
+                    s.kind == lightair_model::kinds::MIC || s.kind == lightair_model::kinds::AUDIO_DEVICE
+                })
+            })
+            .map(|t| (t.id.to_string(), t.name.clone()))
+            .collect();
+        let hears = self.cohost(cx)["hears"].as_str().map(str::to_owned);
+        let current =
+            hears.as_ref().and_then(|h| mics.iter().find(|m| m.0 == *h)).or(mics.first()).map(|m| m.1.clone());
+        let me = cx.entity().downgrade();
+        let hears_menu = Button::new("cohost-hears")
+            .label(current.unwrap_or_else(|| "No mic in the mixer".into()))
+            .xsmall()
+            .outline()
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                for (id, name) in &mics {
+                    let (me, id) = (me.clone(), id.clone());
+                    menu = menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
+                        if let Some(me) = me.upgrade() {
+                            me.update(cx, |this, cx| this.set_cohost(json!({"hears": id}), cx));
+                        }
+                    }));
+                }
+                menu
+            });
         self.section(
             "Behaviour",
             vec![
                 stacked("Chattiness", Some("Quiet: only when spoken to. Normal: also picks a chat message now and then. Lively and Chatty: more often."), chatty),
                 row("Answer chat", Some("Reads chat from every platform and answers some of it. Chat can never make it change Lightair or use the computer."), toggle("cohost-chat", "answerChat", answer, cx)),
-                row("Listen to me", Some("Hears you with on-device speech recognition and answers when you say its name."), toggle("cohost-listen", "listen", listen, cx)),
-                row("Stop when I talk", Some("It goes quiet when your mic picks you up."), toggle("cohost-yield", "stopWhenStreamerTalks", yield_, cx)),
+                row("Hears", Some("The mic it listens to: when you're talking (so it doesn't talk over you) and, with Listen to me on, what you say."), hears_menu.into_any_element()),
+                row("Listen to me", Some("Understands what you say with on-device speech recognition (nothing leaves this computer for it) and answers when you say its name."), toggle("cohost-listen", "listen", listen, cx)),
+                row("Stop when I talk", Some("It goes quiet when the mic it hears picks you up."), toggle("cohost-yield", "stopWhenStreamerTalks", yield_, cx)),
             ],
             cx,
         )
@@ -587,14 +731,19 @@ fn row(name: &str, detail: Option<&str>, control: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
-/// A setting whose choices go on their own line under its name.
+/// A setting whose control takes the whole width, under its name (text, choices).
 fn stacked(name: &str, detail: Option<&str>, control: AnyElement) -> AnyElement {
     div().flex().flex_col().gap_1p5().child(label(name, detail)).child(control).into_any_element()
 }
 
-/// A text field: as wide as there's room for, up to `max`.
-fn field(input: &Entity<InputState>, max: f32) -> Div {
-    div().w_full().max_w(px(max)).child(TextInput::new(input).xsmall())
+fn status_line(colour: Hsla, text: String) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().flex_none().size(px(7.)).rounded_full().bg(colour))
+        .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(text))
+        .into_any_element()
 }
 
 /// The house switch: green when on.

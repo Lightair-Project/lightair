@@ -12,7 +12,9 @@
 pub mod computer;
 #[cfg(target_os = "macos")]
 pub mod input_mac;
+pub mod keys;
 pub mod view;
+pub mod voices;
 mod path;
 
 use std::collections::VecDeque;
@@ -107,6 +109,39 @@ pub struct Shared {
     listen: AtomicBool,
     /// The co-host object's settings PiAir was started with (sent again on a restart).
     start_settings: Mutex<Value>,
+    /// The input device the co-host hears (its "Hears" mic's), for on-device speech.
+    pub hears_device: Mutex<Option<String>>,
+    /// AI keys, voice lists and previews (Settings → Connections, the Voice section).
+    pub ai: Mutex<AiState>,
+}
+
+/// Whether a service's key is there and works.
+#[derive(Clone, Debug, PartialEq)]
+pub enum KeyState {
+    Unknown,
+    Missing,
+    Saved,
+    Checking,
+    /// It works (with a note when it can't do everything).
+    Works(Option<String>),
+    Problem(String),
+}
+
+/// A vendor's voices, as far as they're known.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Voices {
+    Loading,
+    Ready(Vec<voices::VoiceInfo>),
+    Failed(String),
+}
+
+#[derive(Default)]
+pub struct AiState {
+    pub keys: std::collections::HashMap<String, KeyState>,
+    pub voices: std::collections::HashMap<String, Voices>,
+    /// The voice a preview is being made for.
+    pub previewing: Option<String>,
+    pub preview_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -129,10 +164,21 @@ impl Host {
             wanted: AtomicBool::new(false),
             listen: AtomicBool::new(false),
             start_settings: Mutex::new(Value::Null),
+            hears_device: Mutex::new(None),
+            ai: Mutex::new(AiState::default()),
         });
         let host = Host(shared);
         *host.0.computer.allowed.lock().unwrap_or_else(|e| e.into_inner()) = ComputerPrefs::load().allowed;
         host.pump();
+        // which AI keys are saved (the Keychain: off the main thread)
+        let h = host.clone();
+        std::thread::spawn(move || {
+            for (id, ..) in keys::SERVICES {
+                let state = if keys::get(id).is_some() { KeyState::Saved } else { KeyState::Missing };
+                h.0.ai.lock().unwrap_or_else(|e| e.into_inner()).keys.insert((*id).to_string(), state);
+            }
+            h.touch();
+        });
         host
     }
 
@@ -591,8 +637,12 @@ impl Host {
                     let _ = &mut paused;
                     // listening: the on-device speech helper
                     let listen = host.0.listen.load(Ordering::Relaxed) && host.state().ready;
+                    let device = host.0.hears_device.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if speech.as_ref().is_some_and(|s| s.device != device) {
+                        speech = None;
+                    }
                     match (&mut speech, listen) {
-                        (None, true) => speech = Speech::start(),
+                        (None, true) => speech = Speech::start(device),
                         (Some(_), false) => speech = None,
                         (Some(s), true) => {
                             for (text, done) in s.take() {
@@ -866,6 +916,83 @@ fn adopt_copies(before: &lightair_model::Workspace, command: &mut lightair_model
     extra
 }
 
+impl Host {
+    pub fn key_state(&self, service: &str) -> KeyState {
+        self.0.ai.lock().unwrap_or_else(|e| e.into_inner()).keys.get(service).cloned().unwrap_or(KeyState::Unknown)
+    }
+
+    fn set_key_state(&self, service: &str, state: KeyState) {
+        self.0.ai.lock().unwrap_or_else(|e| e.into_inner()).keys.insert(service.to_string(), state);
+        self.touch();
+    }
+
+    /// Saves a key (or removes it), checks it works, and tells PiAir; the voice lists that used
+    /// it are read again.
+    pub fn save_key(&self, service: &'static str, key: Option<String>) {
+        self.set_key_state(service, if key.is_some() { KeyState::Checking } else { KeyState::Missing });
+        let host = self.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = keys::set(service, key.as_deref()) {
+                host.set_key_state(service, KeyState::Problem(format!("Couldn't keep it in the Keychain: {e}")));
+                return;
+            }
+            {
+                let mut ai = host.0.ai.lock().unwrap_or_else(|e| e.into_inner());
+                ai.voices.retain(|vendor, _| keys::service_for_voice(vendor) != service);
+            }
+            host.send(json!({"t": "secrets_changed"}));
+            let Some(key) = key else { return };
+            let state = match keys::check(service, &key) {
+                Ok(note) => KeyState::Works(note),
+                Err(e) => KeyState::Problem(e),
+            };
+            host.set_key_state(service, state);
+        });
+    }
+
+    /// The voices a vendor offers, fetched the first time they're asked for.
+    pub fn voices(&self, vendor: &str) -> Voices {
+        let mut ai = self.0.ai.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(v) = ai.voices.get(vendor) {
+            return v.clone();
+        }
+        ai.voices.insert(vendor.to_string(), Voices::Loading);
+        drop(ai);
+        let (host, vendor) = (self.clone(), vendor.to_string());
+        std::thread::spawn(move || {
+            let v = match voices::list(&vendor) {
+                Ok(list) => Voices::Ready(list),
+                Err(e) => Voices::Failed(e),
+            };
+            host.0.ai.lock().unwrap_or_else(|e| e.into_inner()).voices.insert(vendor, v);
+            host.touch();
+        });
+        Voices::Loading
+    }
+
+    /// Plays a voice's preview through this computer's own output.
+    pub fn preview_voice(&self, vendor: &str, voice: voices::VoiceInfo) {
+        {
+            let mut ai = self.0.ai.lock().unwrap_or_else(|e| e.into_inner());
+            ai.previewing = Some(voice.id.clone());
+            ai.preview_error = None;
+        }
+        self.touch();
+        let (host, vendor) = (self.clone(), vendor.to_string());
+        std::thread::spawn(move || {
+            let r = voices::preview(&vendor, &voice);
+            let mut ai = host.0.ai.lock().unwrap_or_else(|e| e.into_inner());
+            ai.previewing = None;
+            match r {
+                Ok(file) => voices::play(&file),
+                Err(e) => ai.preview_error = Some(e),
+            }
+            drop(ai);
+            host.touch();
+        });
+    }
+}
+
 /// What the computer allows PiAir, kept on this Mac (Settings → AI co-host), not in a project.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -951,19 +1078,27 @@ fn open_url(url: &str) {
 /// listens: utterances as they end.
 struct Speech {
     child: Child,
+    /// The input device it hears (`None`: the default input).
+    device: Option<String>,
     lines: std::sync::mpsc::Receiver<(String, bool)>,
 }
 
 impl Speech {
-    fn start() -> Option<Speech> {
+    fn start(device: Option<String>) -> Option<Speech> {
         if !cfg!(target_os = "macos") {
             return None;
         }
         let exe = std::env::current_exe().ok()?;
         let dir = exe.parent()?;
         let helper = [dir.join("lightair-speech"), dir.join("../lightair-speech")].into_iter().find(|p| p.exists())?;
-        let mut child =
-            Command::new(helper).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+        let mut child = Command::new(helper)
+            .arg("-")
+            .arg(device.clone().unwrap_or_default())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
         let out = child.stdout.take()?;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -978,7 +1113,7 @@ impl Speech {
                 }
             }
         });
-        Some(Speech { child, lines: rx })
+        Some(Speech { child, device, lines: rx })
     }
 
     fn take(&mut self) -> Vec<(String, bool)> {

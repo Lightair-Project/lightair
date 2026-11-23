@@ -401,6 +401,7 @@ impl StudioWindow {
                                         .flex_1()
                                         .min_h_0()
                                         .overflow_y_scroll()
+                                        .track_scroll(&self.settings_scroll)
                                         .px_5()
                                         .pb_5()
                                         .child(content),
@@ -1451,7 +1452,7 @@ impl StudioWindow {
                     }),
             ));
         }
-        pages().child(official).child(tips).child(devices)
+        pages().child(official).child(tips).child(devices).child(self.ai_keys_group(cx))
     }
 
     fn remote_page(&self, cx: &mut Context<Self>) -> Div {

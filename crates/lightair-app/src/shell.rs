@@ -319,6 +319,8 @@ pub struct StudioWindow {
     cohost_view: Entity<crate::piair::view::CohostView>,
     cohost: cohost::CohostSync,
     adding_cohost: bool,
+    /// Settings' page content (a development aid scrolls it for captures).
+    settings_scroll: ScrollHandle,
     /// How each platform shows the stream (a tab beside Activity).
     stream: Entity<crate::stream_panel::StreamPanel>,
     /// Automations (a tab beside the mixer).
@@ -733,6 +735,7 @@ impl StudioWindow {
             let (h, st) = (piair.clone(), studio.clone());
             cx.new(|cx| crate::piair::view::CohostView::new(h, st, window, cx))
         };
+        cx.subscribe(&cohost_view, |this, _, _: &crate::piair::view::CohostEvent, cx| this.open_settings(settings::Page::Connections, cx)).detach();
         live_api::feed_widgets(automations.clone(), studio.read(cx).widgets.clone());
         let automations_panel = {
             let a = automations.clone();
@@ -773,6 +776,7 @@ impl StudioWindow {
             cohost_view,
             cohost: Default::default(),
             adding_cohost: false,
+            settings_scroll: ScrollHandle::new(),
             stream,
             confirm_end: None,
             studio,

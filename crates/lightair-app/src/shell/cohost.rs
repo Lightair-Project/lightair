@@ -6,7 +6,8 @@
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::Sizable;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_engine::avatar::KIND;
 use lightair_engine::{face_drive, piair_voice};
@@ -152,6 +153,20 @@ impl StudioWindow {
             .and_then(|t| workspace.tracks.iter().find(|x| x.id.to_string() == t))
             .map(|t| t.source.to_string());
         piair_voice::set_active(voice_source);
+        // the mic it hears: for "the streamer is talking" and on-device speech
+        let mics = hearing_tracks(&workspace);
+        let hears = want
+            .and_then(|s| s.settings[COHOST]["hears"].as_str())
+            .and_then(|t| mics.iter().find(|(id, _)| id.to_string() == t))
+            .or(mics.first());
+        *self.piair.0.mics.lock().unwrap_or_else(|e| e.into_inner()) =
+            hears.map(|(id, _)| vec![*id]).unwrap_or_default();
+        let device = hears
+            .and_then(|(_, source)| workspace.sources.get(source))
+            .filter(|s| s.kind == lightair_model::kinds::MIC)
+            .and_then(|s| s.settings["device"].as_str().map(str::to_owned))
+            .filter(|d| !d.is_empty() && d != "default");
+        *self.piair.0.hears_device.lock().unwrap_or_else(|e| e.into_inner()) = device;
         // the computer is waiting on the streamer's yes: show the co-host so they see it
         let asking = self.piair.state().question.is_some();
         if asking && !self.cohost.surfaced {
@@ -246,6 +261,76 @@ impl StudioWindow {
         div().child(self.cohost_view.clone()).into_any_element()
     }
 
+    /// Settings → Connections: the AI co-host's keys, one row per service, each with its state.
+    pub(super) fn ai_keys_group(&self, cx: &mut Context<Self>) -> Div {
+        use crate::piair::KeyState;
+        let mut group = super::settings::group_tip(
+            "AI co-host",
+            "Keys for your co-host's brain and voice. Copy a key from the service's own site, then choose Paste key: Lightair keeps it in the system's credential store, checks it works and never shows it. A subscription (Claude Pro/Max, ChatGPT, GitHub Copilot) is used from the co-host's Brain section instead.",
+        );
+        for (id, name, _, hint) in crate::piair::keys::SERVICES {
+            let state = self.piair.key_state(id);
+            let (text, colour) = match &state {
+                KeyState::Unknown => ("…".to_string(), tok::text_tertiary()),
+                KeyState::Missing => ("Not set".to_string(), tok::text_tertiary()),
+                KeyState::Saved => ("Saved".to_string(), tok::ok()),
+                KeyState::Checking => ("Checking…".to_string(), tok::warn()),
+                KeyState::Works(None) => ("Works".to_string(), tok::ok()),
+                KeyState::Works(Some(note)) => (note.clone(), tok::warn()),
+                KeyState::Problem(e) => (e.clone(), tok::error()),
+            };
+            let set = !matches!(state, KeyState::Missing | KeyState::Unknown);
+            let service: &'static str = id;
+            let control = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    Button::new(SharedString::from(format!("ai-key-{service}")))
+                        .label(if set { "Paste new key" } else { "Paste key" })
+                        .xsmall()
+                        .outline()
+                        .on_click(cx.listener(move |this, _, _, cx| this.paste_ai_key(service, cx))),
+                )
+                .when(set, |d| {
+                    d.child(
+                        Button::new(SharedString::from(format!("ai-key-remove-{service}")))
+                            .label("Remove")
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.piair.save_key(service, None);
+                                cx.notify();
+                            })),
+                    )
+                });
+            group = group.child(super::settings::row_status(name, &text, hint, control).text_color(colour));
+        }
+        group
+    }
+
+    /// Saves the key on the clipboard for an AI service.
+    pub(super) fn paste_ai_key(&mut self, service: &'static str, cx: &mut Context<Self>) {
+        let key = cx
+            .read_from_clipboard()
+            .and_then(|c| c.text())
+            .map(|t| t.trim().to_string())
+            .filter(|t| t.len() >= 16 && !t.contains(char::is_whitespace));
+        match key {
+            Some(k) => self.piair.save_key(service, Some(k)),
+            None => self.studio.update(cx, |s, _| {
+                s.issue = Some(
+                    format!(
+                        "Copy your {} key first (the clipboard doesn't hold one).",
+                        crate::piair::keys::name_of(service)
+                    )
+                    .into(),
+                )
+            }),
+        }
+        cx.notify();
+    }
+
     /// Development only (debug builds): `LIGHTAIR_PIAIR_PROMPT_FILE` sends its newest line to
     /// PiAir as a prompt from the streamer, or runs a command (`!add <avatar file>`, `!settings`,
     /// `!drives`, `!call <method> <json>`, `!chat <who>: <text>`, `!allow <bundle id>`, `!stop`).
@@ -267,6 +352,21 @@ impl StudioWindow {
             }
             "!stop" => self.piair.kill_switch(),
             "!settings" => self.open_settings(super::settings::Page::CoHost, cx),
+            "!connections" => self.open_settings(super::settings::Page::Connections, cx),
+            l if l.starts_with("!settings-scroll ") => {
+                let y: f32 = l[17..].trim().parse().unwrap_or(0.0);
+                self.settings_scroll.set_offset(point(px(0.), px(-y)));
+            }
+            l if l.starts_with("!paste-key ") => {
+                if let Some((id, ..)) = crate::piair::keys::SERVICES.iter().find(|s| s.0 == l[11..].trim()) {
+                    self.paste_ai_key(id, cx);
+                }
+            }
+            l if l.starts_with("!remove-key ") => {
+                if let Some((id, ..)) = crate::piair::keys::SERVICES.iter().find(|s| s.0 == l[12..].trim()) {
+                    self.piair.save_key(id, None);
+                }
+            }
             l if l.starts_with("!add ") => {
                 let id = self.avatar_library.for_file(std::path::Path::new(l[5..].trim()));
                 self.avatar_library.save();
@@ -306,6 +406,19 @@ impl StudioWindow {
         }
         cx.notify();
     }
+}
+
+/// The mixer tracks a co-host can hear the streamer on: mics and audio inputs, as (track, source).
+pub(crate) fn hearing_tracks(w: &lightair_model::Workspace) -> Vec<(Id, Id)> {
+    w.tracks
+        .iter()
+        .filter(|t| {
+            w.sources
+                .get(&t.source)
+                .is_some_and(|s| s.kind == lightair_model::kinds::MIC || s.kind == lightair_model::kinds::AUDIO_DEVICE)
+        })
+        .map(|t| (t.id, t.source))
+        .collect()
 }
 
 /// Co-host sources that an object still uses, in the workspace's order.
