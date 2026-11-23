@@ -27,14 +27,67 @@ use crate::ui::{self, tok};
 
 pub(super) const KIND: &str = lightair_engine::avatar::KIND;
 
-/// An expression as the Inspector shows it: a VRM's preset names capitalised ("happy" → "Happy"),
-/// a 2D model's own as they are; "" is none.
+/// An expression as the Inspector shows it, readably: a VRM's preset names capitalised ("happy"
+/// → "Happy"); a model's parameter names without "Param", in words, a side last
+/// ("ParamBrowLAngle" → "Brow angle (left)", "Arm:: Left:: Move" → "Arm move (left)"); "" is none.
+/// The stored setting and the chip's tooltip keep the name as it is.
 fn expression_label(e: &str) -> String {
-    let mut c = e.chars();
-    match c.next() {
-        None => "None".into(),
-        Some(f) if e.chars().all(|c| c.is_ascii_lowercase()) => f.to_uppercase().chain(c).collect(),
-        Some(_) => e.to_string(),
+    if e.is_empty() {
+        return "None".into();
+    }
+    let rest = e.strip_prefix("Param").filter(|r| r.starts_with(|c: char| c.is_uppercase())).unwrap_or(e);
+    // words: at separators, and where camelCase turns ("BrowLAngle" → Brow, L, Angle)
+    let chars: Vec<char> = rest.chars().collect();
+    let mut words: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            if !cur.is_empty() {
+                words.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|j| chars[j]);
+        let next = chars.get(i + 1).copied();
+        let turn = c.is_uppercase()
+            && prev.is_some_and(|p| {
+                p.is_lowercase() || p.is_ascii_digit() || (p.is_uppercase() && next.is_some_and(char::is_lowercase))
+            });
+        if turn && !cur.is_empty() {
+            words.push(std::mem::take(&mut cur));
+        }
+        cur.push(c);
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    // a side, said once at the end
+    let side = words.iter().find_map(|w| match w.as_str() {
+        "L" | "Left" | "left" => Some("left"),
+        "R" | "Right" | "right" => Some("right"),
+        _ => None,
+    });
+    words.retain(|w| !matches!(w.as_str(), "L" | "Left" | "left" | "R" | "Right" | "right"));
+    let mut out: Vec<String> = words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            let lower = w.to_lowercase();
+            if i == 0 {
+                let mut c = lower.chars();
+                c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+            } else {
+                lower
+            }
+        })
+        .collect();
+    if out.is_empty() {
+        out.push(e.to_string());
+    }
+    let label = out.join(" ");
+    match side {
+        Some(s) => format!("{label} ({s})"),
+        None => label,
     }
 }
 
@@ -393,8 +446,20 @@ impl StudioWindow {
         } else {
             (tok::warn(), "Looking for your face…".to_string())
         };
-        let body_line =
-            (!status.body.is_empty() && !device.is_empty() && status.loaded).then(|| format!("Body: {}", status.body));
+        // the body only when it needs something: following it, and not seeing it
+        let body = s["body"].as_str().unwrap_or("upper");
+        let body_line = (status.loaded && !device.is_empty() && body != "off" && status.tracking)
+            .then(|| match status.body.as_str() {
+                b if b.starts_with("no body tracker") => {
+                    Some("Body following isn't available here: the face only".to_string())
+                }
+                b if b.starts_with("no body") && body == "full" => {
+                    Some("Full body needs all of you in view".to_string())
+                }
+                b if b.starts_with("no body") => Some("Upper body needs more of you in view".to_string()),
+                _ => None,
+            })
+            .flatten();
 
         let card =
             div()
@@ -845,7 +910,12 @@ impl StudioWindow {
         let mut chips = div().flex().flex_wrap().gap_1();
         for (i, value) in choices.iter().enumerate() {
             let on = expression == value;
-            if !query.is_empty() && !on && !value.is_empty() && !value.to_lowercase().contains(&query) {
+            if !query.is_empty()
+                && !on
+                && !value.is_empty()
+                && !value.to_lowercase().contains(&query)
+                && !expression_label(value).to_lowercase().contains(&query)
+            {
                 continue;
             }
             let cmd = set("expression", json!(value));
@@ -866,6 +936,14 @@ impl StudioWindow {
                     })
                     .child(expression_label(value))
                     .children(key_of(value).map(|k| div().text_color(tok::text_tertiary()).child(k)))
+                    // the model's own name for it, when it's shown otherwise
+                    .when(
+                        expression_label(value) != *value && !value.is_empty() && value.chars().any(char::is_uppercase),
+                        |d| {
+                            let raw = value.clone();
+                            d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(raw.clone()).build(w, cx))
+                        },
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !on {
                             this.exec(cmd.clone(), cx)
