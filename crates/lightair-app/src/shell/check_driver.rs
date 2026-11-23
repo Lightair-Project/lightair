@@ -202,6 +202,18 @@ impl StudioWindow {
                 })
                 .detach();
             }
+            // an avatar's Shape ("shape 1080 1920"), and Check tracking
+            "shape" => {
+                let mut n = rest.split(' ').filter_map(|v| v.parse::<u32>().ok());
+                if let (Some(source), Some(w), Some(h)) = (selected_source(), n.next(), n.next()) {
+                    self.set_avatar_shape(source, (w, h), cx);
+                }
+            }
+            "check-tracking" => {
+                if let Some(source) = selected_source() {
+                    self.check_tracking(source, true, cx);
+                }
+            }
             "popout" => {
                 if let Some(panel) = self.docked_panel(rest, cx) {
                     self.pop_out(panel, window, cx);
