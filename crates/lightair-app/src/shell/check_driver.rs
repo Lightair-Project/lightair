@@ -137,13 +137,15 @@ impl StudioWindow {
                         self.open_anchor_sheet(scene, avatar_object, avatar_source, object, None, window, cx)
                     }
                     "accessory" => {
-                        let (key, file) = rest.split_once(' ').unwrap_or((rest, ""));
+                        // (the file is the part from " /": an anchor's name may have spaces)
+                        let (key, file) =
+                            rest.rsplit_once(" /").map(|(k, f)| (k, format!("/{f}"))).unwrap_or((rest, String::new()));
                         self.open_anchor_sheet(
                             scene,
                             avatar_object,
                             avatar_source,
                             None,
-                            Some(PathBuf::from(file)),
+                            Some(PathBuf::from(&file)),
                             window,
                             cx,
                         );
@@ -213,6 +215,28 @@ impl StudioWindow {
                 if let Some(source) = selected_source() {
                     self.check_tracking(source, true, cx);
                 }
+            }
+            // the PNGtuber editor: new, with a folder's pictures ("png-new <folder>"), or a file's
+            "png-new" => {
+                let source = selected_source()
+                    .filter(|s| workspace.sources.get(s).is_some_and(|i| i.kind == super::avatar_props::KIND));
+                self.open_png_editor_with(None, vec![PathBuf::from(rest)], source, cx);
+            }
+            "png" => crate::pngtuber_editor::check(rest, cx),
+            // a PNGtuber's push to talk: "ptt-keys" waits for its keys; "ptt on" / "ptt off"
+            "ptt-keys" => {
+                self.push_to_talk_capture = selected_source();
+                window.focus(&self.focus, cx);
+            }
+            "ptt" => {
+                if let Some(source) = selected_source() {
+                    self.push_to_talk(source, rest == "on", cx);
+                }
+            }
+            "png-edit" => {
+                let source = selected_source()
+                    .filter(|s| workspace.sources.get(s).is_some_and(|i| i.kind == super::avatar_props::KIND));
+                self.open_png_editor(Some(PathBuf::from(rest)), source, cx);
             }
             "popout" => {
                 if let Some(panel) = self.docked_panel(rest, cx) {
