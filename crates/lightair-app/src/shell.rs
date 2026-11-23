@@ -365,6 +365,9 @@ pub struct StudioWindow {
     library_sheet: Option<avatar_sheets::LibrarySheet>,
     anchor_sheet: Option<avatar_sheets::AnchorSheet>,
     avatar_pictures: HashSet<Id>,
+    /// Library pictures to take from their files, one at a time, and whether one is being taken.
+    picture_queue: std::collections::VecDeque<Id>,
+    picture_busy: bool,
     /// The Avatar section's shortcut list is open; an expression waiting for its keys (avatar
     /// source, expression; "" for none).
     expression_keys_open: bool,
@@ -806,6 +809,8 @@ impl StudioWindow {
             library_sheet: None,
             anchor_sheet: None,
             avatar_pictures: HashSet::new(),
+            picture_queue: Default::default(),
+            picture_busy: false,
             expression_keys_open: false,
             expression_capture: None,
             push_to_talk_on: HashSet::new(),

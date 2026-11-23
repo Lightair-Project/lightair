@@ -63,6 +63,32 @@ pub fn kind_of(file: &str) -> &'static str {
     }
 }
 
+/// A picture's size in pixels (read from its header once, then remembered).
+pub fn picture_size(path: &Path) -> Option<(u32, u32)> {
+    static SIZES: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, (u32, u32)>>> =
+        std::sync::Mutex::new(None);
+    let mut sizes = SIZES.lock().ok()?;
+    let sizes = sizes.get_or_insert_with(Default::default);
+    if let Some(s) = sizes.get(path) {
+        return Some(*s);
+    }
+    let s = image::image_dimensions(path).ok()?;
+    sizes.insert(path.to_path_buf(), s);
+    Some(s)
+}
+
+/// The size to draw a picture at inside a `w`×`h` box, keeping its shape (it fits inside,
+/// centred by whatever holds it).
+pub fn fit(path: &Path, w: f32, h: f32) -> (f32, f32) {
+    match picture_size(path) {
+        Some((pw, ph)) if pw > 0 && ph > 0 => {
+            let k = (w / pw as f32).min(h / ph as f32);
+            (pw as f32 * k, ph as f32 * k)
+        }
+        _ => (w, h),
+    }
+}
+
 /// An avatar's name from its file ("mao_pro" for mao_pro.model3.json).
 pub fn name_of(path: &Path) -> String {
     path.file_stem()

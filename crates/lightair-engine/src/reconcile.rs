@@ -780,6 +780,15 @@ impl Reconciler {
     }
 
     /// Where an avatar's anchor is in its picture at rest (pixels).
+    /// A model drawn on its own, not on any canvas (a library picture of an avatar no scene shows):
+    /// a new strong reference to a private avatar source showing `file` (the caller lets it go).
+    pub fn avatar_snapshot_source(&self, file: &str, framing: &str) -> Option<*mut sys::obs_source_t> {
+        let settings = serde_json::json!({"file": file, "framing": framing, "width": 1080, "height": 1080, "mirror": true, "device": ""});
+        let s = ObsSource::create_private(crate::avatar::KIND, "library picture", Some(&data_from_json(&settings)))?;
+        let p = unsafe { sys::obs_source_get_ref(s.as_ptr()) };
+        (!p.is_null()).then_some(p)
+    }
+
     /// A PNGtuber's push to talk held, or let go.
     pub fn avatar_push_to_talk(&self, source: Id, held: bool) {
         if let Some(s) = self.sources.get(&source) {

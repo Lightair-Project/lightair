@@ -17,6 +17,7 @@ use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_engine::avatar_pins::{Placement, on_canvas};
@@ -32,8 +33,17 @@ pub(super) struct LibrarySheet {
     /// The avatar to switch (its source); `None`: add a new avatar object.
     source: Option<Id>,
     renaming: Option<(Id, Entity<InputState>)>,
+    /// The cards' scrolling (the chosen one scrolled into view on open).
+    scroll: ScrollHandle,
     _subs: Vec<Subscription>,
 }
+
+/// The sheet's size: three cards across, and at most this tall (less in a small window).
+const SHEET_W: f32 = 588.0;
+const SHEET_H: f32 = 620.0;
+/// A card's picture area.
+const PICTURE_W: f32 = 160.0;
+const PICTURE_H: f32 = 116.0;
 
 pub(super) struct AnchorSheet {
     scene: Id,
@@ -101,8 +111,94 @@ impl StudioWindow {
             self.add_avatar_from_file(source, window, cx);
             return;
         }
-        self.library_sheet = Some(LibrarySheet { source, renaming: None, _subs: Vec::new() });
+        // the chosen one in view
+        let scroll = ScrollHandle::new();
+        let current =
+            source.and_then(|s| self.studio.read(cx).workspace().sources.get(&s).and_then(|i| entry_of(&i.settings)));
+        if let Some(i) = current.and_then(|c| self.avatar_library.avatars.iter().position(|e| e.id == c)) {
+            scroll.scroll_to_item(i);
+        }
+        self.library_sheet = Some(LibrarySheet { source, renaming: None, scroll, _subs: Vec::new() });
+        // pictures for the ones without (a model no scene shows is drawn on its own)
+        let missing: Vec<Id> = self
+            .avatar_library
+            .avatars
+            .iter()
+            .filter(|e| {
+                let wide = e.picture_path().is_some_and(|p| lib::picture_size(&p) == Some(OLD_PICTURE));
+                (e.picture_path().is_none() || wide)
+                    && !self.avatar_pictures.contains(&e.id)
+                    && Path::new(&e.file).exists()
+            })
+            .map(|e| e.id)
+            .collect();
+        for id in missing {
+            self.avatar_pictures.insert(id);
+            self.picture_queue.push_back(id);
+        }
+        self.next_picture(cx);
         cx.notify();
+    }
+
+    /// Takes the next queued library picture from the model's file, one at a time: a private
+    /// avatar source draws it (once loaded) into a preview that's read back.
+    fn next_picture(&mut self, cx: &mut Context<Self>) {
+        if self.picture_busy {
+            return;
+        }
+        let Some(entry) = self.picture_queue.pop_front() else { return };
+        let Some(e) = self.avatar_library.get(entry).cloned() else { return self.next_picture(cx) };
+        let framing = if lib::kind_of(&e.file) == "PNGtuber" {
+            "full".to_string()
+        } else {
+            e.look["framing"].as_str().unwrap_or("bust").to_string()
+        };
+        let engine = self.studio.read(cx).engine().clone();
+        let file = e.file.clone();
+        let Some(src) = engine.call(move |s| s.reconciler.avatar_snapshot_source(&file, &framing).map(|p| p as usize))
+        else {
+            return self.next_picture(cx);
+        };
+        self.picture_busy = true;
+        let preview = lightair_preview::Preview::attach();
+        preview.set_own_size(true);
+        preview.set_size(Some(picture_size(1080, 1080)));
+        preview.set_source(Some(src as *mut lightair_engine::sys::obs_source_t));
+        cx.spawn(async move |this, cx| {
+            let start = Instant::now();
+            // loaded (a big model takes a few seconds), then a few frames drawn
+            let mut seen_at = None;
+            let frame = loop {
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+                let status = lightair_engine::avatar::status(src as *mut lightair_engine::sys::obs_source_t);
+                if !status.error.is_empty() || start.elapsed() > Duration::from_secs(20) {
+                    break None;
+                }
+                if status.loaded && seen_at.is_none() {
+                    seen_at = Some(preview.frames());
+                }
+                if seen_at.is_some_and(|f| preview.frames() >= f + 8)
+                    && let Some(f) = preview.latest_frame()
+                {
+                    break Some(f);
+                }
+            };
+            drop(preview);
+            let png = frame.as_ref().and_then(picture_png);
+            let _ = this.update(cx, |this, cx| {
+                match png {
+                    Some(png) => {
+                        this.avatar_library.set_picture(entry, &png);
+                        this.avatar_library.save();
+                    }
+                    None => tracing::warn!(%entry, "no library picture: the model didn't load"),
+                }
+                this.picture_busy = false;
+                this.next_picture(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn close_avatar_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -220,9 +316,20 @@ impl StudioWindow {
     fn take_avatar_picture(&mut self, source: Id, entry: Id, cx: &mut Context<Self>) {
         self.avatar_pictures.insert(entry);
         let engine = self.studio.read(cx).engine().clone();
-        let Some(src) = engine.call(move |e| e.reconciler.source_ref(source).map(|p| p as usize)) else { return };
+        let Some((src, sw, sh)) = engine.call(move |e| {
+            e.reconciler.source_ref(source).map(|p| unsafe {
+                (
+                    p as usize,
+                    lightair_engine::sys::obs_source_get_width(p),
+                    lightair_engine::sys::obs_source_get_height(p),
+                )
+            })
+        }) else {
+            return;
+        };
         let preview = lightair_preview::Preview::attach();
         preview.set_own_size(true);
+        preview.set_size(Some(picture_size(sw, sh)));
         preview.set_source(Some(src as *mut lightair_engine::sys::obs_source_t));
         cx.spawn(async move |this, cx| {
             let start = Instant::now();
@@ -277,14 +384,28 @@ impl StudioWindow {
         let for_name = target.and_then(|s| workspace.sources.get(&s)).map(|i| format!("for {}", i.name));
         let me = cx.entity().downgrade();
 
-        let mut grid = div().grid().grid_cols(3).gap_2();
+        let mut grid = div()
+            .id("avatar-library-body")
+            .flex_1()
+            .min_h_0()
+            .grid()
+            .grid_cols(3)
+            .gap_2()
+            .content_start()
+            .pr_2()
+            .track_scroll(&sheet.scroll)
+            .overflow_y_scroll();
         for (i, e) in self.avatar_library.avatars.iter().enumerate() {
             let id = e.id;
             let selected = current == Some(id);
             let renaming = sheet.renaming.as_ref().filter(|(r, _)| *r == id).map(|(_, input)| input.clone());
             let missing = !Path::new(&e.file).exists();
             let picture = match e.picture_path() {
-                Some(p) => img(p).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+                // its own shape, fitted in (never stretched)
+                Some(p) => {
+                    let (w, h) = lib::fit(&p, PICTURE_W, PICTURE_H);
+                    img(p).w(px(w)).h(px(h)).into_any_element()
+                }
                 None => ui::icon("person-standing").size(px(28.)).text_color(tok::text_tertiary()).into_any_element(),
             };
             let menu_me = me.clone();
@@ -307,7 +428,7 @@ impl StudioWindow {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .h(px(112.))
+                            .h(px(PICTURE_H))
                             .rounded(px(8.))
                             .overflow_hidden()
                             .bg(tok::bg_app())
@@ -412,8 +533,9 @@ impl StudioWindow {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .w(px(560.))
-                        .max_h(px(600.))
+                        .w(px(SHEET_W))
+                        .h(px(SHEET_H))
+                        .max_h(relative(0.86))
                         .p_3()
                         .rounded(px(14.))
                         .bg(tok::bg_panel())
@@ -465,7 +587,7 @@ impl StudioWindow {
                                         .on_click(cx.listener(move |this, _, window, cx| this.add_avatar_from_file(target, window, cx))),
                                 ),
                         )
-                        .child(div().id("avatar-library-body").flex_shrink(1.).min_h_0().overflow_y_scroll().child(grid)),
+                        .child(grid.vertical_scrollbar(&sheet.scroll)),
                 )
                 .into_any_element(),
         )
@@ -987,10 +1109,21 @@ pub(super) fn expression_keys(workspace: &lightair_model::Workspace) -> Vec<(Id,
     out
 }
 
-/// A frame as a PNG picture for the library: at most 320 wide, cut to what's drawn when the
+/// The pictures taken before they kept the avatar's shape: the canvas's 16:9 at 320 wide, the
+/// avatar stretched into it. Retaken when the library opens.
+const OLD_PICTURE: (u32, u32) = (320, 180);
+
+/// The size a library picture is drawn at: the avatar's own shape, its long side 360.
+fn picture_size(w: u32, h: u32) -> (u32, u32) {
+    let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+    let k = 360.0 / w.max(h);
+    ((w * k).round() as u32, (h * k).round() as u32)
+}
+
+/// A frame as a PNG picture for the library: at most 360 wide, cut to what's drawn when the
 /// background is see-through.
 fn picture_png(frame: &lightair_preview::Frame) -> Option<Vec<u8>> {
-    let (w, h, rgba) = lightair_preview::frame_rgba(frame, 320)?;
+    let (w, h, rgba) = lightair_preview::frame_rgba(frame, 360)?;
     let mut img = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
     let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
     for (x, y, p) in img.enumerate_pixels() {

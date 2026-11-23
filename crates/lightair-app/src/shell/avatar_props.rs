@@ -477,7 +477,11 @@ impl StudioWindow {
                         .overflow_hidden()
                         .bg(tok::bg_app())
                         .child(match picture {
-                            Some(p) => img(p).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+                            Some(p) => {
+                                // its own shape, fitted in
+                                let (w, h) = crate::avatar_library::fit(&p, 52.0, 52.0);
+                                img(p).w(px(w)).h(px(h)).into_any_element()
+                            }
                             None => ui::icon("person-standing")
                                 .size(px(22.))
                                 .text_color(tok::text_tertiary())
