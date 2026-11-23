@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::Disableable;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input as TextInput, InputState};
+use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::prelude::FluentBuilder;
@@ -39,6 +39,16 @@ enum Click {
     Anchor,
 }
 
+/// A line on the level meter.
+#[derive(Clone, Copy, PartialEq)]
+enum Line {
+    Open,
+    Close,
+}
+
+/// The level meter's range, dB.
+const METER_FLOOR: f32 = -80.0;
+
 /// Called with where it was saved.
 type OnSaved = Rc<dyn Fn(PathBuf, &mut App)>;
 
@@ -47,6 +57,8 @@ pub struct PngEditor {
     /// Each layer's picture, PNG bytes, by its `image` path; and as GPUI shows it.
     pngs: HashMap<String, Vec<u8>>,
     images: HashMap<String, Arc<Image>>,
+    /// Each layer's thumbnail: its visible part on a checkerboard.
+    thumbs: HashMap<String, Arc<Image>>,
     puppet: Puppet,
     dirty: bool,
     selected: Option<usize>,
@@ -58,6 +70,14 @@ pub struct PngEditor {
     mic: Option<Id>,
     level_db: f32,
     name: Entity<InputState>,
+    /// The chosen expression's name, being edited.
+    expression_name: Entity<InputState>,
+    /// The voice's less used settings shown (silence, attack, release).
+    more_voice: bool,
+    /// A line on the level meter being dragged, and where the meter is.
+    dragging: Option<Line>,
+    meter: Rc<Cell<Bounds<Pixels>>>,
+    _renaming: Subscription,
     sliders: HashMap<String, (Entity<SliderState>, Subscription)>,
     preview: Rc<Cell<Bounds<Pixels>>>,
     note: Option<String>,
@@ -73,7 +93,8 @@ thread_local! {
 }
 
 /// Development: a check script's step on the editor opened last: "save", "expression <name>
-/// <layer id>" (an expression showing that layer, previewed), "select <layer index>".
+/// <layer id>" (an expression showing that layer, previewed), "costume <name>", "more" (the
+/// voice's More open), "select <layer index>".
 pub fn check(command: &str, cx: &mut App) {
     let Some(e) = LAST.with(|l| l.borrow().as_ref().and_then(WeakEntity::upgrade)) else { return };
     let (cmd, rest) = command.split_once(' ').unwrap_or((command, ""));
@@ -81,13 +102,20 @@ pub fn check(command: &str, cx: &mut App) {
         "save" => this.save(cx),
         "expression" => {
             let (name, layer) = rest.rsplit_once(' ').unwrap_or((rest, ""));
-            this.avatar.expressions.push(Expression {
-                name: name.into(),
-                show: vec![layer.into()],
-                ..Default::default()
-            });
+            let name = free_expression_name(&this.avatar, name, None);
+            this.avatar.expressions.push(Expression { name, show: vec![layer.into()], ..Default::default() });
             this.expression = Some(this.avatar.expressions.len() - 1);
             this.changed(cx);
+        }
+        "costume" => {
+            if let Some(e) = this.avatar.expressions.iter_mut().find(|e| e.name == rest) {
+                e.costume = true;
+            }
+            this.changed(cx);
+        }
+        "more" => {
+            this.more_voice = true;
+            cx.notify();
         }
         "select" => {
             this.selected = rest.parse().ok();
@@ -116,12 +144,22 @@ pub fn open(
     };
     let opened = gpui_kit::open_window(options, cx, move |window, cx| {
         cx.new(|cx| {
-            let (avatar, pngs, note) = match path.as_deref().map(read) {
-                Some(Ok((a, p))) => (a, p, None),
-                Some(Err(e)) => (Avatar::new("My PNGtuber", 1024, 1024), HashMap::new(), Some(e)),
-                None => (Avatar::new("My PNGtuber", 1024, 1024), HashMap::new(), None),
+            let (mut avatar, pngs, thumbs, note) = match path.as_deref().map(read) {
+                Some(Ok((a, p, t))) => (a, p, t, None),
+                Some(Err(e)) => (Avatar::new("My PNGtuber", 1024, 1024), HashMap::new(), HashMap::new(), Some(e)),
+                None => (Avatar::new("My PNGtuber", 1024, 1024), HashMap::new(), HashMap::new(), None),
             };
+            unique_names(&mut avatar);
             let name = cx.new(|cx| InputState::new(window, cx).default_value(avatar.name.clone()));
+            let expression_name = cx.new(|cx| InputState::new(window, cx));
+            let renaming =
+                cx.subscribe_in(&expression_name, window, |this: &mut PngEditor, state, ev: &InputEvent, _, cx| {
+                    if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        let typed = state.read(cx).value().trim().to_string();
+                        this.rename_expression(typed, cx);
+                    }
+                });
+
             let images = pngs
                 .iter()
                 .map(|(k, v)| (k.clone(), Arc::new(Image::from_bytes(ImageFormat::Png, v.clone()))))
@@ -132,6 +170,7 @@ pub fn open(
                 avatar,
                 pngs,
                 images,
+                thumbs,
                 dirty: false,
                 selected: None,
                 click: Click::Nothing,
@@ -141,6 +180,11 @@ pub fn open(
                 mic,
                 level_db: f32::NEG_INFINITY,
                 name,
+                expression_name,
+                more_voice: false,
+                dragging: None,
+                meter: Rc::new(Cell::new(Bounds::default())),
+                _renaming: renaming,
                 sliders: HashMap::new(),
                 preview: Rc::new(Cell::new(Bounds::default())),
                 note,
@@ -160,14 +204,107 @@ pub fn open(
     }
 }
 
-/// Reads a `.lairava` for editing: its description and its pictures as PNG bytes.
-fn read(path: &Path) -> Result<(Avatar, HashMap<String, Vec<u8>>), String> {
+type Thumbs = HashMap<String, Arc<Image>>;
+
+/// Reads a `.lairava` for editing: its description, its pictures as PNG bytes, their thumbnails.
+fn read(path: &Path) -> Result<(Avatar, HashMap<String, Vec<u8>>, Thumbs), String> {
     let loaded = lightair_pngtuber::file::read_path(path).map_err(|e| e.to_string())?;
     let mut pngs = HashMap::new();
+    let mut thumbs = HashMap::new();
     for (l, p) in loaded.avatar.layers.iter().zip(&loaded.pictures) {
         pngs.insert(l.image.clone(), lightair_pngtuber::file::encode_png(p)?);
+        if let Some(t) = thumbnail(p) {
+            thumbs.insert(l.image.clone(), t);
+        }
     }
-    Ok((loaded.avatar, pngs))
+    Ok((loaded.avatar, pngs, thumbs))
+}
+
+/// The side of a thumbnail, pixels.
+const THUMB: u32 = 72;
+
+/// A layer's thumbnail: its visible part (cropped to where it isn't see-through), fitted to a
+/// square on a light checkerboard, so a small eye or mouth fills it and dark parts show.
+fn thumbnail(p: &lightair_pngtuber::Picture) -> Option<Arc<Image>> {
+    let (w, h) = (p.width as usize, p.height as usize);
+    let alpha = |x: usize, y: usize| p.rgba[(y * w + x) * 4 + 3];
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            if alpha(x, y) > 8 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if x0 > x1 {
+        (x0, y0, x1, y1) = (0, 0, w.saturating_sub(1), h.saturating_sub(1));
+    }
+    let (cw, ch) = ((x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32);
+    let n = THUMB as usize;
+    // a little room around it
+    let k = (cw.max(ch) / (n as f32 * 0.84)).max(1e-3);
+    let (ox, oy) = ((n as f32 - cw / k) / 2.0, (n as f32 - ch / k) / 2.0);
+    let mut out = vec![0u8; n * n * 4];
+    for ty in 0..n {
+        for tx in 0..n {
+            let check = if (tx / 6 + ty / 6) % 2 == 0 { 232.0 } else { 206.0 };
+            let (sx, sy) = ((tx as f32 - ox) * k + x0 as f32, (ty as f32 - oy) * k + y0 as f32);
+            let mut c = [check, check, check];
+            if sx >= x0 as f32 && sy >= y0 as f32 && sx <= x1 as f32 + 0.999 && sy <= y1 as f32 + 0.999 {
+                let i = ((sy as usize).min(h - 1) * w + (sx as usize).min(w - 1)) * 4;
+                let a = p.rgba[i + 3] as f32 / 255.0;
+                for (j, v) in c.iter_mut().enumerate() {
+                    *v = p.rgba[i + j] as f32 * a + *v * (1.0 - a);
+                }
+            }
+            let o = (ty * n + tx) * 4;
+            out[o..o + 4].copy_from_slice(&[c[0] as u8, c[1] as u8, c[2] as u8, 255]);
+        }
+    }
+    let png =
+        lightair_pngtuber::file::encode_png(&lightair_pngtuber::Picture { width: THUMB, height: THUMB, rgba: out })
+            .ok()?;
+    Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)))
+}
+
+/// A layer's name from its file's: without leading numbering, words for separators, a capital
+/// first ("08 hat" → "Hat", "04_mouth-closed" → "Mouth closed").
+fn layer_name(stem: &str) -> String {
+    let rest = stem.trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest = if rest.len() < stem.len() { rest.trim_start_matches([' ', '_', '-', '.']) } else { stem };
+    let words: Vec<&str> =
+        rest.split(|c: char| c == '_' || c == '-' || c.is_whitespace()).filter(|w| !w.is_empty()).collect();
+    let joined = words.join(" ");
+    let mut c = joined.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => stem.to_string(),
+    }
+}
+
+/// A name for an expression not taken by another in `avatar` (`except`: its own place).
+fn free_expression_name(avatar: &Avatar, base: &str, except: Option<usize>) -> String {
+    let taken = |n: &str| {
+        avatar.expressions.iter().enumerate().any(|(i, e)| Some(i) != except && e.name.eq_ignore_ascii_case(n))
+    };
+    if !taken(base) {
+        return base.to_string();
+    }
+    (2..).map(|n| format!("{base} {n}")).find(|n| !taken(n)).unwrap_or_else(|| base.to_string())
+}
+
+/// Every expression's name unique (an older file's two of a name: the second gets a number).
+fn unique_names(avatar: &mut Avatar) {
+    for i in 0..avatar.expressions.len() {
+        let name = free_expression_name(avatar, &avatar.expressions[i].name, Some(i));
+        let clash = avatar.expressions[..i].iter().any(|e| e.name.eq_ignore_ascii_case(&avatar.expressions[i].name));
+        if clash {
+            avatar.expressions[i].name = name;
+        }
+    }
 }
 
 /// The PNGs among dropped paths (a folder's, by name), in order.
@@ -243,16 +380,20 @@ impl PngEditor {
                 self.avatar.height = pic.height;
             }
             let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Layer".into());
-            let id = self.avatar.free_id(&stem);
+            let name = layer_name(&stem);
+            let id = self.avatar.free_id(&name);
             let (role, frame) = Role::suggested(&stem);
             let (w, h) = (pic.width as f32, pic.height as f32);
             let (x, y) = ((self.avatar.width as f32 - w) / 2.0, (self.avatar.height as f32 - h) / 2.0);
             let image = format!("layers/{id}.png");
             self.images.insert(image.clone(), Arc::new(Image::from_bytes(ImageFormat::Png, bytes.clone())));
+            if let Some(t) = thumbnail(&pic) {
+                self.thumbs.insert(image.clone(), t);
+            }
             self.pngs.insert(image.clone(), bytes);
             self.avatar.layers.push(Layer {
                 id,
-                name: stem,
+                name,
                 image,
                 x,
                 y,
@@ -392,6 +533,55 @@ impl PngEditor {
         self.changed(cx);
     }
 
+    /// Renames the chosen expression (a name another has gets a number).
+    fn rename_expression(&mut self, typed: String, cx: &mut Context<Self>) {
+        let Some(i) = self.expression else { return };
+        if typed.is_empty() || self.avatar.expressions.get(i).is_some_and(|e| e.name == typed) {
+            return;
+        }
+        let name = free_expression_name(&self.avatar, &typed, Some(i));
+        if name != typed {
+            self.note = Some(format!("Another is called {typed}: this one is {name}"));
+        }
+        if let Some(e) = self.avatar.expressions.get_mut(i) {
+            e.name = name;
+        }
+        self.dirty = true;
+        cx.notify();
+    }
+
+    /// Chooses an expression to set up (or none), its name in the field.
+    fn choose_expression(&mut self, i: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.expression = i;
+        let name = i.and_then(|i| self.avatar.expressions.get(i)).map(|e| e.name.clone()).unwrap_or_default();
+        self.expression_name.update(cx, |s, cx| s.set_value(name, window, cx));
+        cx.notify();
+    }
+
+    /// Adds an expression or a costume, named so no other has its name, and chooses it.
+    fn add_expression(&mut self, costume: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let base = if costume { "Costume" } else { "Expression" };
+        let name = free_expression_name(&self.avatar, &format!("{base} 1"), None);
+        self.avatar.expressions.push(Expression { name, costume, ..Default::default() });
+        self.choose_expression(Some(self.avatar.expressions.len() - 1), window, cx);
+        self.changed(cx);
+    }
+
+    /// The level meter dragged at `x` (window pixels): the line being dragged moves there (the
+    /// open line stays above the close line).
+    fn drag_meter(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        let Some(line) = self.dragging else { return };
+        let b = self.meter.get();
+        let w = f32::from(b.size.width).max(1.0);
+        let db = (METER_FLOOR + f32::from(x - b.origin.x) / w * -METER_FLOOR).clamp(METER_FLOOR, 0.0).round();
+        let mic = &mut self.avatar.mic;
+        match line {
+            Line::Open => mic.open_db = db.max(mic.close_db + 1.0),
+            Line::Close => mic.close_db = db.min(mic.open_db - 1.0),
+        }
+        self.changed(cx);
+    }
+
     fn scale(&self) -> f32 {
         (PREVIEW / self.avatar.width as f32).min(PREVIEW / self.avatar.height as f32)
     }
@@ -456,7 +646,7 @@ impl Render for PngEditor {
             let on = self.selected == Some(i);
             let role = l.role;
             let frame = l.frame;
-            let thumb = self.images.get(&l.image).cloned();
+            let thumb = self.thumbs.get(&l.image).cloned();
             let menu_me = me.clone();
             let role_menu = Button::new(("layer-role", i)).label(role.label()).xsmall().outline().dropdown_menu(
                 move |mut m, _, _| {
@@ -690,15 +880,34 @@ impl Render for PngEditor {
 
         // the mic's level against its lines
         let mic = self.avatar.mic;
-        let to_x = |db: f32| ((db + 80.0) / 80.0).clamp(0.0, 1.0);
+        let to_x = |db: f32| ((db - METER_FLOOR) / -METER_FLOOR).clamp(0.0, 1.0);
         let meter_w = 360.0;
         let level = if self.level_db.is_finite() { to_x(self.level_db) } else { 0.0 };
+        // the open and close lines: handles to drag (the voice opens the mouth past the first)
+        let handle = |id: &'static str, db: f32, colour: Hsla, tip: &'static str| {
+            div()
+                .id(id)
+                .absolute()
+                .top(px(-6.))
+                .h(px(22.))
+                .w(px(6.))
+                .left(px(meter_w * to_x(db) - 3.0))
+                .rounded(px(2.))
+                .bg(colour)
+                .border_1()
+                .border_color(tok::bg_panel())
+                .cursor(CursorStyle::ResizeLeftRight)
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
+        };
+        let meter_bounds = self.meter.clone();
         let meter = div()
+            .id("png-meter")
             .relative()
             .w(px(meter_w))
             .h(px(10.))
             .rounded(px(3.))
             .bg(tok::bg_raised())
+            .cursor(CursorStyle::ResizeLeftRight)
             .child(
                 div().absolute().left_0().top_0().h_full().w(px(meter_w * level)).rounded(px(3.)).bg(if pose.talking {
                     tok::ok()
@@ -706,24 +915,20 @@ impl Render for PngEditor {
                     tok::text_tertiary()
                 }),
             )
-            .child(div().absolute().top_0().h_full().w(px(2.)).left(px(meter_w * to_x(mic.open_db))).bg(tok::text()))
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .h_full()
-                    .w(px(1.))
-                    .left(px(meter_w * to_x(mic.close_db)))
-                    .bg(tok::text_secondary()),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .h_full()
-                    .w(px(1.))
-                    .left(px(meter_w * to_x(mic.gate_db)))
-                    .bg(tok::text_tertiary()),
+            .child(handle("png-meter-close", mic.close_db, tok::text_secondary(), "Closes at: drag it"))
+            .child(handle("png-meter-open", mic.open_db, tok::text(), "Opens at: drag it"))
+            .child(canvas(move |b, _, _| meter_bounds.set(b), |_, _, _, _| {}).absolute().size_full())
+            // pressed: the nearer line follows the pointer
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                    let b = this.meter.get();
+                    let at = f32::from(ev.position.x - b.origin.x) / f32::from(b.size.width).max(1.0);
+                    let mic = this.avatar.mic;
+                    let near_open = (at - to_x(mic.open_db)).abs() <= (at - to_x(mic.close_db)).abs();
+                    this.dragging = Some(if near_open { Line::Open } else { Line::Close });
+                    this.drag_meter(ev.position.x, cx);
+                }),
             );
         let mic_name = self
             .mic
@@ -850,13 +1055,15 @@ impl Render for PngEditor {
                             this.changed(cx);
                         }),
                     ))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.expression = if this.expression == Some(i) { None } else { Some(i) };
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let next = if this.expression == Some(i) { None } else { Some(i) };
+                        this.choose_expression(next, window, cx);
                         cx.notify();
                     })),
             );
         }
 
+        let chosen = self.expression.and_then(|i| self.avatar.expressions.get(i).map(|e| (e.costume, i)));
         let open =
             self.slider("mic-open".into(), (-80.0, 0.0, 1.0), mic.open_db, |this, v| this.avatar.mic.open_db = v, cx);
         let close = self.slider(
@@ -1003,27 +1210,55 @@ impl Render for PngEditor {
                         div()
                             .flex()
                             .gap_1()
-                            .child(Button::new("add-expression").icon(ui::icon("plus")).label("Expression").xsmall().ghost().on_click(cx.listener(|this, _, _, cx| {
-                                let n = this.avatar.expressions.len() + 1;
-                                this.avatar.expressions.push(Expression { name: format!("Expression {n}"), ..Default::default() });
-                                this.expression = Some(this.avatar.expressions.len() - 1);
-                                this.changed(cx);
-                            })))
-                            .child(Button::new("add-costume").icon(ui::icon("plus")).label("Costume").xsmall().ghost().on_click(cx.listener(|this, _, _, cx| {
-                                let n = this.avatar.expressions.iter().filter(|e| e.costume).count() + 1;
-                                this.avatar.expressions.push(Expression { name: format!("Costume {n}"), costume: true, ..Default::default() });
-                                this.expression = Some(this.avatar.expressions.len() - 1);
-                                this.changed(cx);
-                            }))),
+                            .child(Button::new("add-expression").icon(ui::icon("plus")).label("Expression").xsmall().ghost().on_click(cx.listener(|this, _, window, cx| this.add_expression(false, window, cx))))
+                            .child(Button::new("add-costume").icon(ui::icon("plus")).label("Costume").xsmall().ghost().on_click(cx.listener(|this, _, window, cx| this.add_expression(true, window, cx)))),
                     ),
             )
             .child(expressions)
+            .children(chosen.map(|(costume, i)| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .pt_1()
+                    .child(row("Name", None, TextInput::new(&self.expression_name).small()))
+                    .child(row(
+                        "Kind",
+                        Some(("png-expression-kind", "A costume is listed apart (with a shirt), the same otherwise.")),
+                        Button::new("png-expression-kind").label(if costume { "Costume" } else { "Expression" }).xsmall().outline().on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(e) = this.avatar.expressions.get_mut(i) {
+                                e.costume = !e.costume;
+                            }
+                            this.changed(cx);
+                        })),
+                    ))
+            }))
             .child(heading("Voice"))
-            .child(row("Opens at", Some(("png-open", "The mouth opens when your voice is louder than this (the bright line on the meter).")), with_value(open, format!("{:.0} dB", mic.open_db))))
+            .child(row("Opens at", Some(("png-open", "The mouth opens when your voice is louder than this: the bright handle on the meter under the preview.")), with_value(open, format!("{:.0} dB", mic.open_db))))
             .child(row("Closes at", Some(("png-close", "It closes once your voice stays below this, lower than Opens at, so it doesn't flicker.")), with_value(close, format!("{:.0} dB", mic.close_db))))
-            .child(row("Silence", Some(("png-gate", "Anything quieter is the room, not you.")), with_value(gate, format!("{:.0} dB", mic.gate_db))))
-            .child(row("Attack", None, with_value(attack, format!("{:.0} ms", mic.attack_ms))))
-            .child(row("Release", None, with_value(release, format!("{:.0} ms", mic.release_ms))))
+            .child(
+                div()
+                    .id("png-voice-more")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .py_1()
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(tok::text_secondary())
+                    .hover(|d| d.text_color(tok::text()))
+                    .child(ui::icon(if self.more_voice { "chevron-down" } else { "chevron-right" }).size(px(12.)))
+                    .child("More")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.more_voice = !this.more_voice;
+                        cx.notify();
+                    })),
+            )
+            .when(self.more_voice, |d| {
+                d.child(row("Silence", Some(("png-gate", "Anything quieter is the room, not you.")), with_value(gate, format!("{:.0} dB", mic.gate_db))))
+                    .child(row("Attack", Some(("png-attack", "How quickly the mouth follows a louder voice.")), with_value(attack, format!("{:.0} ms", mic.attack_ms))))
+                    .child(row("Release", Some(("png-release", "How long it waits, quieter, before closing.")), with_value(release, format!("{:.0} ms", mic.release_ms))))
+            })
             .child(heading("Motion"))
             .child(row("Bounce", None, with_value(bounce, format!("{:.0}%", m.bounce * 100.0))))
             .child(row("Squash", None, with_value(squash, format!("{:.0}%", m.squash * 100.0))))
@@ -1053,6 +1288,20 @@ impl Render for PngEditor {
             .text_size(px(13.))
             .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(tok::bg_raised()))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.add_pictures(paths.paths(), cx)))
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if this.dragging.is_some() && ev.pressed_button == Some(MouseButton::Left) {
+                    this.drag_meter(ev.position.x, cx);
+                } else if this.dragging.is_some() {
+                    this.dragging = None;
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.dragging = None;
+                    cx.notify();
+                }),
+            )
             .child(div().flex().flex_1().min_h_0().child(left).child(middle).child(right))
             .child(footer)
     }

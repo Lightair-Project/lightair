@@ -530,20 +530,32 @@ impl StudioWindow {
         self.avatar_pictures.remove(&entry);
         self.avatar_library.save();
         let workspace = self.studio.read(cx).workspace().clone();
-        match source.and_then(|s| workspace.sources.get(&s)).filter(|i| i.kind == KIND) {
-            Some(i) => {
+        let file = path.to_string_lossy().into_owned();
+        // the avatar it was opened from, and every other one showing this file: read again
+        let target = source.and_then(|s| workspace.sources.get(&s)).filter(|i| i.kind == KIND).map(|i| i.id);
+        let mic = self.default_mic(cx);
+        let commands: Vec<Command> = workspace
+            .sources
+            .values()
+            .filter(|i| i.kind == KIND && (Some(i.id) == target || i.settings["file"].as_str() == Some(file.as_str())))
+            .map(|i| {
                 let mut settings = i.settings.clone();
-                settings["file"] = json!(path.to_string_lossy());
+                settings["file"] = json!(file);
                 settings["library"] = json!(entry);
                 settings["revision"] = json!(settings["revision"].as_i64().unwrap_or(0) + 1);
                 if settings["mic"].as_str().is_none_or(str::is_empty)
-                    && let Some(t) = self.default_mic(cx)
+                    && let Some(t) = mic
                 {
                     settings["mic"] = json!(t);
                 }
-                self.exec(Command::SetSourceSettings { source: i.id, settings }, cx);
-            }
-            None => self.use_avatar(entry, None, cx),
+                Command::SetSourceSettings { source: i.id, settings }
+            })
+            .collect();
+        if commands.is_empty() {
+            // a new one: on the canvas
+            self.use_avatar(entry, None, cx);
+        } else {
+            self.exec(Command::Batch { label: "Save PNGtuber".into(), commands }, cx);
         }
     }
 

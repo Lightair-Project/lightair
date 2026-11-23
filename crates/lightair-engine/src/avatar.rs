@@ -212,7 +212,8 @@ enum Load {
 #[derive(Clone)]
 enum Loaded {
     Vrm(Arc<Model>),
-    Flat(Arc<Mutex<Option<Box<crate::avatar2d::Flat>>>>, Vec<String>, Arc<Vec<(Anchor, usize)>>),
+    /// (the model, its expressions, its anchors, which of its expressions are costumes)
+    Flat(Arc<Mutex<Option<Box<crate::avatar2d::Flat>>>>, Vec<String>, Arc<Vec<(Anchor, usize)>>, Vec<String>),
 }
 
 /// A VRM model's expressions to choose from: the moods first (happy, angry, sad, relaxed,
@@ -455,8 +456,9 @@ impl Shared {
                 let result = if is_flat(&file) {
                     crate::avatar2d::Flat::load(std::path::Path::new(&file)).map(|l| {
                         let names = l.expressions();
+                        let costumes = l.costumes();
                         let anchors = Arc::new(crate::avatar_pins::flat_anchors(&l));
-                        Loaded::Flat(Arc::new(Mutex::new(Some(Box::new(l)))), names, anchors)
+                        Loaded::Flat(Arc::new(Mutex::new(Some(Box::new(l)))), names, anchors, costumes)
                     })
                 } else {
                     std::fs::read(&file)
@@ -1190,7 +1192,7 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         let data = Box::into_raw(Box::new(Arc::downgrade(&s))) as *mut c_void;
         sys::proc_handler_add(ph, c"void calibrate(out string calibration)".as_ptr(), Some(proc_calibrate), data);
         sys::proc_handler_add(ph, c"void anchor_rest(in string key, in string size, out string at)".as_ptr(), Some(proc_anchor_rest), data);
-        sys::proc_handler_add(ph, c"void status(out bool loaded, out bool tracking, out string error, out string name, out string body, out string expressions, out string anchors)".as_ptr(), Some(proc_status), data);
+        sys::proc_handler_add(ph, c"void status(out bool loaded, out bool tracking, out string error, out string name, out string body, out string expressions, out string anchors, out string costumes)".as_ptr(), Some(proc_status), data);
         // (the weak reference lives as long as the source: freed with it)
         let _ = data;
     }
@@ -1245,7 +1247,7 @@ unsafe extern "C" fn proc_status(data: *mut c_void, cd: *mut sys::calldata_t) {
     let weak = unsafe { &*(data as *const std::sync::Weak<Shared>) };
     let Some(s) = weak.upgrade() else { return };
     let (expressions, anchors) = match &*s.load.lock() {
-        Load::Ready(_, Loaded::Flat(_, names, anchors)) => (names.join("\n"), anchor_lines(anchors)),
+        Load::Ready(_, Loaded::Flat(_, names, anchors, _)) => (names.join("\n"), anchor_lines(anchors)),
         Load::Ready(_, Loaded::Vrm(m)) => (vrm_expressions(m).join("\n"), anchor_lines(&crate::avatar_pins::vrm_anchors(m))),
         _ => (String::new(), String::new()),
     };
@@ -1286,6 +1288,12 @@ unsafe extern "C" fn proc_status(data: *mut c_void, cd: *mut sys::calldata_t) {
     set_string(cd, c"expressions", &x);
     let a = CString::new(anchors).unwrap_or_default();
     set_string(cd, c"anchors", &a);
+    let costumes = match &*s.load.lock() {
+        Load::Ready(_, Loaded::Flat(_, _, _, c)) => c.join("\n"),
+        _ => String::new(),
+    };
+    let c = CString::new(costumes).unwrap_or_default();
+    set_string(cd, c"costumes", &c);
 }
 
 /// Anchors as the status proc gives them: a line each, "group\tlabel\tkey".
@@ -1420,7 +1428,7 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
                 r.avatar = Some((path, Avatar::new(m)));
             }
         }
-        Some((path, Loaded::Flat(slot, _, anchors))) => {
+        Some((path, Loaded::Flat(slot, _, anchors, _))) => {
             r.avatar = None;
             // (a new load of it: the same path, read again)
             if let Some(mut l) = slot.lock().take() {
@@ -1624,6 +1632,8 @@ pub struct Status {
     pub expressions: Vec<String>,
     /// What things can be pinned to (bones, meshes), in the picker's order.
     pub anchors: Vec<Anchor>,
+    /// Which of its expressions are costumes (a PNGtuber's).
+    pub costumes: Vec<String>,
 }
 
 fn get_string(cd: &mut sys::calldata_t, name: &CStr) -> String {
@@ -1662,6 +1672,7 @@ pub fn status(source: *mut sys::obs_source_t) -> Status {
         name: get_string(&mut cd, c"name"),
         body: get_string(&mut cd, c"body"),
         expressions: get_string(&mut cd, c"expressions").lines().map(str::to_string).collect(),
+        costumes: get_string(&mut cd, c"costumes").lines().map(str::to_string).collect(),
         anchors: get_string(&mut cd, c"anchors")
             .lines()
             .filter_map(|l| {

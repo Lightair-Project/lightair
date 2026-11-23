@@ -934,6 +934,8 @@ impl StudioWindow {
                     .when(!on, |d| {
                         d.bg(tok::bg_raised()).text_color(tok::text_secondary()).hover(|d| d.text_color(tok::text()))
                     })
+                    // a costume (a PNGtuber's): a shirt before its name
+                    .when(status.costumes.contains(value), |d| d.child(ui::icon("shirt").size(px(11.))))
                     .child(expression_label(value))
                     .children(key_of(value).map(|k| div().text_color(tok::text_tertiary()).child(k)))
                     // the model's own name for it, when it's shown otherwise

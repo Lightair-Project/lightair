@@ -404,6 +404,14 @@ impl Flat {
         }
     }
 
+    /// Which of its expressions are costumes (a PNGtuber's; the others have none).
+    pub fn costumes(&self) -> Vec<String> {
+        match self {
+            Flat::Png(l) => l.puppet.avatar().expressions.iter().filter(|e| e.costume).map(|e| e.name.clone()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// A PNGtuber's mic: its level (dBFS) and push to talk, for the next frame.
     pub fn set_mic(&mut self, level_db: f32, push_to_talk: Option<bool>) {
         if let Flat::Png(l) = self {
