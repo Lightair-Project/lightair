@@ -29,6 +29,7 @@ lightair-phone-camera.workspace = true
 # `lightair call`: one remote API call from the command line (mcp_bridge)
 tungstenite = "0.30"
 lightair-model.workspace = true
+lightair-pngtuber.workspace = true
 lightair-audio.workspace = true
 lightair-store.workspace = true
 serde_json.workspace = true

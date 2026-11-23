@@ -10,6 +10,7 @@
 //!   avatar, on that anchor, pinned.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::Sizable;
@@ -58,7 +59,12 @@ pub(super) fn pin_of(settings: &Value, object: Id) -> Option<String> {
 
 /// `settings` with `object` pinned to `key` (`None`: not pinned), with where the anchor is at rest
 /// now (`at`), which its offset is kept from.
-pub(super) fn with_pin(settings: &Value, object: Id, key: Option<&str>, at: Option<lightair_engine::avatar_pins::Spot>) -> Value {
+pub(super) fn with_pin(
+    settings: &Value,
+    object: Id,
+    key: Option<&str>,
+    at: Option<lightair_engine::avatar_pins::Spot>,
+) -> Value {
     let mut s = if settings.is_object() { settings.clone() } else { json!({}) };
     if !s["pins"].is_object() {
         s["pins"] = json!({});
@@ -138,7 +144,13 @@ impl StudioWindow {
             }
             None => {
                 let device = self.face_camera(cx);
-                let base = json!({"file": e.file, "device": device, "width": 1080, "height": 1080, "framing": "bust", "mirror": true, "library": e.id});
+                let mut base = json!({"file": e.file, "device": device, "width": 1080, "height": 1080, "framing": "bust", "mirror": true, "library": e.id});
+                // a PNGtuber: listening to a mic, its whole picture shown
+                if lib::kind_of(&e.file) == "PNGtuber" {
+                    base["mic"] = json!(self.default_mic(cx));
+                    base["framing"] = json!("full");
+                    base["device"] = json!("");
+                }
                 let settings = lib::with_look(&base, &e.look);
                 let size = (
                     settings["width"].as_f64().unwrap_or(1080.0) as f32,
@@ -241,6 +253,7 @@ impl StudioWindow {
     pub(super) fn sync_avatars(&mut self, cx: &mut Context<Self>) {
         let workspace = self.studio.read(cx).workspace().clone();
         crate::shortcuts::set_expression_keys(expression_keys(&workspace));
+        crate::shortcuts::set_push_to_talk_keys(push_to_talk_keys(&workspace));
         let Some((source, settings)) = self.selected_avatar(cx) else { return };
         self.keep_avatar_look(&settings);
         let loaded = self.avatar_status.get(&source).is_some_and(|s| s.loaded);
@@ -433,6 +446,17 @@ impl StudioWindow {
                                 )
                                 .child(ui::info("avatar-library-info", "Your avatars, in every workspace. Each keeps its framing, size and expression shortcuts. Right-click one to rename, duplicate or delete it (its file stays)."))
                                 .child(
+                                    Button::new("avatar-new-png")
+                                        .icon(ui::icon("image"))
+                                        .label("New PNGtuber…")
+                                        .small()
+                                        .ghost()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.library_sheet = None;
+                                            this.open_png_editor(None, target, cx)
+                                        })),
+                                )
+                                .child(
                                     Button::new("avatar-add-file")
                                         .icon(ui::icon("plus"))
                                         .label("Add from file…")
@@ -445,6 +469,92 @@ impl StudioWindow {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Opens the PNGtuber editor: a new one, or the one at `path`. Saved, it goes in the library,
+    /// and on `source` (a new one), or `source` reads it again.
+    pub(super) fn open_png_editor(&mut self, path: Option<PathBuf>, source: Option<Id>, cx: &mut Context<Self>) {
+        self.open_png_editor_with(path, Vec::new(), source, cx)
+    }
+
+    /// `open_png_editor`, with pictures added at once (a check script's).
+    pub(super) fn open_png_editor_with(
+        &mut self,
+        path: Option<PathBuf>,
+        add: Vec<PathBuf>,
+        source: Option<Id>,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.studio.read(cx).workspace().clone();
+        // the mixer's tracks, microphones first
+        let mut tracks: Vec<(Id, String, bool)> = workspace
+            .tracks
+            .iter()
+            .map(|t| {
+                (
+                    t.id,
+                    t.name.clone(),
+                    workspace.sources.get(&t.source).is_some_and(|i| crate::console::is_mic(&i.kind)),
+                )
+            })
+            .collect();
+        tracks.sort_by_key(|t| !t.2);
+        let mic = source
+            .and_then(|s| workspace.sources.get(&s))
+            .and_then(|i| serde_json::from_value::<Id>(i.settings["mic"].clone()).ok());
+        let me = cx.entity().downgrade();
+        let on_saved: Rc<dyn Fn(PathBuf, &mut App)> = Rc::new(move |saved: PathBuf, cx: &mut App| {
+            let Some(me) = me.upgrade() else { return };
+            me.update(cx, |this, cx| this.png_saved(&saved, source, cx));
+        });
+        crate::pngtuber_editor::open(
+            path,
+            add,
+            tracks.into_iter().map(|(id, n, _)| (id, n)).collect(),
+            mic,
+            on_saved,
+            cx,
+        );
+    }
+
+    /// A PNGtuber saved in its editor: in the library (its picture taken again), and on the avatar
+    /// it was opened from (read again), or as a new avatar object.
+    fn png_saved(&mut self, path: &Path, source: Option<Id>, cx: &mut Context<Self>) {
+        let entry = self.avatar_library.for_file(path);
+        if let Some(e) = self.avatar_library.get_mut(entry) {
+            if let Ok(l) = lightair_pngtuber::file::read_path(path) {
+                e.name = l.avatar.name;
+            }
+            e.picture = None;
+        }
+        self.avatar_pictures.remove(&entry);
+        self.avatar_library.save();
+        let workspace = self.studio.read(cx).workspace().clone();
+        match source.and_then(|s| workspace.sources.get(&s)).filter(|i| i.kind == KIND) {
+            Some(i) => {
+                let mut settings = i.settings.clone();
+                settings["file"] = json!(path.to_string_lossy());
+                settings["library"] = json!(entry);
+                settings["revision"] = json!(settings["revision"].as_i64().unwrap_or(0) + 1);
+                if settings["mic"].as_str().is_none_or(str::is_empty)
+                    && let Some(t) = self.default_mic(cx)
+                {
+                    settings["mic"] = json!(t);
+                }
+                self.exec(Command::SetSourceSettings { source: i.id, settings }, cx);
+            }
+            None => self.use_avatar(entry, None, cx),
+        }
+    }
+
+    /// The mic a new PNGtuber listens to: the mixer's first microphone, else its first track.
+    pub(super) fn default_mic(&self, cx: &App) -> Option<Id> {
+        let w = self.studio.read(cx).workspace();
+        w.tracks
+            .iter()
+            .find(|t| w.sources.get(&t.source).is_some_and(|i| crate::console::is_mic(&i.kind)))
+            .or(w.tracks.first())
+            .map(|t| t.id)
     }
 
     // ------------------------------------------------------------------- pin to
@@ -485,7 +595,12 @@ impl StudioWindow {
     }
 
     /// Where an anchor is at rest now, in the avatar's picture.
-    fn anchor_at_rest(&self, avatar_source: Id, key: Option<&str>, cx: &App) -> Option<lightair_engine::avatar_pins::Spot> {
+    fn anchor_at_rest(
+        &self,
+        avatar_source: Id,
+        key: Option<&str>,
+        cx: &App,
+    ) -> Option<lightair_engine::avatar_pins::Spot> {
         let key = key?.to_string();
         self.studio.read(cx).engine().call(move |e| e.reconciler.avatar_anchor_rest(avatar_source, &key, None))
     }
@@ -546,7 +661,8 @@ impl StudioWindow {
             avatar.settings["height"].as_f64().unwrap_or(1080.0) as f32,
         );
         let engine = self.studio.read(cx).engine().clone();
-        let rest = key.clone().and_then(|k| engine.call(move |e| e.reconciler.avatar_anchor_rest(avatar_source, &k, None)));
+        let rest =
+            key.clone().and_then(|k| engine.call(move |e| e.reconciler.avatar_anchor_rest(avatar_source, &k, None)));
         let at = rest.map(|s| (s.x, s.y));
         let mut layouts = Vec::new();
         for canvas in &workspace.canvases {
@@ -621,8 +737,10 @@ impl StudioWindow {
             "It follows that part of the model: where you place it with the avatar at rest is where it stays on it."
         };
         let pinned = !key.is_empty();
-        let unpin =
-            Command::SetSourceSettings { source: avatar_source, settings: with_pin(&avatar.settings, object, None, None) };
+        let unpin = Command::SetSourceSettings {
+            source: avatar_source,
+            settings: with_pin(&avatar.settings, object, None, None),
+        };
         self.section(
             "Pin to",
             Some(
@@ -822,6 +940,23 @@ impl StudioWindow {
                 .into_any_element(),
         )
     }
+}
+
+/// Every PNGtuber's push to talk keys: (avatar source, keys), in a steady order.
+pub(super) fn push_to_talk_keys(workspace: &lightair_model::Workspace) -> Vec<(Id, String)> {
+    let mut out: Vec<(Id, String)> = workspace
+        .sources
+        .values()
+        .filter(|i| i.kind == KIND)
+        .filter_map(|i| {
+            i.settings["push_to_talk_keys"]
+                .as_str()
+                .filter(|k| crate::shortcuts::parse(k).is_some())
+                .map(|k| (i.id, k.to_string()))
+        })
+        .collect();
+    out.sort_by_key(|(s, _)| s.to_string());
+    out
 }
 
 /// Every avatar's expression shortcuts: (avatar source, expression, keys), in a steady order.

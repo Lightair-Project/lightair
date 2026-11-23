@@ -56,6 +56,8 @@ pub fn kind_of(file: &str) -> &'static str {
         "Inochi2D"
     } else if f.ends_with(".uma") {
         "Umamo"
+    } else if f.ends_with(".lairava") {
+        "PNGtuber"
     } else {
         "VRM"
     }

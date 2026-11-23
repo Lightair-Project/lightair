@@ -22,10 +22,10 @@ pub struct Choose {
 /// The avatar formats Lightair loads (`lightair_engine::avatar`).
 pub const AVATAR: Choose = Choose {
     title: "Choose an avatar",
-    message: "VRM (.vrm, or .glb with VRM data) · Live2D (.model3.json) · Inochi2D (.inp, .inx) · Umamo (.uma)",
+    message: "VRM (.vrm, or .glb with VRM data) · Live2D (.model3.json) · Inochi2D (.inp, .inx) · Umamo (.uma) · PNGtuber (.lairava)",
     button: "Choose",
     // (a plain glTF without VRM's extension doesn't load: lightair-avatar's vrm.rs)
-    suffixes: &[".vrm", ".glb", ".model3.json", ".inp", ".inx", ".uma"],
+    suffixes: &[".vrm", ".glb", ".model3.json", ".inp", ".inx", ".uma", ".lairava"],
 };
 
 /// What an avatar can wear: a picture or a video.

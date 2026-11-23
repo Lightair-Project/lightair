@@ -31,6 +31,8 @@ pub enum GlobalAction {
     Automation(u16),
     /// An avatar expression's shortcut (its place in `expression_keys`).
     Expression(u16),
+    /// A PNGtuber's push to talk, held (its place in `push_to_talk_keys`).
+    PushToTalk(u16),
     /// PiAir's kill switch: AI drives off, speech cut, PiAir stopped.
     PiAirStop,
 }
@@ -90,6 +92,7 @@ impl GlobalAction {
             GlobalAction::Scene(n) => format!("Scene {n} on air"),
             GlobalAction::Automation(_) => "An automation".into(),
             GlobalAction::Expression(_) => "An avatar's expression".into(),
+            GlobalAction::PushToTalk(_) => "A PNGtuber's push to talk".into(),
             GlobalAction::PiAirStop => "Stop PiAir (kill switch)".into(),
         }
     }
@@ -100,6 +103,8 @@ static BASE: std::sync::Mutex<Vec<(GlobalAction, String)>> = std::sync::Mutex::n
 static AUTOMATIONS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 /// Avatars' expression shortcuts: (avatar source, expression ("" for neutral), keys).
 static EXPRESSIONS: std::sync::Mutex<Vec<(lightair_model::Id, String, String)>> = std::sync::Mutex::new(Vec::new());
+/// PNGtubers' push to talk: (avatar source, keys).
+static PUSH_TO_TALK: std::sync::Mutex<Vec<(lightair_model::Id, String)>> = std::sync::Mutex::new(Vec::new());
 
 /// Registers Settings' shortcuts and the automations' hotkeys together: the ones the system
 /// refused.
@@ -122,7 +127,28 @@ pub fn register_all(base: &[(GlobalAction, String)]) -> Vec<GlobalAction> {
             all.push((GlobalAction::Expression(i as u16), keys.clone()));
         }
     }
+    for (i, (_, keys)) in PUSH_TO_TALK.lock().unwrap().iter().enumerate() {
+        if !all.iter().any(|(_, k)| k == keys) {
+            all.push((GlobalAction::PushToTalk(i as u16), keys.clone()));
+        }
+    }
     register(&all)
+}
+
+/// PNGtubers' push to talk keys changed: registered again with the others. The ones the system
+/// refused.
+pub fn set_push_to_talk_keys(keys: Vec<(lightair_model::Id, String)>) -> Vec<GlobalAction> {
+    if *PUSH_TO_TALK.lock().unwrap() == keys {
+        return Vec::new();
+    }
+    *PUSH_TO_TALK.lock().unwrap() = keys;
+    let base = BASE.lock().unwrap().clone();
+    register_all(&base)
+}
+
+/// The PNGtuber a push to talk key belongs to.
+pub fn push_to_talk_for(i: u16) -> Option<lightair_model::Id> {
+    PUSH_TO_TALK.lock().unwrap().get(i as usize).map(|(s, _)| *s)
 }
 
 /// Avatars' expression shortcuts changed: registered again with the others. The ones the system
@@ -166,9 +192,9 @@ pub fn automation_for(i: u16) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-pub use imp::{display, parse, register, take_pressed};
+pub use imp::{display, parse, register, take_pressed, take_released};
 #[cfg(windows)]
-pub use win::{display, parse, register, take_pressed};
+pub use win::{display, parse, register, take_pressed, take_released};
 
 #[cfg(target_os = "macos")]
 mod imp {
@@ -295,6 +321,7 @@ mod imp {
             out: *mut *mut c_void,
         ) -> i32;
         fn UnregisterEventHotKey(hotkey: *mut c_void) -> i32;
+        fn GetEventKind(event: *mut c_void) -> u32;
         fn GetEventParameter(
             event: *mut c_void,
             name: u32,
@@ -318,6 +345,7 @@ mod imp {
         /// Registered hot keys: Carbon's handle (as an address) and the action, by id.
         keys: HashMap<u32, (usize, GlobalAction)>,
         pressed: Vec<GlobalAction>,
+        released: Vec<GlobalAction>,
     }
 
     fn state() -> &'static Mutex<State> {
@@ -339,9 +367,15 @@ mod imp {
             )
         } == 0;
         if ok && id.signature == SIGNATURE {
+            // 5: pressed, 6: released (push to talk is held)
+            let kind = unsafe { GetEventKind(event) };
             let mut s = state().lock().unwrap();
             if let Some((_, action)) = s.keys.get(&id.id).copied() {
-                s.pressed.push(action);
+                if kind == 6 {
+                    s.released.push(action);
+                } else {
+                    s.pressed.push(action);
+                }
             }
         }
         0
@@ -353,12 +387,15 @@ mod imp {
         let mut s = state().lock().unwrap();
         unsafe {
             if !s.installed {
-                let spec = EventTypeSpec { event_class: four(b"keyb"), event_kind: 5 };
+                let spec = [
+                    EventTypeSpec { event_class: four(b"keyb"), event_kind: 5 },
+                    EventTypeSpec { event_class: four(b"keyb"), event_kind: 6 },
+                ];
                 let rc = InstallEventHandler(
                     GetApplicationEventTarget(),
                     on_hot_key,
-                    1,
-                    &spec,
+                    2,
+                    spec.as_ptr(),
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
                 );
@@ -404,6 +441,10 @@ mod imp {
         std::mem::take(&mut state().lock().unwrap().pressed)
     }
 
+    /// Shortcuts let go since the last call.
+    pub fn take_released() -> Vec<GlobalAction> {
+        std::mem::take(&mut state().lock().unwrap().released)
+    }
 }
 
 #[cfg(windows)]
@@ -561,6 +602,11 @@ mod win {
     /// Shortcuts pressed since the last call.
     pub fn take_pressed() -> Vec<GlobalAction> {
         std::mem::take(&mut state().lock().unwrap().pressed)
+    }
+
+    /// Windows's hot keys say nothing when let go: push to talk switches on and off instead.
+    pub fn take_released() -> Vec<GlobalAction> {
+        Vec::new()
     }
 }
 

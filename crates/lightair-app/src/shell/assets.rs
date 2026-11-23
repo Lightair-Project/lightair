@@ -62,7 +62,7 @@ impl AssetKind {
         match ext.as_str() {
             "prefab" => AssetKind::Prefab,
             "scene" => AssetKind::Scene,
-            "vrm" | "glb" | "inp" | "inx" | "uma" => AssetKind::Avatar,
+            "vrm" | "glb" | "inp" | "inx" | "uma" | "lairava" => AssetKind::Avatar,
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tga" | "heic" => AssetKind::Image,
             "mp4" | "mov" | "m4v" | "mkv" | "webm" | "avi" => AssetKind::Video,
             "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "aiff" => AssetKind::Audio,
@@ -571,7 +571,13 @@ impl StudioWindow {
                         self.avatar_library.save();
                         let e = self.avatar_library.get(entry).cloned()?;
                         name = e.name.clone();
-                        let base = json!({"file": e.file, "device": self.face_camera(cx), "width": 1080, "height": 1080, "framing": "bust", "mirror": true, "library": e.id});
+                        let mut base = json!({"file": e.file, "device": self.face_camera(cx), "width": 1080, "height": 1080, "framing": "bust", "mirror": true, "library": e.id});
+                        // a PNGtuber: listening to a mic, its whole picture shown
+                        if crate::avatar_library::kind_of(&e.file) == "PNGtuber" {
+                            base["mic"] = json!(self.default_mic(cx));
+                            base["framing"] = json!("full");
+                            base["device"] = json!("");
+                        }
                         let settings = crate::avatar_library::with_look(&base, &e.look);
                         let size = (settings["width"].as_f64().unwrap_or(1080.0) as f32, settings["height"].as_f64().unwrap_or(1080.0) as f32);
                         (super::avatar_props::KIND, settings, size)

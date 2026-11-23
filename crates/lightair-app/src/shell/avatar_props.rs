@@ -70,6 +70,91 @@ impl StudioWindow {
         }
     }
 
+    /// A PNGtuber's push to talk held, or let go.
+    pub(super) fn push_to_talk(&mut self, source: Id, held: bool, cx: &mut Context<Self>) {
+        if held {
+            self.push_to_talk_on.insert(source);
+        } else {
+            self.push_to_talk_on.remove(&source);
+        }
+        self.studio.read(cx).engine().post(move |s| s.reconciler.avatar_push_to_talk(source, held));
+        cx.notify();
+    }
+
+    /// A shortcut let go: push to talk stops.
+    pub(super) fn global_release(&mut self, action: crate::shortcuts::GlobalAction, cx: &mut Context<Self>) {
+        if let crate::shortcuts::GlobalAction::PushToTalk(i) = action
+            && let Some(source) = crate::shortcuts::push_to_talk_for(i)
+        {
+            self.push_to_talk(source, false, cx);
+        }
+    }
+
+    /// What already has these keys among avatars' shortcuts (an expression's, a push to talk's),
+    /// other than `except`'s (source, expression; None: its push to talk).
+    fn avatar_key_taken(&self, keys: &str, except: (Id, Option<&str>), cx: &App) -> Option<String> {
+        let workspace = self.studio.read(cx).workspace();
+        let name = |s: &Id| workspace.sources.get(s).map(|i| i.name.clone()).unwrap_or_default();
+        for (s, e, k) in super::avatar_sheets::expression_keys(workspace) {
+            if k == keys && (s, Some(e.as_str())) != except {
+                return Some(format!("{}'s {}", name(&s), expression_label(&e)));
+            }
+        }
+        for (s, k) in super::avatar_sheets::push_to_talk_keys(workspace) {
+            if k == keys && (s, None) != except {
+                return Some(format!("{}'s push to talk", name(&s)));
+            }
+        }
+        None
+    }
+
+    /// The keys pressed for a PNGtuber's push to talk (checked as an expression's are).
+    pub(super) fn capture_push_to_talk_key(&mut self, k: &Keystroke, cx: &mut Context<Self>) {
+        let Some(source) = self.push_to_talk_capture else { return };
+        if k.key == "escape" {
+            self.push_to_talk_capture = None;
+            cx.notify();
+            return;
+        }
+        let Some(keys) = super::settings::keystroke_keys(k) else { return };
+        let shown = crate::shortcuts::display(&keys);
+        if crate::shortcuts::parse(&keys).is_none() {
+            let hint = if cfg!(windows) {
+                "Use Ctrl or Alt with a letter or number, or an F key."
+            } else {
+                "Use ⌘, ⌃ or ⌥ with a letter or number, or an F key."
+            };
+            self.avatar_note = Some((source, hint.into()));
+            cx.notify();
+            return;
+        }
+        self.push_to_talk_capture = None;
+        let taken = crate::shortcuts::taken_by(&keys).or_else(|| self.avatar_key_taken(&keys, (source, None), cx));
+        if let Some(what) = taken {
+            self.avatar_note = Some((source, format!("{shown} is already {what}.")));
+            cx.notify();
+            return;
+        }
+        let workspace = self.studio.read(cx).workspace().clone();
+        let mut list = super::avatar_sheets::push_to_talk_keys(&workspace);
+        list.retain(|(s, _)| *s != source);
+        list.push((source, keys.clone()));
+        let index = list.iter().position(|(s, _)| *s == source).unwrap_or(0) as u16;
+        let refused = crate::shortcuts::set_push_to_talk_keys(list);
+        if refused.contains(&crate::shortcuts::GlobalAction::PushToTalk(index)) {
+            crate::shortcuts::set_push_to_talk_keys(super::avatar_sheets::push_to_talk_keys(&workspace));
+            self.avatar_note = Some((source, format!("{shown} is taken by {} or another app.", ui::OS)));
+            cx.notify();
+            return;
+        }
+        let Some(settings) = workspace.sources.get(&source).map(|i| i.settings.clone()) else { return };
+        self.avatar_note = None;
+        self.exec(
+            Command::SetSourceSettings { source, settings: with(&settings, "push_to_talk_keys", json!(keys)) },
+            cx,
+        );
+    }
+
     /// The keys pressed for an expression's shortcut: checked against Settings' shortcuts, the
     /// automations', other expressions' and what the system already has.
     pub(super) fn capture_expression_key(&mut self, k: &Keystroke, cx: &mut Context<Self>) {
@@ -99,13 +184,12 @@ impl StudioWindow {
             note(self, format!("{shown} is already {what}."), cx);
             return;
         }
-        let workspace = self.studio.read(cx).workspace().clone();
-        let mut list = super::avatar_sheets::expression_keys(&workspace);
-        if let Some((s, e, _)) = list.iter().find(|(s, e, k)| *k == keys && !(*s == source && *e == expression)) {
-            let who = workspace.sources.get(s).map(|i| i.name.clone()).unwrap_or_default();
-            note(self, format!("{shown} is already {who}'s {}.", expression_label(e)), cx);
+        if let Some(what) = self.avatar_key_taken(&keys, (source, Some(expression.as_str())), cx) {
+            note(self, format!("{shown} is already {what}."), cx);
             return;
         }
+        let workspace = self.studio.read(cx).workspace().clone();
+        let mut list = super::avatar_sheets::expression_keys(&workspace);
         // the system's word: another app may have it
         list.retain(|(s, e, _)| !(*s == source && *e == expression));
         list.push((source, expression.clone(), keys.clone()));
@@ -261,8 +345,10 @@ impl StudioWindow {
         source: &Source,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let mut out =
-            vec![self.avatar_card(source, cx), self.tracking_section(source, cx), self.framing_section(source, cx)];
+        // a PNGtuber listens to a mic; the others follow a face
+        let png = crate::avatar_library::kind_of(source.settings["file"].as_str().unwrap_or("")) == "PNGtuber";
+        let follow = if png { self.voice_section(source, cx) } else { self.tracking_section(source, cx) };
+        let mut out = vec![self.avatar_card(source, cx), follow, self.framing_section(source, cx)];
         out.extend(self.expressions_section(source, cx));
         out.push(self.accessories_section(scene, object, source, cx));
         out
@@ -282,12 +368,22 @@ impl StudioWindow {
         let connected = self.connected.as_ref().is_none_or(|c| c.cameras.iter().any(|(d, _)| *d == device));
 
         // what it's doing, in a line: a problem says what to do
+        let png = kind == "PNGtuber";
+        let mic = s["mic"]
+            .as_str()
+            .and_then(|m| self.studio.read(cx).workspace().tracks.iter().find(|t| t.id.to_string() == m))
+            .map(|t| t.name.clone());
         let (dot, line) = if file.is_empty() {
             (tok::text_tertiary(), "No model: choose one with Change".to_string())
         } else if !status.error.is_empty() {
             (tok::error(), load_problem(&file, &status.error))
         } else if !status.loaded {
             (tok::text_tertiary(), "Loading…".to_string())
+        } else if png {
+            match &mic {
+                Some(m) => (tok::ok(), format!("Listening to {m}")),
+                None => (tok::warn(), "No mic: choose one to make it talk".to_string()),
+            }
         } else if device.is_empty() {
             (tok::text_tertiary(), "Not following a face: choose a camera".to_string())
         } else if !connected {
@@ -343,6 +439,12 @@ impl StudioWindow {
                             kind
                         })),
                 )
+                .when(png, |d| {
+                    let path = std::path::PathBuf::from(&file);
+                    d.child(Button::new("avatar-edit").label("Edit").small().outline().on_click(
+                        cx.listener(move |this, _, _, cx| this.open_png_editor(Some(path.clone()), Some(id), cx)),
+                    ))
+                })
                 .child(
                     Button::new("avatar-change").label("Change").small().outline().on_click(
                         cx.listener(move |this, _, window, cx| this.open_avatar_library(Some(id), window, cx)),
@@ -364,6 +466,94 @@ impl StudioWindow {
                 body_line.map(|l| div().pl(px(15.)).text_size(px(11.)).text_color(tok::text_tertiary()).child(l)),
             );
         self.section("Avatar", None, cx).child(card).child(state).into_any_element()
+    }
+
+    /// A PNGtuber's Voice: the mixer track whose sound makes it talk.
+    fn voice_section(&self, source: &Source, cx: &mut Context<Self>) -> AnyElement {
+        let id = source.id;
+        let s = source.settings.clone();
+        let workspace = self.studio.read(cx).workspace().clone();
+        let current = s["mic"].as_str().unwrap_or("").to_string();
+        let tracks: Vec<(String, String)> =
+            workspace.tracks.iter().map(|t| (t.id.to_string(), t.name.clone())).collect();
+        let shown = tracks.iter().find(|(t, _)| *t == current).map_or("None".to_string(), |(_, n)| n.clone());
+        let me = cx.entity().downgrade();
+        let menu = Button::new("avatar-mic").label(shown).small().outline().dropdown_menu(move |mut m, _, _| {
+            for (value, name) in tracks.clone() {
+                let me = me.clone();
+                let cmd = Command::SetSourceSettings { source: id, settings: with(&s, "mic", json!(value)) };
+                m = m.item(PopupMenuItem::new(name).checked(value == current).on_click(move |_, _, cx| {
+                    if let Some(me) = me.upgrade() {
+                        me.update(cx, |this, cx| this.exec(cmd.clone(), cx));
+                    }
+                }));
+            }
+            m
+        });
+        // push to talk: it talks only while these keys are held
+        let ptt =
+            source.settings["push_to_talk_keys"].as_str().filter(|k| !k.is_empty()).map(crate::shortcuts::display);
+        let waiting = self.push_to_talk_capture == Some(id);
+        let held = self.push_to_talk_on.contains(&id);
+        let mut cleared = source.settings.clone();
+        if let Some(m) = cleared.as_object_mut() {
+            m.remove("push_to_talk_keys");
+        }
+        let clear = Command::SetSourceSettings { source: id, settings: cleared };
+        let note = self.avatar_note.as_ref().filter(|(s, _)| *s == id).map(|(_, n)| n.clone());
+        let ptt_row = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(div().flex().items_center().gap_1().child(div().text_size(px(12.)).text_color(tok::text_secondary()).child("Push to talk")).child(ui::info(
+                "avatar-ptt-info",
+                if cfg!(windows) {
+                    "With keys set, it talks only after you press them, until you press them again. Works in any app."
+                } else {
+                    "With keys set, it talks only while you hold them. Works in any app."
+                },
+            )))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(if waiting {
+                        div().text_size(px(11.)).text_color(tok::warn()).child("Press keys… (Esc cancels)")
+                    } else {
+                        div()
+                            .text_size(px(11.))
+                            .font_family(crate::ui::MONO)
+                            .text_color(if held { tok::ok() } else { tok::text_secondary() })
+                            .child(ptt.clone().unwrap_or_else(|| "Off".into()))
+                    })
+                    .child(Button::new("avatar-ptt-set").label(if ptt.is_some() { "Change" } else { "Set" }).xsmall().outline().on_click(cx.listener(move |this, _, window, cx| {
+                        this.push_to_talk_capture = Some(id);
+                        this.avatar_note = None;
+                        window.focus(&this.focus, cx);
+                        cx.notify();
+                    })))
+                    .when(ptt.is_some(), |d| {
+                        d.child(Button::new("avatar-ptt-clear").icon(ui::icon("x")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| this.exec(clear.clone(), cx))))
+                    }),
+            );
+        self.section("Voice", None, cx)
+            .child(ptt_row)
+            .children(note.map(|n| div().text_size(px(11.)).text_color(tok::warn()).child(n)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(div().flex().items_center().gap_1().child(div().text_size(px(12.)).text_color(tok::text_secondary()).child("Mic")).child(ui::info(
+                        "avatar-mic-info",
+                        "Its mouth opens with this mixer track's sound. When it opens and closes is set in its editor (Edit).",
+                    )))
+                    .child(menu),
+            )
+            .into_any_element()
     }
 
     /// Tracking: the camera, how much of the body follows, Calibrate, Mirror; Check tracking in the

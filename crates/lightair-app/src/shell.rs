@@ -369,6 +369,9 @@ pub struct StudioWindow {
     /// source, expression; "" for none).
     expression_keys_open: bool,
     expression_capture: Option<(Id, String)>,
+    /// PNGtubers whose push to talk is held now; one waiting for its keys.
+    push_to_talk_on: HashSet<Id>,
+    push_to_talk_capture: Option<Id>,
     /// Check tracking's 15 s: the avatar and when it began.
     tracking_check: Option<(Id, Instant)>,
     /// Effect control groups toggled from their default (first open, the rest closed).
@@ -648,12 +651,16 @@ impl StudioWindow {
                     break;
                 }
                 let pressed = crate::shortcuts::take_pressed();
-                if pressed.is_empty() {
+                let released = crate::shortcuts::take_released();
+                if pressed.is_empty() && released.is_empty() {
                     continue;
                 }
                 let alive = this.update_in(cx, |this, window, cx| {
                     for action in pressed {
                         this.global_action(action, window, cx);
+                    }
+                    for action in released {
+                        this.global_release(action, cx);
                     }
                 });
                 if alive.is_err() {
@@ -766,6 +773,10 @@ impl StudioWindow {
                             this.capture_expression_key(&ev.keystroke, cx);
                             return Some((this.expression_capture.is_none(), this.focus.clone()));
                         }
+                        if this.push_to_talk_capture.is_some() {
+                            this.capture_push_to_talk_key(&ev.keystroke, cx);
+                            return Some((this.push_to_talk_capture.is_none(), this.focus.clone()));
+                        }
                         this.shortcut_capture?;
                         this.capture_shortcut(&ev.keystroke, cx);
                         Some((this.shortcut_capture.is_none(), this.focus.clone()))
@@ -797,6 +808,8 @@ impl StudioWindow {
             avatar_pictures: HashSet::new(),
             expression_keys_open: false,
             expression_capture: None,
+            push_to_talk_on: HashSet::new(),
+            push_to_talk_capture: None,
             tracking_check: None,
             fx_groups: Default::default(),
             colour_pickers: Default::default(),
@@ -1177,6 +1190,13 @@ impl StudioWindow {
     fn global_action(&mut self, action: crate::shortcuts::GlobalAction, window: &mut Window, cx: &mut Context<Self>) {
         use crate::shortcuts::GlobalAction as A;
         match action {
+            // held on macOS (let go: `global_release`); on Windows, on and off
+            A::PushToTalk(i) => {
+                if let Some(source) = crate::shortcuts::push_to_talk_for(i) {
+                    let held = cfg!(target_os = "macos") || !self.push_to_talk_on.contains(&source);
+                    self.push_to_talk(source, held, cx);
+                }
+            }
             A::Expression(i) => {
                 // an expression's key: that expression, or back to none if it's on already
                 if let Some((source, expression)) = crate::shortcuts::expression_for(i) {

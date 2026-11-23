@@ -36,6 +36,7 @@ mod plugin_editor;
 #[path = "plugin_editor_win.rs"]
 mod plugin_editor;
 mod plugin_scan;
+mod pngtuber_editor;
 mod outputs_panel;
 mod permissions;
 mod piair;
