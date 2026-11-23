@@ -181,6 +181,13 @@ impl ExpressionManager {
         self.players.push(ExpressionPlayer::new(expression));
     }
 
+    /// Sets the newest expression's blend weight (`0.0..=1.0`): how strongly it shows.
+    pub fn set_weight(&mut self, weight: f32) {
+        if let Some(player) = self.players.last_mut() {
+            player.set_weight(weight);
+        }
+    }
+
     /// Starts fading out every active expression.
     pub fn stop_all(&mut self) {
         for player in &mut self.players {

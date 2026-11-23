@@ -1169,7 +1169,7 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         let ph = sys::obs_source_get_proc_handler(source);
         let data = Box::into_raw(Box::new(Arc::downgrade(&s))) as *mut c_void;
         sys::proc_handler_add(ph, c"void calibrate(out string calibration)".as_ptr(), Some(proc_calibrate), data);
-        sys::proc_handler_add(ph, c"void anchor_rest(in string key, out string at)".as_ptr(), Some(proc_anchor_rest), data);
+        sys::proc_handler_add(ph, c"void anchor_rest(in string key, in string size, out string at)".as_ptr(), Some(proc_anchor_rest), data);
         sys::proc_handler_add(ph, c"void status(out bool loaded, out bool tracking, out string error, out string name, out string body, out string expressions, out string anchors)".as_ptr(), Some(proc_status), data);
         // (the weak reference lives as long as the source: freed with it)
         let _ = data;
@@ -1193,7 +1193,13 @@ unsafe extern "C" fn proc_anchor_rest(data: *mut c_void, cd: *mut sys::calldata_
     let Some(s) = weak.upgrade() else { return };
     let key = get_string(unsafe { &mut *cd }, c"key");
     let settings = s.settings.lock().clone();
-    let (w, h) = (settings.width as f32, settings.height as f32);
+    // ("w h": at another size of the picture, as it would be)
+    let size = get_string(unsafe { &mut *cd }, c"size");
+    let mut wh = size.split(' ').filter_map(|v| v.parse::<f32>().ok());
+    let (w, h) = match (wh.next(), wh.next()) {
+        (Some(w), Some(h)) if w > 0.0 && h > 0.0 => (w, h),
+        _ => (settings.width as f32, settings.height as f32),
+    };
     let aspect = w / h.max(1.0);
     let r = s.render.lock();
     let Some(&i) = r.anchors.get(&key) else { return };
@@ -1408,6 +1414,7 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
         r.dirty = true;
     }
     if let Some((_, l)) = r.puppet.as_mut() {
+        l.set_expression_weight(expression.map_or(1.0, |e| e.1));
         l.update(&face, expression.map(|e| e.0), dt);
         r.dirty = true;
     }
@@ -1623,8 +1630,10 @@ pub fn status(source: *mut sys::obs_source_t) -> Status {
 }
 
 /// Where an anchor is in the avatar's picture at rest (pixels), once the model is in use.
-pub fn anchor_rest(source: *mut sys::obs_source_t, key: &str) -> Option<crate::avatar_pins::Spot> {
+/// `size`: as it would be at that size of the picture instead.
+pub fn anchor_rest(source: *mut sys::obs_source_t, key: &str, size: Option<(u32, u32)>) -> Option<crate::avatar_pins::Spot> {
     let key = CString::new(key).ok()?;
+    let size = CString::new(size.map_or(String::new(), |(w, h)| format!("{w} {h}"))).ok()?;
     unsafe {
         let ph = sys::obs_source_get_proc_handler(source);
         if ph.is_null() {
@@ -1632,6 +1641,7 @@ pub fn anchor_rest(source: *mut sys::obs_source_t, key: &str) -> Option<crate::a
         }
         let mut cd = sys::calldata_t::default();
         set_string(&mut cd, c"key", &key);
+        set_string(&mut cd, c"size", &size);
         let ok = sys::proc_handler_call(ph, c"anchor_rest".as_ptr(), &mut cd);
         let at = if ok { get_string(&mut cd, c"at") } else { String::new() };
         free_cd(&mut cd);

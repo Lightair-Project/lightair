@@ -47,6 +47,8 @@ pub struct Puppet {
     expressions: Vec<(String, Expression3)>,
     manager: ExpressionManager,
     playing: Option<String>,
+    /// How strongly the expression shows (`0..=1`).
+    weight: f32,
     /// The model's Idle motions, played one after another under the face (which wins where both
     /// move a parameter: the head, eyes, mouth).
     idle: Vec<Motion3>,
@@ -143,6 +145,7 @@ impl Puppet {
             expressions,
             manager: ExpressionManager::new(),
             playing: None,
+            weight: 1.0,
             idle,
             idle_player: None,
             time: 0.0,
@@ -204,6 +207,11 @@ impl Puppet {
         self.expressions.iter().map(|(n, _)| n.clone()).collect()
     }
 
+    /// How strongly its expression shows, from the next frame (`0..=1`).
+    pub fn set_expression_weight(&mut self, weight: f32) {
+        self.weight = if weight.is_finite() { weight.clamp(0.0, 1.0) } else { 1.0 };
+    }
+
     /// Poses the model for this frame: the face (mirrored first if wanted), an expression by
     /// name (or none), `dt` seconds after the last.
     pub fn update(&mut self, face: &Face, expression: Option<&str>, dt: f32) {
@@ -216,6 +224,7 @@ impl Puppet {
             }
             self.playing = expression.map(str::to_string);
         }
+        self.manager.set_weight(self.weight);
         let p = self.params.clone();
         let (yaw, pitch, roll) = face.angles();
         // the next Idle motion when one ends

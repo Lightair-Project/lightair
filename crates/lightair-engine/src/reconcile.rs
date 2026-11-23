@@ -780,8 +780,9 @@ impl Reconciler {
     }
 
     /// Where an avatar's anchor is in its picture at rest (pixels).
-    pub fn avatar_anchor_rest(&self, source: Id, key: &str) -> Option<crate::avatar_pins::Spot> {
-        crate::avatar::anchor_rest(self.sources.get(&source)?.as_ptr(), key)
+    /// `size`: at that size of its picture instead.
+    pub fn avatar_anchor_rest(&self, source: Id, key: &str, size: Option<(u32, u32)>) -> Option<crate::avatar_pins::Spot> {
+        crate::avatar::anchor_rest(self.sources.get(&source)?.as_ptr(), key, size)
     }
 
     /// Takes the face an avatar sees now as its neutral one: the `calibration` setting.

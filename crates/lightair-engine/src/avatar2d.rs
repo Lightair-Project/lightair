@@ -395,6 +395,14 @@ impl Flat {
         }
     }
 
+    /// How strongly a Live2D model's expression shows (`0..=1`); Inochi2D and Umamo hold theirs
+    /// at full.
+    pub fn set_expression_weight(&mut self, weight: f32) {
+        if let Flat::Live2d(l) = self {
+            l.puppet.set_expression_weight(weight);
+        }
+    }
+
     /// Poses it for this frame, with an expression (its name) or none.
     pub fn update(&mut self, face: &lightair_avatar::Face, expression: Option<&str>, dt: f32) {
         match self {
