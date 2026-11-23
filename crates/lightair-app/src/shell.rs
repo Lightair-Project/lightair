@@ -369,6 +369,8 @@ pub struct StudioWindow {
     /// source, expression; "" for none).
     expression_keys_open: bool,
     expression_capture: Option<(Id, String)>,
+    /// Check tracking's 15 s: the avatar and when it began.
+    tracking_check: Option<(Id, Instant)>,
     /// Effect control groups toggled from their default (first open, the rest closed).
     fx_groups: std::collections::HashSet<String>,
     /// Colour pickers of the selected object's effects, by "effect:key".
@@ -795,6 +797,7 @@ impl StudioWindow {
             avatar_pictures: HashSet::new(),
             expression_keys_open: false,
             expression_capture: None,
+            tracking_check: None,
             fx_groups: Default::default(),
             colour_pickers: Default::default(),
             colours: Default::default(),

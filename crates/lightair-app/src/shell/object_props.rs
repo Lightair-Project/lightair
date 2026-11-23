@@ -54,6 +54,8 @@ pub(super) struct ObjectProps {
     pub(super) web_css: Option<CssEdit>,
     /// The selected widget's settings.
     pub(super) widget: Option<super::widget_props::WidgetEdit>,
+    /// The selected avatar's expression search (shown past 12 expressions).
+    pub(super) expression_search: Option<(Id, Entity<InputState>, Subscription)>,
 }
 
 pub(super) fn is_text(kind: &str) -> bool {
@@ -141,6 +143,21 @@ impl StudioWindow {
                 }
             }
             None => self.props.text = None,
+        }
+
+        // An avatar's expression search: filters as it's typed.
+        match source.as_ref().filter(|i| i.kind == super::avatar_props::KIND) {
+            Some(i) if !self.props.expression_search.as_ref().is_some_and(|(s, _, _)| *s == i.id) => {
+                let state = cx.new(|cx| InputState::new(window, cx).placeholder("Search expressions"));
+                let events = cx.subscribe_in(&state, window, |_, _, ev: &InputEvent, _, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        cx.notify();
+                    }
+                });
+                self.props.expression_search = Some((i.id, state, events));
+            }
+            Some(_) => {}
+            None => self.props.expression_search = None,
         }
 
         // Web page address: the same, applied on Enter or when the field loses focus.
@@ -326,8 +343,6 @@ impl StudioWindow {
             self.widget_section(source, cx)
         } else if is_web(&source.kind) {
             Some(self.web_section(source, cx).into_any_element())
-        } else if source.kind == super::avatar_props::KIND {
-            Some(self.avatar_section(source, cx))
         } else if source.kind == super::phone_camera::KIND {
             Some(self.phone_camera_section(source, cx))
         } else {

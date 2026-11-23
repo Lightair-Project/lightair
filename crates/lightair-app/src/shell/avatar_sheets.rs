@@ -487,7 +487,7 @@ impl StudioWindow {
     /// Where an anchor is at rest now, in the avatar's picture.
     fn anchor_at_rest(&self, avatar_source: Id, key: Option<&str>, cx: &App) -> Option<lightair_engine::avatar_pins::Spot> {
         let key = key?.to_string();
-        self.studio.read(cx).engine().call(move |e| e.reconciler.avatar_anchor_rest(avatar_source, &key))
+        self.studio.read(cx).engine().call(move |e| e.reconciler.avatar_anchor_rest(avatar_source, &key, None))
     }
 
     /// Asks for a picture or video, then the anchor it goes on.
@@ -546,7 +546,7 @@ impl StudioWindow {
             avatar.settings["height"].as_f64().unwrap_or(1080.0) as f32,
         );
         let engine = self.studio.read(cx).engine().clone();
-        let rest = key.clone().and_then(|k| engine.call(move |e| e.reconciler.avatar_anchor_rest(avatar_source, &k)));
+        let rest = key.clone().and_then(|k| engine.call(move |e| e.reconciler.avatar_anchor_rest(avatar_source, &k, None)));
         let at = rest.map(|s| (s.x, s.y));
         let mut layouts = Vec::new();
         for canvas in &workspace.canvases {

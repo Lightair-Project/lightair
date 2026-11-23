@@ -678,7 +678,11 @@ impl StudioWindow {
         }
 
         let mut col = body.gap_0().child(header);
-        if let Some(source) = source.as_ref().and_then(|i| self.source_section(i, cx)) {
+        // an avatar: its own sections first (docs/plans/avatar-inspector.md), its model in the first
+        let avatar = source.as_ref().filter(|i| i.kind == super::avatar_props::KIND);
+        if let Some(avatar) = avatar {
+            col = col.children(self.avatar_sections(scene, object, avatar, cx));
+        } else if let Some(source) = source.as_ref().and_then(|i| self.source_section(i, cx)) {
             col = col.child(source);
         }
         col = col.child(transform);
