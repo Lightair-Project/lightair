@@ -257,12 +257,147 @@ impl StudioWindow {
         div().child(self.cohost_view.clone()).into_any_element()
     }
 
+    /// Settings → Connections: the subscriptions the co-host's brain can use instead of a key,
+    /// one row each (Sign in / Sign out), with the sign-in's steps under its row as they come.
+    pub(super) fn ai_subscriptions_group(&self, cx: &mut Context<Self>) -> Div {
+        let mut group = super::settings::group_tip(
+            "AI co-host subscriptions",
+            "Use a subscription you already pay for as your co-host's brain. Sign in opens the provider's page in your browser; Lightair keeps the sign-in in the system's credential store. Then choose the provider in the co-host's Brain section.",
+        );
+        let step = self.piair.sign_in_step();
+        for (id, name, hint) in crate::piair::keys::SUBSCRIPTIONS {
+            let provider: &'static str = id;
+            let signing = step.as_ref().filter(|a| a.provider == provider);
+            let busy = signing.is_some_and(|a| !a.done && !a.error);
+            let (text, colour) = match (busy, self.piair.sub_state(provider)) {
+                (true, _) => ("Signing in…".to_string(), tok::warn()),
+                (_, None) => ("…".to_string(), tok::text_tertiary()),
+                (_, Some(true)) => ("Signed in".to_string(), tok::ok()),
+                (_, Some(false)) => ("Not signed in".to_string(), tok::text_tertiary()),
+            };
+            let control = if busy {
+                Button::new(SharedString::from(format!("ai-sub-cancel-{provider}")))
+                    .label("Cancel")
+                    .xsmall()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.piair.cancel_sign_in();
+                        cx.notify();
+                    }))
+            } else if self.piair.sub_state(provider) == Some(true) {
+                Button::new(SharedString::from(format!("ai-sub-out-{provider}")))
+                    .label("Sign out")
+                    .xsmall()
+                    .ghost()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.piair.cancel_sign_in();
+                        this.piair.sign_out(provider);
+                        cx.notify();
+                    }))
+            } else {
+                Button::new(SharedString::from(format!("ai-sub-in-{provider}")))
+                    .label("Sign in")
+                    .xsmall()
+                    .outline()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.piair.sign_in(provider);
+                        cx.notify();
+                    }))
+            };
+            group = group.child(super::settings::row_status(name, &text, hint, control).text_color(colour));
+            if let Some(a) = signing {
+                group = group.child(self.sign_in_card(a.clone(), cx));
+            }
+        }
+        group
+    }
+
+    /// A sign-in's latest step: what to do, the code to enter on the provider's page, the code
+    /// to paste back or a choice to make.
+    fn sign_in_card(&self, a: crate::piair::Auth, cx: &mut Context<Self>) -> AnyElement {
+        let colour = if a.error {
+            tok::error()
+        } else if a.done {
+            tok::ok()
+        } else {
+            tok::accent_primary()
+        };
+        let mut buttons = div().flex().flex_wrap().items_center().gap_1p5();
+        for (i, (id, label)) in a.options.iter().enumerate() {
+            let id = id.clone();
+            buttons =
+                buttons.child(Button::new(("ai-sub-option", i)).label(label.clone()).xsmall().outline().on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.piair.sign_in_answer(&id);
+                        cx.notify();
+                    }),
+                ));
+        }
+        if a.wants_code && a.options.is_empty() {
+            buttons = buttons.child(Button::new("ai-sub-paste").label("Paste code").xsmall().primary().on_click(
+                cx.listener(|this, _, _, cx| {
+                    let code = cx
+                        .read_from_clipboard()
+                        .and_then(|c| c.text())
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty() && !t.contains('\n'));
+                    match code {
+                        Some(c) => this.piair.sign_in_answer(&c),
+                        None => this
+                            .studio
+                            .update(cx, |s, _| s.issue = Some("Copy the code from the sign-in page first.".into())),
+                    }
+                    cx.notify();
+                }),
+            ));
+        }
+        if let Some(code) = a.code.clone() {
+            buttons = buttons.child(Button::new("ai-sub-copy").label("Copy code").xsmall().outline().on_click(
+                move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                },
+            ));
+        }
+        if let Some(url) = a.url.clone().filter(|_| !a.done && !a.error) {
+            buttons = buttons.child(
+                Button::new("ai-sub-open")
+                    .label("Open the page again")
+                    .xsmall()
+                    .ghost()
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+            );
+        }
+        if a.done || a.error {
+            buttons = buttons.child(Button::new("ai-sub-close").label("OK").xsmall().ghost().on_click(cx.listener(
+                |this, _, _, cx| {
+                    this.piair.cancel_sign_in();
+                    cx.notify();
+                },
+            )));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .ml_3()
+            .p_3()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(colour)
+            .child(div().text_size(px(12.)).text_color(tok::text()).child(a.message.clone()))
+            .children(a.code.clone().map(|c| {
+                div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).font_family(crate::ui::MONO).child(c)
+            }))
+            .child(buttons)
+            .into_any_element()
+    }
+
     /// Settings → Connections: the AI co-host's keys, one row per service, each with its state.
     pub(super) fn ai_keys_group(&self, cx: &mut Context<Self>) -> Div {
         use crate::piair::KeyState;
         let mut group = super::settings::group_tip(
             "AI co-host",
-            "Keys for your co-host's brain and voice. Copy a key from the service's own site, then choose Paste key: Lightair keeps it in the system's credential store, checks it works and never shows it. A subscription (Claude Pro/Max, ChatGPT, GitHub Copilot) is used from the co-host's Brain section instead.",
+            "Keys for your co-host's brain and voice. Copy a key from the service's own site, then choose Paste key: Lightair keeps it in the system's credential store, checks it works and never shows it. With a subscription (Claude Pro/Max, ChatGPT, GitHub Copilot), sign in above instead.",
         );
         for (id, name, _, hint) in crate::piair::keys::SERVICES {
             let state = self.piair.key_state(id);
@@ -329,7 +464,7 @@ impl StudioWindow {
 
     /// Development only (debug builds): `LIGHTAIR_PIAIR_PROMPT_FILE` sends its newest line to
     /// PiAir as a prompt from the streamer, or runs a command (`!add <avatar file>`, `!settings`,
-    /// `!drives`, `!call <method> <json>`, `!chat <who>: <text>`, `!allow <bundle id>`, `!stop`).
+    /// `!drives`, `!signin <provider>`, `!signin-code <code>`, `!call <method> <json>`, `!chat <who>: <text>`, `!allow <bundle id>`, `!stop`).
     fn dev_cohost_prompts(&mut self, cx: &mut Context<Self>) {
         let Some(f) = std::env::var_os("LIGHTAIR_PIAIR_PROMPT_FILE").filter(|_| cfg!(debug_assertions)) else { return };
         let text = std::fs::read_to_string(&f).unwrap_or_default();
@@ -350,6 +485,8 @@ impl StudioWindow {
             "!settings" => self.open_settings(super::settings::Page::CoHost, cx),
             "!connections" => self.open_settings(super::settings::Page::Connections, cx),
             "!voices" => self.cohost_view.update(cx, |v, cx| v.open_voices(cx)),
+            l if l.starts_with("!signin ") => self.piair.sign_in(l["!signin ".len()..].trim()),
+            l if l.starts_with("!signin-code ") => self.piair.sign_in_answer(l["!signin-code ".len()..].trim()),
             l if l.starts_with("!settings-scroll ") => {
                 let y: f32 = l[17..].trim().parse().unwrap_or(0.0);
                 self.settings_scroll.set_offset(point(px(0.), px(-y)));

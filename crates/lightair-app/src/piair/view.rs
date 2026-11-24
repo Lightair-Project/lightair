@@ -7,16 +7,17 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input as TextInput, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_model::{Command, Id};
 use serde_json::{Value, json};
 
-use super::{COHOST, Host, KeyState, Voices, keys, voices};
+use super::voice_sheet::VoiceSheet;
+use super::{COHOST, Host, KeyState, Voices, keys};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 
@@ -28,7 +29,7 @@ const TALK_LINES: usize = 6;
 
 /// What the co-host's sections ask the window for.
 pub enum CohostEvent {
-    /// Settings → Connections (to add a key).
+    /// Settings → Connections (to add a key or sign in to a subscription).
     OpenConnections,
 }
 
@@ -41,11 +42,8 @@ pub struct CohostView {
     prompt: Entity<InputState>,
     name: Entity<InputState>,
     personality: Entity<TextareaState>,
-    code: Entity<InputState>,
-    /// The voice picker: open, its search, its gender filter, and the preview last drawn.
-    voice_open: bool,
-    voice_search: Entity<InputState>,
-    voice_gender: Option<&'static str>,
+    /// The voice picker (a sheet over the window), and the preview last drawn.
+    sheet: Entity<VoiceSheet>,
     shown_preview: (Option<String>, Option<String>),
     collapsed: HashSet<&'static str>,
     _subs: Vec<Subscription>,
@@ -60,14 +58,11 @@ impl CohostView {
         let personality = cx.new(|cx| {
             TextareaState::new(window, cx).auto_grow(3, 8).placeholder("How it talks: warm, quick and playful…")
         });
-        let code = cx.new(|cx| InputState::new(window, cx).placeholder("Code from the sign-in page"));
-        let voice_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search voices"));
+        let sheet = {
+            let (host, me) = (host.clone(), cx.weak_entity());
+            cx.new(|cx| VoiceSheet::new(host, me, window, cx))
+        };
         let mut subs = Vec::new();
-        subs.push(cx.subscribe(&voice_search, |_, _, ev: &InputEvent, cx| {
-            if matches!(ev, InputEvent::Change) {
-                cx.notify();
-            }
-        }));
         subs.push(cx.subscribe_in(&prompt, window, |this, state, ev: &InputEvent, window, cx| {
             if matches!(ev, InputEvent::PressEnter { .. }) {
                 let text = state.read(cx).value().trim().to_string();
@@ -91,13 +86,6 @@ impl CohostView {
                 if !v.is_empty() && this.setting("/persona/personality", cx).as_str() != Some(v.as_str()) {
                     this.set(json!({"persona": {"personality": v}}), cx);
                 }
-            }
-        }));
-        subs.push(cx.subscribe_in(&code, window, |this, state, ev: &InputEvent, window, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. }) {
-                let c = state.read(cx).value().trim().to_string();
-                this.host.send(json!({"t": "auth_code", "code": c}));
-                state.update(cx, |s, cx| s.set_value("", window, cx));
             }
         }));
         // what PiAir says shows as it happens; the persona fields show what's set
@@ -145,10 +133,7 @@ impl CohostView {
             prompt,
             name,
             personality,
-            code,
-            voice_open: false,
-            voice_search,
-            voice_gender: None,
+            sheet,
             shown_preview: (None, None),
             collapsed: HashSet::new(),
             _subs: subs,
@@ -157,8 +142,8 @@ impl CohostView {
 
     /// Opens the voice picker (a development aid for captures).
     pub fn open_voices(&mut self, cx: &mut Context<Self>) {
-        self.voice_open = true;
-        cx.notify();
+        let vendor = self.setting("/voice/vendor", cx).as_str().unwrap_or("gemini").to_string();
+        self.sheet.update(cx, |s, cx| s.open(&vendor, cx));
     }
 
     /// Shows this co-host object's settings (`active`: it's the one PiAir runs for).
@@ -174,7 +159,7 @@ impl CohostView {
     }
 
     /// A PiAir setting: the object's, else what PiAir is using (its defaults).
-    fn setting(&self, pointer: &str, cx: &App) -> Value {
+    pub(super) fn setting(&self, pointer: &str, cx: &App) -> Value {
         let own = self.cohost(cx)["piair"].pointer(pointer).cloned().filter(|v| !v.is_null());
         own.or_else(|| self.host.state().settings.pointer(pointer).cloned()).unwrap_or(Value::Null)
     }
@@ -190,7 +175,7 @@ impl CohostView {
     }
 
     /// Changes the object's PiAir settings; Lightair passes them on to PiAir.
-    fn set(&mut self, patch: Value, cx: &mut Context<Self>) {
+    pub(super) fn set(&mut self, patch: Value, cx: &mut Context<Self>) {
         self.set_cohost(json!({"piair": patch}), cx);
     }
 
@@ -275,7 +260,6 @@ impl CohostView {
         let lines: Vec<_> =
             s.log.iter().rev().take(TALK_LINES).cloned().collect::<Vec<_>>().into_iter().rev().collect();
         let question = s.question.as_ref().map(|q| q.text.clone());
-        let auth = s.auth.clone().filter(|a| !a.done || a.error);
         drop(s);
         let name = self.setting("/persona/name", cx).as_str().unwrap_or("Pi").to_string();
         let mut body: Vec<AnyElement> = Vec::new();
@@ -299,36 +283,6 @@ impl CohostView {
                                     cx.notify();
                                 },
                             ))),
-                    )
-                    .into_any_element(),
-            );
-        }
-        if let Some(a) = auth {
-            let color = if a.error { tok::error() } else { tok::accent_primary() };
-            body.push(
-                card(color)
-                    .child(div().text_size(px(12.)).child(a.message.clone()))
-                    .children(
-                        a.code.clone().map(|c| div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(c)),
-                    )
-                    .when(a.wants_code, |d| d.child(TextInput::new(&self.code).xsmall()))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .children(a.url.clone().map(|url| {
-                                Button::new("cohost-auth-open")
-                                    .label("Open sign-in page")
-                                    .xsmall()
-                                    .outline()
-                                    .on_click(move |_, _, cx| cx.open_url(&url))
-                            }))
-                            .child(Button::new("cohost-auth-close").label("Close").xsmall().ghost().on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.host.state().auth = None;
-                                    cx.notify();
-                                }),
-                            )),
                     )
                     .into_any_element(),
             );
@@ -450,7 +404,7 @@ impl CohostView {
             row(
                 "Provider",
                 Some(
-                    "Any provider Pi supports, with an API key (Settings → Connections) or a subscription (Claude Pro/Max, ChatGPT, GitHub Copilot) where it has one.",
+                    "Any provider Pi supports, with an API key or a subscription (Claude Pro/Max, ChatGPT, GitHub Copilot) where it has one: both are set up in Settings → Connections. ✓ marks the ones ready to use.",
                 ),
                 provider_menu.into_any_element(),
             ),
@@ -460,42 +414,27 @@ impl CohostView {
                 model_menu.into_any_element(),
             ),
         ];
-        // signed in, or how to: a subscription here, a key in Connections
-        let has_key_service = keys::SERVICES.iter().any(|s| s.0 == provider.as_str());
+        // signed in, or where to: subscriptions and keys are in Settings → Connections
         if signed_in {
             body.push(status_line(tok::ok(), "Signed in".into()));
         } else {
-            let mut line = div()
+            let line = div()
                 .flex()
                 .items_center()
                 .gap_2()
                 .child(div().flex_none().size(px(7.)).rounded_full().bg(tok::warn()))
+                .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(tok::text_secondary()).child(if oauth {
+                    "Not signed in: sign in or add a key"
+                } else {
+                    "No key yet"
+                }))
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(12.))
-                        .text_color(tok::text_secondary())
-                        .child("Not signed in"),
-                );
-            if oauth {
-                let provider = provider.clone();
-                line = line.child(Button::new("cohost-oauth").label("Use subscription").xsmall().outline().on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        this.host.send(json!({"t": "login", "provider": provider, "kind": "oauth"}));
-                        cx.notify();
-                    }),
-                ));
-            }
-            if has_key_service {
-                line = line.child(
-                    Button::new("cohost-brain-key")
-                        .label("Add key")
+                    Button::new("cohost-brain-connections")
+                        .label("Open Connections")
                         .xsmall()
                         .outline()
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(CohostEvent::OpenConnections))),
                 );
-            }
             body.push(line.into_any_element());
         }
         self.section("Brain", body, cx)
@@ -536,23 +475,25 @@ impl CohostView {
         self.section("Voice", body, cx)
     }
 
-    /// The chosen voice (▶ to hear it, Change to pick another) and, open, the picker: search,
-    /// a gender filter where the vendor says, and every voice with its own ▶ to audition it.
+    /// The voice picker, a sheet over the window (for the window to draw).
+    pub fn sheet(&self) -> Entity<VoiceSheet> {
+        self.sheet.clone()
+    }
+
+    /// The chosen voice: ▶ to hear it, Change to pick another in the voice sheet.
     fn voice_picker(&self, vendor: &str, chosen: &str, cx: &mut Context<Self>) -> AnyElement {
         let voices = self.host.voices(vendor);
         let (loading, playing) = self.host.preview_state();
         let preview_error = self.host.0.ai.lock().unwrap_or_else(|e| e.into_inner()).preview_error.clone();
-        let list = match &voices {
-            Voices::Ready(l) => l.clone(),
-            _ => Vec::new(),
+        let current = match &voices {
+            Voices::Ready(l) => l.iter().find(|v| v.id == chosen).cloned(),
+            _ => None,
         };
-        let current = list.iter().find(|v| v.id == chosen).cloned();
-        // ▶ / a spinner while the sample's made / ■ while it plays
-        let play_button = |id: SharedString, v: voices::VoiceInfo, cx: &mut Context<Self>| {
+        let play = current.clone().map(|v| {
             let (is_loading, is_playing) =
                 (loading.as_deref() == Some(v.id.as_str()), playing.as_deref() == Some(v.id.as_str()));
             let vendor = vendor.to_string();
-            Button::new(id)
+            Button::new("cohost-voice-play")
                 .icon(ui::icon(if is_playing {
                     "square"
                 } else if is_loading {
@@ -571,8 +512,8 @@ impl CohostView {
                     }
                     cx.notify();
                 }))
-        };
-        let tags = |v: &voices::VoiceInfo| {
+        });
+        let tags = current.as_ref().filter(|v| !v.tags.is_empty()).map(|v| {
             div().flex().flex_wrap().gap_1().children(v.tags.iter().take(4).map(|t| {
                 div()
                     .px_1p5()
@@ -583,9 +524,7 @@ impl CohostView {
                     .text_color(tok::text_secondary())
                     .child(t.clone())
             }))
-        };
-        // the chosen one
-        let open = self.voice_open;
+        });
         let card = div()
             .flex()
             .items_center()
@@ -593,7 +532,7 @@ impl CohostView {
             .p_2()
             .rounded(px(8.))
             .bg(tok::bg_raised())
-            .children(current.clone().map(|v| play_button("cohost-voice-play".into(), v, cx)))
+            .children(play)
             .child(
                 div()
                     .flex()
@@ -610,125 +549,32 @@ impl CohostView {
                             _ => chosen.to_string(),
                         },
                     ))
-                    .children(current.as_ref().filter(|v| !v.tags.is_empty()).map(|v| tags(v))),
+                    .children(tags),
             )
             .child(
                 Button::new("cohost-voice-change")
-                    .label(if open {
-                        "Done"
-                    } else if current.is_some() {
-                        "Change"
-                    } else {
-                        "Choose"
-                    })
+                    .label(if current.is_some() { "Change" } else { "Choose" })
                     .xsmall()
                     .outline()
-                    .disabled(!matches!(voices, Voices::Ready(_)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.voice_open = !open;
-                        cx.notify();
-                    })),
+                    .on_click({
+                        let vendor = vendor.to_string();
+                        cx.listener(move |this, _, _, cx| {
+                            this.sheet.update(cx, |s, cx| s.open(&vendor, cx));
+                        })
+                    }),
             );
-        let mut out = div().flex().flex_col().gap_1p5().child(card);
         let problem = match (&voices, preview_error) {
             (Voices::Failed(e), _) => Some(e.clone()),
-            (_, Some(e)) => Some(e),
+            (_, Some(e)) if !self.sheet.read(cx).is_open() => Some(e),
             _ => None,
         };
-        if let Some(e) = problem {
-            out = out.child(div().text_size(px(11.)).text_color(tok::error()).child(e));
-        }
-        if !open || list.is_empty() {
-            return out.into_any_element();
-        }
-        // the picker
-        let query = self.voice_search.read(cx).value().trim().to_lowercase();
-        let has_gender = list.iter().any(|v| v.gender.is_some());
-        let gender = self.voice_gender;
-        let shown: Vec<voices::VoiceInfo> = list
-            .iter()
-            .filter(|v| gender.is_none_or(|g| v.gender.as_deref() == Some(g)))
-            .filter(|v| {
-                query.is_empty()
-                    || v.name.to_lowercase().contains(&query)
-                    || v.tags.iter().any(|t| t.to_lowercase().contains(&query))
-            })
-            .cloned()
-            .collect();
-        let mut filters = div().flex().gap_0p5().p_0p5().rounded(px(6.)).bg(tok::bg_panel());
-        if has_gender {
-            for (i, (label, g)) in
-                [("All", None), ("Female", Some("female")), ("Male", Some("male"))].into_iter().enumerate()
-            {
-                let on = gender == g;
-                filters = filters.child(seg(("cohost-voice-gender", i), label, on).flex_1().justify_center().when(
-                    !on,
-                    |d| {
-                        d.on_click(cx.listener(move |this, _, _, cx| {
-                            this.voice_gender = g;
-                            cx.notify();
-                        }))
-                    },
-                ));
-            }
-        }
-        let mut rows = div().id("cohost-voices").flex().flex_col().gap_0p5().max_h(px(320.)).overflow_y_scroll();
-        for (i, v) in shown.iter().enumerate() {
-            let is_current = v.id == chosen;
-            let pick = v.id.clone();
-            rows = rows.child(
-                div()
-                    .id(("cohost-voice-row", i))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .p_1p5()
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .when(is_current, |d| d.bg(tok::bg_selected()))
-                    .when(!is_current, |d| d.hover(|d| d.bg(tok::bg_raised())))
-                    .child(play_button(SharedString::from(format!("cohost-voice-play-{i}")), v.clone(), cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_0p5()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().text_size(px(12.)).truncate().child(v.name.clone()))
-                            .child(tags(v)),
-                    )
-                    .when(is_current, |d| d.child(ui::icon("check").size(px(13.)).text_color(tok::ok())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set(json!({"voice": {"voice": pick}}), cx);
-                        this.voice_open = false;
-                        cx.notify();
-                    })),
-            );
-        }
-        if shown.is_empty() {
-            rows =
-                rows.child(div().p_2().text_size(px(12.)).text_color(tok::text_tertiary()).child("No voice matches."));
-        }
-        out.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1p5()
-                .p_2()
-                .rounded(px(8.))
-                .border_1()
-                .border_color(tok::border())
-                .child(TextInput::new(&self.voice_search).xsmall())
-                .when(has_gender, |d| d.child(filters))
-                .child(rows)
-                .child(div().text_size(px(10.)).text_color(tok::text_tertiary()).child(format!(
-                    "{} of {} voices",
-                    shown.len(),
-                    list.len()
-                ))),
-        )
-        .into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(card)
+            .children(problem.map(|e| div().text_size(px(11.)).text_color(tok::error()).child(e)))
+            .into_any_element()
     }
 
     // ---------------------------------------------------------------- Persona, Behaviour

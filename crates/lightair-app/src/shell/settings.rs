@@ -1452,7 +1452,7 @@ impl StudioWindow {
                     }),
             ));
         }
-        pages().child(official).child(tips).child(devices).child(self.ai_keys_group(cx))
+        pages().child(official).child(tips).child(devices).child(self.ai_subscriptions_group(cx)).child(self.ai_keys_group(cx))
     }
 
     fn remote_page(&self, cx: &mut Context<Self>) -> Div {

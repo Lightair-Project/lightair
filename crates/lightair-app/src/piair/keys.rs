@@ -34,18 +34,63 @@ pub const SERVICES: &[(&str, &str, Use, &str)] = &[
         "anthropic",
         "Anthropic (Claude)",
         Use::Brain,
-        "console.anthropic.com › API keys. Claude Pro or Max: use the subscription in the co-host's Brain section instead.",
+        "console.anthropic.com › API keys. With Claude Pro or Max, sign in under Subscriptions instead (one or the other).",
     ),
     (
         "openai",
         "OpenAI",
         Use::Brain,
-        "platform.openai.com › API keys. ChatGPT Plus or Pro: use the subscription in the co-host's Brain section instead.",
+        "platform.openai.com › API keys. With ChatGPT Plus or Pro, sign in under Subscriptions instead.",
     ),
     ("openrouter", "OpenRouter", Use::Brain, "openrouter.ai › Keys."),
     ("groq", "Groq", Use::Brain, "console.groq.com › API keys."),
     ("xai", "xAI (Grok)", Use::Brain, "console.x.ai › API keys."),
 ];
+
+/// Subscriptions the co-host's brain can use instead of a key, signed in on the provider's own
+/// page (Pi's OAuth): (Pi provider id, name, how it goes).
+pub const SUBSCRIPTIONS: &[(&str, &str, &str)] = &[
+    (
+        "anthropic",
+        "Claude Pro or Max",
+        "Sign in with your Claude account: its page opens, then copy the code it shows and choose Paste code. Replaces an Anthropic key (one or the other).",
+    ),
+    (
+        "openai-codex",
+        "ChatGPT Plus or Pro",
+        "Sign in with your ChatGPT account: its page opens and comes back here by itself.",
+    ),
+    ("github-copilot", "GitHub Copilot", "Sign in with GitHub: its page opens; enter the code shown here."),
+    (
+        "xai",
+        "SuperGrok or X Premium",
+        "Sign in with your X account: its page opens and comes back here by itself. Replaces an xAI key (one or the other).",
+    ),
+];
+
+/// The name of a subscription, for messages.
+pub fn subscription_name(provider: &str) -> &'static str {
+    SUBSCRIPTIONS.iter().find(|s| s.0 == provider).map_or("the subscription", |s| s.1)
+}
+
+/// Whether a subscription is signed in (Pi's OAuth credential in the Keychain). Off the main
+/// thread.
+pub fn signed_in(provider: &str) -> bool {
+    keyring::Entry::new(KEYCHAIN_SERVICE, &format!("provider:{provider}"))
+        .ok()
+        .and_then(|e| e.get_password().ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .is_some_and(|v| v["type"] == "oauth")
+}
+
+/// Signs a subscription out: its OAuth credential goes (a key saved for the provider stays).
+pub fn sign_out(provider: &str) -> Result<(), String> {
+    if !signed_in(provider) {
+        return Ok(());
+    }
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("provider:{provider}")).map_err(|e| e.to_string())?;
+    entry.delete_credential().map_err(|e| e.to_string())
+}
 
 /// The voice vendor's key service for a co-host voice (`gemini` uses Google's).
 pub fn service_for_voice(vendor: &str) -> &'static str {

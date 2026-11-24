@@ -1154,6 +1154,7 @@ impl StudioWindow {
             || self.library_sheet.is_some()
             || self.anchor_sheet.is_some()
             || self.outputs.read(cx).dialog_open()
+            || self.cohost_view.read(cx).sheet().read(cx).is_open()
     }
 
     fn to_canvas(&self, workspace: &Workspace, canvas: Id, p: Point<Pixels>) -> Option<(f32, f32)> {
@@ -2487,6 +2488,7 @@ impl Render for StudioWindow {
             .child(self.status_bar(cx))
             .children(self.widget_code_overlay(cx))
             .children(self.add_object_overlay(cx))
+            .child(self.cohost_view.read(cx).sheet())
             .children(self.effect_catalog_overlay(cx))
             .children(self.source_picker_overlay(cx))
             .children(self.library_sheet_overlay(cx))

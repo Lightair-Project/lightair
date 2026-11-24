@@ -14,6 +14,7 @@ pub mod computer;
 pub mod input_mac;
 pub mod keys;
 pub mod view;
+pub mod voice_sheet;
 pub mod voices;
 mod path;
 
@@ -60,6 +61,8 @@ pub struct Auth {
     pub url: Option<String>,
     pub code: Option<String>,
     pub wants_code: bool,
+    /// A choice to make (id, label) instead of a code to paste.
+    pub options: Vec<(String, String)>,
     pub done: bool,
     pub error: bool,
 }
@@ -115,6 +118,9 @@ pub struct Shared {
     engine: std::sync::Arc<lightair_engine::Engine>,
     /// AI keys, voice lists and previews (Settings → Connections, the Voice section).
     pub ai: Mutex<AiState>,
+    /// A subscription sign-in's own PiAir (it only signs in), with its run number.
+    signin: Mutex<Option<(u64, Child, ChildStdin)>>,
+    signin_gen: AtomicU64,
 }
 
 /// What a heard track is to the co-host.
@@ -191,6 +197,10 @@ pub struct AiState {
     pub previewing: Option<String>,
     pub playing: Option<String>,
     pub preview_error: Option<String>,
+    /// Which subscriptions are signed in (Settings → Connections).
+    pub subs: std::collections::HashMap<String, bool>,
+    /// The subscription sign-in under way, at its latest step.
+    pub signin: Option<Auth>,
 }
 
 #[derive(Clone)]
@@ -216,6 +226,8 @@ impl Host {
             hears: Mutex::new(Vec::new()),
             engine,
             ai: Mutex::new(AiState::default()),
+            signin: Mutex::new(None),
+            signin_gen: AtomicU64::new(0),
         });
         let host = Host(shared);
         *host.0.computer.allowed.lock().unwrap_or_else(|e| e.into_inner()) = ComputerPrefs::load().allowed;
@@ -226,6 +238,10 @@ impl Host {
             for (id, ..) in keys::SERVICES {
                 let state = if keys::get(id).is_some() { KeyState::Saved } else { KeyState::Missing };
                 h.0.ai.lock().unwrap_or_else(|e| e.into_inner()).keys.insert((*id).to_string(), state);
+            }
+            for (id, ..) in keys::SUBSCRIPTIONS {
+                let on = keys::signed_in(id);
+                h.0.ai.lock().unwrap_or_else(|e| e.into_inner()).subs.insert((*id).to_string(), on);
             }
             h.touch();
         });
@@ -822,6 +838,15 @@ pub fn parse_line(line: &str) -> Result<Incoming, String> {
             url: text("url"),
             code: text("code"),
             wants_code: flag("prompt"),
+            options: m
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|o| Some((o.get("id")?.as_str()?.to_owned(), o.get("label")?.as_str()?.to_owned())))
+                        .collect()
+                })
+                .unwrap_or_default(),
             done: flag("done"),
             error: flag("error"),
         }),
@@ -998,6 +1023,191 @@ impl Host {
                 Err(e) => KeyState::Problem(e),
             };
             host.set_key_state(service, state);
+        });
+    }
+
+    // ------------------------------------------------------- subscriptions
+
+    /// Whether a subscription is signed in (`None` while that's being read).
+    pub fn sub_state(&self, provider: &str) -> Option<bool> {
+        self.0.ai.lock().unwrap_or_else(|e| e.into_inner()).subs.get(provider).copied()
+    }
+
+    /// The subscription sign-in under way (or just over), at its latest step.
+    pub fn sign_in_step(&self) -> Option<Auth> {
+        self.0.ai.lock().unwrap_or_else(|e| e.into_inner()).signin.clone()
+    }
+
+    fn set_sign_in_step(&self, step: Option<Auth>) {
+        self.0.ai.lock().unwrap_or_else(|e| e.into_inner()).signin = step;
+        self.touch();
+    }
+
+    /// Signs in to a provider's subscription (Settings → Connections): a PiAir of its own that only
+    /// signs in, so it works whether or not a co-host is on. The provider's page opens in the
+    /// browser; the steps show in Settings; the credential goes to the Keychain through
+    /// `secret.set`, and the co-host's PiAir reads it again.
+    pub fn sign_in(&self, provider: &str) {
+        self.cancel_sign_in();
+        let step = |message: &str, error: bool| Auth {
+            provider: provider.to_string(),
+            message: message.to_string(),
+            error,
+            ..Auth::default()
+        };
+        let Some(cmd) = Self::program() else {
+            self.set_sign_in_step(Some(step("PiAir isn't in this build of Lightair.", true)));
+            return;
+        };
+        let mut c = Command::new(&cmd[0]);
+        c.args(&cmd[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let mut child = match c.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                self.set_sign_in_step(Some(step(&format!("Couldn't start the sign-in: {e}"), true)));
+                return;
+            }
+        };
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else { return };
+        if let Some(err) = child.stderr.take() {
+            std::thread::spawn(move || {
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    tracing::info!(target: "piair", "sign-in: {line}");
+                }
+            });
+        }
+        let run = self.0.signin_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        *self.0.signin.lock().unwrap_or_else(|e| e.into_inner()) = Some((run, child, stdin));
+        self.set_sign_in_step(Some(step("Opening the sign-in page…", false)));
+        let login = json!({"t": "login", "provider": provider, "kind": "oauth"});
+        let (host, provider) = (self.clone(), provider.to_string());
+        std::thread::Builder::new()
+            .name("piair-signin".into())
+            .spawn(move || {
+                let current = || host.0.signin_gen.load(Ordering::Relaxed) == run;
+                let mut finished = false;
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if !current() {
+                        break;
+                    }
+                    match parse_line(&line) {
+                        // it only keeps its credential: nothing else of Lightair's is open to it
+                        Ok(Incoming::Call { id, method, params }) => {
+                            let msg = if method.starts_with("secret.") {
+                                match host.answer(&method, params) {
+                                    Ok(result) => json!({"t": "reply", "id": id, "result": result}),
+                                    Err(e) => json!({"t": "reply", "id": id, "error": {"code": e.0, "message": e.1}}),
+                                }
+                            } else {
+                                json!({"t": "reply", "id": id, "error": {"code": "not_allowed", "message": "Only signing in here."}})
+                            };
+                            host.sign_in_send(run, msg);
+                        }
+                        Ok(Incoming::Auth(mut a)) => {
+                            if let Some(url) = &a.url {
+                                open_url(url);
+                            }
+                            a.provider = provider.clone();
+                            if a.done {
+                                a.message = format!("Signed in to {}", keys::subscription_name(&provider));
+                            }
+                            finished |= a.done || a.error;
+                            host.set_sign_in_step(Some(a));
+                        }
+                        // PiAir says where providers stand once the sign-in is over: it's done
+                        Ok(Incoming::Providers { .. }) => break,
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(%e, "piair sign-in: bad line"),
+                    }
+                }
+                if !current() {
+                    return;
+                }
+                let proc = host.0.signin.lock().unwrap_or_else(|e| e.into_inner()).take_if(|s| s.0 == run);
+                if let Some((_, mut c, stdin)) = proc {
+                    drop(stdin);
+                    let _ = c.wait();
+                }
+                let on = keys::signed_in(&provider);
+                {
+                    let mut ai = host.0.ai.lock().unwrap_or_else(|e| e.into_inner());
+                    ai.subs.insert(provider.clone(), on);
+                    if let Some(id) = keys::SERVICES.iter().map(|s| s.0).find(|s| *s == provider) {
+                        let state = if keys::get(id).is_some() { KeyState::Saved } else { KeyState::Missing };
+                        ai.keys.insert(id.to_string(), state);
+                    }
+                    if !finished && !on {
+                        ai.signin = Some(Auth {
+                            provider: provider.clone(),
+                            message: "The sign-in stopped before it finished.".into(),
+                            error: true,
+                            ..Auth::default()
+                        });
+                    }
+                }
+                host.send(json!({"t": "secrets_changed"}));
+                host.touch();
+            })
+            .ok();
+        self.sign_in_send(run, login);
+    }
+
+    fn sign_in_send(&self, run: u64, m: Value) {
+        let mut g = self.0.signin.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, _, stdin)) = g.as_mut().filter(|s| s.0 == run) {
+            let mut line = m.to_string();
+            line.push('\n');
+            let _ = stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush());
+        }
+    }
+
+    /// Answers the sign-in's question: the code from the provider's page, or a choice's id.
+    pub fn sign_in_answer(&self, code: &str) {
+        let run = self.0.signin_gen.load(Ordering::Relaxed);
+        self.sign_in_send(run, json!({"t": "auth_code", "code": code}));
+        if let Some(a) = self.0.ai.lock().unwrap_or_else(|e| e.into_inner()).signin.as_mut() {
+            a.wants_code = false;
+            a.options.clear();
+            a.message = "Checking…".into();
+        }
+        self.touch();
+    }
+
+    /// Stops a sign-in under way (and forgets the last one's message).
+    pub fn cancel_sign_in(&self) {
+        self.0.signin_gen.fetch_add(1, Ordering::Relaxed);
+        if let Some((_, mut c, stdin)) = self.0.signin.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            drop(stdin);
+            let _ = c.kill();
+            std::thread::spawn(move || {
+                let _ = c.wait();
+            });
+        }
+        self.set_sign_in_step(None);
+    }
+
+    /// Signs a subscription out, and tells the co-host's PiAir.
+    pub fn sign_out(&self, provider: &'static str) {
+        let host = self.clone();
+        std::thread::spawn(move || {
+            let result = keys::sign_out(provider);
+            let on = keys::signed_in(provider);
+            host.0.ai.lock().unwrap_or_else(|e| e.into_inner()).subs.insert(provider.to_string(), on);
+            if let Err(e) = result {
+                host.set_sign_in_step(Some(Auth {
+                    provider: provider.to_string(),
+                    message: format!("Couldn't sign out: {e}"),
+                    error: true,
+                    ..Auth::default()
+                }));
+            }
+            host.send(json!({"t": "secrets_changed"}));
+            host.touch();
         });
     }
 
