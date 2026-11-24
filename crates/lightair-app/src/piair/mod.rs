@@ -1847,62 +1847,83 @@ fn track_sound(
     })
 }
 
-/// Keeps the co-host from hearing itself: while its voice plays (the mic picks it up from the
-/// speakers), what's heard goes through only when it's clearly louder than that voice's echo
-/// would be (the streamer talking over it), else silence. How loud the echo comes back is learned
-/// as the voice plays, so with headphones (no echo) the streamer is heard at once.
-struct EchoGate {
-    /// The voice's peak in the last frames (the echo arrives a little after it plays).
-    recent: VecDeque<f32>,
-    /// The echo's level against the voice's (an upper bound, learned).
-    gain: f32,
-    /// Frames still let through after the streamer was heard (so words aren't cut).
+/// What the live model hears of a track: the co-host's own voice taken out (WebRTC's echo
+/// canceller, with the voice as it plays as its reference, the way a voice call does), and only
+/// while someone is talking (WebRTC's speech detector), so nothing goes up the call in silence:
+/// the model isn't kept listening (and spending the plan) to a quiet room, and never to itself.
+struct Hearer {
+    apm: sonora::AudioProcessing,
+    vad: sonora_agc2::vad_wrapper::VoiceActivityDetectorWrapper,
+    /// The last moments before speech starts (sent with it, so its first syllable isn't lost).
+    lead: VecDeque<[i16; Hearer::FRAME]>,
+    /// Frames still sent after the last speech (the model hears the pause that ends a turn).
     hold: u32,
+    /// Speech frames in a row (one alone, a click or what's left of an echo, doesn't open it).
+    streak: u32,
+    /// For the debug log: the loudest heard and the likeliest speech since it was last read.
+    seen: (i16, f32),
 }
 
-impl EchoGate {
-    /// 20 ms at 16 kHz.
-    const FRAME: usize = 320;
-    /// The voice's echo can come this many frames after it played (output and room delay).
-    const REACH: usize = 25;
-    /// The streamer is heard over the voice when this much louder than its echo.
-    const OVER: f32 = 2.0;
+impl Hearer {
+    /// 10 ms at 16 kHz.
+    const FRAME: usize = 160;
+    const LEAD: usize = 30;
+    const HOLD: u32 = 120;
+    /// Speech probability that opens it, and the least level (RMS, of 32768) of a frame that
+    /// counts: a quiet room the detector mistakes for a voice stays shut.
+    const SPEECH: f32 = 0.6;
+    const LEVEL: f32 = 100.0;
 
     fn new() -> Self {
-        Self { recent: VecDeque::with_capacity(Self::REACH + 1), gain: 1.0, hold: 0 }
+        use sonora::config::EchoCanceller;
+        let rate = lightair_engine::audio_host::LISTEN_RATE;
+        let config = sonora::Config { echo_canceller: Some(EchoCanceller::default()), ..Default::default() };
+        let apm = sonora::AudioProcessing::builder()
+            .config(config)
+            .capture_config(sonora::StreamConfig::new(rate, 1))
+            .render_config(sonora::StreamConfig::new(rate, 1))
+            .build();
+        let vad = sonora_agc2::vad_wrapper::VoiceActivityDetectorWrapper::new(sonora_simd::detect_backend(), rate as i32);
+        Self { apm, vad, lead: VecDeque::with_capacity(Self::LEAD + 1), hold: 0, streak: 0, seen: (0, 0.0) }
     }
 
-    /// One frame of what's heard (`heard`) and the voice playing at the same time (`voice`):
-    /// leaves the frame as it is, or silences it.
-    fn frame(&mut self, heard: &mut [i16], voice: &[i16]) {
-        let peak = |x: &[i16]| x.iter().map(|v| v.unsigned_abs()).max().unwrap_or(0) as f32 / 32768.0;
-        let (h, v) = (peak(heard), peak(voice));
-        self.recent.push_back(v);
-        if self.recent.len() > Self::REACH {
-            self.recent.pop_front();
+    /// One frame heard and the voice playing at the same time: what to send up the call (`out`
+    /// gets nothing when no one's talking).
+    fn frame(&mut self, heard: &[i16], voice: &[i16], out: &mut Vec<i16>) {
+        let mut scratch = [0i16; Self::FRAME];
+        let _ = self.apm.process_render_i16(voice, &mut scratch);
+        let mut clean = [0i16; Self::FRAME];
+        if self.apm.process_capture_i16(heard, &mut clean).is_err() {
+            clean.copy_from_slice(heard);
         }
-        let far = self.recent.iter().copied().fold(0.0, f32::max);
-        // the co-host is quiet (and has been for a while): everything is heard
-        if far < 0.003 {
-            self.hold = 0;
-            return;
-        }
-        if h > Self::OVER * self.gain * far && h > 0.01 {
-            self.hold = 10;
-            return;
+        let floats: [f32; Self::FRAME] = std::array::from_fn(|k| clean[k] as f32);
+        let p = self.vad.analyze(&floats);
+        let level = (floats.iter().map(|v| v * v).sum::<f32>() / Self::FRAME as f32).sqrt();
+        self.streak = if p > Self::SPEECH && level > Self::LEVEL { self.streak + 1 } else { 0 };
+        let speech = self.streak >= 2;
+        let top = heard.iter().map(|v| v.saturating_abs()).max().unwrap_or(0);
+        self.seen = (self.seen.0.max(top), self.seen.1.max(p));
+        if speech {
+            // starting: what came just before goes first
+            for f in self.lead.drain(..) {
+                out.extend_from_slice(&f);
+            }
+            self.hold = Self::HOLD;
         }
         if self.hold > 0 {
             self.hold -= 1;
-            return;
+            out.extend_from_slice(&clean);
+        } else {
+            self.lead.push_back(clean);
+            if self.lead.len() > Self::LEAD {
+                self.lead.pop_front();
+            }
         }
-        // echo alone: learn how loud it comes back (rising at once, easing down over seconds)
-        self.gain = (h / far).max(self.gain * 0.995).min(8.0);
-        heard.fill(0);
     }
 }
 
-/// Realtime voice: forwards a conversation track's sound raw to PiAir (`audio` messages) for the
-/// live model to hear, with the co-host's own voice kept out ([`EchoGate`]).
+/// Realtime voice: forwards a conversation track's sound to PiAir (`audio` messages) for the
+/// live model to hear, through a [`Hearer`].
 struct Forwarder {
     source: Id,
     muted: std::sync::Arc<AtomicBool>,
@@ -1931,10 +1952,11 @@ impl Forwarder {
         std::thread::spawn(move || {
             let _tap = tap;
             let _guard = Finally(d);
-            let mut gate = EchoGate::new();
+            let mut hearer = Hearer::new();
+            let mut out = Vec::<i16>::with_capacity(4096);
             let (mut pending, mut voice) = (Vec::<i16>::new(), Vec::<i16>::new());
             let mut bytes = Vec::with_capacity(8192);
-            let mut peak: i16 = 0;
+            let (mut peak, mut sent): (i16, usize) = (0, 0);
             let mut report = Instant::now();
             while !s.load(Ordering::Relaxed) && !heard.is_abandoned() {
                 std::thread::sleep(Duration::from_millis(20));
@@ -1960,26 +1982,32 @@ impl Forwarder {
                         }
                     }
                 }
-                let frames = pending.len() / EchoGate::FRAME * EchoGate::FRAME;
+                let frames = pending.len() / Hearer::FRAME * Hearer::FRAME;
                 if frames == 0 {
                     continue;
                 }
-                for (h, v) in pending[..frames].chunks_mut(EchoGate::FRAME).zip(voice[..frames].chunks(EchoGate::FRAME)) {
-                    gate.frame(h, v);
-                }
-                bytes.clear();
-                for &x in &pending[..frames] {
-                    peak = peak.max(x.saturating_abs());
-                    bytes.extend_from_slice(&x.to_le_bytes());
+                out.clear();
+                for (h, v) in pending[..frames].chunks(Hearer::FRAME).zip(voice[..frames].chunks(Hearer::FRAME)) {
+                    hearer.frame(h, v, &mut out);
                 }
                 pending.drain(..frames);
                 voice.drain(..frames);
-                host.send(json!({"t": "audio", "pcm": base64::engine::general_purpose::STANDARD.encode(&bytes)}));
                 if report.elapsed() > Duration::from_secs(2) {
-                    tracing::debug!(track = %name, peak, echo = gate.gain, "piair: forwarded audio level");
-                    peak = 0;
+                    let (heard, speech) = std::mem::take(&mut hearer.seen);
+                    tracing::debug!(track = %name, heard, speech, peak, sent, "piair: heard audio sent up the call");
+                    (peak, sent) = (0, 0);
                     report = Instant::now();
                 }
+                if out.is_empty() {
+                    continue;
+                }
+                bytes.clear();
+                for &x in &out {
+                    peak = peak.max(x.saturating_abs());
+                    bytes.extend_from_slice(&x.to_le_bytes());
+                }
+                sent += out.len();
+                host.send(json!({"t": "audio", "pcm": base64::engine::general_purpose::STANDARD.encode(&bytes)}));
             }
         });
         tracing::info!(track = %h.name, echo = h.echo.len(), "piair: forwarding this track's audio to ChatGPT voice");

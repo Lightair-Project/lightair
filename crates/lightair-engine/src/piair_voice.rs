@@ -73,7 +73,16 @@ struct Queue {
     events: Vec<Event>,
     /// Fading out after a cancel: samples left of the fade.
     fade: usize,
+    /// The utterance playing now (until its last piece has played).
+    current: Option<String>,
+    /// It ran dry before PiAir finished it: wait for a lead again before going on.
+    dry: bool,
 }
+
+/// How much of an utterance is queued before it starts (or goes on after running dry), unless
+/// PiAir has finished it: speech that streams in (a live voice) arrives a little unevenly, and
+/// without this lead every late packet is a gap.
+const LEAD: usize = RATE as usize * 3 / 20;
 
 static QUEUE: Mutex<Option<Queue>> = Mutex::new(None);
 /// Voice sources alive (no source: nothing would play it).
@@ -155,6 +164,9 @@ pub fn cancel(utterance: Option<&str>) {
             q.fade = BLOCK;
         }
         q.ended.retain(|u| !gone.contains(u));
+        if q.current.as_ref().is_some_and(|c| gone.contains(c)) {
+            (q.current, q.dry) = (None, false);
+        }
         for u in gone {
             q.events.push(Event::Cancelled(u));
         }
@@ -200,8 +212,18 @@ fn next_block(out: &mut [f32; BLOCK], mouth: &mut Mouth) {
     let mut nod = false;
     with(|q| {
         let mut i = 0;
-        while i < BLOCK {
+        // a new utterance, or one that ran dry: wait for its lead
+        let wait = q.pieces.front().filter(|p| p.first || q.dry).is_some_and(|p| {
+            let u = &p.utterance;
+            let queued: usize = q.pieces.iter().filter(|p| &p.utterance == u).map(|p| p.samples.len()).sum();
+            queued < LEAD && !q.ended.contains(u)
+        });
+        if !wait {
+            q.dry = false;
+        }
+        while i < BLOCK && !wait {
             let Some(p) = q.pieces.front_mut() else { break };
+            q.current = Some(p.utterance.clone());
             if p.played == 0 && p.first {
                 q.events.push(Event::Playing(p.utterance.clone()));
                 p.first = false;
@@ -221,9 +243,17 @@ fn next_block(out: &mut [f32; BLOCK], mouth: &mut Mouth) {
                 if !q.pieces.iter().any(|p| p.utterance == done) && q.ended.contains(&done) {
                     q.ended.retain(|u| *u != done);
                     q.events.push(Event::Done(done));
+                    q.current = None;
                     nod = true;
                 }
             }
+        }
+        // ran out mid-utterance (more of it is still coming)
+        if i < BLOCK && !wait && q.pieces.is_empty() && q.current.as_ref().is_some_and(|u| !q.ended.contains(u)) {
+            if !q.dry {
+                tracing::debug!("piair voice: ran dry mid-utterance (waiting for a lead)");
+            }
+            q.dry = true;
         }
         for s in out[i..].iter_mut() {
             *s = 0.0;
