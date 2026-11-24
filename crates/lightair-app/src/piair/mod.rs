@@ -118,6 +118,8 @@ pub struct Shared {
     engine: std::sync::Arc<lightair_engine::Engine>,
     /// AI keys, voice lists and previews (Settings → Connections, the Voice section).
     pub ai: Mutex<AiState>,
+    /// How each heard track's listening is going, for the Inspector's Hears list.
+    pub hear_status: Mutex<std::collections::HashMap<Id, HearStatus>>,
     /// A subscription sign-in's own PiAir (it only signs in), with its run number.
     signin: Mutex<Option<(u64, Child, ChildStdin)>>,
     signin_gen: AtomicU64,
@@ -130,6 +132,14 @@ pub enum Role {
     Conversation,
     /// Something playing (a video, a game): context it may react to, never someone addressing it.
     Content,
+}
+
+/// How listening to a heard track is going: what the Inspector says under it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HearStatus {
+    pub text: String,
+    /// 0 fine, 1 worth a look (no sound), 2 it can't hear (the reason in `text`).
+    pub level: u8,
 }
 
 /// A mixer track the co-host hears.
@@ -226,6 +236,7 @@ impl Host {
             hears: Mutex::new(Vec::new()),
             engine,
             ai: Mutex::new(AiState::default()),
+            hear_status: Mutex::new(std::collections::HashMap::new()),
             signin: Mutex::new(None),
             signin_gen: AtomicU64::new(0),
         });
@@ -647,6 +658,7 @@ impl Host {
                 let mut loud_until = Instant::now();
                 let mut paused = false;
                 let mut listeners: std::collections::HashMap<Id, Listener> = std::collections::HashMap::new();
+                let mut failed: std::collections::HashMap<Id, (Instant, String)> = std::collections::HashMap::new();
                 loop {
                     std::thread::sleep(Duration::from_millis(20));
                     for e in piair_voice::take_events() {
@@ -665,6 +677,8 @@ impl Host {
                     }
                     if !host.running() {
                         listeners.clear();
+                        failed.clear();
+                        host.0.hear_status.lock().unwrap_or_else(|e| e.into_inner()).clear();
                         continue;
                     }
                     for ev in host.0.hub.since(last_chat) {
@@ -704,13 +718,48 @@ impl Host {
                     // listening: one on-device speech helper per heard track, while PiAir runs
                     let ready = host.state().ready;
                     let hears = if ready { host.0.hears.lock().unwrap_or_else(|e| e.into_inner()).clone() } else { Vec::new() };
-                    listeners.retain(|track, l| hears.iter().any(|h| h.track == *track && h.role == l.role && h.source == l.source) && !l.dead());
-                    for h in &hears {
-                        if !listeners.contains_key(&h.track)
-                            && let Some(l) = Listener::start(&host.0.engine, h)
-                        {
-                            listeners.insert(h.track, l);
+                    listeners.retain(|track, l| hears.iter().any(|h| h.track == *track && h.role == l.role && h.source == l.source));
+                    // one that stopped: why, and a new try in a few seconds (not in a loop)
+                    let ended: Vec<Id> = listeners.iter_mut().filter_map(|(t, l)| l.dead().then_some(*t)).collect();
+                    for t in ended {
+                        if let Some(l) = listeners.remove(&t) {
+                            let why = l.state.lock().unwrap_or_else(|e| e.into_inner()).problem.clone();
+                            failed.insert(t, (Instant::now(), why.unwrap_or_else(|| "Speech recognition stopped; trying again…".into())));
                         }
+                    }
+                    failed.retain(|t, _| hears.iter().any(|h| h.track == *t));
+                    for h in &hears {
+                        if listeners.contains_key(&h.track) || failed.get(&h.track).is_some_and(|f| f.0.elapsed() < Duration::from_secs(5)) {
+                            continue;
+                        }
+                        match Listener::start(&host.0.engine, h) {
+                            Ok(l) => {
+                                failed.remove(&h.track);
+                                listeners.insert(h.track, l);
+                            }
+                            Err(why) => {
+                                tracing::warn!(track = %h.name, %why, "piair: can't listen");
+                                failed.insert(h.track, (Instant::now(), why));
+                            }
+                        }
+                    }
+                    // what the Inspector says under each heard track
+                    let status: std::collections::HashMap<Id, HearStatus> = hears
+                        .iter()
+                        .map(|h| {
+                            let st = match (listeners.get(&h.track), failed.get(&h.track)) {
+                                (Some(l), _) => l.status(),
+                                (None, Some((_, why))) => HearStatus { text: why.clone(), level: 2 },
+                                (None, None) => HearStatus { text: "Starting…".into(), level: 1 },
+                            };
+                            (h.track, st)
+                        })
+                        .collect();
+                    let mut current = host.0.hear_status.lock().unwrap_or_else(|e| e.into_inner());
+                    if *current != status {
+                        *current = status;
+                        drop(current);
+                        host.touch();
                     }
                     for l in listeners.values_mut() {
                         for (text, done) in l.take() {
@@ -1370,24 +1419,52 @@ struct Listener {
     name: String,
     lines: std::sync::mpsc::Receiver<(String, bool)>,
     stop: std::sync::Arc<AtomicBool>,
+    state: std::sync::Arc<Mutex<ListenState>>,
+}
+
+/// What a listener knows of itself, from its helper's lines and the sound going in.
+#[derive(Default)]
+struct ListenState {
+    /// The helper is listening ("on-device" or "online").
+    ready: Option<String>,
+    /// The words it last made out, and when.
+    words: Option<(String, Instant)>,
+    /// When the track last had sound in it (above a whisper).
+    sound_at: Option<Instant>,
+    started: Option<Instant>,
+    /// Why it can't hear, as the helper says.
+    problem: Option<String>,
 }
 
 impl Listener {
-    fn start(engine: &std::sync::Arc<lightair_engine::Engine>, h: &Hearing) -> Option<Listener> {
+    /// Starts listening to a track, or says why it can't.
+    fn start(engine: &std::sync::Arc<lightair_engine::Engine>, h: &Hearing) -> Result<Listener, String> {
         if !cfg!(target_os = "macos") {
-            return None;
+            return Err("Hearing needs macOS for now.".into());
         }
-        let exe = std::env::current_exe().ok()?;
-        let dir = exe.parent()?;
-        let helper = [dir.join("lightair-speech"), dir.join("../lightair-speech")].into_iter().find(|p| p.exists())?;
+        let missing = || "Speech recognition isn't in this build of Lightair.".to_string();
+        let exe = std::env::current_exe().map_err(|_| missing())?;
+        let dir = exe.parent().ok_or_else(missing)?;
+        let helper =
+            [dir.join("lightair-speech"), dir.join("../lightair-speech")].into_iter().find(|p| p.exists()).ok_or_else(missing)?;
         let source = h.source;
-        let (tap, mut consumer) = engine.call(move |e| e.reconciler.source_ref(source).map(|p| unsafe { lightair_engine::audio_tap::Tap::open(p) }))?;
-        let mut child = Command::new(helper).args(["-", "-pcm"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
-        let mut stdin = child.stdin.take()?;
-        let out = child.stdout.take()?;
+        let (tap, mut consumer) = engine
+            .call(move |e| e.reconciler.source_ref(source).map(|p| unsafe { lightair_engine::audio_tap::Tap::open(p) }))
+            .ok_or("Couldn't take this track's sound (is its source on?).")?;
+        let mut child = Command::new(helper)
+            .args(["-", "-pcm"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Speech recognition didn't start: {e}"))?;
+        let (Some(mut stdin), Some(out)) = (child.stdin.take(), child.stdout.take()) else {
+            return Err("Speech recognition didn't start.".into());
+        };
         let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let state = std::sync::Arc::new(Mutex::new(ListenState { started: Some(Instant::now()), ..Default::default() }));
         // the track's sound into the helper
-        let s = stop.clone();
+        let (s, st) = (stop.clone(), state.clone());
         std::thread::spawn(move || {
             let _tap = tap;
             let mut bytes = Vec::with_capacity(8192);
@@ -1398,6 +1475,11 @@ impl Listener {
                     continue;
                 }
                 let Ok(chunk) = consumer.read_chunk(n) else { continue };
+                let (a, b) = chunk.as_slices();
+                // above a whisper (about -40 dBFS)
+                if a.iter().chain(b).any(|v| v.unsigned_abs() > 330) {
+                    st.lock().unwrap_or_else(|e| e.into_inner()).sound_at = Some(Instant::now());
+                }
                 bytes.clear();
                 bytes.extend(chunk.into_iter().flat_map(i16::to_le_bytes));
                 if stdin.write_all(&bytes).is_err() {
@@ -1407,20 +1489,61 @@ impl Listener {
         });
         // its words out
         let (tx, rx) = std::sync::mpsc::channel();
+        let (st, name) = (state.clone(), h.name.clone());
         std::thread::spawn(move || {
             let mut last = String::new();
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 if let Some(text) = line.strip_prefix("TEXT ") {
                     last = text.to_string();
+                    {
+                        let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
+                        g.words = Some((last.clone(), Instant::now()));
+                        g.problem = None;
+                    }
                     if tx.send((last.clone(), false)).is_err() {
                         break;
                     }
-                } else if line == "DONE" && !last.is_empty() && tx.send((std::mem::take(&mut last), true)).is_err() {
-                    break;
+                } else if line == "DONE" {
+                    if !last.is_empty() && tx.send((std::mem::take(&mut last), true)).is_err() {
+                        break;
+                    }
+                } else if let Some(how) = line.strip_prefix("READY ") {
+                    tracing::info!(track = %name, %how, "piair: listening");
+                    st.lock().unwrap_or_else(|e| e.into_inner()).ready = Some(how.to_string());
+                } else if let Some(why) = line.strip_prefix("ERROR ") {
+                    tracing::warn!(track = %name, %why, "piair: speech recognition");
+                    st.lock().unwrap_or_else(|e| e.into_inner()).problem = Some(why.to_string());
                 }
             }
         });
-        Some(Listener { child, role: h.role, source: h.source, name: h.name.clone(), lines: rx, stop })
+        Ok(Listener { child, role: h.role, source: h.source, name: h.name.clone(), lines: rx, stop, state })
+    }
+
+    /// What the Inspector says under its track.
+    fn status(&self) -> HearStatus {
+        let g = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let ago = |t: Option<Instant>| t.map(|t| t.elapsed());
+        if let Some(p) = &g.problem {
+            return HearStatus { text: p.clone(), level: 2 };
+        }
+        if let Some((w, at)) = &g.words
+            && at.elapsed() < Duration::from_secs(10)
+        {
+            let w: String = w.chars().rev().take(80).collect::<Vec<_>>().into_iter().rev().collect();
+            return HearStatus { text: format!("Heard: “{w}”"), level: 0 };
+        }
+        if g.ready.is_none() {
+            return if ago(g.started).is_some_and(|d| d > Duration::from_secs(8)) {
+                HearStatus { text: "Speech recognition hasn't started (Speech Recognition allowed in System Settings › Privacy & Security?)".into(), level: 2 }
+            } else {
+                HearStatus { text: "Starting speech recognition…".into(), level: 1 }
+            };
+        }
+        let quiet_for = ago(g.sound_at).or(ago(g.started)).unwrap_or_default();
+        if quiet_for > Duration::from_secs(5) {
+            return HearStatus { text: "No sound from this track: muted, or nothing playing?".into(), level: 1 };
+        }
+        HearStatus { text: "Listening".into(), level: 0 }
     }
 
     /// What it heard since last time: (text so far, whether the utterance ended).

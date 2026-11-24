@@ -3,6 +3,7 @@
 // language allows (never sent anywhere then). One line per update on stdout:
 //   TEXT <what's been said so far in this utterance>
 //   DONE            (the utterance ended; the next TEXT starts a new one)
+//   READY <language> <on-device|online>   (once, when it's listening)
 //   ERROR <why>
 // Runs until its stdin closes (Lightair quitting or no automation listening any more).
 // Arguments, both optional: a language ("en-US"; "-" for the system's) and where the sound comes
@@ -43,6 +44,7 @@ let engine = AVAudioEngine()
 var request: SFSpeechAudioBufferRecognitionRequest?
 var task: SFSpeechRecognitionTask?
 var started = Date()
+var lastError = ""
 
 func say(_ line: String) {
     print(line.replacingOccurrences(of: "\n", with: " "))
@@ -61,12 +63,23 @@ func restart() {
     started = Date()
     task = recognizer?.recognitionTask(with: req) { result, error in
         if let r = result {
+            lastError = ""
             say("TEXT " + r.bestTranscription.formattedString)
             if r.isFinal {
                 say("DONE")
                 DispatchQueue.main.async { restart() }
             }
-        } else if error != nil {
+        } else if let e = error as NSError? {
+            // say why it can't hear (once per reason), but not the everyday ones: a task we ended
+            // ourselves, a stretch with no speech
+            let quiet: Set<Int> = [203, 216, 301, 1101, 1110]
+            if !quiet.contains(e.code) {
+                let why = "ERROR \(e.localizedDescription) (\(e.domain) \(e.code))"
+                if why != lastError {
+                    lastError = why
+                    say(why)
+                }
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { restart() }
         }
     }
@@ -78,6 +91,7 @@ func start() {
         exit(3)
     }
     recognizer = r
+    say("READY \(locale.identifier) \(r.supportsOnDeviceRecognition ? "on-device" : "online")")
     // samples from Lightair on stdin: no microphone of our own
     if fromStdin {
         restart()

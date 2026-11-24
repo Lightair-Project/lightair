@@ -667,9 +667,32 @@ impl CohostView {
             .iter()
             .map(|h| json!({"track": h.track.to_string(), "role": if h.role == super::Role::Content { "content" } else { "conversation" }}))
             .collect();
+        let status = self.host.0.hear_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let running = self.active && self.host.running();
         let mut list = div().flex().flex_col().gap_1();
         for (i, h) in hears.iter().enumerate() {
             let content = h.role == super::Role::Content;
+            // how listening to it is going (while the co-host is on)
+            let line = status.get(&h.track).filter(|_| running).map(|st| {
+                let colour = match st.level {
+                    0 => tok::ok(),
+                    1 => tok::warn(),
+                    _ => tok::error(),
+                };
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_1p5()
+                    .child(div().flex_none().mt(px(4.)).size(px(6.)).rounded_full().bg(colour))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .text_color(if st.level == 2 { tok::error() } else { tok::text_secondary() })
+                            .child(st.text.clone()),
+                    )
+            });
             let set_role = {
                 let saved = saved.clone();
                 move |this: &mut CohostView, role: &str, cx: &mut Context<CohostView>| {
@@ -729,7 +752,8 @@ impl CohostView {
                             .child(seg("cohost-hears-content", "Content", content).when(!content, |d| {
                                 d.on_click(cx.listener(move |this, _, _, cx| to_content(this, "content", cx)))
                             })),
-                    ),
+                    )
+                    .children(line),
             );
         }
         // every mixer track but the co-hosts' own voices and those already heard
