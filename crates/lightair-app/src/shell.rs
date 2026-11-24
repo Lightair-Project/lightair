@@ -316,7 +316,9 @@ pub struct StudioWindow {
     /// PiAir, the AI co-host (crate::piair); the co-host object's Inspector sections; what the
     /// co-host check last did (shell/cohost.rs); an AI co-host is being added (the library open).
     pub(crate) piair: crate::piair::Host,
+    /// The co-host's card in the Inspector, and its own window (a sheet like Settings).
     cohost_view: Entity<crate::piair::view::CohostView>,
+    cohost_window: Entity<crate::piair::view::CohostView>,
     cohost: cohost::CohostSync,
     adding_cohost: bool,
     /// Settings' page content (a development aid scrolls it for captures).
@@ -731,11 +733,27 @@ impl StudioWindow {
         let remote = Self::new_remote(window, cx);
         let automations = live_api::start_automations(&studio.read(cx).chat, remote.jobs());
         let piair = crate::piair::Host::new(remote.jobs(), studio.read(cx).chat.clone(), studio.read(cx).engine().clone());
-        let cohost_view = {
+        let (cohost_view, cohost_window) = {
+            use crate::piair::view::{CohostView, Mode};
             let (h, st) = (piair.clone(), studio.clone());
-            cx.new(|cx| crate::piair::view::CohostView::new(h, st, window, cx))
+            let card = cx.new(|cx| CohostView::new(Mode::Card, h.clone(), st.clone(), window, cx));
+            let win = cx.new(|cx| CohostView::new(Mode::Window, h, st, window, cx));
+            (card, win)
         };
-        cx.subscribe(&cohost_view, |this, _, _: &crate::piair::view::CohostEvent, cx| this.open_settings(settings::Page::Connections, cx)).detach();
+        for view in [&cohost_view, &cohost_window] {
+            cx.subscribe_in(view, window, |this, from, ev: &crate::piair::view::CohostEvent, window, cx| match ev {
+                crate::piair::view::CohostEvent::OpenConnections => this.open_settings(settings::Page::Connections, cx),
+                crate::piair::view::CohostEvent::OpenWindow(page) => {
+                    let (source, active) = from.read(cx).source_shown();
+                    let page = *page;
+                    this.cohost_window.update(cx, |w, cx| {
+                        w.set_source(source, active);
+                        w.open(page, window, cx);
+                    });
+                }
+            })
+            .detach();
+        }
         live_api::feed_widgets(automations.clone(), studio.read(cx).widgets.clone());
         let automations_panel = {
             let a = automations.clone();
@@ -774,6 +792,7 @@ impl StudioWindow {
             activity,
             piair,
             cohost_view,
+            cohost_window,
             cohost: Default::default(),
             adding_cohost: false,
             settings_scroll: ScrollHandle::new(),
@@ -1154,7 +1173,8 @@ impl StudioWindow {
             || self.library_sheet.is_some()
             || self.anchor_sheet.is_some()
             || self.outputs.read(cx).dialog_open()
-            || self.cohost_view.read(cx).sheet().read(cx).is_open()
+            || self.cohost_window.read(cx).is_open()
+            || self.cohost_window.read(cx).sheet().read(cx).is_open()
     }
 
     fn to_canvas(&self, workspace: &Workspace, canvas: Id, p: Point<Pixels>) -> Option<(f32, f32)> {
@@ -2488,7 +2508,8 @@ impl Render for StudioWindow {
             .child(self.status_bar(cx))
             .children(self.widget_code_overlay(cx))
             .children(self.add_object_overlay(cx))
-            .child(self.cohost_view.read(cx).sheet())
+            .child(self.cohost_window.clone())
+            .child(self.cohost_window.read(cx).sheet())
             .children(self.effect_catalog_overlay(cx))
             .children(self.source_picker_overlay(cx))
             .children(self.library_sheet_overlay(cx))

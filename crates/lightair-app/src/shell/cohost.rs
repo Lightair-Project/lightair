@@ -263,12 +263,14 @@ impl StudioWindow {
         self.exec(Command::Batch { label: format!("Make this the active {NAME}"), commands }, cx);
     }
 
-    /// The co-host's sections under its Avatar card (Talk, Brain, Voice, Persona, Behaviour).
+    /// The co-host's card under its Avatar card (what it uses, and its window's button).
     pub(super) fn cohost_sections(&self, source: &Source, cx: &mut Context<Self>) -> AnyElement {
         let id = source.id;
         let workspace = self.studio.read(cx).workspace().clone();
         let active = active_cohost(&live_cohosts(&workspace)).map(|s| s.id) == Some(id);
         self.cohost_view.update(cx, |v, _| v.set_source(Some(id), active));
+        // the window follows the co-host the Inspector shows
+        self.cohost_window.update(cx, |v, _| v.set_source(Some(id), active));
         div().child(self.cohost_view.clone()).into_any_element()
     }
 
@@ -499,7 +501,7 @@ impl StudioWindow {
             "!stop" => self.piair.kill_switch(),
             "!settings" => self.open_settings(super::settings::Page::CoHost, cx),
             "!connections" => self.open_settings(super::settings::Page::Connections, cx),
-            "!voices" => self.cohost_view.update(cx, |v, cx| v.open_voices(cx)),
+            "!voices" => self.cohost_window.update(cx, |v, cx| v.open_voices(cx)),
             l if l.starts_with("!signin ") => self.piair.sign_in(l["!signin ".len()..].trim()),
             l if l.starts_with("!signin-code ") => self.piair.sign_in_answer(l["!signin-code ".len()..].trim()),
             l if l.starts_with("!settings-scroll ") => {

@@ -1,9 +1,10 @@
-//! The AI co-host's sections in the Inspector, under its Avatar card: Talk, Brain, Voice, Persona
-//! and Behaviour. The co-host's settings live on its object (the avatar source's `cohost` block),
-//! so they're saved with the project and undoable; Lightair passes them on to PiAir. Keys live in
-//! Settings → Connections (the Keychain). Labels and values only; what each does is behind an ⓘ.
+//! The AI co-host's settings. In the Inspector, under its Avatar card, a short card: what it uses,
+//! a question it's waiting on, and a button that opens its own window, a sheet like Settings with a
+//! page per area (Talk, Brain, Voice, Hearing, Persona, Behaviour), so the Inspector isn't crowded.
+//! The settings live on its object (the avatar source's `cohost` block), so they're saved with the
+//! project and undoable; Lightair passes them on to PiAir. Keys live in Settings → Connections (the
+//! Keychain).
 
-use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -51,18 +52,53 @@ const LANGUAGES: &[(&str, &str)] = &[
     ("ru", "Russian"),
     ("ar", "Arabic"),
 ];
-/// Lines of the conversation the Talk section shows.
-const TALK_LINES: usize = 6;
+/// Lines of the conversation the Talk page shows.
+const TALK_LINES: usize = 40;
 
-/// What the co-host's sections ask the window for.
+/// Which of the two places this view draws: the Inspector's card, or the co-host's window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Card,
+    Window,
+}
+
+/// The co-host window's pages.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Page {
+    Talk,
+    Brain,
+    Voice,
+    Hearing,
+    Persona,
+    Behaviour,
+}
+
+const PAGES: &[(Page, &str, &str)] = &[
+    (Page::Talk, "Talk", "message-square"),
+    (Page::Brain, "Brain", "sparkles"),
+    (Page::Voice, "Voice", "audio-lines"),
+    (Page::Hearing, "Hearing", "headphones"),
+    (Page::Persona, "Persona", "person-standing"),
+    (Page::Behaviour, "Behaviour", "sliders-horizontal"),
+];
+
+/// What the co-host's views ask the main window for.
 pub enum CohostEvent {
     /// Settings → Connections (to add a key or sign in to a subscription).
     OpenConnections,
+    /// The Inspector card's button: open the co-host's window on this page.
+    OpenWindow(Page),
 }
 
 pub struct CohostView {
+    mode: Mode,
     host: Host,
     studio: Entity<Studio>,
+    /// The window: open, on which page, its focus (Esc closes it) and its scroll.
+    open: bool,
+    page: Page,
+    focus: FocusHandle,
+    scroll: ScrollHandle,
     /// The co-host object's source the Inspector shows, and whether it's the active co-host.
     source: Option<Id>,
     active: bool,
@@ -72,14 +108,13 @@ pub struct CohostView {
     /// The voice picker (a sheet over the window), and the preview last drawn.
     sheet: Entity<VoiceSheet>,
     shown_preview: (Option<String>, Option<String>),
-    collapsed: HashSet<&'static str>,
     _subs: Vec<Subscription>,
 }
 
 impl EventEmitter<CohostEvent> for CohostView {}
 
 impl CohostView {
-    pub fn new(host: Host, studio: Entity<Studio>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(mode: Mode, host: Host, studio: Entity<Studio>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prompt = cx.new(|cx| InputState::new(window, cx).placeholder("Talk to your co-host…"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Pi"));
         let personality = cx.new(|cx| {
@@ -153,8 +188,13 @@ impl CohostView {
         })
         .detach();
         CohostView {
+            mode,
             host,
             studio,
+            open: false,
+            page: Page::Talk,
+            focus: cx.focus_handle(),
+            scroll: ScrollHandle::new(),
             source: None,
             active: false,
             prompt,
@@ -162,7 +202,6 @@ impl CohostView {
             personality,
             sheet,
             shown_preview: (None, None),
-            collapsed: HashSet::new(),
             _subs: subs,
         }
     }
@@ -177,6 +216,29 @@ impl CohostView {
     pub fn set_source(&mut self, source: Option<Id>, active: bool) {
         self.source = source;
         self.active = active;
+    }
+
+    /// The co-host object shown, and whether it's the active co-host.
+    pub fn source_shown(&self) -> (Option<Id>, bool) {
+        (self.source, self.active)
+    }
+
+    /// Opens the window on `page` (the window view).
+    pub fn open(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        self.open = true;
+        self.page = page;
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        self.open = false;
+        cx.notify();
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
     }
 
     /// The object's `cohost` block, or Null.
@@ -206,41 +268,9 @@ impl CohostView {
         self.set_cohost(json!({"piair": patch}), cx);
     }
 
-    fn header(&self, title: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
-        let open = !self.collapsed.contains(title);
-        div()
-            .id(SharedString::from(format!("cohost-section-{title}")))
-            .flex()
-            .items_center()
-            .gap_1()
-            .h(px(34.))
-            .cursor_pointer()
-            .text_size(px(11.))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(tok::text_secondary())
-            .hover(|d| d.text_color(tok::text()))
-            .child(ui::icon(if open { "chevron-down" } else { "chevron-right" }).size(px(12.)))
-            .child(title.to_uppercase())
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if !this.collapsed.remove(title) {
-                    this.collapsed.insert(title);
-                }
-                cx.notify();
-            }))
-    }
-
-    fn section(&self, title: &'static str, body: Vec<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
-        let open = !self.collapsed.contains(title);
-        div()
-            .flex()
-            .flex_col()
-            .gap_2p5()
-            .pb_3()
-            .border_b_1()
-            .border_color(tok::border())
-            .child(self.header(title, cx))
-            .when(open, |d| d.children(body))
-            .into_any_element()
+    /// A page's body: its rows, one under another (the window's title names it).
+    fn section(&self, _title: &'static str, body: Vec<AnyElement>, _cx: &mut Context<Self>) -> AnyElement {
+        div().flex().flex_col().gap_3().children(body).into_any_element()
     }
 
     /// A key's state in a line, with a way to Settings → Connections when it's needed.
@@ -707,7 +737,7 @@ impl CohostView {
     fn behaviour(&self, cx: &mut Context<Self>) -> AnyElement {
         let chattiness = self.setting("/behaviour/chattiness", cx).as_u64().unwrap_or(1) as usize;
         let flag = |pointer: &str, default: bool| self.setting(pointer, cx).as_bool().unwrap_or(default);
-        let (answer, yield_) = (flag("/behaviour/answerChat", true), flag("/behaviour/stopWhenStreamerTalks", true));
+        let answer = flag("/behaviour/answerChat", true);
         let chatty = chips(
             "cohost-chatty",
             CHATTINESS.iter().enumerate().map(|(i, n)| (n.to_string(), i == chattiness)).collect(),
@@ -724,20 +754,37 @@ impl CohostView {
             vec![
                 stacked("Chattiness", Some("Quiet: only when spoken to. Normal: also picks a chat message, or something playing, now and then. Lively and Chatty: more often."), chatty),
                 row("Answer chat", Some("Reads chat from every platform and answers some of it. Chat can never make it change Lightair or use the computer."), toggle("cohost-chat", "answerChat", answer, cx)),
-                stacked(
-                    "Hears",
-                    Some("Mixer tracks it listens to. Conversation: people talking to it (your mic, a guest's): it waits while they speak and answers its name. Content: something playing (a video, a game): it follows along, may react now and then, and never takes it as someone talking to it."),
-                    self.hears_list(cx),
-                ),
-                stacked(
-                    "Hearing with",
-                    Some("What turns each kind of track into words. On this Mac: Apple's speech recognition, free and private, one language at a time. ElevenLabs Scribe v3 Live: any language, follows you switching languages mid-sentence, words as you say them (your ElevenLabs key, with Speech to Text). OpenRouter: any of its transcription models, after each sentence (your OpenRouter key). Cloud hearing is billed for the time a track is heard."),
-                    self.hearing_engines(cx),
-                ),
-                row("Stop when someone talks", Some("It goes quiet when a conversation track picks someone up."), toggle("cohost-yield", "stopWhenStreamerTalks", yield_, cx)),
             ],
             cx,
         )
+    }
+
+    fn hearing(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.setting("/behaviour/stopWhenStreamerTalks", cx).as_bool().unwrap_or(true);
+        let yield_ = switch("cohost-yield", on)
+            .on_click(cx.listener(move |this, _, _, cx| this.set(json!({"behaviour": {"stopWhenStreamerTalks": !on}}), cx)))
+            .into_any_element();
+        let mut body = Vec::new();
+        if self.setting("/voice/vendor", cx).as_str() == Some("codex") {
+            body.push(status_line(
+                tok::text_tertiary(),
+                "With ChatGPT voice, the live model hears the conversation tracks itself: content tracks and Hearing with don't apply.".into(),
+            ));
+        }
+        body.extend([
+            stacked(
+                "Hears",
+                Some("Mixer tracks it listens to. Conversation: people talking with it (your mic, a guest's): it answers what they say. Content: something playing (a video, a game): it follows along, may react now and then, and never takes it as someone talking to it."),
+                self.hears_list(cx),
+            ),
+            stacked(
+                "Hearing with",
+                Some("What turns each kind of track into words. On this Mac: Apple's speech recognition, free and private, one language at a time. ElevenLabs Scribe v3 Live: any language, follows you switching languages mid-sentence, words as you say them (your ElevenLabs key, with Speech to Text). OpenRouter: any of its transcription models, after each sentence (your OpenRouter key). Cloud hearing is billed for the time a track is heard."),
+                self.hearing_engines(cx),
+            ),
+            row("Stop when someone talks", Some("It goes quiet when a conversation track picks someone up."), yield_),
+        ]);
+        self.section("Hearing", body, cx)
     }
 
     /// The tracks it hears, each as conversation or content, and a way to add one.
@@ -1001,17 +1048,213 @@ impl CohostView {
     }
 }
 
+impl CohostView {
+    /// The Inspector's card: what it uses, a question it's waiting on, and the window's button.
+    fn card_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let st = self.host.state();
+        let question = st.question.as_ref().map(|q| q.text.clone());
+        let provider = self.setting("/provider", cx).as_str().unwrap_or("").to_string();
+        let provider_name = st
+            .providers
+            .as_array()
+            .and_then(|a| a.iter().find(|p| p["id"] == provider.as_str()))
+            .and_then(|p| p["name"].as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| provider.clone());
+        drop(st);
+        let vendor = self.setting("/voice/vendor", cx).as_str().unwrap_or("gemini").to_string();
+        let voice_name = VENDORS.iter().find(|(id, _)| *id == vendor).map_or(vendor.clone(), |(_, n)| n.to_string());
+        let realtime = vendor == "codex";
+        let model = self.setting("/model", cx).as_str().unwrap_or("").to_string();
+        let brain = if realtime {
+            "ChatGPT voice".to_string()
+        } else if provider_name.is_empty() {
+            "Not chosen".to_string()
+        } else if model.is_empty() || model == "default" {
+            provider_name
+        } else {
+            format!("{provider_name} · {model}")
+        };
+        let name = self.setting("/persona/name", cx).as_str().unwrap_or("Pi").to_string();
+        let workspace = self.studio.read(cx).workspace().clone();
+        let hears = crate::piair::hearing(&workspace, &self.cohost(cx));
+        let hears = if hears.is_empty() { "Nothing".to_string() } else { hears.iter().map(|h| h.name.clone()).collect::<Vec<_>>().join(", ") };
+        let line = |label: &'static str, value: String| {
+            div()
+                .flex()
+                .gap_2()
+                .text_size(px(12.))
+                .child(div().w(px(64.)).flex_none().text_color(tok::text_tertiary()).child(label))
+                .child(div().flex_1().min_w_0().truncate().text_color(tok::text()).child(value))
+        };
+        let mut card = div().flex().flex_col().gap_1p5().pb_3().border_b_1().border_color(tok::border());
+        if let Some(q) = question {
+            card = card.child(
+                self::card(tok::warn())
+                    .mb_1()
+                    .child(div().text_size(px(12.)).child(q))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Button::new("cohost-allow").label("Allow").small().primary().on_click(cx.listener(|this, _, _, cx| {
+                                this.host.answer_question(true);
+                                cx.notify();
+                            })))
+                            .child(Button::new("cohost-deny").label("Don't").small().outline().on_click(cx.listener(|this, _, _, cx| {
+                                this.host.answer_question(false);
+                                cx.notify();
+                            }))),
+                    ),
+            );
+        }
+        card.child(line("Name", name))
+            .child(line("Brain", brain))
+            .child(line("Voice", voice_name))
+            .child(line("Hears", hears))
+            .child(
+                div().pt_1p5().flex().gap_2().child(
+                    Button::new("cohost-open-window")
+                        .label("Co-host settings…")
+                        .small()
+                        .outline()
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(CohostEvent::OpenWindow(Page::Brain)))),
+                ).child(
+                    Button::new("cohost-open-talk")
+                        .label("Talk")
+                        .small()
+                        .outline()
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(CohostEvent::OpenWindow(Page::Talk)))),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// The co-host's window: a sheet over the main window, a page per area down the side.
+    fn window_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        if !self.open {
+            return div().into_any_element();
+        }
+        let page = self.page;
+        let mut nav = div().flex().flex_col().gap_0p5().w(px(176.)).flex_none().p_2().border_r_1().border_color(tok::border());
+        for (i, (p, label, icon)) in PAGES.iter().enumerate() {
+            let (on, p) = (*p == page, *p);
+            nav = nav.child(
+                div()
+                    .id(("cohost-page", i))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(30.))
+                    .px_2()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                    .when(!on, |d| d.text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
+                    .child(ui::icon(icon).size(px(14.)))
+                    .child(*label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.page = p;
+                        this.scroll.set_offset(point(px(0.), px(0.)));
+                        cx.notify();
+                    })),
+            );
+        }
+        let content = match page {
+            Page::Talk => self.talk(cx),
+            Page::Brain => self.brain(cx),
+            Page::Voice => self.voice(cx),
+            Page::Hearing => self.hearing(cx),
+            Page::Persona => self.persona(cx),
+            Page::Behaviour => self.behaviour(cx),
+        };
+        let title = PAGES.iter().find(|(p, ..)| *p == page).map_or("", |(_, l, _)| *l);
+        let name = self.setting("/persona/name", cx).as_str().unwrap_or("Pi").to_string();
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .justify_center()
+            .items_center()
+            .bg(tok::scrim())
+            .occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close(cx)))
+            .child(
+                div()
+                    .id("cohost-window")
+                    .flex()
+                    .w(px(780.))
+                    .h(px(600.))
+                    .rounded(px(14.))
+                    .overflow_hidden()
+                    .bg(tok::bg_panel())
+                    .border_1()
+                    .border_color(tok::border_strong())
+                    .shadow_lg()
+                    .track_focus(&self.focus)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                        if ev.keystroke.key == "escape" {
+                            this.close(cx);
+                        }
+                    }))
+                    .child(
+                        nav.child(div().flex_1()).child(
+                            div()
+                                .px_2()
+                                .pb_1()
+                                .text_size(px(11.))
+                                .text_color(tok::text_tertiary())
+                                .child(format!("AI co-host · {name}")),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px_5()
+                                    .pt_4()
+                                    .pb_3()
+                                    .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(title))
+                                    .child(
+                                        Button::new("cohost-window-done")
+                                            .label("Done")
+                                            .small()
+                                            .primary()
+                                            .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("cohost-window-content")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.scroll)
+                                    .px_5()
+                                    .pb_5()
+                                    .child(content),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for CohostView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(self.talk(cx))
-            .child(self.brain(cx))
-            .child(self.voice(cx))
-            .child(self.persona(cx))
-            .child(self.behaviour(cx))
+        match self.mode {
+            Mode::Card => self.card_view(cx),
+            Mode::Window => self.window_view(cx),
+        }
     }
 }
 
@@ -1099,10 +1342,10 @@ fn stacked(name: &str, detail: Option<&str>, control: AnyElement) -> AnyElement 
 fn status_line(colour: Hsla, text: String) -> AnyElement {
     div()
         .flex()
-        .items_center()
+        .items_start()
         .gap_2()
-        .child(div().flex_none().size(px(7.)).rounded_full().bg(colour))
-        .child(div().text_size(px(12.)).text_color(tok::text_secondary()).child(text))
+        .child(div().flex_none().mt(px(5.)).size(px(7.)).rounded_full().bg(colour))
+        .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(tok::text_secondary()).child(text))
         .into_any_element()
 }
 

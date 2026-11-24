@@ -8,7 +8,7 @@
 //! `expression <i>` (as its global shortcut does), `set <json>` (merged into the selected
 //! object's source settings), `anchor-sheet`, `accessory <anchor key> <file>`, `pin <anchor key>`,
 //! `drop-tree <object name|-> <above|into|below> <paths…>`, `drop-assets <paths…>`, `save-scene`, `undo`,
-//! `scroll <px>`, `settings-shortcuts`, `assets-open <folder>`.
+//! `scroll <px>`, `settings-shortcuts`, `assets-open <folder>`, `cohost-window <page>`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -78,6 +78,18 @@ impl StudioWindow {
                 self.settings_open = false;
             }
             "keys-open" => self.expression_keys_open = true,
+            "cohost-window" => {
+                use crate::piair::view::Page;
+                let page = match rest {
+                    "talk" => Page::Talk,
+                    "voice" => Page::Voice,
+                    "hearing" => Page::Hearing,
+                    "persona" => Page::Persona,
+                    "behaviour" => Page::Behaviour,
+                    _ => Page::Brain,
+                };
+                self.cohost_window.update(cx, |w, cx| w.open(page, window, cx));
+            }
             "press" => {
                 // (sent from outside this update: the window's key handlers update this view)
                 if let Ok(k) = Keystroke::parse(Box::leak(rest.to_string().into_boxed_str())) {
