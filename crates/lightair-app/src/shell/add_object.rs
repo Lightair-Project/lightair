@@ -64,8 +64,9 @@ pub(super) struct AddObject {
     /// iPhones and iPads connected by cable (name, unique id), looked for again every second.
     phones: Vec<(String, String)>,
     phones_at: Option<std::time::Instant>,
-    /// Pictures other apps share (name, id), for the Shared step.
+    /// Pictures other apps share (name, id), for the Shared step; NDI sources there instead.
     shared: Vec<(String, String)>,
+    ndi: bool,
     _events: Subscription,
 }
 
@@ -86,6 +87,8 @@ enum Kind {
     Avatar,
     CoHost,
     Shared,
+    Ndi,
+    Link,
 }
 
 /// Apps share pictures with Syphon on a Mac and Spout on Windows.
@@ -109,6 +112,8 @@ const KINDS: &[(Kind, Group, &str, &str, &str)] = &[
     ),
     (Kind::CoHost, Group::Capture, "bot", "AI co-host", "An avatar that talks with chat, hears you and can use the computer"),
     (Kind::Shared, Group::Capture, "share-2", SHARED_NAME, "Another app's picture: VTube Studio, Resolume, TouchDesigner, a game"),
+    (Kind::Ndi, Group::Capture, "network", "NDI", "A camera, computer or app sending NDI on your network"),
+    (Kind::Link, Group::Capture, "monitor-smartphone", "Another computer", "Another computer's Lightair or OBS, sent here over the network (SRT)"),
     (Kind::Image, Group::Media, "image", "Image", "A picture or logo"),
     (Kind::Video, Group::Media, "clapperboard", "Video", "A video file, looped"),
     (Kind::Text, Group::Graphics, "type", "Text", "A title or caption"),
@@ -273,6 +278,7 @@ impl StudioWindow {
             phones: Vec::new(),
             phones_at: None,
             shared: Vec::new(),
+            ndi: false,
             _events: events,
         });
         cx.notify();
@@ -408,6 +414,17 @@ impl StudioWindow {
                     .call(|_| lightair_engine::shared_video::senders());
                 if let Some(a) = &mut self.add_object {
                     a.shared = list;
+                    a.ndi = false;
+                }
+                self.add_object_step(Step::Shared, window, cx);
+                return;
+            }
+            Kind::Link => self.add_link(cx),
+            Kind::Ndi => {
+                let list = self.studio.read(cx).engine().call(|_| lightair_engine::ndi::sources());
+                if let Some(a) = &mut self.add_object {
+                    a.shared = list.into_iter().map(|n| (n.clone(), n)).collect();
+                    a.ndi = true;
                 }
                 self.add_object_step(Step::Shared, window, cx);
                 return;
@@ -1007,6 +1024,7 @@ impl StudioWindow {
                 body.child(grid).into_any_element()
             }
             Step::Shared => {
+                let ndi = self.add_object.as_ref().is_some_and(|a| a.ndi);
                 let shared: Vec<(String, String)> = self
                     .add_object
                     .as_ref()
@@ -1014,23 +1032,36 @@ impl StudioWindow {
                     .unwrap_or_default();
                 let mut body = list();
                 if shared.is_empty() {
-                    body = body.child(empty_state(
-                        "share-2",
-                        format!("No app is sharing with {SHARED_NAME}"),
-                        "Turn on its output in the app (VTube Studio: Settings › Syphon/Spout), then open this again",
-                    ));
+                    body = body.child(match ndi {
+                        true if !self.studio.read(cx).engine().call(|_| lightair_engine::ndi::available()) => empty_state(
+                            "network",
+                            "NDI isn't installed".into(),
+                            "Install NDI Tools (free, from ndi.video), then open this again",
+                        ),
+                        true => empty_state("network", "No NDI sources found yet".into(), "They show a few seconds after they start; open this again"),
+                        false => empty_state(
+                            "share-2",
+                            format!("No app is sharing with {SHARED_NAME}"),
+                            "Turn on its output in the app (VTube Studio: Settings › Syphon/Spout), then open this again",
+                        ),
+                    });
                 }
+                let label = if ndi { "NDI" } else { SHARED_NAME };
                 let mut grid = div().grid().grid_cols(2).gap(px(4.));
                 for (i, (name, id)) in shared.into_iter().enumerate() {
-                    grid = grid.child(tile(("shared", i), "share-2", name.clone(), Some(SHARED_NAME.into()), None, None).on_click(
+                    grid = grid.child(tile(("shared", i), if ndi { "network" } else { "share-2" }, name.clone(), Some(label.into()), None, None).on_click(
                         cx.listener(move |this, _, window, cx| {
-                            this.add_source_object(
-                                &name,
-                                lightair_engine::shared_video::KIND,
-                                lightair_engine::shared_video::settings(&id, &name),
-                                (1920.0, 1080.0),
-                                cx,
-                            );
+                            if ndi {
+                                this.add_placed_object(&name, lightair_engine::ndi::KIND, serde_json::json!({"ndi_name": id}), (1920.0, 1080.0), (0.5, 0.5), true, cx);
+                            } else {
+                                this.add_source_object(
+                                    &name,
+                                    lightair_engine::shared_video::KIND,
+                                    lightair_engine::shared_video::settings(&id, &name),
+                                    (1920.0, 1080.0),
+                                    cx,
+                                );
+                            }
                             this.close_add_object(window, cx);
                         }),
                     ));
@@ -1069,6 +1100,7 @@ impl StudioWindow {
             Step::Types => None,
             Step::Cameras => Some("Camera"),
             Step::Phones => Some("iPhone or iPad"),
+            Step::Shared if self.add_object.as_ref().is_some_and(|a| a.ndi) => Some("NDI"),
             Step::Shared => Some(SHARED_NAME),
             Step::Screens => Some(match screen_mode {
                 Some(lightair_model::kinds::DISPLAY) => "Display",

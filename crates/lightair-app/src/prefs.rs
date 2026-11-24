@@ -49,6 +49,10 @@ pub struct Preferences {
     pub check_updates: bool,
     /// MIDI controls and what they drive (Settings › MIDI).
     pub midi_maps: Vec<crate::midi_map::MidiMap>,
+    /// The program sent over NDI under this name; empty: not sent (Settings › Streaming).
+    pub ndi_output: String,
+    /// The program served over RTSP (Settings › Streaming).
+    pub rtsp_output: bool,
 }
 
 /// The remote API's server (its password is in the Keychain: `secrets`).
@@ -134,6 +138,8 @@ impl Default for Preferences {
             remote: RemoteApi::default(),
             check_updates: true,
             midi_maps: Vec::new(),
+            ndi_output: String::new(),
+            rtsp_output: false,
         }
     }
 }

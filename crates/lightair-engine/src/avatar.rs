@@ -111,17 +111,17 @@ fn calibration_json(c: &Calibration) -> String {
 
 /// The face tracker's frame (face-tracker.h's `ft_face`).
 #[repr(C)]
-struct FtFace {
-    valid: bool,
-    present: bool,
-    frame_id: u64,
-    timestamp_ns: u64,
-    region_start: [i32; 13],
-    region_count: [i32; 13],
-    num_points: i32,
-    pts: [[f32; 2]; 720],
-    skin_valid: bool,
-    skin_cbcr: [f32; 2],
+pub(crate) struct FtFace {
+    pub(crate) valid: bool,
+    pub(crate) present: bool,
+    pub(crate) frame_id: u64,
+    pub(crate) timestamp_ns: u64,
+    pub(crate) region_start: [i32; 13],
+    pub(crate) region_count: [i32; 13],
+    pub(crate) num_points: i32,
+    pub(crate) pts: [[f32; 2]; 720],
+    pub(crate) skin_valid: bool,
+    pub(crate) skin_cbcr: [f32; 2],
 }
 
 /// The body tracker's frame (body-tracker.h's `bt_body`).
@@ -139,10 +139,10 @@ struct BtBody {
 
 const FT_LEFT_PUPIL: usize = 10;
 const FT_RIGHT_PUPIL: usize = 11;
-const FT_MESH: usize = 12;
+pub(crate) const FT_MESH: usize = 12;
 
 /// Calls one of the face tracker's global procs.
-fn tracker_call(name: &CStr, fill: impl FnOnce(*mut sys::calldata_t)) -> Option<sys::calldata_t> {
+pub(crate) fn tracker_call(name: &CStr, fill: impl FnOnce(*mut sys::calldata_t)) -> Option<sys::calldata_t> {
     unsafe {
         let ph = sys::obs_get_proc_handler();
         if ph.is_null() {
@@ -160,7 +160,7 @@ fn tracker_call(name: &CStr, fill: impl FnOnce(*mut sys::calldata_t)) -> Option<
 }
 
 /// (calldata_free is a header inline.)
-fn free_cd(cd: &mut sys::calldata_t) {
+pub(crate) fn free_cd(cd: &mut sys::calldata_t) {
     if !cd.fixed && !cd.stack.is_null() {
         unsafe { sys::bfree(cd.stack as *mut c_void) };
         cd.stack = std::ptr::null_mut();
@@ -176,17 +176,17 @@ fn set_string(cd: *mut sys::calldata_t, name: &CStr, v: &CStr) {
     unsafe { sys::calldata_set_data(cd, name.as_ptr(), b.as_ptr() as *const c_void, b.len()) };
 }
 
-fn set_ptr(cd: *mut sys::calldata_t, name: &CStr, p: *mut c_void) {
+pub(crate) fn set_ptr(cd: *mut sys::calldata_t, name: &CStr, p: *mut c_void) {
     unsafe {
         sys::calldata_set_data(cd, name.as_ptr(), &p as *const _ as *const c_void, std::mem::size_of::<*mut c_void>())
     };
 }
 
-fn set_int(cd: *mut sys::calldata_t, name: &CStr, v: i64) {
+pub(crate) fn set_int(cd: *mut sys::calldata_t, name: &CStr, v: i64) {
     unsafe { sys::calldata_set_data(cd, name.as_ptr(), &v as *const _ as *const c_void, std::mem::size_of::<i64>()) };
 }
 
-fn get_ptr(cd: &mut sys::calldata_t, name: &CStr) -> *mut c_void {
+pub(crate) fn get_ptr(cd: &mut sys::calldata_t, name: &CStr) -> *mut c_void {
     let mut p: *mut c_void = std::ptr::null_mut();
     unsafe {
         sys::calldata_get_data(cd, name.as_ptr(), &mut p as *mut _ as *mut c_void, std::mem::size_of::<*mut c_void>())
@@ -194,7 +194,7 @@ fn get_ptr(cd: &mut sys::calldata_t, name: &CStr) -> *mut c_void {
     p
 }
 
-fn get_bool(cd: &mut sys::calldata_t, name: &CStr) -> bool {
+pub(crate) fn get_bool(cd: &mut sys::calldata_t, name: &CStr) -> bool {
     let mut b = false;
     unsafe { sys::calldata_get_data(cd, name.as_ptr(), &mut b as *mut _ as *mut c_void, std::mem::size_of::<bool>()) };
     b

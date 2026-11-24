@@ -1026,6 +1026,60 @@ impl StudioWindow {
                     ))
                     .child(row("Between tries", None, chips("reconnect-delay", delays, cx))),
             )
+            .child({
+                let on = !self.prefs.ndi_output.is_empty();
+                group_tip("NDI", "Other apps and computers on your network see the program as an NDI source, with its sound (NDI Tools from ndi.video brings NDI).")
+                    .child(row(
+                        "Send the program over NDI",
+                        Some(if on { "As “Lightair”" } else { "Off" }),
+                        switch("ndi-out", on).on_click(cx.listener(move |this, _, _, cx| this.set_ndi_output(!on, cx))),
+                    ))
+            })
+            .child({
+                let on = self.prefs.rtsp_output;
+                let address = on.then(lightair_engine::rtsp::address).flatten();
+                group_tip("RTSP", "Players on your network (VLC, a hardware decoder, a video wall) open the program by its address.")
+                    .child(row(
+                        "Serve the program over RTSP",
+                        Some(address.as_deref().unwrap_or("Off")),
+                        switch("rtsp-out", on).on_click(cx.listener(move |this, _, _, cx| this.set_rtsp_output(!on, cx))),
+                    ))
+            })
+    }
+
+    /// Serves the program over RTSP (or stops), and keeps the choice.
+    pub(super) fn set_rtsp_output(&mut self, on: bool, cx: &mut Context<Self>) {
+        let engine = self.studio.read(cx).engine().clone();
+        let encoders = engine.capabilities.encoders.clone();
+        match engine.call(move |_| lightair_engine::rtsp::set(on, &encoders)) {
+            Ok(()) => {
+                self.prefs.rtsp_output = on;
+                let _ = crate::prefs::save_to(&crate::prefs::path(), &self.prefs);
+            }
+            Err(e) => self.studio.update(cx, |s, cx| {
+                s.issue = Some(e.into());
+                cx.notify();
+            }),
+        }
+        cx.notify();
+    }
+
+    /// Sends the program over NDI (or stops), and keeps the choice.
+    pub(super) fn set_ndi_output(&mut self, on: bool, cx: &mut Context<Self>) {
+        let name = if on { "Lightair".to_string() } else { String::new() };
+        let n = name.clone();
+        let result = self.studio.read(cx).engine().call(move |_| lightair_engine::ndi::set_output(&n));
+        match result {
+            Ok(()) => {
+                self.prefs.ndi_output = name;
+                let _ = crate::prefs::save_to(&crate::prefs::path(), &self.prefs);
+            }
+            Err(e) => self.studio.update(cx, |s, cx| {
+                s.issue = Some(e.into());
+                cx.notify();
+            }),
+        }
+        cx.notify();
     }
 
     /// MIDI: controls learned from a device, each driving a fader, a mute, a scene, a pad or an

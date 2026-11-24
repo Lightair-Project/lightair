@@ -368,6 +368,9 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
     crate::pointer::register();
     crate::filters::register();
     crate::shared_video::register();
+    crate::autoframe::register();
+    crate::ndi::register();
+    crate::rtsp::register();
     crate::piair_voice::register();
     crate::backdrop::register();
     crate::avatar::register();

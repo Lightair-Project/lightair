@@ -946,8 +946,15 @@ impl StudioWindow {
             ),
             None => file,
         };
+        // another computer's picture: where it sends to
+        let link = source.settings["link_port"].as_u64().map(|port| {
+            let ip = lightair_platform::net::local_ip().unwrap_or_else(|| "this-computer".into());
+            format!("Waiting for another computer. On it, send to srt://{ip}:{port} (Lightair: Outputs › Add › custom; OBS: Settings › Stream › Custom).")
+        });
+        let file = if link.is_some() { "From another computer".to_string() } else { file };
         self.section("Media", None, cx)
             .child(div().text_color(tok::text_secondary()).overflow_hidden().text_ellipsis().child(file))
+            .children(link.map(|l| div().text_size(px(11.)).text_color(tok::text_tertiary()).child(l)))
             .child(
                 div()
                     .id("media-progress")

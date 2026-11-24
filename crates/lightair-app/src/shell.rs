@@ -701,6 +701,24 @@ impl StudioWindow {
             }
         })
         .detach();
+        // the program over RTSP, as chosen last time
+        if crate::prefs::load_from(&crate::prefs::path()).rtsp_output {
+            let encoders = studio.read(cx).engine().capabilities.encoders.clone();
+            studio.read(cx).engine().post(move |_| {
+                if let Err(e) = lightair_engine::rtsp::set(true, &encoders) {
+                    tracing::warn!(%e, "RTSP");
+                }
+            });
+        }
+        // the program over NDI, as chosen last time
+        let ndi = crate::prefs::load_from(&crate::prefs::path()).ndi_output;
+        if !ndi.is_empty() {
+            studio.read(cx).engine().post(move |_| {
+                if let Err(e) = lightair_engine::ndi::set_output(&ndi) {
+                    tracing::warn!(%e, "NDI output");
+                }
+            });
+        }
         let native: crate::native_preview::Shared = Default::default();
         let mixer = cx.new(|cx| MixerPanel::new(studio.clone(), native.clone(), cx));
         let mixer_dock = cx.new(|cx| MixerDock::new(mixer.clone(), cx));
@@ -2079,6 +2097,27 @@ impl StudioWindow {
             let cmd = Command::AddSourceEffect { source, effect: beauty.create(), index: None };
             self.exec(cmd, cx);
         }
+    }
+
+    /// Another computer's picture and sound, over the network: a media source listening for SRT
+    /// on a port of its own; the other computer sends there (its Outputs › Add › custom address).
+    pub(super) fn add_link(&mut self, cx: &mut Context<Self>) {
+        let workspace = self.studio.read(cx).workspace().clone();
+        let used: Vec<u64> = workspace.sources.values().filter_map(|s| s.settings["link_port"].as_u64()).collect();
+        let port = (9100u64..9200).find(|p| !used.contains(p)).unwrap_or(9100);
+        let settings = json!({
+            "is_local_file": false,
+            "input": format!("srt://0.0.0.0:{port}?mode=listener&latency=200000"),
+            "input_format": "mpegts",
+            "link_port": port,
+            "restart_on_activate": false,
+            "close_when_inactive": false,
+            "reconnect_delay_sec": 1,
+            "buffering_mb": 1,
+            "hw_decode": true,
+            "clear_on_media_end": false,
+        });
+        self.add_placed_object("From another computer", "ffmpeg_source", settings, (1920.0, 1080.0), (0.5, 0.5), true, cx);
     }
 
     fn add_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
