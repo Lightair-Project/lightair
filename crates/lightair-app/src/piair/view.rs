@@ -24,6 +24,8 @@ use crate::ui::{self, tok};
 const VENDORS: &[(&str, &str)] =
     &[("cartesia", "Cartesia"), ("elevenlabs", "ElevenLabs"), ("gemini", "Gemini"), ("none", "None")];
 const CHATTINESS: &[&str] = &["Quiet", "Normal", "Lively", "Chatty"];
+/// What moves the co-host's mouth (`cohost.mouth`).
+const MOUTHS: &[(&str, &str)] = &[("data", "Voice data"), ("audio", "Sound"), ("tracking", "Face tracking")];
 /// Languages a heard track can be held to (codes the engines know; Apple's get a region).
 const LANGUAGES: &[(&str, &str)] = &[
     ("en", "English"),
@@ -404,7 +406,7 @@ impl CohostView {
                 .to_string();
             Button::new("cohost-model").label(label).xsmall().outline().dropdown_caret(true).dropdown_menu(
                 move |mut menu, _, _| {
-                    for m in list.iter().take(60) {
+                    for m in list.iter().take(100) {
                         let id = m["id"].as_str().unwrap_or("").to_string();
                         let name = m["name"].as_str().unwrap_or(&id).to_string();
                         let me = me.clone();
@@ -428,7 +430,9 @@ impl CohostView {
             ),
             row(
                 "Model",
-                Some("A fast model answers sooner. Using the computer needs a model that can see images."),
+                Some(
+                    "Newest first: the provider's own current list where Lightair has its key or sign-in (OpenRouter's always), so retired models drop out and new ones appear. A fast model answers sooner. Using the computer needs a model that can see images.",
+                ),
                 model_menu.into_any_element(),
             ),
         ];
@@ -506,7 +510,23 @@ impl CohostView {
             ),
             chips,
         )];
+        // what moves its mouth
+        let mouth = self.cohost(cx)["mouth"].as_str().unwrap_or("data").to_string();
+        let mouth_chips = crate::piair::view::chips(
+            "cohost-mouth",
+            MOUTHS.iter().map(|(id, name)| (name.to_string(), mouth == *id)).collect(),
+            cx,
+            |this, i, cx| this.set_cohost(json!({"mouth": MOUTHS[i].0}), cx),
+        );
+        let mouth_row = stacked(
+            "Mouth",
+            Some(
+                "Voice data: mouth shapes timed to the words, from the voice service (ElevenLabs and Cartesia send them; with Gemini it follows the sound). Sound: from the voice's loudness alone. Face tracking: the avatar's camera moves the mouth (someone performing it), and the voice never does.",
+            ),
+            mouth_chips,
+        );
         if vendor == "none" {
+            body.push(mouth_row);
             return self.section("Voice", body, cx);
         }
         let service = keys::service_for_voice(&vendor);
@@ -516,6 +536,7 @@ impl CohostView {
             self.voice_picker(&vendor, &chosen, cx),
         ));
         body.push(self.key_line(service, cx));
+        body.push(mouth_row);
         self.section("Voice", body, cx)
     }
 

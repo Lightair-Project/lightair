@@ -20,6 +20,34 @@ use crate::sys;
 /// mouth is read this far in the past so it moves with what's heard.
 const VOICE_DELAY: Duration = Duration::from_millis(70);
 
+/// What moves the co-host's mouth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouthSource {
+    /// The voice vendor's timing data (mouth shapes in time with the words), and the sound where
+    /// the vendor gives none.
+    Data,
+    /// The sound of the voice alone: its loudness opens the mouth, its brightness shapes it.
+    Audio,
+    /// The avatar's own face tracking (its camera): the voice never moves the mouth.
+    Tracking,
+}
+
+static MOUTH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Sets what moves the co-host's mouth.
+pub fn set_mouth_source(m: MouthSource) {
+    MOUTH.store(m as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What moves the co-host's mouth.
+pub fn mouth_source() -> MouthSource {
+    match MOUTH.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => MouthSource::Audio,
+        2 => MouthSource::Tracking,
+        _ => MouthSource::Data,
+    }
+}
+
 /// Where the co-host looks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Look {
@@ -184,6 +212,9 @@ pub fn merge_at(name: &str, now: Instant, seen: Option<Face>) -> (Option<Face>, 
     }
     let (brow, expression, tilt) = s.mood.as_ref().map_or(([0.0; 2], None, 0.0), |m| mood_parts(&m.0));
     let expression = expression.map(|e| (e, 0.8));
+    let tracking = mouth_source() == MouthSource::Tracking;
+    // face tracking moves the mouth: the voice doesn't
+    let voice = if tracking { None } else { voice };
     let (open, wide) = voice.unwrap_or((0.0, 0.0));
 
     if let Some(mut face) = seen {

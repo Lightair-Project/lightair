@@ -153,6 +153,12 @@ impl StudioWindow {
             .and_then(|t| workspace.tracks.iter().find(|x| x.id.to_string() == t))
             .map(|t| t.source.to_string());
         piair_voice::set_active(voice_source);
+        // what moves its mouth: the voice's data, its sound, or the avatar's face tracking
+        face_drive::set_mouth_source(match want.and_then(|s| s.settings[COHOST]["mouth"].as_str()) {
+            Some("audio") => face_drive::MouthSource::Audio,
+            Some("tracking") => face_drive::MouthSource::Tracking,
+            _ => face_drive::MouthSource::Data,
+        });
         // what it hears: people talking to it (they also tell it when someone's talking) and
         // content playing
         let hears = want.map(|s| crate::piair::hearing(&workspace, &s.settings[COHOST])).unwrap_or_default();

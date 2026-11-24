@@ -255,6 +255,9 @@ struct Mouth {
 
 impl Mouth {
     fn update(&mut self, block: &[f32; BLOCK], shape: Option<Shape>) {
+        let source = crate::face_drive::mouth_source();
+        // the sound alone: the vendor's shapes left out
+        let shape = if source == crate::face_drive::MouthSource::Audio { None } else { shape };
         let rms = (block.iter().map(|s| s * s).sum::<f32>() / BLOCK as f32).sqrt();
         // attack 15 ms, release 60 ms (blocks of 10 ms)
         let k = if rms > self.env { 1.0 - (-10.0f32 / 15.0).exp() } else { 1.0 - (-10.0f32 / 60.0).exp() };
@@ -288,6 +291,21 @@ impl Mouth {
             None => {}
         }
         let speaking = self.env > 0.003;
+        // the vendor's data: each shape opens the mouth its own way while there's sound
+        if source == crate::face_drive::MouthSource::Data
+            && let Some(s) = shape
+        {
+            let shaped = match s {
+                Shape::A => 0.9,
+                Shape::O => 0.7,
+                Shape::E => 0.6,
+                Shape::I => 0.45,
+                Shape::U => 0.4,
+                Shape::Rest => 0.1,
+                Shape::M => 0.0,
+            };
+            open = if speaking { shaped } else { 0.0 };
+        }
         if speaking || self.speaking {
             crate::face_drive::push_voice(open, wide);
         }
