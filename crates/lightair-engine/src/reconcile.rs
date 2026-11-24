@@ -541,6 +541,17 @@ impl Reconciler {
     }
 
     /// A track's, bus's, mix's or the program's meter from the audio engine.
+    /// A track's sound to listen to (the co-host hears it): see [`AudioHost::listen`]. `None`
+    /// when the audio engine isn't running.
+    pub fn listen_track(
+        &mut self,
+        track: Id,
+        tap: lightair_audio::Tap,
+        muted: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Option<rtrb::Consumer<i16>> {
+        Some(self.audio.as_mut()?.listen(crate::audio::node(track), tap, muted))
+    }
+
     pub fn audio_meter(&mut self, id: Id) -> Option<Arc<lightair_audio::meter::Meter>> {
         Some(self.audio.as_mut()?.meter(crate::audio::node(id)))
     }

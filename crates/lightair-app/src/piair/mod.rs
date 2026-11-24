@@ -189,12 +189,22 @@ pub struct Hearing {
     pub role: Role,
     /// What hears it (its role's engine).
     pub engine: Engine,
+    /// The track is muted (nothing of it is heard then).
+    pub muted: bool,
+    /// The co-hosts' voice tracks: what may come back in through a mic from the speakers.
+    pub echo: Vec<Id>,
 }
 
 /// What a co-host hears, from its `cohost.hears` (`[{track, role}]`; an older single track id is
 /// a conversation track). Not set: the first mic in the mixer, as conversation. Tracks that are
 /// gone and co-host voices are left out.
 pub fn hearing(w: &lightair_model::Workspace, cohost: &Value) -> Vec<crate::piair::Hearing> {
+    let echo: Vec<Id> = w
+        .tracks
+        .iter()
+        .filter(|t| w.sources.get(&t.source).is_some_and(|s| s.kind == lightair_engine::piair_voice::KIND))
+        .map(|t| t.id)
+        .collect();
     let make = |track: &str, role: Role| -> Option<Hearing> {
         let t = w.tracks.iter().find(|t| t.id.to_string() == track)?;
         let source = w.sources.get(&t.source)?;
@@ -204,6 +214,8 @@ pub fn hearing(w: &lightair_model::Workspace, cohost: &Value) -> Vec<crate::piai
             name: t.name.clone(),
             role,
             engine: Engine::of(cohost, role),
+            muted: t.muted,
+            echo: echo.clone(),
         })
     };
     match &cohost["hears"] {
@@ -793,6 +805,9 @@ impl Host {
                             hears.iter().any(|h| h.track == *track && h.role == Role::Conversation && h.source == f.source) && !f.dead()
                         });
                         for h in hears.iter().filter(|h| h.role == Role::Conversation) {
+                            if let Some(f) = forwarders.get(&h.track) {
+                                f.muted.store(h.muted, Ordering::Relaxed);
+                            }
                             if !forwarders.contains_key(&h.track)
                                 && let Some(f) = Forwarder::start(&host, h)
                             {
@@ -839,6 +854,9 @@ impl Host {
                     }
                     failed.retain(|t, _| hears.iter().any(|h| h.track == *t));
                     for h in &hears {
+                        if let Some(l) = listeners.get(&h.track) {
+                            l.muted.store(h.muted, Ordering::Relaxed);
+                        }
                         if listeners.contains_key(&h.track) || failed.get(&h.track).is_some_and(|f| f.0.elapsed() < Duration::from_secs(5)) {
                             continue;
                         }
@@ -1608,6 +1626,8 @@ struct Listener {
     stop: std::sync::Arc<AtomicBool>,
     state: std::sync::Arc<Mutex<ListenState>>,
     engine: Engine,
+    /// Its track is muted (silence goes in).
+    muted: std::sync::Arc<AtomicBool>,
     /// Its output has been read to the end (so a reason it gave before stopping is in `state`).
     read_all: std::sync::Arc<AtomicBool>,
 }
@@ -1661,10 +1681,9 @@ impl Listener {
                 (c, None)
             }
         };
-        let source = h.source;
-        let (tap, mut consumer) = engine
-            .call(move |e| e.reconciler.source_ref(source).map(|p| unsafe { lightair_engine::audio_tap::Tap::open(p) }))
-            .ok_or("Couldn't take this track's sound (is its source on?).")?;
+        let muted = std::sync::Arc::new(AtomicBool::new(h.muted));
+        let (tap, mut consumer) =
+            track_sound(engine, h.track, h.source, muted.clone()).ok_or("Couldn't take this track's sound (is its source on?).")?;
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -1692,7 +1711,7 @@ impl Listener {
         std::thread::spawn(move || {
             let _tap = tap;
             let mut bytes = Vec::with_capacity(8192);
-            while !s.load(Ordering::Relaxed) {
+            while !s.load(Ordering::Relaxed) && !consumer.is_abandoned() {
                 std::thread::sleep(Duration::from_millis(40));
                 let n = consumer.slots();
                 if n == 0 {
@@ -1754,6 +1773,7 @@ impl Listener {
             stop,
             state,
             engine: h.engine.clone(),
+            muted,
             read_all,
         })
     }
@@ -1805,41 +1825,165 @@ impl Drop for Listener {
     }
 }
 
-/// Realtime voice: a heard track's sound forwarded to PiAir raw (16 kHz mono s16le, base64, as
-/// `audio` messages), for the live model to hear, instead of on-device speech recognition.
+
+/// A track's sound to hear (mono, [`lightair_engine::audio_host::LISTEN_RATE`]): from Lightair's
+/// mixer, after the track's effects and before its fader, silent while `muted` (a mic or audio
+/// interface is captured by the mixer itself: its libobs source is only a placeholder with no
+/// sound). With no mixer running, from the libobs source (the tap is then held with it).
+fn track_sound(
+    engine: &std::sync::Arc<lightair_engine::Engine>,
+    track: Id,
+    source: Id,
+    muted: std::sync::Arc<AtomicBool>,
+) -> Option<(Option<lightair_engine::audio_tap::Tap>, rtrb::Consumer<i16>)> {
+    engine.call(move |e| {
+        if let Some(c) = e.reconciler.listen_track(track, lightair_audio::Tap::PreFader, muted) {
+            return Some((None, c));
+        }
+        e.reconciler.source_ref(source).map(|p| {
+            let (tap, c) = unsafe { lightair_engine::audio_tap::Tap::open(p) };
+            (Some(tap), c)
+        })
+    })
+}
+
+/// Keeps the co-host from hearing itself: while its voice plays (the mic picks it up from the
+/// speakers), what's heard goes through only when it's clearly louder than that voice's echo
+/// would be (the streamer talking over it), else silence. How loud the echo comes back is learned
+/// as the voice plays, so with headphones (no echo) the streamer is heard at once.
+struct EchoGate {
+    /// The voice's peak in the last frames (the echo arrives a little after it plays).
+    recent: VecDeque<f32>,
+    /// The echo's level against the voice's (an upper bound, learned).
+    gain: f32,
+    /// Frames still let through after the streamer was heard (so words aren't cut).
+    hold: u32,
+}
+
+impl EchoGate {
+    /// 20 ms at 16 kHz.
+    const FRAME: usize = 320;
+    /// The voice's echo can come this many frames after it played (output and room delay).
+    const REACH: usize = 25;
+    /// The streamer is heard over the voice when this much louder than its echo.
+    const OVER: f32 = 2.0;
+
+    fn new() -> Self {
+        Self { recent: VecDeque::with_capacity(Self::REACH + 1), gain: 1.0, hold: 0 }
+    }
+
+    /// One frame of what's heard (`heard`) and the voice playing at the same time (`voice`):
+    /// leaves the frame as it is, or silences it.
+    fn frame(&mut self, heard: &mut [i16], voice: &[i16]) {
+        let peak = |x: &[i16]| x.iter().map(|v| v.unsigned_abs()).max().unwrap_or(0) as f32 / 32768.0;
+        let (h, v) = (peak(heard), peak(voice));
+        self.recent.push_back(v);
+        if self.recent.len() > Self::REACH {
+            self.recent.pop_front();
+        }
+        let far = self.recent.iter().copied().fold(0.0, f32::max);
+        // the co-host is quiet (and has been for a while): everything is heard
+        if far < 0.003 {
+            self.hold = 0;
+            return;
+        }
+        if h > Self::OVER * self.gain * far && h > 0.01 {
+            self.hold = 10;
+            return;
+        }
+        if self.hold > 0 {
+            self.hold -= 1;
+            return;
+        }
+        // echo alone: learn how loud it comes back (rising at once, easing down over seconds)
+        self.gain = (h / far).max(self.gain * 0.995).min(8.0);
+        heard.fill(0);
+    }
+}
+
+/// Realtime voice: forwards a conversation track's sound raw to PiAir (`audio` messages) for the
+/// live model to hear, with the co-host's own voice kept out ([`EchoGate`]).
 struct Forwarder {
     source: Id,
+    muted: std::sync::Arc<AtomicBool>,
     stop: std::sync::Arc<AtomicBool>,
     done: std::sync::Arc<AtomicBool>,
 }
 
 impl Forwarder {
     fn start(host: &Host, h: &Hearing) -> Option<Forwarder> {
-        let source = h.source;
-        let (tap, mut consumer) = host.0.engine.call(move |e| {
-            e.reconciler.source_ref(source).map(|p| unsafe { lightair_engine::audio_tap::Tap::open(p) })
-        })?;
+        let engine = &host.0.engine;
+        let muted = std::sync::Arc::new(AtomicBool::new(h.muted));
+        let (tap, mut heard) = track_sound(engine, h.track, h.source, muted.clone())?;
+        // the co-hosts' voices as they play (after their faders: what can reach the speakers)
+        let mut voices: Vec<rtrb::Consumer<i16>> = h
+            .echo
+            .iter()
+            .filter_map(|&t| {
+                let never = std::sync::Arc::new(AtomicBool::new(false));
+                engine.call(move |e| e.reconciler.listen_track(t, lightair_audio::Tap::PostFader, never))
+            })
+            .collect();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let done = std::sync::Arc::new(AtomicBool::new(false));
         let (s, d, host) = (stop.clone(), done.clone(), host.clone());
+        let name = h.name.clone();
         std::thread::spawn(move || {
             let _tap = tap;
             let _guard = Finally(d);
+            let mut gate = EchoGate::new();
+            let (mut pending, mut voice) = (Vec::<i16>::new(), Vec::<i16>::new());
             let mut bytes = Vec::with_capacity(8192);
-            while !s.load(Ordering::Relaxed) {
+            let mut peak: i16 = 0;
+            let mut report = Instant::now();
+            while !s.load(Ordering::Relaxed) && !heard.is_abandoned() {
                 std::thread::sleep(Duration::from_millis(20));
-                let n = consumer.slots();
+                // the heard sound and the voices are written in the same mixer blocks: take as
+                // much of each, so they stay lined up (unless a voice stalls: the heard sound
+                // never waits on it for long)
+                voices.retain(|v| !v.is_abandoned());
+                let n = match heard.slots() {
+                    n if n > lightair_engine::audio_host::LISTEN_RATE as usize => n,
+                    n => voices.iter().map(|v| v.slots()).fold(n, usize::min),
+                };
                 if n == 0 {
                     continue;
                 }
-                let Ok(chunk) = consumer.read_chunk(n) else { continue };
+                let Ok(chunk) = heard.read_chunk(n) else { continue };
+                let start = pending.len();
+                pending.extend(chunk);
+                voice.resize(pending.len(), 0);
+                for v in &mut voices {
+                    if let Ok(chunk) = v.read_chunk(n.min(v.slots())) {
+                        for (k, x) in chunk.into_iter().enumerate() {
+                            voice[start + k] = voice[start + k].saturating_add(x);
+                        }
+                    }
+                }
+                let frames = pending.len() / EchoGate::FRAME * EchoGate::FRAME;
+                if frames == 0 {
+                    continue;
+                }
+                for (h, v) in pending[..frames].chunks_mut(EchoGate::FRAME).zip(voice[..frames].chunks(EchoGate::FRAME)) {
+                    gate.frame(h, v);
+                }
                 bytes.clear();
-                bytes.extend(chunk.into_iter().flat_map(i16::to_le_bytes));
+                for &x in &pending[..frames] {
+                    peak = peak.max(x.saturating_abs());
+                    bytes.extend_from_slice(&x.to_le_bytes());
+                }
+                pending.drain(..frames);
+                voice.drain(..frames);
                 host.send(json!({"t": "audio", "pcm": base64::engine::general_purpose::STANDARD.encode(&bytes)}));
+                if report.elapsed() > Duration::from_secs(2) {
+                    tracing::debug!(track = %name, peak, echo = gate.gain, "piair: forwarded audio level");
+                    peak = 0;
+                    report = Instant::now();
+                }
             }
         });
-        tracing::info!(track = %h.name, "piair: forwarding this track's audio to ChatGPT voice");
-        Some(Forwarder { source: h.source, stop, done })
+        tracing::info!(track = %h.name, echo = h.echo.len(), "piair: forwarding this track's audio to ChatGPT voice");
+        Some(Forwarder { source: h.source, muted, stop, done })
     }
 
     fn dead(&self) -> bool {

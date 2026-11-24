@@ -237,8 +237,57 @@ struct MultitrackRt {
     ring: rtrb::Producer<f32>,
 }
 
+/// Rate of the sound [`AudioHost::listen`] hands out (mono, 16-bit): what speech recognition
+/// and the co-host's live voice take.
+pub const LISTEN_RATE: u32 = 16_000;
+
+/// A strip being listened to (the co-host hears it), on the audio thread: its sound folded to
+/// mono and brought down to [`LISTEN_RATE`] by averaging (a box filter: enough for speech).
+struct ListenRt {
+    id: la::NodeId,
+    tap: la::Tap,
+    /// Silence while set (the track is muted, for a tap before its fader).
+    muted: Arc<AtomicBool>,
+    ring: rtrb::Producer<i16>,
+    step: f64,
+    phase: f64,
+    sum: f32,
+    count: u32,
+}
+
+impl ListenRt {
+    fn feed(&mut self, src: Option<(&[f32], &[f32])>, block: usize) {
+        let muted = self.muted.load(Ordering::Relaxed);
+        let mut out = [0i16; la::MAX_BLOCK];
+        let mut n = 0usize;
+        for k in 0..block {
+            let x = match src {
+                Some((l, r)) if !muted => (l[k] + r[k]) * 0.5,
+                _ => 0.0,
+            };
+            self.sum += x;
+            self.count += 1;
+            self.phase += self.step;
+            if self.phase >= 1.0 {
+                self.phase -= 1.0;
+                out[n] = ((self.sum / self.count as f32).clamp(-1.0, 1.0) * 32767.0) as i16;
+                n += 1;
+                (self.sum, self.count) = (0.0, 0);
+            }
+        }
+        // what doesn't fit (nobody reading) is dropped, never waited for
+        let room = self.ring.slots().min(n);
+        if room > 0
+            && let Ok(chunk) = self.ring.write_chunk_uninit(room)
+        {
+            chunk.fill_from_iter(out[..room].iter().copied());
+        }
+    }
+}
+
 enum ToRt {
     AddInput(RtInput),
+    Listen(ListenRt),
     RemoveInput(la::NodeId),
     /// Start these files on the next block (all on the same one: sample-aligned).
     StartMultitrack(Vec<MultitrackRt>),
@@ -256,6 +305,7 @@ enum FromRt {
     Input(RtInput),
     Multitrack(Vec<MultitrackRt>),
     Monitor(rtrb::Producer<f32>),
+    Listen(ListenRt),
 }
 
 /// The most the monitor ring holds ahead of the device (frames, at least three blocks): keeps its
@@ -291,6 +341,7 @@ fn rt_loop(
     let mut cue: Option<la::NodeId> = None;
     let mut track_files: Vec<MultitrackRt> = Vec::new();
     let mut monitor: Option<(la::NodeId, rtrb::Producer<f32>)> = None;
+    let mut listens: Vec<ListenRt> = Vec::with_capacity(16);
     let mut multitrack_paused = false;
     let mut multitrack_started = false;
     let period = Duration::from_secs_f64(block as f64 / sample_rate as f64);
@@ -322,6 +373,13 @@ fn rt_loop(
                     }
                 }
                 ToRt::Mixes(m, c) => (mixes, cue) = (m, c),
+                ToRt::Listen(l) => {
+                    if listens.len() < listens.capacity() {
+                        listens.push(l)
+                    } else {
+                        let _ = garbage.push(FromRt::Listen(l));
+                    }
+                }
                 ToRt::StartMultitrack(new) => {
                     let old = std::mem::replace(&mut track_files, new);
                     let _ = garbage.push(FromRt::Multitrack(old));
@@ -428,6 +486,14 @@ fn rt_loop(
                 }
                 unsafe { chunk.commit_all() };
             }
+        }
+        // what's being listened to (the co-host): this block of each; one nobody reads any more goes
+        if let Some(k) = listens.iter().position(|l| l.ring.is_abandoned()) {
+            let _ = garbage.push(FromRt::Listen(listens.swap_remove(k)));
+        }
+        for l in &mut listens {
+            let src = if l.id == la::PROGRAM { Some(graph.program()) } else { graph.tap(l.id, l.tap) };
+            l.feed(src, block);
         }
         // multitrack files: this block of each, interleaved
         if !track_files.is_empty() && !multitrack_paused {
@@ -849,6 +915,17 @@ impl AudioHost {
     pub fn test_monitor(&mut self, source: la::NodeId) -> rtrb::Consumer<f32> {
         let (producer, consumer) = rtrb::RingBuffer::new(monitor_most(self.block) * 4);
         let _ = self.commands.push(ToRt::Monitor(Some((source, producer))));
+        consumer
+    }
+
+    /// A strip's sound to listen to (the co-host hears it): mono at [`LISTEN_RATE`], from `tap`
+    /// (silent while `muted`). Stops when the consumer is dropped, or this engine stops (the
+    /// consumer is then abandoned).
+    pub fn listen(&mut self, id: la::NodeId, tap: la::Tap, muted: Arc<AtomicBool>) -> rtrb::Consumer<i16> {
+        let (ring, consumer) = rtrb::RingBuffer::new(LISTEN_RATE as usize * 4);
+        let step = LISTEN_RATE as f64 / self.sample_rate as f64;
+        let l = ListenRt { id, tap, muted, ring, step, phase: 0.0, sum: 0.0, count: 0 };
+        let _ = self.commands.push(ToRt::Listen(l));
         consumer
     }
 
