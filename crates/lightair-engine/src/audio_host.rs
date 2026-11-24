@@ -295,6 +295,8 @@ enum ToRt {
     PauseMultitrack(bool),
     /// What the monitor plays (a mix, or the program), and its ring; `None`: no direct monitor.
     Monitor(Option<(la::NodeId, rtrb::Producer<f32>)>),
+    /// Mixes played on devices of their own: each one's node and ring (replacing the last list).
+    Extras(Vec<(la::NodeId, rtrb::Producer<f32>)>),
     /// Which mix each out source after Program carries, and the cue mix.
     Mixes([Option<la::NodeId>; OUT_MIXES - 1], Option<la::NodeId>),
 }
@@ -306,6 +308,30 @@ enum FromRt {
     Multitrack(Vec<MultitrackRt>),
     Monitor(rtrb::Producer<f32>),
     Listen(ListenRt),
+    Extras(Vec<(la::NodeId, rtrb::Producer<f32>)>),
+}
+
+/// One block of `out` (silence when `None`) into an output's ring (stereo, interleaved), unless
+/// the ring is already as far ahead of its device as it should be.
+fn feed_output(out: Option<(&[f32], &[f32])>, ring: &mut rtrb::Producer<f32>, block: usize) {
+    let ahead = (ring.buffer().capacity() - ring.slots()) / 2;
+    if ahead + block <= monitor_most(block)
+        && let Ok(mut chunk) = ring.write_chunk_uninit(block * 2)
+    {
+        let (a, b) = chunk.as_mut_slices();
+        for k in 0..block {
+            let (l, r) = out.map_or((0.0, 0.0), |(l, r)| (l[k], r[k]));
+            for (c, v) in [l, r].into_iter().enumerate() {
+                let i = k * 2 + c;
+                if i < a.len() {
+                    a[i].write(v);
+                } else {
+                    b[i - a.len()].write(v);
+                }
+            }
+        }
+        unsafe { chunk.commit_all() };
+    }
 }
 
 /// The most the monitor ring holds ahead of the device (frames, at least three blocks): keeps its
@@ -341,6 +367,7 @@ fn rt_loop(
     let mut cue: Option<la::NodeId> = None;
     let mut track_files: Vec<MultitrackRt> = Vec::new();
     let mut monitor: Option<(la::NodeId, rtrb::Producer<f32>)> = None;
+    let mut extras: Vec<(la::NodeId, rtrb::Producer<f32>)> = Vec::new();
     let mut listens: Vec<ListenRt> = Vec::with_capacity(16);
     let mut multitrack_paused = false;
     let mut multitrack_started = false;
@@ -394,6 +421,10 @@ fn rt_loop(
                     if let Some((_, old)) = std::mem::replace(&mut monitor, m) {
                         let _ = garbage.push(FromRt::Monitor(old));
                     }
+                }
+                ToRt::Extras(e) => {
+                    let old = std::mem::replace(&mut extras, e);
+                    let _ = garbage.push(FromRt::Extras(old));
                 }
             }
         }
@@ -468,24 +499,12 @@ fn rt_loop(
         // the direct monitor: this block of the cue mix (or the program)
         if let Some((src, ring)) = &mut monitor {
             let out = if *src == la::PROGRAM { Some(graph.program()) } else { graph.mix(*src) };
-            let ahead = (ring.buffer().capacity() - ring.slots()) / 2;
-            if ahead + block <= monitor_most(block)
-                && let Ok(mut chunk) = ring.write_chunk_uninit(block * 2)
-            {
-                let (a, b) = chunk.as_mut_slices();
-                for k in 0..block {
-                    let (l, r) = out.map_or((0.0, 0.0), |(l, r)| (l[k], r[k]));
-                    for (c, v) in [l, r].into_iter().enumerate() {
-                        let i = k * 2 + c;
-                        if i < a.len() {
-                            a[i].write(v);
-                        } else {
-                            b[i - a.len()].write(v);
-                        }
-                    }
-                }
-                unsafe { chunk.commit_all() };
-            }
+            feed_output(out, ring, block);
+        }
+        // mixes played on devices of their own
+        for (src, ring) in &mut extras {
+            let out = if *src == la::PROGRAM { Some(graph.program()) } else { graph.mix(*src) };
+            feed_output(out, ring, block);
         }
         // what's being listened to (the co-host): this block of each; one nobody reads any more goes
         if let Some(k) = listens.iter().position(|l| l.ring.is_abandoned()) {
@@ -597,6 +616,8 @@ pub struct AudioHost {
     device_thread: Option<crate::devices::Devices>,
     /// The direct monitor: its output device and what it plays.
     monitor: Option<(String, la::NodeId)>,
+    /// Mixes played on devices of their own: (the mix's node, the device) as opened.
+    extras: Vec<(la::NodeId, String)>,
 }
 
 impl AudioHost {
@@ -661,6 +682,7 @@ impl AudioHost {
             devices: HashMap::new(),
             device_thread: None,
             monitor: None,
+            extras: Vec::new(),
         })
     }
 
@@ -909,6 +931,35 @@ impl AudioHost {
                 Err(e)
             }
         }
+    }
+
+    /// Plays each of `wanted` (a mix's node, an output device) on that device, besides
+    /// everything else; outputs no longer wanted close. Returns what couldn't open.
+    pub fn set_extra_outputs(&mut self, wanted: Vec<(la::NodeId, String)>) -> Vec<String> {
+        if wanted == self.extras {
+            return Vec::new();
+        }
+        let devices = self.device_thread.get_or_insert_with(crate::devices::Devices::start);
+        for (node, _) in &self.extras {
+            devices.close_extra(*node);
+        }
+        let mut rings = Vec::new();
+        let mut opened = Vec::new();
+        let mut failed = Vec::new();
+        for (node, device) in wanted {
+            let (producer, consumer) = rtrb::RingBuffer::new(monitor_most(self.block) * 4);
+            match devices.open_extra(node, &device, self.sample_rate, consumer) {
+                Ok(()) => {
+                    rings.push((node, producer));
+                    opened.push((node, device));
+                }
+                Err(e) => failed.push(format!("{device}: {e}")),
+            }
+        }
+        let _ = self.commands.push(ToRt::Extras(rings));
+        // (what failed is tried again when the mixer next changes)
+        self.extras = opened;
+        failed
     }
 
     /// A monitor whose output the caller reads (tests).

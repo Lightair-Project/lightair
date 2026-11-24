@@ -323,7 +323,7 @@ impl StudioWindow {
             .on_drop(cx.listener(|this, row: &DraggedRow, _, cx| match row.target {
                 RowTarget::Object { object, .. } => this.save_prefab(object, cx),
                 RowTarget::Scene(scene) => this.save_scene_asset(scene, cx),
-                RowTarget::Strip(_) => {}
+                RowTarget::Strip(_) | RowTarget::MoveToFolder(_) | RowTarget::RenameFolder(_) => {}
             }))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.selected_asset = None;

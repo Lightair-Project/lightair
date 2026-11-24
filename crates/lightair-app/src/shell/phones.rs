@@ -612,6 +612,7 @@ fn transition_name(k: lightair_model::TransitionKind) -> &'static str {
         T::Wipe => "wipe",
         T::Dip => "dip",
         T::Stinger => "stinger",
+        T::Scene => "scene",
     }
 }
 
@@ -625,6 +626,7 @@ fn transition_kind(s: &str) -> Option<lightair_model::TransitionKind> {
         "wipe" => T::Wipe,
         "dip" => T::Dip,
         "stinger" => T::Stinger,
+        "scene" => T::Scene,
         _ => return None,
     })
 }

@@ -21,6 +21,8 @@ pub(super) enum Step {
     Web,
     /// An iPhone's or iPad's screen, by cable.
     Phones,
+    /// Another app's picture shared on this computer (Syphon on a Mac, Spout on Windows).
+    Shared,
 }
 
 /// The rail's groups of types.
@@ -62,6 +64,8 @@ pub(super) struct AddObject {
     /// iPhones and iPads connected by cable (name, unique id), looked for again every second.
     phones: Vec<(String, String)>,
     phones_at: Option<std::time::Instant>,
+    /// Pictures other apps share (name, id), for the Shared step.
+    shared: Vec<(String, String)>,
     _events: Subscription,
 }
 
@@ -81,7 +85,11 @@ enum Kind {
     PhoneCamera,
     Avatar,
     CoHost,
+    Shared,
 }
+
+/// Apps share pictures with Syphon on a Mac and Spout on Windows.
+const SHARED_NAME: &str = if cfg!(windows) { "Spout" } else { "Syphon" };
 
 /// (kind, group, icon, name, what it is), in the order shown.
 const KINDS: &[(Kind, Group, &str, &str, &str)] = &[
@@ -100,6 +108,7 @@ const KINDS: &[(Kind, Group, &str, &str, &str)] = &[
         "A VRM, Live2D, Inochi2D or Umamo character that moves with you",
     ),
     (Kind::CoHost, Group::Capture, "bot", "AI co-host", "An avatar that talks with chat, hears you and can use the computer"),
+    (Kind::Shared, Group::Capture, "share-2", SHARED_NAME, "Another app's picture: VTube Studio, Resolume, TouchDesigner, a game"),
     (Kind::Image, Group::Media, "image", "Image", "A picture or logo"),
     (Kind::Video, Group::Media, "clapperboard", "Video", "A video file, looped"),
     (Kind::Text, Group::Graphics, "type", "Text", "A title or caption"),
@@ -263,6 +272,7 @@ impl StudioWindow {
             scroll: ScrollHandle::new(),
             phones: Vec::new(),
             phones_at: None,
+            shared: Vec::new(),
             _events: events,
         });
         cx.notify();
@@ -294,6 +304,7 @@ impl StudioWindow {
         let placeholder = match (step, a.screens.as_ref().map(|p| p.mode)) {
             (Step::Cameras, _) => "Search cameras",
             (Step::Phones, _) => "Search iPhones and iPads",
+            (Step::Shared, _) => "Search shared pictures",
             (Step::Screens, Some(lightair_model::kinds::DISPLAY)) => "Search displays",
             (Step::Screens, Some(lightair_model::kinds::APP)) => "Search apps",
             (Step::Screens, _) => "Search windows",
@@ -387,6 +398,18 @@ impl StudioWindow {
             Kind::Timer => self.add_timer(cx),
             Kind::Web => {
                 self.add_object_step(Step::Web, window, cx);
+                return;
+            }
+            Kind::Shared => {
+                let list = self
+                    .studio
+                    .read(cx)
+                    .engine()
+                    .call(|_| lightair_engine::shared_video::senders());
+                if let Some(a) = &mut self.add_object {
+                    a.shared = list;
+                }
+                self.add_object_step(Step::Shared, window, cx);
                 return;
             }
             Kind::Phone => {
@@ -983,6 +1006,37 @@ impl StudioWindow {
                 }
                 body.child(grid).into_any_element()
             }
+            Step::Shared => {
+                let shared: Vec<(String, String)> = self
+                    .add_object
+                    .as_ref()
+                    .map(|a| a.shared.iter().filter(|(n, _)| matches(&query, &[n])).cloned().collect())
+                    .unwrap_or_default();
+                let mut body = list();
+                if shared.is_empty() {
+                    body = body.child(empty_state(
+                        "share-2",
+                        format!("No app is sharing with {SHARED_NAME}"),
+                        "Turn on its output in the app (VTube Studio: Settings › Syphon/Spout), then open this again",
+                    ));
+                }
+                let mut grid = div().grid().grid_cols(2).gap(px(4.));
+                for (i, (name, id)) in shared.into_iter().enumerate() {
+                    grid = grid.child(tile(("shared", i), "share-2", name.clone(), Some(SHARED_NAME.into()), None, None).on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.add_source_object(
+                                &name,
+                                lightair_engine::shared_video::KIND,
+                                lightair_engine::shared_video::settings(&id, &name),
+                                (1920.0, 1080.0),
+                                cx,
+                            );
+                            this.close_add_object(window, cx);
+                        }),
+                    ));
+                }
+                body.child(grid).into_any_element()
+            }
             Step::Cameras => {
                 let cams: Vec<_> =
                     self.camera_devices.iter().filter(|(label, _)| matches(&query, &[label])).cloned().collect();
@@ -1015,6 +1069,7 @@ impl StudioWindow {
             Step::Types => None,
             Step::Cameras => Some("Camera"),
             Step::Phones => Some("iPhone or iPad"),
+            Step::Shared => Some(SHARED_NAME),
             Step::Screens => Some(match screen_mode {
                 Some(lightair_model::kinds::DISPLAY) => "Display",
                 Some(lightair_model::kinds::APP) => "App",

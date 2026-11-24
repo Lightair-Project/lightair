@@ -34,6 +34,8 @@ pub(crate) struct CanvasMove {
     pub fades: Vec<ObsSource>,
     #[allow(dead_code)]
     pub masks: Vec<crate::reconcile::Masked>,
+    /// A Scene transition's two scenes in the temporary scene: A shown until the swap, B after.
+    pub swap: Option<(*mut sys::obs_sceneitem_t, *mut sys::obs_sceneitem_t)>,
 }
 
 pub(crate) struct MoveAnim {
@@ -41,6 +43,9 @@ pub(crate) struct MoveAnim {
     pub start: Instant,
     pub duration: f32,
     pub done: bool,
+    /// Where (0..1) a Scene transition swaps A for B; `None` for a Move.
+    pub swap_at: Option<f32>,
+    pub swapped: bool,
 }
 
 unsafe impl Send for MoveAnim {}
@@ -89,6 +94,20 @@ impl MoveAnim {
             return true;
         }
         let t = (self.start.elapsed().as_secs_f32() / self.duration.max(0.001)).min(1.0);
+        if let Some(at) = self.swap_at
+            && t >= at
+            && !self.swapped
+        {
+            for f in &self.canvases {
+                if let Some((a, b)) = f.swap {
+                    unsafe {
+                        sys::obs_sceneitem_set_visible(b, true);
+                        sys::obs_sceneitem_set_visible(a, false);
+                    }
+                }
+            }
+            self.swapped = true;
+        }
         let e = ease_in_out(t);
         for f in &self.canvases {
             for tw in &f.tweens {

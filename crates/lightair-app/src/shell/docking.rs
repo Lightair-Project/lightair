@@ -35,6 +35,9 @@ pub(super) struct DockPanels {
     activity: Entity<crate::activity_panel::ActivityPanel>,
     stream: Entity<crate::stream_panel::StreamPanel>,
     automations: Entity<crate::automations_panel::AutomationsPanel>,
+    soundboard: Entity<crate::show_panel::SoundboardPanel>,
+    notes: Entity<crate::show_panel::NotesPanel>,
+    rundown: Entity<crate::show_panel::RundownPanel>,
 }
 
 impl DockPanels {
@@ -59,6 +62,9 @@ impl DockPanels {
         reg!("activity", self.activity);
         reg!("stream", self.stream);
         reg!("automations", self.automations);
+        reg!("soundboard", self.soundboard);
+        reg!("notes", self.notes);
+        reg!("rundown", self.rundown);
     }
 }
 
@@ -78,13 +84,26 @@ pub(super) fn populate_dock(
     area.set_center(DockLayout::tabs().panel_view(panel_handle(panels.canvas.clone()), cx), window, cx);
     // the mixer and assets: a dock of their own, so they hide like the side panels
     let mut bottom = DockLayout::tabs().panel_view(panel_handle(panels.mixer.clone()), cx);
+    if preset == Preset::Live {
+        // live: what runs the show, beside the mixer
+        bottom = bottom
+            .panel_view(panel_handle(panels.soundboard.clone()), cx)
+            .panel_view(panel_handle(panels.rundown.clone()), cx)
+            .panel_view(panel_handle(panels.notes.clone()), cx);
+    }
     if preset != Preset::Live {
         bottom = bottom
             .panel_view(panel_handle(panels.assets.clone()), cx)
             .panel_view(panel_handle(panels.automations.clone()), cx)
+            .panel_view(panel_handle(panels.soundboard.clone()), cx)
+            .panel_view(panel_handle(panels.rundown.clone()), cx)
+            .panel_view(panel_handle(panels.notes.clone()), cx)
             .active_index(match hook.as_deref() {
                 Some(h) if h.starts_with("assets") => 1,
                 Some(h) if h.starts_with("automations") => 2,
+                Some(h) if h.starts_with("soundboard") => 3,
+                Some(h) if h.starts_with("rundown") => 4,
+                Some(h) if h.starts_with("notes") => 5,
                 _ => 0,
             });
     }
@@ -355,6 +374,9 @@ impl StudioWindow {
             activity: self.activity.clone(),
             stream: self.stream.clone(),
             automations: self.automations_panel.clone(),
+            soundboard: cx.new(|cx| crate::show_panel::SoundboardPanel::new(self.studio.clone(), cx)),
+            notes: cx.new(|cx| crate::show_panel::NotesPanel::new(self.studio.clone(), cx)),
+            rundown: cx.new(|cx| crate::show_panel::RundownPanel::new(self.studio.clone(), cx)),
         };
         // Every group shows a tab bar, even with one panel, so any panel can be dropped onto
         // any header to join it as a tab (and the canvas gets a header like the rest).

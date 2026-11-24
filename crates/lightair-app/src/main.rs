@@ -46,6 +46,7 @@ mod prefs;
 mod reframe;
 mod rows;
 mod safe_areas;
+mod show_panel;
 mod keys;
 mod secrets;
 mod selftest;

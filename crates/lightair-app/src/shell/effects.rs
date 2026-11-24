@@ -419,6 +419,49 @@ impl StudioWindow {
         if d.kind == catalog::PLUGIN_KIND {
             return col.child(self.plugin_panel(e, cx));
         }
+        // Object mask: which source's picture cuts this one
+        if d.kind == catalog::OBJECT_MASK_KIND {
+            let own = match iid {
+                Owner::Source(s) => Some(s),
+                _ => None,
+            };
+            let chosen = e.settings.get("source").and_then(Value::as_str).unwrap_or("").to_string();
+            let workspace = self.studio.read(cx).workspace().clone();
+            let mut chips = div().flex().flex_wrap().gap_1().flex_1();
+            let mut any = false;
+            for (n, src) in workspace.sources.values().enumerate() {
+                let audio_only = matches!(
+                    src.kind.as_str(),
+                    lightair_model::kinds::MIC | lightair_model::kinds::DESKTOP_AUDIO | lightair_model::kinds::APP_AUDIO | lightair_model::kinds::AUDIO_DEVICE
+                );
+                if Some(src.id) == own || audio_only || workspace.objects_using(src.id).next().is_none() {
+                    continue;
+                }
+                any = true;
+                let key = src.id.to_string();
+                let on = key == chosen;
+                let cmd = set(with(&e.settings, "source", json!(if on { String::new() } else { key })));
+                chips = chips.child(
+                    div()
+                        .id(SharedString::from(format!("fx-mask-src-{n}")))
+                        .px_2()
+                        .h(px(24.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(5.))
+                        .text_size(px(11.))
+                        .cursor_pointer()
+                        .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                        .when(!on, |d| d.text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
+                        .child(src.name.clone())
+                        .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
+                );
+            }
+            if !any {
+                chips = chips.child(div().text_size(px(11.)).text_color(tok::text_tertiary()).child("Add the object to mask with first"));
+            }
+            col = col.child(control_row("Mask", chips));
+        }
         let mut group_open = true;
         let mut first_heading = true;
         // (macOS's own camera effect; Windows segments with MediaPipe whatever the workspace says)

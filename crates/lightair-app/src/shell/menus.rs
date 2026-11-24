@@ -322,7 +322,7 @@ pub(super) fn scene_menu(
         }
     };
     let (s1, s2) = (shell.clone(), shell.clone());
-    menu.item(
+    let menu = menu.item(
         PopupMenuItem::new("Go on air")
             .icon(ui::icon("radio"))
             .disabled(on_air)
@@ -357,7 +357,85 @@ pub(super) fn scene_menu(
             .icon(ui::icon("arrow-down"))
             .disabled(index + 1 >= count)
             .on_click(run(Command::MoveScene { scene, to: index + 1 })),
-    )
+    );
+    // over every scene (a downstream keyer)
+    let overlay = workspace.show.overlays.contains(&scene);
+    let mut show = workspace.show.clone();
+    if overlay {
+        show.overlays.retain(|o| *o != scene);
+    } else {
+        show.overlays.push(scene);
+    }
+    let label = if overlay { "Stop showing over every scene" } else { "Show over every scene" };
+    let mut menu = menu.separator().item(
+        PopupMenuItem::new(label)
+            .icon(ui::icon("layers"))
+            .on_click(run(Command::SetShow { show, label: label.into() })),
+    );
+    // folders
+    let current = workspace.scenes[index].folder.clone();
+    let mut folders: Vec<String> = Vec::new();
+    for s in workspace.scenes.iter() {
+        if !s.folder.is_empty() && s.folder != current && !folders.contains(&s.folder) {
+            folders.push(s.folder.clone());
+        }
+    }
+    let s3 = shell.clone();
+    menu = menu.separator().item(PopupMenuItem::new("New folder…").icon(ui::icon("folder-plus")).on_click(
+        move |_, window, cx| {
+            if let Some(s) = s3.upgrade() {
+                s.update(cx, |w, cx| w.start_rename(RowTarget::MoveToFolder(scene), "New folder", window, cx));
+            }
+        },
+    ));
+    for f in folders {
+        menu = menu.item(
+            PopupMenuItem::new(format!("Move to {f}"))
+                .icon(ui::icon("folder-input"))
+                .on_click(run(Command::SetSceneFolder { scene, folder: f.clone() })),
+        );
+    }
+    if !current.is_empty() {
+        menu = menu.item(
+            PopupMenuItem::new("Take out of folder")
+                .icon(ui::icon("folder-output"))
+                .on_click(run(Command::SetSceneFolder { scene, folder: String::new() })),
+        );
+    }
+    menu
+}
+
+/// The menu for a folder in the Scenes list (`first`: a scene in it).
+pub(super) fn folder_menu(
+    first: Id,
+    menu: PopupMenu,
+    shell: &WeakEntity<StudioWindow>,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let Some(w) = shell.upgrade() else { return menu };
+    let workspace = w.read(cx).studio.read(cx).workspace().clone();
+    let Some(folder) = workspace.scene(first).map(|s| s.folder.clone()).filter(|f| !f.is_empty()) else { return menu };
+    let ungroup = Command::Batch {
+        label: "Remove folder".into(),
+        commands: workspace
+            .scenes
+            .iter()
+            .filter(|s| s.folder == folder)
+            .map(|s| Command::SetSceneFolder { scene: s.id, folder: String::new() })
+            .collect(),
+    };
+    let (s1, s2) = (shell.clone(), shell.clone());
+    let name = folder.clone();
+    menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+        if let Some(s) = s1.upgrade() {
+            s.update(cx, |w, cx| w.start_rename(RowTarget::RenameFolder(first), &name, window, cx));
+        }
+    }))
+    .item(PopupMenuItem::new("Remove folder (keep its scenes)").icon(ui::icon("folder-x")).on_click(move |_, _, cx| {
+        if let Some(s) = s2.upgrade() {
+            s.update(cx, |w, cx| w.exec(ungroup.clone(), cx));
+        }
+    }))
 }
 
 /// The menu for empty space in the Scenes list.

@@ -316,6 +316,51 @@ impl StudioWindow {
                                     .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
                             )
                     })
+                    .child({
+                        // also on a device of its own (a second pair of headphones, a room speaker)
+                        let stale = self.output_devices.borrow().as_ref().is_none_or(|(at, _)| at.elapsed().as_secs() > 5);
+                        if stale {
+                            let list = self.studio.read(cx).engine().call(|_| lightair_engine::monitoring::devices());
+                            *self.output_devices.borrow_mut() = Some((std::time::Instant::now(), list));
+                        }
+                        let devices = self.output_devices.borrow().as_ref().map(|(_, l)| l.clone()).unwrap_or_default();
+                        let mut chips = div().flex().flex_wrap().gap_1();
+                        let mut options: Vec<(String, Option<String>)> = vec![("Nowhere else".into(), None)];
+                        options.extend(devices.into_iter().map(|(name, dev)| (name, Some(dev))));
+                        for (n, (name, dev)) in options.into_iter().enumerate() {
+                            let on = m.device == dev;
+                            let cmd = Command::UpdateMix { mix: AudioMix { device: dev, ..m.clone() } };
+                            chips = chips.child(
+                                div()
+                                    .id(("mix-device", n))
+                                    .px_2()
+                                    .h(px(22.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(5.))
+                                    .text_size(px(11.))
+                                    .cursor_pointer()
+                                    .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                                    .when(!on, |d| d.text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
+                                    .child(name)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
+                            );
+                        }
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .py_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(div().text_size(px(12.)).child("Also plays on"))
+                                    .child(ui::info("mix-device-info", "This mix, as it sounds after its fader, on another output: a guest's headphones, a speaker in the room, an interface's outputs")),
+                            )
+                            .child(chips)
+                    })
                     .child(self.strip_effects_section(strip, &m.effects, cx))
                     .child(div().pt_2().child(
                         Button::new("remove-mix").label("Remove mix").small().danger().on_click(

@@ -147,6 +147,15 @@ enum Cmd {
         reply: mpsc::Sender<Result<(), String>>,
     },
     CloseOutput,
+    /// Another output (a mix played on a device of its own), by `key`.
+    OpenExtra {
+        key: u128,
+        device: String,
+        sample_rate: u32,
+        ring: rtrb::Consumer<f32>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    CloseExtra(u128),
 }
 
 /// Times the monitor ran short (a gap in what's heard), for diagnostics.
@@ -167,6 +176,8 @@ impl Devices {
                 let mut streams: HashMap<lightair_model::Id, cpal::Stream> = HashMap::new();
                 // the monitor's stream, held open (at most one)
                 let mut output: Vec<cpal::Stream> = Vec::new();
+                // mixes played on devices of their own
+                let mut extras: HashMap<u128, cpal::Stream> = HashMap::new();
                 while let Ok(cmd) = rx.recv() {
                     match cmd {
                         Cmd::Open { input, device, sample_rate, ring, reply } => {
@@ -197,6 +208,21 @@ impl Devices {
                             }
                         }
                         Cmd::CloseOutput => output.clear(),
+                        Cmd::OpenExtra { key, device, sample_rate, ring, reply } => {
+                            extras.remove(&key);
+                            match open_output(&device, sample_rate, ring) {
+                                Ok(stream) => {
+                                    extras.insert(key, stream);
+                                    let _ = reply.send(Ok(()));
+                                }
+                                Err(e) => {
+                                    let _ = reply.send(Err(e));
+                                }
+                            }
+                        }
+                        Cmd::CloseExtra(key) => {
+                            extras.remove(&key);
+                        }
                     }
                 }
             })
@@ -236,6 +262,19 @@ impl Devices {
 
     pub fn close_output(&self) {
         let _ = self.tx.send(Cmd::CloseOutput);
+    }
+
+    /// Plays `ring` on output `device` as another output, `key` (closing any it had).
+    pub fn open_extra(&self, key: u128, device: &str, sample_rate: u32, ring: rtrb::Consumer<f32>) -> Result<(), String> {
+        let (reply, answer) = mpsc::channel();
+        self.tx
+            .send(Cmd::OpenExtra { key, device: device.into(), sample_rate, ring, reply })
+            .map_err(|_| "the device thread stopped".to_string())?;
+        answer.recv_timeout(std::time::Duration::from_secs(5)).map_err(|_| "the output didn't open".to_string())?
+    }
+
+    pub fn close_extra(&self, key: u128) {
+        let _ = self.tx.send(Cmd::CloseExtra(key));
     }
 }
 

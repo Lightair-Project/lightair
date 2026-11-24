@@ -41,6 +41,9 @@ mod phone_decode_win;
 #[cfg(any(target_os = "macos", windows))]
 mod phone_units;
 pub mod player;
+pub mod filters;
+pub mod shared_video;
+pub mod soundboard;
 pub mod plugins;
 pub mod pointer;
 mod reconcile;

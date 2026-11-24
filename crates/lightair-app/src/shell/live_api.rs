@@ -182,6 +182,23 @@ impl StudioWindow {
                 w.button(id, button);
                 Ok(json!({}))
             }
+            // the soundboard: a pad by name or id; none (or "stop"): stop
+            "soundboard.play" => {
+                let studio = self.studio.read(cx);
+                let w = studio.workspace();
+                let which = text(p, "pad").filter(|k| *k != "stop");
+                let pad = which.map(|k| w.show.pads.iter().find(|pd| pd.id.to_string() == k || pd.name.eq_ignore_ascii_case(k)).cloned());
+                match pad {
+                    Some(None) => Err(ApiError::not_found(format!("no pad {}", which.unwrap_or_default()))),
+                    Some(Some(pad)) if crate::show_panel::play_pad(studio, Some(&pad)) => Ok(json!({"playing": pad.name})),
+                    None if crate::show_panel::play_pad(studio, None) => Ok(json!({})),
+                    _ => Err(ApiError::new(ErrorKind::State, "there's no soundboard yet (add a sound in the Soundboard panel)")),
+                }
+            }
+            "soundboard.list" => {
+                let w = self.studio.read(cx).workspace();
+                Ok(json!({"pads": w.show.pads.iter().map(|p| json!({"id": p.id, "name": p.name, "file": p.file, "looped": p.looped})).collect::<Vec<_>>()}))
+            }
             "widgets.speak" => match widgets {
                 Some(w) if w.speak(text(p, "text").unwrap_or("")) => Ok(json!({})),
                 Some(_) => Err(ApiError::new(ErrorKind::State, "there's no alert box on air to say it (add one in Add Object › Widgets)")),

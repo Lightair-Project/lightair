@@ -13,6 +13,10 @@ pub enum RowTarget {
     Object { scene: Id, object: Id },
     /// A mixer strip (track, bus or mix).
     Strip(lightair_model::MixerStrip),
+    /// A new folder for this scene (the name typed is the folder's).
+    MoveToFolder(Id),
+    /// The folder this scene is in (renamed for every scene in it).
+    RenameFolder(Id),
 }
 
 impl RowTarget {
@@ -21,6 +25,7 @@ impl RowTarget {
             RowTarget::Scene(scene) => Command::RenameScene { scene, name },
             RowTarget::Object { scene, object } => Command::RenameObject { scene, object, name },
             RowTarget::Strip(strip) => Command::RenameStrip { strip, name },
+            RowTarget::MoveToFolder(scene) | RowTarget::RenameFolder(scene) => Command::SetSceneFolder { scene, folder: name },
         }
     }
 }

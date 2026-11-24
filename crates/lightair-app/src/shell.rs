@@ -407,6 +407,13 @@ pub struct StudioWindow {
     interfaces: RefCell<(std::time::Instant, Vec<lightair_engine::devices::DeviceInfo>)>,
     /// The transition tile playing its preview (under the pointer), and since when.
     transition_hover: Option<(usize, Instant)>,
+    /// The scene's transition being edited is its rule for switching from this scene:
+    /// (the scene, the scene it comes from).
+    transition_from: Option<(Id, Id)>,
+    /// Scene folders closed in the Scenes panel (by name).
+    collapsed_folders: HashSet<String>,
+    /// Audio output devices (name, id) for a mix's own output, read now and then.
+    output_devices: RefCell<Option<(Instant, Vec<(String, String)>)>>,
     /// The object showing crop handles instead of resize handles.
     crop_mode: Option<Id>,
     crop_preview_sent: Option<(Id, Id, Id)>,
@@ -862,6 +869,9 @@ impl StudioWindow {
             interfaces: RefCell::new((std::time::Instant::now(), Vec::new())),
             crop_mode: None,
             transition_hover: None,
+            transition_from: None,
+            collapsed_folders: HashSet::new(),
+            output_devices: RefCell::new(None),
             crop_preview_sent: None,
             rotate_tool: false,
             gizmo_hover: None,
@@ -943,6 +953,26 @@ impl StudioWindow {
     fn finish_rename(&mut self, commit: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(renaming) = self.renaming.take() else { return };
         if commit && let Some(cmd) = renaming.command(cx) {
+            // a folder's new name goes to every scene in it
+            let cmd = match (renaming.target, &cmd) {
+                (RowTarget::RenameFolder(scene), Command::SetSceneFolder { folder, .. }) => {
+                    let workspace = self.studio.read(cx).workspace().clone();
+                    let old = workspace.scene(scene).map(|s| s.folder.clone()).unwrap_or_default();
+                    let commands: Vec<Command> = workspace
+                        .scenes
+                        .iter()
+                        .filter(|s| !old.is_empty() && s.folder == old)
+                        .map(|s| Command::SetSceneFolder { scene: s.id, folder: folder.clone() })
+                        .collect();
+                    if old.is_empty() {
+                        cmd
+                    } else {
+                        self.collapsed_folders.remove(&old);
+                        Command::Batch { label: "Rename folder".into(), commands }
+                    }
+                }
+                _ => cmd,
+            };
             self.exec(cmd, cx);
         }
         window.focus(&self.focus, cx);
@@ -3372,22 +3402,65 @@ impl StudioWindow {
     /// How scenes change on air: a tile per kind, then its settings as rows (duration;
     /// direction for Slide and Wipe; the video and its cut point for Stinger).
     fn transition_picker(&self, workspace: &Workspace, scene: &Scene, cx: &mut Context<Self>) -> impl IntoElement {
-        // this scene's own, or the default every switch uses (what the tiles below change)
+        // this scene's own, or the default every switch uses (what the tiles below change); or,
+        // with a scene picked under From, its rule for switching from that scene
         let own = scene.transition.is_some();
-        let current = scene.transition.unwrap_or(workspace.transition);
         let sid = scene.id;
-        let set = move |settings: TransitionSettings| {
-            if own { Command::SetSceneTransition { scene: sid, transition: Some(settings) } } else { Command::SetTransition { settings } }
+        let from = self
+            .transition_from
+            .filter(|(s, f)| *s == sid && scene.transitions_from.contains_key(f))
+            .map(|(_, f)| f);
+        let base = scene.transition.unwrap_or(workspace.transition);
+        let current = from.and_then(|f| scene.transitions_from.get(&f).copied()).unwrap_or(base);
+        let set = move |settings: TransitionSettings| match from {
+            Some(f) => Command::SetSceneTransitionFrom { scene: sid, from: f, transition: Some(settings) },
+            None if own => Command::SetSceneTransition { scene: sid, transition: Some(settings) },
+            None => Command::SetTransition { settings },
         };
         let scope = self.segmented(
             "tr-scope",
             vec![
-                ("All scenes", Command::SetSceneTransition { scene: sid, transition: None }, !own),
+                ("All scenes", Command::SetSceneTransition { scene: sid, transition: None }, !own && from.is_none()),
                 // its own starts as a copy of the default
-                ("This scene", Command::SetSceneTransition { scene: sid, transition: Some(current) }, own),
+                ("This scene", Command::SetSceneTransition { scene: sid, transition: Some(base) }, own && from.is_none()),
             ],
             cx,
         );
+        // From: a rule per scene it can come from (a dot marks the ones with their own)
+        let mut from_row = div().flex().flex_wrap().gap_1();
+        for (n, other) in workspace.scenes.iter().filter(|s| s.id != sid).enumerate() {
+            let oid = other.id;
+            let has = scene.transitions_from.contains_key(&oid);
+            let on = from == Some(oid);
+            from_row = from_row.child(
+                div()
+                    .id(("tr-from", n))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .h(px(22.))
+                    .rounded(px(5.))
+                    .text_size(px(11.))
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                    .when(!on, |d| d.text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
+                    .when(has, |d| d.child(div().size(px(5.)).rounded_full().bg(tok::accent_primary())))
+                    .child(other.name.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if on {
+                            this.transition_from = None;
+                        } else {
+                            if !has {
+                                this.exec(Command::SetSceneTransitionFrom { scene: sid, from: oid, transition: Some(base) }, cx);
+                            }
+                            this.transition_from = Some((sid, oid));
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        let from_name = from.and_then(|f| workspace.scene(f)).map(|s| s.name.clone());
         // the kinds, as tiles
         let tile = |i: usize, kind: TransitionKind| {
             let on = current.kind == kind;
@@ -3399,6 +3472,7 @@ impl StudioWindow {
                 TransitionKind::Wipe => "The new scene wipes across the old one",
                 TransitionKind::Dip => "Fades through black",
                 TransitionKind::Stinger => "A video plays over the switch",
+                TransitionKind::Scene => "A scene plays over the switch (an animated graphic); the scenes swap halfway",
             };
             // hovered: it plays (A, the switch, B, again); otherwise it shows the switch midway
             let playing = self.transition_hover.filter(|(k, _)| *k == i).map(|(_, since)| {
@@ -3453,8 +3527,40 @@ impl StudioWindow {
             .flex_col()
             .gap_2()
             .child(scope)
-            .children(hint.map(|h| div().text_size(px(11.)).text_color(tok::text_tertiary()).child(h)))
-            .child(grid);
+            .children(hint.map(|h| div().text_size(px(11.)).text_color(tok::text_tertiary()).child(h)));
+        if workspace.scenes.len() > 1 {
+            body = body.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(div().w(px(72.)).flex_none().pt(px(3.)).text_size(px(12.)).text_color(tok::text_secondary()).child("From"))
+                    .child(div().flex_1().min_w_0().child(from_row)),
+            );
+        }
+        if let (Some(f), Some(name)) = (from, from_name) {
+            let remove = Command::SetSceneTransitionFrom { scene: sid, from: f, transition: None };
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.))
+                            .text_color(tok::text_tertiary())
+                            .child(format!("Switching here from {name}")),
+                    )
+                    .child(Button::new("tr-from-remove").label("Remove").xsmall().ghost().on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.exec(remove.clone(), cx);
+                            this.transition_from = None;
+                        },
+                    ))),
+            );
+        }
+        body = body.child(grid);
         // duration (a cut has none)
         if current.kind != TransitionKind::Cut {
             let durations: Vec<(&'static str, Command, bool)> = [(300u32, "0.3 s"), (500, "0.5 s"), (800, "0.8 s"), (1200, "1.2 s")]
@@ -3469,6 +3575,47 @@ impl StudioWindow {
                 .map(|(d, label)| (label, set(TransitionSettings { direction: d, ..current }), current.direction == d))
                 .collect();
             body = body.child(row("Direction", self.segmented("tr-direction", dirs, cx).flex_1().into_any_element()));
+        }
+        // Scene: which scene plays over the switch (this scene's own, else the show's)
+        if current.kind == TransitionKind::Scene {
+            let mine = own || from.is_some();
+            let chosen = if mine { scene.transition_scene.or(workspace.show.transition_scene) } else { workspace.show.transition_scene };
+            let mut chips = div().flex().flex_wrap().gap_1();
+            for (n, other) in workspace.scenes.iter().filter(|s| s.id != sid).enumerate() {
+                let oid = other.id;
+                let on = chosen == Some(oid);
+                let cmd = if mine {
+                    Command::SetSceneTransitionScene { scene: sid, transition_scene: Some(oid) }
+                } else {
+                    let mut show = workspace.show.clone();
+                    show.transition_scene = Some(oid);
+                    Command::SetShow { show, label: "Change the transition scene".into() }
+                };
+                chips = chips.child(
+                    div()
+                        .id(("tr-scene", n))
+                        .px_2()
+                        .h(px(22.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(5.))
+                        .text_size(px(11.))
+                        .cursor_pointer()
+                        .when(on, |d| d.bg(tok::bg_selected()).text_color(tok::text()))
+                        .when(!on, |d| d.text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
+                        .child(other.name.clone())
+                        .on_click(cx.listener(move |this, _, _, cx| this.exec(cmd.clone(), cx))),
+                );
+            }
+            body = body.child(row("Plays", chips.into_any_element()));
+            if chosen.is_none() {
+                body = body.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(tok::text_tertiary())
+                        .child("Pick the scene to play over the switch: a video with alpha, an animated logo, a wipe. Until then it crossfades."),
+                );
+            }
         }
         // Stinger: its video, and when the scene changes underneath it
         if current.kind == TransitionKind::Stinger {
@@ -3538,8 +3685,94 @@ impl StudioWindow {
         let selected = studio.selected_scene;
         let program = workspace.program;
         let shell = cx.entity().downgrade();
-        let rows = workspace.scenes.iter().enumerate().map(|(i, scene)| {
+        // folders: each listed where its first scene is, its scenes under it
+        enum Entry {
+            Folder(String, Id, usize, bool),
+            Scene(usize),
+        }
+        let mut entries = Vec::new();
+        let mut seen: Vec<&str> = Vec::new();
+        for (i, scene) in workspace.scenes.iter().enumerate() {
+            if scene.folder.is_empty() {
+                entries.push(Entry::Scene(i));
+            } else if !seen.contains(&scene.folder.as_str()) {
+                seen.push(&scene.folder);
+                let members: Vec<usize> =
+                    workspace.scenes.iter().enumerate().filter(|(_, s)| s.folder == scene.folder).map(|(n, _)| n).collect();
+                let open = !self.collapsed_folders.contains(&scene.folder);
+                let live = members.iter().any(|n| program == Some(workspace.scenes[*n].id));
+                entries.push(Entry::Folder(scene.folder.clone(), scene.id, members.len(), live));
+                if open {
+                    entries.extend(members.into_iter().map(Entry::Scene));
+                }
+            }
+        }
+        let overlays = workspace.show.overlays.clone();
+        let renaming_folder = self.renaming.as_ref().and_then(|r| match r.target {
+            RowTarget::RenameFolder(s) => Some(s),
+            _ => None,
+        });
+        let folder_header = |name: String, first: Id, count: usize, live: bool, n: usize, cx: &mut Context<Self>| {
+            let open = !self.collapsed_folders.contains(&name);
+            let key = name.clone();
+            let shell = shell.clone();
+            div()
+                .id(("scene-folder", n))
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .h(px(28.))
+                .mx_2()
+                .px_2()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|d| d.bg(tok::bg_raised()))
+                .child(ui::icon(if open { "chevron-down" } else { "chevron-right" }).size(px(12.)).text_color(tok::text_tertiary()))
+                .child(ui::icon(if open { "folder-open" } else { "folder" }).size(px(13.)).text_color(tok::text_secondary()))
+                .child(if renaming_folder == Some(first) {
+                    self.row_label(RowTarget::RenameFolder(first), &name, tok::text()).into_any_element()
+                } else {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(tok::text_secondary())
+                        .child(name.clone())
+                        .into_any_element()
+                })
+                .when(live && !open, |d| d.child(div().size(px(6.)).rounded_full().bg(tok::live())))
+                .child(div().text_size(px(10.)).text_color(tok::text_tertiary()).child(count.to_string()))
+                .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                    if ev.click_count() == 2 {
+                        this.start_rename(RowTarget::RenameFolder(first), &key, window, cx);
+                        return;
+                    }
+                    if !this.collapsed_folders.remove(&key) {
+                        this.collapsed_folders.insert(key.clone());
+                    }
+                    cx.notify();
+                }))
+                .context_menu(move |m, _, cx| menus::folder_menu(first, m, &shell, cx))
+                .into_any_element()
+        };
+        let mut headers = Vec::new();
+        for (n, e) in entries.iter().enumerate() {
+            if let Entry::Folder(name, first, count, live) = e {
+                headers.push((n, folder_header(name.clone(), *first, *count, *live, n, cx)));
+            }
+        }
+        let mut headers = headers.into_iter().peekable();
+        let shown: Vec<(usize, Option<usize>)> = entries
+            .iter()
+            .enumerate()
+            .map(|(n, e)| (n, if let Entry::Scene(i) = e { Some(*i) } else { None }))
+            .collect();
+        let row_of = |i: usize, scene: &std::sync::Arc<Scene>, cx: &mut Context<Self>| {
             let id = scene.id;
+            let indented = !scene.folder.is_empty();
+            let overlay = overlays.contains(&id);
             let on_air = program == Some(id);
             let target = RowTarget::Scene(id);
             let dragged = DraggedRow { target, name: scene.name.clone().into(), icon: "layout-dashboard" };
@@ -3596,7 +3829,12 @@ impl StudioWindow {
                             .bg(tok::live()),
                     )
                 })
-                .child(self.row_label(target, &scene.name, tok::text()))
+                .child(if self.renaming.as_ref().is_some_and(|r| r.target == RowTarget::MoveToFolder(id)) {
+                    // naming the new folder this scene goes into
+                    self.row_label(RowTarget::MoveToFolder(id), "New folder", tok::text())
+                } else {
+                    self.row_label(target, &scene.name, tok::text())
+                })
                 .when(on_air, |d| {
                     d.child(
                         div()
@@ -3615,11 +3853,37 @@ impl StudioWindow {
                             .child(crate::ui::keys_label(&format!("⌘{}", i + 1)).into_owned()),
                     )
                 })
+                .when(overlay, |d| {
+                    d.child(
+                        div()
+                            .px_1()
+                            .rounded(px(3.))
+                            .text_size(px(9.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(tok::accent_primary())
+                            .border_1()
+                            .border_color(tok::accent_primary())
+                            .child("OVERLAY"),
+                    )
+                })
+                .when(indented, |d| d.ml(px(22.)))
                 .context_menu({
                     let shell = shell.clone();
                     move |m, _, cx| menus::scene_menu(id, m, &shell, cx)
                 })
-        });
+                .into_any_element()
+        };
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (n, scene_index) in shown {
+            match scene_index {
+                Some(i) => rows.push(row_of(i, &workspace.scenes[i], cx)),
+                None => {
+                    if let Some((_, h)) = headers.next_if(|(k, _)| *k == n) {
+                        rows.push(h);
+                    }
+                }
+            }
+        }
         div().flex().flex_col().size_full().pt_1().child(
             div()
                 .id("scenes-scroll")
@@ -4943,6 +5207,20 @@ fn transition_preview(kind: TransitionKind, direction: Direction, t: Option<f32>
         TransitionKind::Stinger => frame
             .child(scene(t >= 0.5, 0.0, 0.0))
             .child(div().absolute().left(relative(-0.55 + 1.6 * t)).top_0().w(relative(0.5)).h_full().bg(rgb(0x7C5CFF))),
+        // a graphic grows over the middle, the scenes swapping behind it
+        TransitionKind::Scene => {
+            let g = 1.0 - (2.0 * t - 1.0).abs();
+            frame.child(scene(t >= 0.5, 0.0, 0.0)).child(
+                div()
+                    .absolute()
+                    .left(relative(0.5 - 0.3 * g))
+                    .top(relative(0.5 - 0.45 * g))
+                    .w(relative(0.6 * g))
+                    .h(relative(0.9 * g))
+                    .rounded(px(4.))
+                    .bg(rgb(0xF5A524)),
+            )
+        }
     }
 }
 

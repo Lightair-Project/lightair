@@ -77,7 +77,16 @@ pub struct Reconciler {
     /// Sources held back until the user answers macOS's camera or microphone prompt
     /// ([`crate::access`]).
     awaiting_access: HashSet<Id>,
+    /// The overlay scenes on each canvas's output channels: (canvas, channel) → the scene source
+    /// put there (as a number, to compare).
+    overlays: HashMap<(Id, u32), usize>,
+    /// Soundboard sources: in no scene, kept running by an output channel of their own.
+    soundboards: HashSet<Id>,
 }
+
+/// Output channels for overlay scenes (`Show::overlays`), drawn over channel 0 (the transition,
+/// what's on air) in order; tracks' sound-only sources take channels below them.
+pub const OVERLAY_CHANNELS: std::ops::Range<u32> = 49..57;
 
 /// libobs state for one mixer track: its output channel, volume meter and effect filters.
 struct TrackState {
@@ -204,6 +213,8 @@ impl Reconciler {
                 Patch::TrackOrder(_) => {}
                 // The audio engine takes the mixer from the workspace (docs/plans/audio-engine.md).
                 Patch::AudioSetup => {}
+                // the transition is read above; overlays are synced below
+                Patch::Workspace => {}
             }
         }
         let audio_changed = recreated || patches.iter().any(|p| {
@@ -236,6 +247,37 @@ impl Reconciler {
             self.sync_screen_zoom_pointers(workspace);
         }
         self.sync_avatar_pins(workspace);
+        self.sync_overlays(workspace);
+    }
+
+    /// Puts the show's overlay scenes on each canvas's overlay channels (and clears the rest),
+    /// where they changed. A scene on air that is also an overlay is drawn once more on top.
+    fn sync_overlays(&mut self, workspace: &Workspace) {
+        let overlays: Vec<Id> = workspace.show.overlays.iter().copied().take(OVERLAY_CHANNELS.len()).collect();
+        for canvas in self.canvases.clone() {
+            for (i, channel) in OVERLAY_CHANNELS.enumerate() {
+                let src = overlays
+                    .get(i)
+                    .and_then(|o| self.scenes.get(&(*o, canvas)))
+                    .map_or(std::ptr::null_mut(), |s| s.source_ptr());
+                let key = (canvas, channel);
+                let had = self.overlays.get(&key).copied().unwrap_or(0);
+                if had == src as usize {
+                    continue;
+                }
+                unsafe {
+                    match self.obs_canvases.get(&canvas) {
+                        Some(obs_canvas) => sys::obs_canvas_set_channel(obs_canvas.as_ptr(), channel, src),
+                        None => sys::obs_set_output_source(channel, src),
+                    }
+                }
+                if src.is_null() {
+                    self.overlays.remove(&key);
+                } else {
+                    self.overlays.insert(key, src as usize);
+                }
+            }
+        }
     }
 
     /// Hands each avatar the scene items pinned to it (`crate::avatar_pins`): an object under an
@@ -369,6 +411,15 @@ impl Reconciler {
         let monitor = self.monitor.clone().map(|(d, program)| (d, if program { lightair_audio::PROGRAM } else { crate::audio::CUE }));
         if let Err(e) = host.set_headphones(monitor) {
             tracing::warn!(%e, "direct monitoring unavailable; libobs monitors the cue");
+        }
+        let extras: Vec<(lightair_audio::NodeId, String)> = workspace
+            .audio
+            .mixes
+            .iter()
+            .filter_map(|m| m.device.clone().map(|d| (crate::audio::node(m.id), d)))
+            .collect();
+        for e in host.set_extra_outputs(extras) {
+            tracing::warn!(error = %e, "a mix's output device didn't open");
         }
         let wanted: HashSet<Id> = workspace.tracks.iter().map(|t| t.source).collect();
         let is_device = |id: &Id| workspace.sources.get(id).is_some_and(|i| i.kind == crate::devices::DEVICE_KIND);
@@ -626,6 +677,7 @@ impl Reconciler {
     fn remove_canvas(&mut self, id: Id) {
         self.finish_move();
         self.transitions.remove(&id);
+        self.overlays.retain(|(c, _), _| *c != id);
         self.items.retain(|(_, f, _), _| *f != id);
         self.masks.retain(|(_, f, _), _| *f != id);
         self.scenes.retain(|(_, f), _| *f != id);
@@ -660,6 +712,9 @@ impl Reconciler {
                     self.timers.add(source.id, src.as_ptr(), &source.settings);
                     self.ensure_timers_tick();
                 }
+                if source.kind == crate::soundboard::KIND {
+                    self.soundboards.insert(source.id);
+                }
                 let chain = unsafe { chain_build(src.as_ptr(), &lower(&source.effects)) };
                 self.source_effects.insert(source.id, chain);
                 self.sources.insert(source.id, src);
@@ -670,6 +725,7 @@ impl Reconciler {
 
     fn destroy_source(&mut self, id: Id) {
         self.awaiting_access.remove(&id);
+        self.soundboards.remove(&id);
         self.timers.remove(id);
         if self.held.remove(&id)
             && let Some(src) = self.sources.get(&id)
@@ -950,7 +1006,14 @@ impl Reconciler {
         self.finish_move();
         // the incoming scene's own transition (and stinger video), else the workspace's
         let incoming = program.and_then(|b| workspace.scene(b));
-        let settings = self.next_transition.take().or_else(|| incoming.and_then(|s| s.transition)).unwrap_or(self.transition_settings);
+        // coming from a particular scene, that pair's own first
+        let pair = previous.zip(incoming).and_then(|(a, s)| s.transitions_from.get(&a).copied());
+        let settings = self
+            .next_transition
+            .take()
+            .or(pair)
+            .or_else(|| incoming.and_then(|s| s.transition))
+            .unwrap_or(self.transition_settings);
         let stinger = incoming.filter(|s| s.transition.is_some()).and_then(|s| s.stinger.clone()).or_else(|| self.stinger.clone());
         let kind = match (previous, program) {
             (Some(a), Some(b)) if a != b => settings.kind,
@@ -983,6 +1046,29 @@ impl Reconciler {
                 let (Some(a), Some(b)) = (previous, program) else { unreachable!() };
                 if !self.start_move(a, b, ms, workspace) {
                     self.land(program);
+                }
+            }
+            TransitionKind::Scene => {
+                let (Some(a), Some(b)) = (previous, program) else { unreachable!() };
+                let over = incoming.and_then(|s| s.transition_scene).or(workspace.show.transition_scene);
+                let started = over.filter(|o| *o != a && *o != b).is_some_and(|o| self.start_scene_transition(a, b, o, ms));
+                if !started {
+                    // no scene to play: a crossfade
+                    let fade = TransitionSettings { kind: TransitionKind::Fade, ..settings };
+                    let (type_id, source_settings) = transition_source(&fade, None);
+                    for canvas in self.canvases.clone() {
+                        self.ensure_transition(canvas, type_id, &source_settings);
+                        if let Some(tr) = self.transitions.get(&canvas) {
+                            unsafe {
+                                sys::obs_transition_start(
+                                    tr.as_ptr(),
+                                    sys::OBS_TRANSITION_MODE_AUTO,
+                                    ms,
+                                    self.dest(program, canvas),
+                                )
+                            };
+                        }
+                    }
                 }
             }
         }
@@ -1118,14 +1204,78 @@ impl Reconciler {
                 crate::transition::set_now(tr.as_ptr(), temp.source_ptr());
                 sys::obs_source_dec_active(temp.source_ptr());
             }
-            canvases.push(CanvasMove { temp, tweens, transition: tr.as_ptr(), dest, fades, masks });
+            canvases.push(CanvasMove { temp, tweens, transition: tr.as_ptr(), dest, fades, masks, swap: None });
         }
         if canvases.is_empty() {
             return false;
         }
         self.ensure_tick();
-        *self.anim.lock() =
-            Some(MoveAnim { canvases, start: std::time::Instant::now(), duration: ms as f32 / 1000.0, done: false });
+        *self.anim.lock() = Some(MoveAnim {
+            canvases,
+            start: std::time::Instant::now(),
+            duration: ms as f32 / 1000.0,
+            done: false,
+            swap_at: None,
+            swapped: false,
+        });
+        true
+    }
+
+    /// A Scene transition from `a` to `b`: in each canvas a temporary scene shows A, then B from
+    /// halfway, with `over` (restarted, so its videos play from the start) on top throughout.
+    fn start_scene_transition(&mut self, a: Id, b: Id, over: Id, ms: u32) -> bool {
+        let mut canvases = Vec::new();
+        for canvas in self.canvases.clone() {
+            let (Some(tr), Some(sa), Some(sb), Some(so)) = (
+                self.transitions.get(&canvas),
+                self.scenes.get(&(a, canvas)),
+                self.scenes.get(&(b, canvas)),
+                self.scenes.get(&(over, canvas)),
+            ) else {
+                continue;
+            };
+            let dest = sb.source_ptr();
+            let name = format!("scene-transition:{canvas}:{}", Id::new());
+            let temp = match self.obs_canvases.get(&canvas) {
+                Some(obs_canvas) => obs_canvas.create_scene(&name),
+                None => ObsScene::create(&name),
+            };
+            let Some(temp) = temp else { continue };
+            unsafe {
+                sys::obs_source_inc_active(temp.source_ptr());
+                let ia = sys::obs_scene_add(temp.as_ptr(), sa.source_ptr());
+                let ib = sys::obs_scene_add(temp.as_ptr(), dest);
+                let io = sys::obs_scene_add(temp.as_ptr(), so.source_ptr());
+                if ia.is_null() || ib.is_null() || io.is_null() {
+                    sys::obs_source_dec_active(temp.source_ptr());
+                    continue;
+                }
+                sys::obs_sceneitem_set_visible(ib, false);
+                crate::transition::set_now(tr.as_ptr(), temp.source_ptr());
+                sys::obs_source_dec_active(temp.source_ptr());
+                canvases.push(CanvasMove {
+                    temp,
+                    tweens: Vec::new(),
+                    transition: tr.as_ptr(),
+                    dest,
+                    fades: Vec::new(),
+                    masks: Vec::new(),
+                    swap: Some((ia, ib)),
+                });
+            }
+        }
+        if canvases.is_empty() {
+            return false;
+        }
+        self.ensure_tick();
+        *self.anim.lock() = Some(MoveAnim {
+            canvases,
+            start: std::time::Instant::now(),
+            duration: ms as f32 / 1000.0,
+            done: false,
+            swap_at: Some(0.5),
+            swapped: false,
+        });
         true
     }
 
@@ -1134,6 +1284,30 @@ impl Reconciler {
             unsafe { sys::obs_add_tick_callback(Some(on_timers_tick), tick_param(&self.timers)) };
             self.timers_tick = true;
         }
+    }
+
+    /// Plays `file` on the soundboard `source` from the start (`looped`: over and over), at
+    /// `volume` (0..1); `None` stops it.
+    pub fn soundboard_play(&self, source: Id, file: Option<(&str, bool, f32)>) {
+        let Some(src) = self.sources.get(&source).filter(|_| self.soundboards.contains(&source)) else { return };
+        unsafe {
+            match file {
+                Some((path, looped, volume)) => {
+                    src.update(&data_from_json(&crate::soundboard::settings(path, looped)));
+                    sys::obs_source_set_volume(src.as_ptr(), volume.clamp(0.0, 1.0));
+                    sys::obs_source_media_restart(src.as_ptr());
+                }
+                None => sys::obs_source_media_stop(src.as_ptr()),
+            }
+        }
+    }
+
+    /// Whether the soundboard `source` is playing now.
+    pub fn soundboard_playing(&self, source: Id) -> bool {
+        self.sources.get(&source).is_some_and(|s| {
+            let state = unsafe { sys::obs_source_media_get_state(s.as_ptr()) };
+            state == sys::OBS_MEDIA_STATE_PLAYING
+        })
     }
 
     pub fn timer_action(&self, source: Id, action: TimerAction) {
@@ -1333,7 +1507,7 @@ impl Reconciler {
             return;
         };
         let used: std::collections::HashSet<u32> = self.tracks.values().map(|t| t.channel).filter(|c| *c != 0).collect();
-        let Some(channel) = (1..crate::audio_host::OUT_CHANNELS.start).find(|c| !used.contains(c)) else {
+        let Some(channel) = (1..OVERLAY_CHANNELS.start).find(|c| !used.contains(c)) else {
             tracing::error!("no free output channel for track");
             return;
         };
@@ -1344,7 +1518,8 @@ impl Reconciler {
             // scene showing it is on air, and its sound with it; off air it stops (no decoding,
             // no painting). Sound-only sources (microphones, desktop and app audio) always run,
             // like OBS's global audio sources.
-            let pictured = sys::obs_source_get_output_flags(src) & sys::OBS_SOURCE_VIDEO != 0;
+            let pictured = sys::obs_source_get_output_flags(src) & sys::OBS_SOURCE_VIDEO != 0
+                && !self.soundboards.contains(&track.source);
             let channel = if pictured { 0 } else { channel };
             if channel != 0 {
                 sys::obs_set_output_source(channel, src);
@@ -1788,6 +1963,8 @@ fn transition_source(
         TransitionKind::Dip => {
             ("fade_to_color_transition", serde_json::json!({"color": 0xFF000000u32, "switch_point": 50}))
         }
+        // played by Lightair itself (`start_scene_transition`); a fade when it can't
+        TransitionKind::Scene => ("fade_transition", serde_json::json!({})),
         TransitionKind::Cut | TransitionKind::Fade | TransitionKind::Move => ("fade_transition", serde_json::json!({})),
     }
 }
