@@ -796,3 +796,331 @@ impl Render for RundownPanel {
 }
 
 panel_traits!(RundownPanel, "rundown", "list-ordered", "Rundown");
+
+// ---------------------------------------------------------------------------------------------
+// PTZ cameras
+
+pub struct PtzPanel {
+    studio: Entity<Studio>,
+    focus: FocusHandle,
+    selected: Option<Id>,
+    /// Pan, tilt and zoom speed (0..1).
+    speed: f32,
+    /// Clicking a preset saves the camera's position there instead of going to it.
+    saving: bool,
+    /// The add form: the name and address fields, and the protocol.
+    adding: Option<(Entity<InputState>, Entity<InputState>, String)>,
+    /// The scene on air last time (a scene going on air recalls its presets).
+    program: Option<Id>,
+}
+
+impl PtzPanel {
+    pub fn new(studio: Entity<Studio>, cx: &mut Context<Self>) -> Self {
+        let program = studio.read(cx).workspace().program;
+        cx.observe(&studio, |this, studio, cx| {
+            let w = studio.read(cx).workspace().clone();
+            if w.program != this.program {
+                this.program = w.program;
+                if let Some(p) = w.program {
+                    for cam in &w.show.ptz {
+                        if let Some(preset) = cam.scene_presets.get(&p) {
+                            crate::ptz::recall(cam, *preset);
+                        }
+                    }
+                }
+            }
+            cx.notify();
+        })
+        .detach();
+        Self { studio, focus: cx.focus_handle(), selected: None, speed: 0.5, saving: false, adding: None, program }
+    }
+
+    fn camera(&self, cx: &App) -> Option<lightair_model::PtzCamera> {
+        let w = self.studio.read(cx).workspace();
+        let id = self.selected.or(w.show.ptz.first().map(|c| c.id))?;
+        w.show.ptz.iter().find(|c| c.id == id).cloned()
+    }
+
+    fn open_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name (Stage left)"));
+        let host = cx.new(|cx| InputState::new(window, cx).placeholder("Address (192.168.1.50)"));
+        self.adding = Some((name, host, "visca-ip".into()));
+        cx.notify();
+    }
+
+    fn add(&mut self, cx: &mut Context<Self>) {
+        let Some((name, host, protocol)) = self.adding.take() else { return };
+        let host = host.read(cx).value().trim().to_string();
+        if host.is_empty() {
+            return;
+        }
+        let n = self.studio.read(cx).workspace().show.ptz.len() + 1;
+        let name = Some(name.read(cx).value().trim().to_string()).filter(|s| !s.is_empty()).unwrap_or(format!("Camera {n}"));
+        let mut cam = lightair_model::PtzCamera::new(name, host);
+        cam.port = if protocol == "visca-tcp" { 5678 } else { 52381 };
+        cam.protocol = protocol;
+        self.selected = Some(cam.id);
+        set_show(&self.studio, "Add a PTZ camera", |s| s.ptz.push(cam), cx);
+        cx.notify();
+    }
+}
+
+impl Render for PtzPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace = self.studio.read(cx).workspace().clone();
+        let cam = self.camera(cx);
+        let mut bar = toolbar();
+        for (i, c) in workspace.show.ptz.iter().enumerate() {
+            let id = c.id;
+            let on = cam.as_ref().is_some_and(|x| x.id == id);
+            let st = self.studio.clone();
+            bar = bar.child(
+                chip(("ptz-cam", i), c.name.clone(), on)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.selected = Some(id);
+                        cx.notify();
+                    }))
+                    .context_menu(move |m, _, _| {
+                        let st = st.clone();
+                        m.item(PopupMenuItem::new("Remove").icon(ui::icon("trash")).on_click(move |_, _, cx| {
+                            set_show(&st, "Remove a PTZ camera", |s| s.ptz.retain(|c| c.id != id), cx)
+                        }))
+                    }),
+            );
+        }
+        bar = bar.child(div().flex_1()).child(
+            Button::new("ptz-add").label("Add camera").icon(ui::icon("plus")).xsmall().outline().on_click(cx.listener(
+                |this, _, window, cx| this.open_add(window, cx),
+            )),
+        );
+        let mut body = div().flex().flex_col().gap_3().p_3();
+        if let Some((name, host, protocol)) = &self.adding {
+            let mut kinds = div().flex().gap_1();
+            for (k, (value, label)) in [("visca-ip", "VISCA over IP (UDP)"), ("visca-tcp", "VISCA over TCP")].into_iter().enumerate() {
+                let on = protocol == value;
+                kinds = kinds.child(chip(("ptz-proto", k), label, on).on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(a) = &mut this.adding {
+                        a.2 = value.into();
+                    }
+                    cx.notify();
+                })));
+            }
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_2()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(tok::border())
+                    .child(TextInput::new(name).small())
+                    .child(TextInput::new(host).small())
+                    .child(kinds)
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .justify_end()
+                            .child(Button::new("ptz-cancel").label("Cancel").xsmall().ghost().on_click(cx.listener(|this, _, _, cx| {
+                                this.adding = None;
+                                cx.notify();
+                            })))
+                            .child(Button::new("ptz-save").label("Add").xsmall().primary().on_click(cx.listener(|this, _, _, cx| this.add(cx)))),
+                    ),
+            );
+        }
+        let Some(cam) = cam else {
+            if self.adding.is_none() {
+                body = body.child(empty(
+                    "move",
+                    "PTZ cameras",
+                    "Add a pan-tilt-zoom camera by its network address (VISCA over IP or TCP): move it, zoom, and save presets that scenes recall as they go on air.",
+                ));
+            }
+            return div().flex().flex_col().size_full().bg(tok::bg_panel()).child(bar).child(body);
+        };
+        // the pad: hold to move (let go, or leave it, to stop)
+        let speed = self.speed;
+        let pad_button = |key: &'static str, icon: &'static str, pan: i8, tilt: i8, cam: lightair_model::PtzCamera| {
+            let (c1, c2, c3) = (cam.clone(), cam.clone(), cam);
+            div()
+                .id(key)
+                .size(px(40.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .bg(tok::bg_raised())
+                .hover(|d| d.bg(tok::bg_selected()))
+                .cursor_pointer()
+                .child(ui::icon(icon).size(px(16.)))
+                .on_mouse_down(MouseButton::Left, move |_, _, _| crate::ptz::drive(&c1, pan, tilt, speed))
+                .on_mouse_up(MouseButton::Left, move |_, _, _| crate::ptz::drive(&c2, 0, 0, speed))
+                .on_hover(move |hovered, _, _| {
+                    if !*hovered {
+                        crate::ptz::drive(&c3, 0, 0, speed)
+                    }
+                })
+        };
+        let home_cam = cam.clone();
+        let mut pad = div().grid().grid_cols(3).gap_1().w(px(128.));
+        for (key, icon, pan, tilt) in [
+            ("ptz-ul", "arrow-up-left", -1, -1),
+            ("ptz-u", "arrow-up", 0, -1),
+            ("ptz-ur", "arrow-up-right", 1, -1),
+            ("ptz-l", "arrow-left", -1, 0),
+        ] {
+            pad = pad.child(pad_button(key, icon, pan, tilt, cam.clone()));
+        }
+        pad = pad.child(
+            div()
+                .id("ptz-home")
+                .size(px(40.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .bg(tok::bg_raised())
+                .hover(|d| d.bg(tok::bg_selected()))
+                .cursor_pointer()
+                .child(ui::icon("house").size(px(16.)))
+                .on_click(move |_, _, _| crate::ptz::home(&home_cam)),
+        );
+        for (key, icon, pan, tilt) in [
+            ("ptz-r", "arrow-right", 1, 0),
+            ("ptz-dl", "arrow-down-left", -1, 1),
+            ("ptz-d", "arrow-down", 0, 1),
+            ("ptz-dr", "arrow-down-right", 1, 1),
+        ] {
+            pad = pad.child(pad_button(key, icon, pan, tilt, cam.clone()));
+        }
+        let zoom_button = |key: &'static str, label: &'static str, dir: i8, cam: lightair_model::PtzCamera| {
+            let (c1, c2, c3) = (cam.clone(), cam.clone(), cam);
+            div()
+                .id(key)
+                .w(px(56.))
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .bg(tok::bg_raised())
+                .hover(|d| d.bg(tok::bg_selected()))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .child(label)
+                .on_mouse_down(MouseButton::Left, move |_, _, _| crate::ptz::zoom(&c1, dir, speed))
+                .on_mouse_up(MouseButton::Left, move |_, _, _| crate::ptz::zoom(&c2, 0, speed))
+                .on_hover(move |hovered, _, _| {
+                    if !*hovered {
+                        crate::ptz::zoom(&c3, 0, speed)
+                    }
+                })
+        };
+        let focus_cam = cam.clone();
+        let mut speeds = div().flex().gap_1();
+        for (k, (label, v)) in [("Slow", 0.2f32), ("Medium", 0.5), ("Fast", 0.9)].into_iter().enumerate() {
+            let on = (self.speed - v).abs() < 0.05;
+            speeds = speeds.child(chip(("ptz-speed", k), label, on).on_click(cx.listener(move |this, _, _, cx| {
+                this.speed = v;
+                cx.notify();
+            })));
+        }
+        let controls = div()
+            .flex()
+            .gap_4()
+            .items_start()
+            .child(pad)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().flex().gap_1().child(zoom_button("ptz-zin", "Zoom +", 1, cam.clone())).child(zoom_button("ptz-zout", "Zoom −", -1, cam.clone())))
+                    .child(speeds)
+                    .child(Button::new("ptz-af").label("Auto focus").xsmall().outline().on_click(move |_, _, _| crate::ptz::autofocus(&focus_cam))),
+            );
+        body = body.child(controls);
+        // presets: go there (or save there); a scene can recall one as it goes on air
+        let scene = self.studio.read(cx).selected_scene;
+        let scene_name = scene.and_then(|s| workspace.scene(s)).map(|s| s.name.clone());
+        let mut grid = div().grid().grid_cols(5).gap_1();
+        for p in 1u8..=10 {
+            let (c, saving, st) = (cam.clone(), self.saving, self.studio.clone());
+            let used_by: Vec<String> =
+                cam.scene_presets.iter().filter(|(_, v)| **v == p).filter_map(|(s, _)| workspace.scene(*s).map(|s| s.name.clone())).collect();
+            let cam_id = cam.id;
+            let sn = scene_name.clone();
+            grid = grid.child(
+                div()
+                    .id(("ptz-preset", p as usize))
+                    .h(px(40.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.))
+                    .border_1()
+                    .border_color(if self.saving { tok::live() } else { tok::border() })
+                    .hover(|d| d.bg(tok::bg_raised()))
+                    .cursor_pointer()
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(p.to_string()))
+                    .when(!used_by.is_empty(), |d| d.child(div().text_size(px(9.)).text_color(tok::text_tertiary()).truncate().child(used_by.join(", "))))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if saving {
+                            crate::ptz::store(&c, p);
+                            this.saving = false;
+                            cx.notify();
+                        } else {
+                            crate::ptz::recall(&c, p);
+                        }
+                    }))
+                    .context_menu(move |m, _, _| {
+                        let Some(scene) = scene else { return m };
+                        let (st1, st2) = (st.clone(), st.clone());
+                        let name = sn.clone().unwrap_or_default();
+                        m.item(PopupMenuItem::new(format!("Go here when {name} goes on air")).on_click(move |_, _, cx| {
+                            set_show(&st1, "Change a scene's PTZ preset", |s| {
+                                if let Some(c) = s.ptz.iter_mut().find(|c| c.id == cam_id) {
+                                    c.scene_presets.insert(scene, p);
+                                }
+                            }, cx)
+                        }))
+                        .item(PopupMenuItem::new(format!("Nothing for {name}")).on_click(move |_, _, cx| {
+                            set_show(&st2, "Change a scene's PTZ preset", |s| {
+                                if let Some(c) = s.ptz.iter_mut().find(|c| c.id == cam_id) {
+                                    c.scene_presets.remove(&scene);
+                                }
+                            }, cx)
+                        }))
+                    }),
+            );
+        }
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().flex_1().text_size(px(12.)).text_color(tok::text_secondary()).child(if self.saving {
+                    "Click a preset to save the camera's position there".to_string()
+                } else {
+                    format!("{} · {}:{} · right-click a preset to tie it to a scene", cam.name, cam.host, cam.port)
+                }))
+                .child(
+                    Button::new("ptz-saving")
+                        .label(if self.saving { "Cancel" } else { "Save to a preset" })
+                        .xsmall()
+                        .outline()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.saving = !this.saving;
+                            cx.notify();
+                        })),
+                ),
+        );
+        body = body.child(grid);
+        div().flex().flex_col().size_full().bg(tok::bg_panel()).child(bar).child(div().id("ptz-body").flex_1().min_h_0().overflow_y_scroll().child(body))
+    }
+}
+
+panel_traits!(PtzPanel, "ptz", "move", "PTZ");

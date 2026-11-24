@@ -38,6 +38,7 @@ pub(super) struct DockPanels {
     soundboard: Entity<crate::show_panel::SoundboardPanel>,
     notes: Entity<crate::show_panel::NotesPanel>,
     rundown: Entity<crate::show_panel::RundownPanel>,
+    ptz: Entity<crate::show_panel::PtzPanel>,
 }
 
 impl DockPanels {
@@ -65,6 +66,7 @@ impl DockPanels {
         reg!("soundboard", self.soundboard);
         reg!("notes", self.notes);
         reg!("rundown", self.rundown);
+        reg!("ptz", self.ptz);
     }
 }
 
@@ -89,7 +91,8 @@ pub(super) fn populate_dock(
         bottom = bottom
             .panel_view(panel_handle(panels.soundboard.clone()), cx)
             .panel_view(panel_handle(panels.rundown.clone()), cx)
-            .panel_view(panel_handle(panels.notes.clone()), cx);
+            .panel_view(panel_handle(panels.notes.clone()), cx)
+            .panel_view(panel_handle(panels.ptz.clone()), cx);
     }
     if preset != Preset::Live {
         bottom = bottom
@@ -98,6 +101,7 @@ pub(super) fn populate_dock(
             .panel_view(panel_handle(panels.soundboard.clone()), cx)
             .panel_view(panel_handle(panels.rundown.clone()), cx)
             .panel_view(panel_handle(panels.notes.clone()), cx)
+            .panel_view(panel_handle(panels.ptz.clone()), cx)
             .active_index(match hook.as_deref() {
                 Some(h) if h.starts_with("assets") => 1,
                 Some(h) if h.starts_with("automations") => 2,
@@ -377,6 +381,7 @@ impl StudioWindow {
             soundboard: cx.new(|cx| crate::show_panel::SoundboardPanel::new(self.studio.clone(), cx)),
             notes: cx.new(|cx| crate::show_panel::NotesPanel::new(self.studio.clone(), cx)),
             rundown: cx.new(|cx| crate::show_panel::RundownPanel::new(self.studio.clone(), cx)),
+            ptz: cx.new(|cx| crate::show_panel::PtzPanel::new(self.studio.clone(), cx)),
         };
         // Every group shows a tab bar, even with one panel, so any panel can be dropped onto
         // any header to join it as a tab (and the canvas gets a header like the rest).
