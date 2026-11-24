@@ -44,6 +44,7 @@ pub mod player;
 pub mod filters;
 pub mod shared_video;
 pub mod soundboard;
+pub mod playlists;
 pub mod plugins;
 pub mod pointer;
 mod reconcile;

@@ -35,11 +35,11 @@ const DB_MIN: f32 = -60.0;
 const DB_MAX: f32 = 12.0;
 
 /// Fader position (0 = bottom, 1 = top) for a dB value: linear in dB, −60…+12.
-fn db_to_pos(db: f32) -> f32 {
+pub(crate) fn db_to_pos(db: f32) -> f32 {
     if !db.is_finite() { 0.0 } else { ((db - DB_MIN) / (DB_MAX - DB_MIN)).clamp(0.0, 1.0) }
 }
 
-fn pos_to_db(pos: f32) -> f32 {
+pub(crate) fn pos_to_db(pos: f32) -> f32 {
     if pos <= 0.001 { f32::NEG_INFINITY } else { DB_MIN + pos.clamp(0.0, 1.0) * (DB_MAX - DB_MIN) }
 }
 

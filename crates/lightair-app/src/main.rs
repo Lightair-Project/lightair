@@ -47,6 +47,8 @@ mod reframe;
 mod rows;
 mod safe_areas;
 mod show_panel;
+mod widget_feeds;
+mod midi_map;
 mod keys;
 mod secrets;
 mod selftest;

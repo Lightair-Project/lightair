@@ -47,6 +47,8 @@ pub struct Preferences {
     pub remote: RemoteApi,
     /// Look for a new Lightair at launch and every few hours (Settings › About).
     pub check_updates: bool,
+    /// MIDI controls and what they drive (Settings › MIDI).
+    pub midi_maps: Vec<crate::midi_map::MidiMap>,
 }
 
 /// The remote API's server (its password is in the Keychain: `secrets`).
@@ -131,6 +133,7 @@ impl Default for Preferences {
             macos_background_before: None,
             remote: RemoteApi::default(),
             check_updates: true,
+            midi_maps: Vec::new(),
         }
     }
 }

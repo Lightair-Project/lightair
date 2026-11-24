@@ -82,6 +82,9 @@ pub struct Reconciler {
     overlays: HashMap<(Id, u32), usize>,
     /// Soundboard sources: in no scene, kept running by an output channel of their own.
     soundboards: HashSet<Id>,
+    /// Media playlists, driven by their own tick callback.
+    playlists: Arc<crate::playlists::Playlists>,
+    playlists_tick: bool,
 }
 
 /// Output channels for overlay scenes (`Show::overlays`), drawn over channel 0 (the transition,
@@ -162,6 +165,13 @@ impl Reconciler {
                             src.update(&data_from_json(&source_settings(after, drawn)));
                             if after.kind == TIMER_KIND {
                                 self.timers.configure(after.id, &after.settings);
+                            }
+                            self.playlists.set(after.id, src.as_ptr(), &after.settings);
+                            if !crate::playlists::files(&after.settings).is_empty() && !self.playlists_tick {
+                                unsafe {
+                                    sys::obs_add_tick_callback(Some(crate::playlists::on_tick), crate::playlists::tick_param(&self.playlists))
+                                };
+                                self.playlists_tick = true;
                             }
                         }
                         let chain = self.source_effects.entry(after.id).or_default();
@@ -603,6 +613,12 @@ impl Reconciler {
         Some(self.audio.as_mut()?.listen(crate::audio::node(track), tap, muted))
     }
 
+    /// The program's sound as it goes out (the Audio visualiser): see [`AudioHost::listen`].
+    pub fn listen_program(&mut self) -> Option<rtrb::Consumer<i16>> {
+        let never = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        Some(self.audio.as_mut()?.listen(lightair_audio::PROGRAM, lightair_audio::Tap::PostFader, never))
+    }
+
     pub fn audio_meter(&mut self, id: Id) -> Option<Arc<lightair_audio::meter::Meter>> {
         Some(self.audio.as_mut()?.meter(crate::audio::node(id)))
     }
@@ -715,6 +731,10 @@ impl Reconciler {
                 if source.kind == crate::soundboard::KIND {
                     self.soundboards.insert(source.id);
                 }
+                if !crate::playlists::files(&source.settings).is_empty() {
+                    self.playlists.set(source.id, src.as_ptr(), &source.settings);
+                    self.ensure_playlists_tick();
+                }
                 let chain = unsafe { chain_build(src.as_ptr(), &lower(&source.effects)) };
                 self.source_effects.insert(source.id, chain);
                 self.sources.insert(source.id, src);
@@ -726,6 +746,7 @@ impl Reconciler {
     fn destroy_source(&mut self, id: Id) {
         self.awaiting_access.remove(&id);
         self.soundboards.remove(&id);
+        self.playlists.remove(id);
         self.timers.remove(id);
         if self.held.remove(&id)
             && let Some(src) = self.sources.get(&id)
@@ -1308,6 +1329,23 @@ impl Reconciler {
             let state = unsafe { sys::obs_source_media_get_state(s.as_ptr()) };
             state == sys::OBS_MEDIA_STATE_PLAYING
         })
+    }
+
+    fn ensure_playlists_tick(&mut self) {
+        if !self.playlists_tick {
+            unsafe { sys::obs_add_tick_callback(Some(crate::playlists::on_tick), crate::playlists::tick_param(&self.playlists)) };
+            self.playlists_tick = true;
+        }
+    }
+
+    /// Moves a playlist `by` files and plays from there.
+    pub fn playlist_skip(&self, source: Id, by: i64) {
+        self.playlists.skip(source, by);
+    }
+
+    /// A playlist's place: (from 1, how many, the file playing).
+    pub fn playlist_now(&self, source: Id) -> Option<(usize, usize, String)> {
+        self.playlists.now(source)
     }
 
     pub fn timer_action(&self, source: Id, action: TimerAction) {

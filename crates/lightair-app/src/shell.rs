@@ -414,6 +414,12 @@ pub struct StudioWindow {
     collapsed_folders: HashSet<String>,
     /// Audio output devices (name, id) for a mix's own output, read now and then.
     output_devices: RefCell<Option<(Instant, Vec<(String, String)>)>>,
+    /// MIDI mappings' devices, the next control being learned, what each mapping last sent
+    /// back, and a fader move in progress (one undo step).
+    pub(super) midi: crate::midi_map::MidiHub,
+    pub(super) midi_learn: bool,
+    midi_sent: HashMap<usize, u8>,
+    midi_gesture: Option<Instant>,
     /// The object showing crop handles instead of resize handles.
     crop_mode: Option<Id>,
     crop_preview_sent: Option<(Id, Id, Id)>,
@@ -675,6 +681,9 @@ impl StudioWindow {
                 }
                 let pressed = crate::shortcuts::take_pressed();
                 let released = crate::shortcuts::take_released();
+                if this.update_in(cx, |this, window, cx| this.poll_midi(window, cx)).is_err() {
+                    break;
+                }
                 if pressed.is_empty() && released.is_empty() {
                     continue;
                 }
@@ -872,6 +881,10 @@ impl StudioWindow {
             transition_from: None,
             collapsed_folders: HashSet::new(),
             output_devices: RefCell::new(None),
+            midi: crate::midi_map::MidiHub::start(),
+            midi_learn: false,
+            midi_sent: HashMap::new(),
+            midi_gesture: None,
             crop_preview_sent: None,
             rotate_tool: false,
             gizmo_hover: None,
@@ -1332,6 +1345,77 @@ impl StudioWindow {
                 cx.notify();
             }
             A::Scene(n) => self.scene_shortcut(n.saturating_sub(1) as usize, window, cx),
+        }
+    }
+
+    /// MIDI mappings: what devices sent (a control learned, or what it drives), a fader move's
+    /// undo step closed when it stops, and what each control shows sent back to its device.
+    fn poll_midi(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::midi_map::{MidiMap, MidiTarget};
+        let maps = self.prefs.midi_maps.clone();
+        self.midi.set_wanted(!maps.is_empty() || self.midi_learn);
+        while let Some(m) = self.midi.next() {
+            if self.midi_learn {
+                // a release (0) can't be learned from: wait for the press or the move
+                if m.value == 0 && m.kind == "note" {
+                    continue;
+                }
+                self.midi_learn = false;
+                let map = MidiMap { device: m.device.clone(), kind: m.kind.into(), channel: m.channel, number: m.number, target: MidiTarget::None };
+                if !self.prefs.midi_maps.iter().any(|x| x.matches(&m)) {
+                    self.prefs.midi_maps.push(map);
+                    let _ = crate::prefs::save_to(&crate::prefs::path(), &self.prefs);
+                }
+                cx.notify();
+                continue;
+            }
+            for map in maps.iter().filter(|x| x.matches(&m)) {
+                let press = m.value > 0;
+                match map.target {
+                    MidiTarget::None => {}
+                    MidiTarget::Volume { track } => {
+                        let db = crate::mixer::pos_to_db(m.value as f32 / 127.0);
+                        if self.midi_gesture.is_none() {
+                            self.studio.update(cx, |s, _| s.begin_gesture());
+                        }
+                        self.midi_gesture = Some(Instant::now());
+                        self.exec(Command::SetTrackVolume { track, volume_db: db }, cx);
+                    }
+                    MidiTarget::Mute { track } if press => {
+                        let muted = self.studio.read(cx).workspace().track(track).is_some_and(|t| t.muted);
+                        self.exec(Command::SetTrackMuted { track, muted: !muted }, cx);
+                    }
+                    MidiTarget::Scene { scene } if press => self.exec(Command::SetProgram { scene: Some(scene) }, cx),
+                    MidiTarget::Pad { pad } if press => {
+                        let studio = self.studio.read(cx);
+                        if let Some(p) = studio.workspace().show.pads.iter().find(|p| p.id == pad).cloned() {
+                            crate::show_panel::play_pad(studio, Some(&p));
+                        }
+                    }
+                    MidiTarget::Action { action } if press => self.global_action(action, window, cx),
+                    _ => {}
+                }
+            }
+        }
+        // a fader move ends when the control rests
+        if self.midi_gesture.is_some_and(|t| t.elapsed() > std::time::Duration::from_millis(500)) {
+            self.midi_gesture = None;
+            self.studio.update(cx, |s, _| s.end_gesture());
+        }
+        // feedback: faders' places, mutes and the scene on air, as they change
+        let workspace = self.studio.read(cx).workspace().clone();
+        for (i, map) in maps.iter().enumerate() {
+            let value = match map.target {
+                MidiTarget::Volume { track } => workspace.track(track).map(|t| (crate::mixer::db_to_pos(t.volume_db) * 127.0).round() as u8),
+                MidiTarget::Mute { track } => workspace.track(track).map(|t| if t.muted { 127 } else { 0 }),
+                MidiTarget::Scene { scene } => Some(if workspace.program == Some(scene) { 127 } else { 0 }),
+                _ => None,
+            };
+            let Some(v) = value else { continue };
+            if self.midi_sent.get(&i) != Some(&v) && !map.device.is_empty() {
+                self.midi.feedback(map, &map.device, v);
+                self.midi_sent.insert(i, v);
+            }
         }
     }
 

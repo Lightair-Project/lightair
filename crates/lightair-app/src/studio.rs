@@ -292,6 +292,9 @@ impl Studio {
         // what came before (before anything listens: it isn't new)
         lightair_live::log::start(&chat, lightair_platform::paths::data_dir().join("chat"));
         let widgets = crate::widgets::start(&chat);
+        if let Some(w) = &widgets {
+            crate::widget_feeds::start(w.clone(), engine.clone());
+        }
         let mut studio = Self {
             chat,
             services: Vec::new(),

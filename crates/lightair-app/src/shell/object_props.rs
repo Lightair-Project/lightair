@@ -45,6 +45,8 @@ const CSS_SNIPPETS: &[(&str, &str, &str)] = &[
 pub(super) struct ObjectProps {
     text: Option<TextEdit>,
     media: Option<(Id, MediaStatus, Instant)>,
+    /// The media object's playlist place: (position from 1, how many, the file).
+    playlist: Option<(Id, (usize, usize, String))>,
     /// The effect whose controls are shown.
     pub(super) open_effect: Option<Id>,
     timer: Option<(Id, TimerStatus, Instant)>,
@@ -291,6 +293,7 @@ impl StudioWindow {
                     let id = i.id;
                     self.props.media =
                         engine.call(move |s| s.reconciler.media_status(id)).map(|status| (id, status, Instant::now()));
+                    self.props.playlist = engine.call(move |s| s.reconciler.playlist_now(id)).map(|p| (id, p));
                 }
             }
             None => self.props.media = None,
@@ -934,6 +937,15 @@ impl StudioWindow {
             _ => "",
         };
         let loop_settings = with(&source.settings, "looping", json!(!looping));
+        let playlist = lightair_engine::playlists::files(&source.settings);
+        let place = self.props.playlist.as_ref().filter(|(i, _)| *i == id).map(|(_, p)| p.clone());
+        let file = match &place {
+            Some((at, n, f)) => format!(
+                "{at}/{n} · {}",
+                std::path::Path::new(f).file_name().map_or(f.clone(), |x| x.to_string_lossy().into_owned())
+            ),
+            None => file,
+        };
         self.section("Media", None, cx)
             .child(div().text_color(tok::text_secondary()).overflow_hidden().text_ellipsis().child(file))
             .child(
@@ -988,6 +1000,92 @@ impl StudioWindow {
                         if looping { b.primary() } else { b.ghost() }
                     }),
             )
+            .child(self.playlist_rows(source, &playlist, place.map(|p| p.0), cx))
+    }
+
+    /// A media object's playlist: its files (the one playing marked), adding more, skipping,
+    /// shuffling.
+    fn playlist_rows(&self, source: &Source, files: &[String], at: Option<usize>, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = source.id;
+        let settings = source.settings.clone();
+        let shuffle = settings["shuffle"].as_bool().unwrap_or(false);
+        let mut col = div().flex().flex_col().gap_1().pt_2();
+        let head = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(div().flex_1().text_size(px(12.)).text_color(tok::text_secondary()).child(if files.is_empty() {
+                "Playlist".to_string()
+            } else {
+                format!("Playlist · {} files", files.len())
+            }))
+            .when(!files.is_empty(), |d| {
+                let shuffled = with(&settings, "shuffle", json!(!shuffle));
+                d.child(Button::new("pl-prev").icon(crate::ui::icon("skip-back")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
+                    this.studio.read(cx).engine().post(move |s| s.reconciler.playlist_skip(id, -1));
+                })))
+                .child(Button::new("pl-next").icon(crate::ui::icon("skip-forward")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
+                    this.studio.read(cx).engine().post(move |s| s.reconciler.playlist_skip(id, 1));
+                })))
+                .child({
+                    let b = Button::new("pl-shuffle").icon(crate::ui::icon("shuffle")).xsmall().on_click(cx.listener(move |this, _, _, cx| {
+                        this.exec(Command::SetSourceSettings { source: id, settings: shuffled.clone() }, cx)
+                    }));
+                    if shuffle { b.primary() } else { b.ghost() }
+                })
+            })
+            .child(Button::new("pl-add").label("Add files…").xsmall().outline().on_click(cx.listener(move |this, _, window, cx| {
+                this.add_playlist_files(id, window, cx)
+            })));
+        col = col.child(head);
+        let playing = at.and_then(|a| a.checked_sub(1));
+        for (i, f) in files.iter().enumerate() {
+            let name = std::path::Path::new(f).file_name().map_or(f.clone(), |x| x.to_string_lossy().into_owned());
+            let mut rest: Vec<Value> = files.iter().map(|x| json!(x)).collect();
+            rest.remove(i);
+            let without = with(&settings, "playlist", json!(rest));
+            let on = !settings["shuffle"].as_bool().unwrap_or(false) && playing == Some(i);
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_1()
+                    .rounded(px(4.))
+                    .when(on, |d| d.bg(tok::bg_selected()))
+                    .child(div().w(px(18.)).text_size(px(10.)).font_family(crate::ui::MONO).text_color(tok::text_tertiary()).child(format!("{}", i + 1)))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).child(name))
+                    .child(Button::new(("pl-remove", i)).icon(crate::ui::icon("x")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
+                        this.exec(Command::SetSourceSettings { source: id, settings: without.clone() }, cx)
+                    }))),
+            );
+        }
+        col
+    }
+
+    fn add_playlist_files(&mut self, source: Id, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                let workspace = this.studio.read(cx).workspace().clone();
+                let Some(src) = workspace.sources.get(&source) else { return };
+                let mut files = lightair_engine::playlists::files(&src.settings);
+                // the file it plays now starts the list
+                if files.is_empty()
+                    && let Some(f) = src.settings["local_file"].as_str().filter(|f| !f.is_empty())
+                {
+                    files.push(f.to_string());
+                }
+                files.extend(paths.iter().map(|p| p.to_string_lossy().into_owned()));
+                let mut settings = with(&src.settings, "playlist", json!(files));
+                if src.settings.get("looping").is_none() {
+                    settings = with(&settings, "looping", json!(true));
+                }
+                this.exec(Command::SetSourceSettings { source, settings }, cx);
+            });
+        })
+        .detach();
     }
 }
 

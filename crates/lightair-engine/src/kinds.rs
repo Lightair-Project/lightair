@@ -28,6 +28,10 @@ pub fn resolve(kind: &str, settings: &Value) -> Option<(&'static str, Value)> {
         return Some(("ffmpeg_source", crate::soundboard::settings("", false)));
     }
     if kind == "ffmpeg_source" {
+        // a playlist plays through OBS's media source (any file type, one after another)
+        if !crate::playlists::files(settings).is_empty() {
+            return Some(("ffmpeg_source", crate::playlists::media_settings(settings)));
+        }
         if native_media(settings) {
             return Some((NATIVE_MEDIA, settings.clone()));
         }

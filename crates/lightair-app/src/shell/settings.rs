@@ -34,6 +34,7 @@ pub(crate) enum Page {
     Clips,
     Canvases,
     Shortcuts,
+    Midi,
     Remote,
     Connections,
     Permissions,
@@ -50,6 +51,7 @@ const PAGES: &[(Page, &str, &str)] = &[
     (Page::Canvases, "Canvases", "proportions"),
     (Page::Camera, "Camera", "camera"),
     (Page::Shortcuts, "Shortcuts", "keyboard"),
+    (Page::Midi, "MIDI", "piano"),
     (Page::Remote, "Remote API", "radio-tower"),
     (Page::Connections, "Connections", "plug"),
     (Page::Permissions, "Permissions", "shield-check"),
@@ -315,6 +317,7 @@ impl StudioWindow {
             Page::Clips => self.clips_page(cx),
             Page::Canvases => self.canvases_page(cx),
             Page::Shortcuts => self.shortcuts_page(cx),
+            Page::Midi => self.midi_page(cx),
             Page::Remote => self.remote_page(cx),
             Page::Connections => self.connections_page(cx),
             Page::Permissions => self.permissions_page(cx),
@@ -1023,6 +1026,93 @@ impl StudioWindow {
                     ))
                     .child(row("Between tries", None, chips("reconnect-delay", delays, cx))),
             )
+    }
+
+    /// MIDI: controls learned from a device, each driving a fader, a mute, a scene, a pad or an
+    /// action (`crate::midi_map`).
+    fn midi_page(&self, cx: &mut Context<Self>) -> Div {
+        use crate::midi_map::MidiTarget;
+        let workspace = self.studio.read(cx).workspace().clone();
+        let learning = self.midi_learn;
+        let mut list = group_tip(
+            "Controls",
+            "Move a fader or press a button on your controller after Learn. Faders and buttons that light up follow Lightair back.",
+        );
+        let name_of = |t: MidiTarget| -> String {
+            match t {
+                MidiTarget::None => "Choose what it does…".into(),
+                MidiTarget::Volume { track } => format!("Volume · {}", workspace.track(track).map_or("(gone)", |t| t.name.as_str())),
+                MidiTarget::Mute { track } => format!("Mute · {}", workspace.track(track).map_or("(gone)", |t| t.name.as_str())),
+                MidiTarget::Scene { scene } => format!("Scene · {}", workspace.scene(scene).map_or("(gone)", |s| s.name.as_str())),
+                MidiTarget::Pad { pad } => format!("Pad · {}", workspace.show.pads.iter().find(|p| p.id == pad).map_or("(gone)", |p| p.name.as_str())),
+                MidiTarget::Action { action } => action.label(),
+            }
+        };
+        for (i, map) in self.prefs.midi_maps.iter().enumerate() {
+            let me = cx.entity().downgrade();
+            let w = workspace.clone();
+            let picker = Button::new(("midi-target", i)).label(name_of(map.target)).small().outline().dropdown_menu(move |mut menu, _, _| {
+                let set = |t: MidiTarget| {
+                    let me = me.clone();
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        if let Some(me) = me.upgrade() {
+                            me.update(cx, |this, cx| {
+                                if let Some(m) = this.prefs.midi_maps.get_mut(i) {
+                                    m.target = t;
+                                }
+                                this.midi_sent.remove(&i);
+                                let _ = crate::prefs::save_to(&crate::prefs::path(), &this.prefs);
+                                cx.notify();
+                            });
+                        }
+                    }
+                };
+                for t in w.tracks.iter() {
+                    menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(format!("Volume · {}", t.name)).on_click(set(MidiTarget::Volume { track: t.id })));
+                }
+                menu = menu.separator();
+                for t in w.tracks.iter() {
+                    menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(format!("Mute · {}", t.name)).on_click(set(MidiTarget::Mute { track: t.id })));
+                }
+                menu = menu.separator();
+                for sc in w.scenes.iter() {
+                    menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(format!("Scene · {}", sc.name)).on_click(set(MidiTarget::Scene { scene: sc.id })));
+                }
+                if !w.show.pads.is_empty() {
+                    menu = menu.separator();
+                }
+                for p in w.show.pads.iter() {
+                    menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(format!("Pad · {}", p.name)).on_click(set(MidiTarget::Pad { pad: p.id })));
+                }
+                menu = menu.separator();
+                for a in crate::shortcuts::GlobalAction::ALL.iter().copied() {
+                    menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(a.label()).on_click(set(MidiTarget::Action { action: a })));
+                }
+                menu
+            });
+            let remove = Button::new(("midi-remove", i)).icon(ui::icon("trash")).xsmall().ghost().on_click(cx.listener(move |this, _, _, cx| {
+                if i < this.prefs.midi_maps.len() {
+                    this.prefs.midi_maps.remove(i);
+                    this.midi_sent.clear();
+                    let _ = crate::prefs::save_to(&crate::prefs::path(), &this.prefs);
+                    cx.notify();
+                }
+            }));
+            list = list.child(row(&map.control(), None, div().flex().items_center().gap_1().child(picker).child(remove)));
+        }
+        let learn = Button::new("midi-learn")
+            .label(if learning { "Move a control on your device…" } else { "Learn a control" })
+            .icon(ui::icon(if learning { "radio" } else { "plus" }))
+            .small()
+            .outline()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.midi_learn = !this.midi_learn;
+                cx.notify();
+            }));
+        if self.prefs.midi_maps.is_empty() {
+            list = list.child(row("No controls yet", Some("Learn one, then choose what it does."), div()));
+        }
+        pages().child(list.child(div().flex().justify_end().pt_2().child(learn)))
     }
 
     fn clips_page(&self, cx: &mut Context<Self>) -> Div {

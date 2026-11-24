@@ -5,16 +5,21 @@
 //   DONE            (the utterance ended; the next TEXT starts a new one)
 //   READY <language> <on-device|online>   (once, when it's listening)
 //   ERROR <why>
+//   TRANSLATION <the utterance just ended, translated>   (with a third argument)
 // Runs until its stdin closes (Lightair quitting or no automation listening any more).
 // Arguments, both optional: a language ("en-US"; "-" for the system's) and where the sound comes
 // from: a Core Audio input device's UID, "-pcm" for 16 kHz mono 16-bit samples on stdin (a mixer
-// track Lightair taps), or nothing for the default input.
+// track Lightair taps), or nothing for the default input. A third, a language ("es"), translates
+// each finished utterance into it on this Mac (Apple's Translation; macOS 26 and later).
 
 import AVFoundation
 import AudioToolbox
 import CoreAudio
 import Foundation
 import Speech
+#if canImport(Translation)
+import Translation
+#endif
 
 setvbuf(stdout, nil, _IOLBF, 0)
 
@@ -24,6 +29,7 @@ let fromStdin = args.count > 2 && args[2] == "-pcm"
 let deviceUID = args.count > 2 && !args[2].isEmpty && args[2] != "default" && !fromStdin ? args[2] : nil
 let pcmFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
 var pending = Data()
+let target = args.count > 3 && !args[3].isEmpty && args[3] != "-" ? args[3] : nil
 
 /// A Core Audio device by its UID.
 func device(uid: String) -> AudioDeviceID? {
@@ -54,6 +60,26 @@ func say(_ line: String) {
     print(line.replacingOccurrences(of: "\n", with: " "))
 }
 
+/// Ends the utterance `text`: DONE, then its translation when one is wanted.
+func finish(_ text: String) {
+    guard !text.isEmpty else { return }
+    say("DONE")
+    guard let target = target else { return }
+    #if canImport(Translation)
+    if #available(macOS 26.0, *) {
+        Task {
+            do {
+                let session = TranslationSession(installedSource: locale.language, target: Locale.Language(identifier: target))
+                let r = try await session.translate(text)
+                say("TRANSLATION " + r.targetText)
+            } catch {
+                say("ERROR translation: \(error.localizedDescription)")
+            }
+        }
+    }
+    #endif
+}
+
 /// Which recognition task is the current one: an ended task's last callbacks are ignored.
 var generation = 0
 
@@ -81,7 +107,7 @@ func restart() {
                 say("TEXT " + text)
             }
             if r.isFinal {
-                if !lastText.isEmpty { say("DONE") }
+                finish(lastText)
                 lastText = ""
                 DispatchQueue.main.async { restart() }
             }
@@ -105,8 +131,8 @@ func restart() {
 func endWhenSettled() {
     Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
         if !lastText.isEmpty && Date().timeIntervalSince(lastTextAt) > 1.2 {
+            finish(lastText)
             lastText = ""
-            say("DONE")
             restart()
         }
     }
@@ -125,7 +151,7 @@ func start() {
         endWhenSettled()
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
             if Date().timeIntervalSince(started) > 50 {
-                if !lastText.isEmpty { say("DONE") }
+                finish(lastText)
                 lastText = ""
                 restart()
             }
@@ -154,7 +180,7 @@ func start() {
     // a recognition task lasts about a minute: start a new one before then
     Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
         if Date().timeIntervalSince(started) > 50 {
-            if !lastText.isEmpty { say("DONE") }
+            finish(lastText)
             lastText = ""
             restart()
         }

@@ -551,6 +551,133 @@ fn rand_now() -> f32 {
     (n.wrapping_mul(2_654_435_761) % 100_000) as f32 / 100_000.0
 }
 
+// ---------------------------------------------------------------------------------------------
+// React to sound
+
+const REACT_EFFECT: &str = r#"
+uniform texture2d image;
+uniform float opacity;
+uniform float gain;
+sampler_state def { Filter = Linear; AddressU = Clamp; AddressV = Clamp; };
+float4 PSReact(VertInOut vert_in) : TARGET
+{
+    float4 c = image.Sample(def, vert_in.uv);
+    return float4(c.rgb * gain, c.a * opacity);
+}
+technique Draw { pass { vertex_shader = VSDefault(vert_in); pixel_shader = PSReact(vert_in); } }
+"#;
+
+/// A picture that moves with a track's level (`track`: the track's id): `react` 0 grows, 1
+/// fades in, 2 glows, 3 shakes, by `amount`; `floor_db` is the quietest level that moves it.
+struct React {
+    context: *mut sys::obs_source_t,
+    effect: *mut sys::gs_effect_t,
+    track: Option<lightair_model::Id>,
+    react: i64,
+    amount: f32,
+    floor_db: f32,
+    /// The level as it moves (0..1): up at once, down slowly.
+    level: f32,
+    seed: u32,
+}
+
+unsafe extern "C" fn react_name(_: *mut c_void) -> *const c_char {
+    c"React to sound".as_ptr()
+}
+
+unsafe extern "C" fn react_update(data: *mut c_void, settings: *mut sys::obs_data_t) {
+    let f = unsafe { &mut *(data as *mut React) };
+    let track = unsafe { get_str(settings, c"track") };
+    f.track = serde_json::from_value(serde_json::Value::String(track)).ok();
+    f.react = unsafe { sys::obs_data_get_int(settings, c"react".as_ptr()) };
+    f.amount = (unsafe { sys::obs_data_get_double(settings, c"amount".as_ptr()) } as f32).clamp(0.0, 1.0);
+    let floor = unsafe { sys::obs_data_get_double(settings, c"floor_db".as_ptr()) } as f32;
+    f.floor_db = if floor < -1.0 { floor } else { -40.0 };
+}
+
+unsafe extern "C" fn react_create(settings: *mut sys::obs_data_t, context: *mut sys::obs_source_t) -> *mut c_void {
+    let mut f = Box::new(React {
+        context,
+        effect: std::ptr::null_mut(),
+        track: None,
+        react: 0,
+        amount: 0.5,
+        floor_db: -40.0,
+        level: 0.0,
+        seed: 12345,
+    });
+    unsafe { react_update(&mut *f as *mut React as *mut c_void, settings) };
+    Box::into_raw(f) as *mut c_void
+}
+
+unsafe extern "C" fn react_destroy(data: *mut c_void) {
+    let mut f = unsafe { Box::from_raw(data as *mut React) };
+    unsafe {
+        sys::obs_enter_graphics();
+        destroy_effect(&mut f.effect);
+        sys::obs_leave_graphics();
+    }
+}
+
+unsafe extern "C" fn react_tick(data: *mut c_void, seconds: f32) {
+    let f = unsafe { &mut *(data as *mut React) };
+    let db = f
+        .track
+        .and_then(|t| crate::meters::meters().get(t))
+        .map(|c| {
+            let l = c.levels();
+            if l.age > 0.5 { f32::NEG_INFINITY } else { l.peak.iter().copied().fold(f32::NEG_INFINITY, f32::max) }
+        })
+        .unwrap_or(f32::NEG_INFINITY);
+    let target = if db.is_finite() { ((db - f.floor_db) / -f.floor_db).clamp(0.0, 1.0) } else { 0.0 };
+    // up at once, down over about a fifth of a second
+    f.level = if target > f.level { target } else { f.level + (target - f.level) * (seconds * 6.0).min(1.0) };
+}
+
+unsafe extern "C" fn react_render(data: *mut c_void, _: *mut sys::gs_effect_t) {
+    let f = unsafe { &mut *(data as *mut React) };
+    let (w, h) = unsafe { target_size(f.context) };
+    if w == 0 || h == 0 || f.track.is_none() {
+        unsafe { sys::obs_source_skip_video_filter(f.context) };
+        return;
+    }
+    unsafe {
+        if f.effect.is_null() {
+            f.effect = make_effect(&format!("{VERTEX}{REACT_EFFECT}"), c"lightair-react.effect");
+        }
+        if f.effect.is_null() || !sys::obs_source_process_filter_begin(f.context, sys::GS_RGBA, sys::OBS_NO_DIRECT_RENDERING) {
+            sys::obs_source_skip_video_filter(f.context);
+            return;
+        }
+        let k = f.level * f.amount;
+        let (mut opacity, mut gain) = (1.0, 1.0);
+        sys::gs_matrix_push();
+        match f.react {
+            // grows from its middle
+            0 => {
+                let s = 1.0 + 0.35 * k;
+                let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+                sys::gs_matrix_translate3f(cx, cy, 0.0);
+                sys::gs_matrix_scale3f(s, s, 1.0);
+                sys::gs_matrix_translate3f(-cx, -cy, 0.0);
+            }
+            1 => opacity = (1.0 - f.amount) + k,
+            2 => gain = 1.0 + 1.5 * k,
+            _ => {
+                f.seed = f.seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                let a = (f.seed >> 16) as f32 / 65_536.0;
+                let b = (f.seed & 0xffff) as f32 / 65_536.0;
+                let r = 0.03 * w.min(h) as f32 * k;
+                sys::gs_matrix_translate3f((a - 0.5) * 2.0 * r, (b - 0.5) * 2.0 * r, 0.0);
+            }
+        }
+        sys::gs_effect_set_float(param(f.effect, c"opacity"), opacity.clamp(0.0, 1.0));
+        sys::gs_effect_set_float(param(f.effect, c"gain"), gain);
+        sys::obs_source_process_filter_end(f.context, f.effect, w, h);
+        sys::gs_matrix_pop();
+    }
+}
+
 /// Registers the filters with libobs (once; after startup).
 pub fn register() {
     static DONE: std::sync::Once = std::sync::Once::new();
@@ -589,6 +716,18 @@ pub fn register() {
         info.update = Some(shader_update);
         info.get_defaults = Some(shader_defaults);
         info.video_render = Some(shader_render);
+        sys::obs_register_source_s(&info, std::mem::size_of::<sys::obs_source_info>());
+
+        let mut info: sys::obs_source_info = std::mem::zeroed();
+        info.id = c"lightair_audio_react".as_ptr();
+        info.type_ = sys::OBS_SOURCE_TYPE_FILTER;
+        info.output_flags = sys::OBS_SOURCE_VIDEO;
+        info.get_name = Some(react_name);
+        info.create = Some(react_create);
+        info.destroy = Some(react_destroy);
+        info.update = Some(react_update);
+        info.video_tick = Some(react_tick);
+        info.video_render = Some(react_render);
         sys::obs_register_source_s(&info, std::mem::size_of::<sys::obs_source_info>());
     });
 }

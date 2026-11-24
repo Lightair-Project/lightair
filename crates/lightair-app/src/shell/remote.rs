@@ -769,7 +769,13 @@ impl StudioWindow {
 
             "source.get" => {
                 let s = source_by(&w, need(p, "source")?)?;
-                Ok(json!({"id": s.id, "name": s.name, "kind": s.kind, "settings": s.settings}))
+                // a media source: where it is (and in its playlist)
+                let id = s.id;
+                let engine = self.studio.read(cx).engine().clone();
+                let (media, playlist) = engine.call(move |e| (e.reconciler.media_status(id), e.reconciler.playlist_now(id)));
+                let media = media.map(|m| json!({"state": format!("{:?}", m.state), "time_ms": m.time_ms, "duration_ms": m.duration_ms}));
+                let playlist = playlist.map(|(at, n, file)| json!({"at": at, "of": n, "file": file}));
+                Ok(json!({"id": s.id, "name": s.name, "kind": s.kind, "settings": s.settings, "media": media, "playlist": playlist}))
             }
             "source.update" => {
                 let s = source_by(&w, need(p, "source")?)?.clone();
@@ -1348,6 +1354,15 @@ impl StudioWindow {
                     settings["height"] = h.clone();
                 }
                 NewSource { kind: lightair_model::kinds::CAMERA.into(), settings, size: (1280.0, 720.0), sound: false, name: "Camera".into() }
+            }
+            // one of Lightair's own widgets: settings.widget is its kind ("scoreboard", "captions", …)
+            "widget" => {
+                let wk = s.get("widget").and_then(Value::as_str).ok_or_else(|| ApiError::invalid("a widget needs settings.widget (its kind)"))?.to_string();
+                let b = lightair_widgets::catalog::by_kind(&wk).ok_or_else(|| ApiError::invalid(format!("no widget {wk}")))?;
+                let (w, h) = b.size;
+                let instance = lightair_widgets::Instance::new(&wk, None);
+                let settings = json!({"url": instance.address(), "width": w, "height": h, "fps": 30, "widget": instance});
+                NewSource { kind: lightair_engine::web::KIND.into(), settings, size: (w as f32, h as f32), sound: b.sound, name: b.name.into() }
             }
             "timer" | lightair_engine::timers::TIMER_KIND => {
                 defaults(&mut s, json!({

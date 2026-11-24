@@ -141,6 +141,7 @@ pub fn params(e: &Effect) -> Option<Params> {
             limit: r.flag("limit"),
             podcast: r.num("character") >= 0.5,
         }),
+        "audio.pitch" => Params::Pitch(la::dsp::PitchParams { semitones: r.num("semitones"), robot: r.flag("robot"), mix: r.num("mix") }),
         lightair_model::catalog::PLUGIN_KIND => Params::Plugin(PluginParams { plugin: crate::plugins::instance(e) }),
         _ => return None,
     })

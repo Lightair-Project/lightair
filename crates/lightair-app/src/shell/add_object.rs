@@ -1305,7 +1305,7 @@ fn key_hint(keys: &'static str, label: &'static str) -> Div {
 }
 
 /// The widget gallery's groups, in order.
-const WIDGET_GROUPS: &[&str] = &["Alerts and events", "Chat", "Goals and timers", "Viewers play", "Info"];
+const WIDGET_GROUPS: &[&str] = &["Alerts and events", "Chat", "Goals and timers", "Viewers play", "On screen", "Info"];
 
 /// Which gallery group a built-in widget is in.
 fn widget_group(kind: &str) -> &'static str {
@@ -1314,6 +1314,7 @@ fn widget_group(kind: &str) -> &'static str {
         "chat-box" | "emote-wall" | "emote-combo" => "Chat",
         "goal" | "counter" | "subathon" => "Goals and timers",
         "poll" | "prediction" | "wheel" | "leaderboard" => "Viewers play",
+        "scoreboard" | "lower-third" | "web-data" | "input-overlay" | "captions" | "visualiser" => "On screen",
         _ => "Info",
     }
 }
