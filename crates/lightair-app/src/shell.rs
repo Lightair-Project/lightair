@@ -62,6 +62,9 @@ use crate::ui::{self, tok};
 use lightair_engine::outputs::{OutputState, runtime};
 use std::time::Instant;
 
+/// Output devices (name, id) and when they were read.
+type OutputDevices = (Instant, Vec<(String, String)>);
+
 actions!(
     lightair,
     [
@@ -413,7 +416,7 @@ pub struct StudioWindow {
     /// Scene folders closed in the Scenes panel (by name).
     collapsed_folders: HashSet<String>,
     /// Audio output devices (name, id) for a mix's own output, read now and then.
-    output_devices: RefCell<Option<(Instant, Vec<(String, String)>)>>,
+    output_devices: RefCell<Option<OutputDevices>>,
     /// MIDI mappings' devices, the next control being learned, what each mapping last sent
     /// back, and a fader move in progress (one undo step).
     pub(super) midi: crate::midi_map::MidiHub,

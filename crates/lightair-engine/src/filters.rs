@@ -194,8 +194,8 @@ unsafe extern "C" fn mask_render(data: *mut c_void, _: *mut sys::gs_effect_t) {
         let (mw, mh) = (sys::obs_source_get_width(mask), sys::obs_source_get_height(mask));
         sys::gs_texrender_reset(f.texrender);
         if sys::gs_texrender_begin(f.texrender, w, h) {
-            let mut clear = sys::vec4 { __bindgen_anon_1: sys::vec4__bindgen_ty_1 { ptr: [0.0; 4] } };
-            sys::gs_clear(sys::GS_CLEAR_COLOR, &mut clear, 0.0, 0);
+            let clear = sys::vec4 { __bindgen_anon_1: sys::vec4__bindgen_ty_1 { ptr: [0.0; 4] } };
+            sys::gs_clear(sys::GS_CLEAR_COLOR, &clear, 0.0, 0);
             sys::gs_ortho(0.0, w as f32, 0.0, h as f32, -100.0, 100.0);
             if mw > 0 && mh > 0 {
                 sys::gs_matrix_push();
@@ -327,8 +327,8 @@ unsafe extern "C" fn freeze_render(data: *mut c_void, _: *mut sys::gs_effect_t) 
             // the picture at this moment, kept
             sys::gs_texrender_reset(f.texrender);
             if sys::gs_texrender_begin(f.texrender, w, h) {
-                let mut clear = sys::vec4 { __bindgen_anon_1: sys::vec4__bindgen_ty_1 { ptr: [0.0; 4] } };
-                sys::gs_clear(sys::GS_CLEAR_COLOR, &mut clear, 0.0, 0);
+                let clear = sys::vec4 { __bindgen_anon_1: sys::vec4__bindgen_ty_1 { ptr: [0.0; 4] } };
+                sys::gs_clear(sys::GS_CLEAR_COLOR, &clear, 0.0, 0);
                 sys::gs_ortho(0.0, w as f32, 0.0, h as f32, -100.0, 100.0);
                 if sys::obs_source_process_filter_begin(f.context, sys::GS_RGBA, sys::OBS_NO_DIRECT_RENDERING) {
                     sys::gs_blend_state_push();

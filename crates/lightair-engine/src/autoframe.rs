@@ -97,6 +97,9 @@ fn v4(v: [f32; 4]) -> sys::vec4 {
     sys::vec4 { __bindgen_anon_1: sys::vec4__bindgen_ty_1 { ptr: v } }
 }
 
+/// A copy of the picture for Vision: BGRA bytes, width, height, bytes a row.
+type Copy = (Vec<u8>, usize, usize, usize);
+
 /// What both filters share: the tracker, the small copy for it, and the face last seen.
 struct Watch {
     tracker: *mut c_void,
@@ -110,7 +113,7 @@ struct Watch {
     face: Option<[f32; 4]>,
     missing: u32,
     /// Where copies of the picture go too (Apple's Vision, for every face; macOS).
-    sink: Option<std::sync::mpsc::SyncSender<(Vec<u8>, usize, usize, usize)>>,
+    sink: Option<std::sync::mpsc::SyncSender<Copy>>,
     /// Every face Vision found lately, and when.
     all: std::sync::Arc<std::sync::Mutex<(Vec<[f32; 4]>, std::time::Instant)>>,
 }
@@ -145,7 +148,7 @@ impl Watch {
         let mut w = Watch::new();
         #[cfg(target_os = "macos")]
         {
-            let (tx, rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, usize, usize, usize)>(1);
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Copy>(1);
             let all = w.all.clone();
             std::thread::Builder::new()
                 .name("lightair-faces".into())
@@ -445,8 +448,8 @@ unsafe extern "C" fn af_tick(data: *mut c_void, seconds: f32) {
     let k = (seconds * (0.6 + 4.0 * f.speed)).min(1.0);
     let far = (0..4).map(|i| (want[i] - f.view[i]).abs()).fold(0.0f32, f32::max);
     if far > 0.015 {
-        for i in 0..4 {
-            f.view[i] += (want[i] - f.view[i]) * k;
+        for (v, w) in f.view.iter_mut().zip(want) {
+            *v += (w - *v) * k;
         }
     }
 }

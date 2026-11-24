@@ -738,7 +738,7 @@ impl Render for RundownPanel {
                 let shorter = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                     set_show(&s1, "Change a segment", |s| {
                         if let Some(seg) = s.rundown.iter_mut().find(|s| s.id == id) {
-                            seg.seconds = seg.seconds.saturating_sub(60).max(0);
+                            seg.seconds = seg.seconds.saturating_sub(60);
                         }
                     }, cx)
                 };

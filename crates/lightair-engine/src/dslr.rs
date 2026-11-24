@@ -88,7 +88,6 @@ struct SrcPtr(*mut sys::obs_source_t);
 unsafe impl Send for SrcPtr {}
 
 fn run(src: SrcPtr, stop: Arc<AtomicBool>) {
-    let src = src;
     let Some(l) = lib() else { return };
     while !stop.load(Ordering::Relaxed) {
         // a camera (again, after one goes away)
