@@ -688,7 +688,7 @@ impl CohostView {
         self.section(
             "Persona",
             vec![
-                stacked("Name", Some("It answers when chat or you say its name."), TextInput::new(&self.name).small().into_any_element()),
+                stacked("Name", Some("Chat that says its name gets an answer first."), TextInput::new(&self.name).small().into_any_element()),
                 stacked(
                     "Personality",
                     Some("How it talks and what it's like, in your words: its humour, what it knows about you and your stream, what to avoid."),

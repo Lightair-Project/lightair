@@ -1739,6 +1739,7 @@ impl Listener {
             let _done = Finally(done_reading);
             let mut last = String::new();
             for line in BufReader::new(out).lines().map_while(Result::ok) {
+                tracing::debug!(track = %name, %line, "piair: speech helper");
                 if let Some(text) = line.strip_prefix("TEXT ") {
                     last = text.to_string();
                     {
