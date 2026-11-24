@@ -21,7 +21,7 @@ pub const SERVICES: &[(&str, &str, Use, &str)] = &[
         "elevenlabs",
         "ElevenLabs",
         Use::Voice,
-        "elevenlabs.io › Developers › API keys. Give it Text to Speech, and Voices (read) for the voice picker.",
+        "elevenlabs.io › Developers › API keys. Give it Text to Speech, Voices (read) for the voice picker, and Speech to Text to hear with Scribe.",
     ),
     ("cartesia", "Cartesia", Use::Voice, "play.cartesia.ai › API keys."),
     (
@@ -42,7 +42,12 @@ pub const SERVICES: &[(&str, &str, Use, &str)] = &[
         Use::Brain,
         "platform.openai.com › API keys. With a ChatGPT subscription, sign in under Subscriptions instead (one or the other).",
     ),
-    ("openrouter", "OpenRouter", Use::Brain, "openrouter.ai › Keys."),
+    (
+        "openrouter",
+        "OpenRouter",
+        Use::Brain,
+        "openrouter.ai › Keys. Used for OpenRouter's models, and to hear with its transcription models.",
+    ),
     ("groq", "Groq", Use::Brain, "console.groq.com › API keys."),
     ("xai", "xAI (Grok)", Use::Brain, "console.x.ai › API keys."),
 ];

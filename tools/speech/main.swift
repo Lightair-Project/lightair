@@ -45,12 +45,21 @@ var request: SFSpeechAudioBufferRecognitionRequest?
 var task: SFSpeechRecognitionTask?
 var started = Date()
 var lastError = ""
+// the utterance so far and when it last changed: Apple's recognizer rarely ends an utterance in a
+// stream that never stops, so it's ended here once the words stop changing
+var lastText = ""
+var lastTextAt = Date()
 
 func say(_ line: String) {
     print(line.replacingOccurrences(of: "\n", with: " "))
 }
 
+/// Which recognition task is the current one: an ended task's last callbacks are ignored.
+var generation = 0
+
 func restart() {
+    generation += 1
+    let mine = generation
     task?.cancel()
     task = nil
     request?.endAudio()
@@ -62,11 +71,18 @@ func restart() {
     request = req
     started = Date()
     task = recognizer?.recognitionTask(with: req) { result, error in
+        guard mine == generation else { return }
         if let r = result {
             lastError = ""
-            say("TEXT " + r.bestTranscription.formattedString)
+            let text = r.bestTranscription.formattedString
+            if text != lastText {
+                lastText = text
+                lastTextAt = Date()
+                say("TEXT " + text)
+            }
             if r.isFinal {
-                say("DONE")
+                if !lastText.isEmpty { say("DONE") }
+                lastText = ""
                 DispatchQueue.main.async { restart() }
             }
         } else if let e = error as NSError? {
@@ -85,6 +101,17 @@ func restart() {
     }
 }
 
+/// Ends the utterance when its words haven't changed for 1.2 s, and starts listening afresh.
+func endWhenSettled() {
+    Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+        if !lastText.isEmpty && Date().timeIntervalSince(lastTextAt) > 1.2 {
+            lastText = ""
+            say("DONE")
+            restart()
+        }
+    }
+}
+
 func start() {
     guard let r = SFSpeechRecognizer(locale: locale), r.isAvailable else {
         say("ERROR speech recognition isn't available for \(locale.identifier)")
@@ -95,9 +122,11 @@ func start() {
     // samples from Lightair on stdin: no microphone of our own
     if fromStdin {
         restart()
+        endWhenSettled()
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
             if Date().timeIntervalSince(started) > 50 {
-                say("DONE")
+                if !lastText.isEmpty { say("DONE") }
+                lastText = ""
                 restart()
             }
         }
@@ -121,10 +150,12 @@ func start() {
         exit(4)
     }
     restart()
+    endWhenSettled()
     // a recognition task lasts about a minute: start a new one before then
     Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
         if Date().timeIntervalSince(started) > 50 {
-            say("DONE")
+            if !lastText.isEmpty { say("DONE") }
+            lastText = ""
             restart()
         }
     }

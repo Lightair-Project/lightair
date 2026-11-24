@@ -24,6 +24,24 @@ use crate::ui::{self, tok};
 const VENDORS: &[(&str, &str)] =
     &[("cartesia", "Cartesia"), ("elevenlabs", "ElevenLabs"), ("gemini", "Gemini"), ("none", "None")];
 const CHATTINESS: &[&str] = &["Quiet", "Normal", "Lively", "Chatty"];
+/// Languages a heard track can be held to (codes the engines know; Apple's get a region).
+const LANGUAGES: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("id", "Indonesian"),
+    ("ms", "Malay"),
+    ("ja", "Japanese"),
+    ("ko", "Korean"),
+    ("zh", "Chinese"),
+    ("th", "Thai"),
+    ("vi", "Vietnamese"),
+    ("hi", "Hindi"),
+    ("es", "Spanish"),
+    ("pt", "Portuguese"),
+    ("fr", "French"),
+    ("de", "German"),
+    ("ru", "Russian"),
+    ("ar", "Arabic"),
+];
 /// Lines of the conversation the Talk section shows.
 const TALK_LINES: usize = 6;
 
@@ -648,8 +666,13 @@ impl CohostView {
                 row("Answer chat", Some("Reads chat from every platform and answers some of it. Chat can never make it change Lightair or use the computer."), toggle("cohost-chat", "answerChat", answer, cx)),
                 stacked(
                     "Hears",
-                    Some("Mixer tracks it listens to, with on-device speech recognition (nothing leaves this computer for it). Conversation: people talking to it (your mic, a guest's): it waits while they speak and answers its name. Content: something playing (a video, a game): it follows along, may react now and then, and never takes it as someone talking to it."),
+                    Some("Mixer tracks it listens to. Conversation: people talking to it (your mic, a guest's): it waits while they speak and answers its name. Content: something playing (a video, a game): it follows along, may react now and then, and never takes it as someone talking to it."),
                     self.hears_list(cx),
+                ),
+                stacked(
+                    "Hearing with",
+                    Some("What turns each kind of track into words. On this Mac: Apple's speech recognition, free and private, one language at a time. ElevenLabs Scribe v3 Live: any language, follows you switching languages mid-sentence, words as you say them (your ElevenLabs key, with Speech to Text). OpenRouter: any of its transcription models, after each sentence (your OpenRouter key). Cloud hearing is billed for the time a track is heard."),
+                    self.hearing_engines(cx),
                 ),
                 row("Stop when someone talks", Some("It goes quiet when a conversation track picks someone up."), toggle("cohost-yield", "stopWhenStreamerTalks", yield_, cx)),
             ],
@@ -658,6 +681,127 @@ impl CohostView {
     }
 
     /// The tracks it hears, each as conversation or content, and a way to add one.
+    /// For conversation and for content: the engine and model that hear it, and its language.
+    fn hearing_engines(&self, cx: &mut Context<Self>) -> AnyElement {
+        let cohost = self.cohost(cx);
+        let eleven = self.host.stt_models("elevenlabs").and_then(Result::ok).unwrap_or_default();
+        let openrouter = self.host.stt_models("openrouter");
+        let me = cx.entity().downgrade();
+        let mut out = div().flex().flex_col().gap_1p5();
+        for role in [super::Role::Conversation, super::Role::Content] {
+            let key = role.key();
+            let e = super::Engine::of(&cohost, role);
+            let model_name = |list: &[(String, String)], id: &str| {
+                list.iter().find(|m| m.0 == id).map(|m| m.1.clone()).unwrap_or_else(|| id.to_string())
+            };
+            let label = match e.kind.as_str() {
+                "elevenlabs" => format!(
+                    "ElevenLabs · {}",
+                    model_name(&eleven, if e.model.is_empty() { "scribe_v3_live" } else { &e.model })
+                        .split(" (")
+                        .next()
+                        .unwrap_or_default()
+                ),
+                "openrouter" => {
+                    let list = openrouter.clone().and_then(Result::ok).unwrap_or_default();
+                    format!(
+                        "OpenRouter · {}",
+                        if e.model.is_empty() { "choose a model".into() } else { model_name(&list, &e.model) }
+                    )
+                }
+                _ => "On this Mac".to_string(),
+            };
+            let engine_menu = {
+                let (me, eleven, openrouter, language) =
+                    (me.clone(), eleven.clone(), openrouter.clone(), e.language.clone());
+                Button::new(SharedString::from(format!("cohost-hearing-{key}"))).label(label).xsmall().outline().dropdown_caret(true).dropdown_menu(
+                    move |mut menu, _, _| {
+                        let pick = |engine: &str, model: &str| {
+                            let (me, engine, model, language) = (me.clone(), engine.to_string(), model.to_string(), language.clone());
+                            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                if let Some(me) = me.upgrade() {
+                                    me.update(cx, |this, cx| {
+                                        this.set_cohost(
+                                            json!({"hearing": {key: {"engine": engine, "model": model, "language": language}}}),
+                                            cx,
+                                        )
+                                    });
+                                }
+                            }
+                        };
+                        menu = menu.item(PopupMenuItem::new("On this Mac (free, one language)").on_click(pick("apple", "")));
+                        menu = menu.separator().item(PopupMenuItem::label("ElevenLabs"));
+                        for (id, name) in &eleven {
+                            menu = menu.item(PopupMenuItem::new(name.clone()).on_click(pick("elevenlabs", id)));
+                        }
+                        menu = menu.separator().item(PopupMenuItem::label("OpenRouter"));
+                        match &openrouter {
+                            None => menu = menu.item(PopupMenuItem::new("Loading models…").disabled(true)),
+                            Some(Err(why)) => menu = menu.item(PopupMenuItem::new(why.clone()).disabled(true)),
+                            Some(Ok(list)) => {
+                                for (id, name) in list.iter().take(40) {
+                                    menu = menu.item(PopupMenuItem::new(name.clone()).on_click(pick("openrouter", id)));
+                                }
+                            }
+                        }
+                        menu
+                    },
+                )
+            };
+            let language_menu = {
+                let me = me.clone();
+                let apple = e.kind == "apple";
+                let any = if apple { "System language" } else { "Any language" };
+                let current = LANGUAGES.iter().find(|l| l.0 == e.language).map_or(any, |l| l.1);
+                Button::new(SharedString::from(format!("cohost-hearing-lang-{key}")))
+                    .label(current)
+                    .xsmall()
+                    .ghost()
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for &(code, name) in std::iter::once(&("", any)).chain(LANGUAGES.iter()) {
+                            let me = me.clone();
+                            menu = menu.item(PopupMenuItem::new(name).on_click(move |_, _, cx| {
+                                if let Some(me) = me.upgrade() {
+                                    me.update(cx, |this, cx| {
+                                        this.set_cohost(json!({"hearing": {key: {"language": code}}}), cx)
+                                    });
+                                }
+                            }));
+                        }
+                        menu
+                    })
+            };
+            out = out.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_2()
+                    .rounded(px(7.))
+                    .bg(tok::bg_raised())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                ui::icon(if role == super::Role::Content { "monitor-play" } else { "mic" })
+                                    .size(px(13.))
+                                    .text_color(tok::text_secondary()),
+                            )
+                            .child(div().flex_1().text_size(px(12.)).child(if role == super::Role::Content {
+                                "Content"
+                            } else {
+                                "Conversation"
+                            })),
+                    )
+                    .child(div().flex().flex_wrap().items_center().gap_1().child(engine_menu).child(language_menu)),
+            );
+        }
+        out.into_any_element()
+    }
+
     fn hears_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let w = self.studio.read(cx).workspace().clone();
         let cohost = self.cohost(cx);
