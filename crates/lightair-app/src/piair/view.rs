@@ -371,8 +371,14 @@ impl CohostView {
             let list = providers.clone();
             Button::new("cohost-provider").label(label).xsmall().outline().dropdown_caret(true).dropdown_menu(
                 move |mut menu, _, _| {
+                    let mut apps_heading = false;
                     for x in &list {
                         let id = x["id"].as_str().unwrap_or("").to_string();
+                        // the streamer's own AI apps, after the providers
+                        if id.starts_with("cli:") && !apps_heading {
+                            apps_heading = true;
+                            menu = menu.separator().item(PopupMenuItem::label("AI apps on this computer (your plan)"));
+                        }
                         let first = x["models"]
                             .as_array()
                             .and_then(|m| m.first())
@@ -424,7 +430,7 @@ impl CohostView {
             row(
                 "Provider",
                 Some(
-                    "Any provider Pi supports, with an API key or a subscription (Claude Pro/Max, ChatGPT, GitHub Copilot) where it has one: both are set up in Settings → Connections. ✓ marks the ones ready to use.",
+                    "Any provider Pi supports, with an API key or a subscription (Claude Pro/Max, ChatGPT, GitHub Copilot) where it has one: both are set up in Settings → Connections. Or an AI app on this computer (Claude Code, Codex, Antigravity, Grok) on its own plan: it talks, but can't use tools. ✓ marks the ones ready to use.",
                 ),
                 provider_menu.into_any_element(),
             ),
@@ -438,7 +444,15 @@ impl CohostView {
         ];
         // signed in, or where to: subscriptions and keys are in Settings → Connections. A
         // subscription signed in for another provider is offered as the one to use.
-        if signed_in {
+        let app = provider.starts_with("cli:");
+        if app && signed_in {
+            body.push(status_line(
+                tok::ok(),
+                "Signed in. It talks on your plan, but can't remember notes, change Lightair or use the computer: each reply runs the app once.".into(),
+            ));
+        } else if let Some(hint) = p["hint"].as_str().filter(|h| app && !h.is_empty()) {
+            body.push(status_line(tok::warn(), hint.to_string()));
+        } else if signed_in {
             body.push(status_line(tok::ok(), "Signed in".into()));
         } else {
             let other = providers
