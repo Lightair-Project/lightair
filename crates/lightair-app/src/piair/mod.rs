@@ -13,10 +13,10 @@ pub mod computer;
 #[cfg(target_os = "macos")]
 pub mod input_mac;
 pub mod keys;
+mod path;
 pub mod view;
 pub mod voice_sheet;
 pub mod voices;
-mod path;
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
@@ -110,6 +110,9 @@ pub struct Shared {
     pub wanted: AtomicBool,
     /// Listen to the streamer (on-device speech), from PiAir's settings.
     listen: AtomicBool,
+    /// Realtime voice is on (the active co-host's voice is "ChatGPT voice"): conversation audio is
+    /// streamed up to PiAir raw, not transcribed.
+    realtime: AtomicBool,
     /// The co-host object's settings PiAir was started with (sent again on a restart).
     start_settings: Mutex<Value>,
     /// The mixer tracks the co-host hears, and as what (the active co-host's "Hears").
@@ -169,7 +172,11 @@ impl Engine {
         let v = &cohost["hearing"][role.key()];
         let text = |k: &str| v[k].as_str().unwrap_or("").to_string();
         let kind = text("engine");
-        Engine { kind: if kind.is_empty() { "apple".into() } else { kind }, model: text("model"), language: text("language") }
+        Engine {
+            kind: if kind.is_empty() { "apple".into() } else { kind },
+            model: text("model"),
+            language: text("language"),
+        }
     }
 }
 
@@ -188,7 +195,7 @@ pub struct Hearing {
 /// a conversation track). Not set: the first mic in the mixer, as conversation. Tracks that are
 /// gone and co-host voices are left out.
 pub fn hearing(w: &lightair_model::Workspace, cohost: &Value) -> Vec<crate::piair::Hearing> {
-        let make = |track: &str, role: Role| -> Option<Hearing> {
+    let make = |track: &str, role: Role| -> Option<Hearing> {
         let t = w.tracks.iter().find(|t| t.id.to_string() == track)?;
         let source = w.sources.get(&t.source)?;
         (source.kind != lightair_engine::piair_voice::KIND).then(|| Hearing {
@@ -273,6 +280,7 @@ impl Host {
             mics: Mutex::new(Vec::new()),
             wanted: AtomicBool::new(false),
             listen: AtomicBool::new(false),
+            realtime: AtomicBool::new(false),
             start_settings: Mutex::new(Value::Null),
             hears: Mutex::new(Vec::new()),
             engine,
@@ -315,6 +323,15 @@ impl Host {
 
     pub fn running(&self) -> bool {
         self.state().running
+    }
+
+    /// Whether realtime voice is on (the active co-host's voice is "ChatGPT voice").
+    pub fn realtime(&self) -> bool {
+        self.0.realtime.load(Ordering::Relaxed)
+    }
+
+    pub fn set_realtime(&self, on: bool) {
+        self.0.realtime.store(on, Ordering::Relaxed);
     }
 
     /// Sends a message to PiAir (dropped when it isn't running).
@@ -700,6 +717,7 @@ impl Host {
                 let mut paused = false;
                 let mut listeners: std::collections::HashMap<Id, Listener> = std::collections::HashMap::new();
                 let mut failed: std::collections::HashMap<Id, (Instant, String)> = std::collections::HashMap::new();
+                let mut forwarders: std::collections::HashMap<Id, Forwarder> = std::collections::HashMap::new();
                 loop {
                     std::thread::sleep(Duration::from_millis(20));
                     for e in piair_voice::take_events() {
@@ -719,6 +737,7 @@ impl Host {
                     if !host.running() {
                         listeners.clear();
                         failed.clear();
+                        forwarders.clear();
                         host.0.hear_status.lock().unwrap_or_else(|e| e.into_inner()).clear();
                         continue;
                     }
@@ -759,6 +778,44 @@ impl Host {
                     // listening: one on-device speech helper per heard track, while PiAir runs
                     let ready = host.state().ready;
                     let hears = if ready { host.0.hears.lock().unwrap_or_else(|e| e.into_inner()).clone() } else { Vec::new() };
+                    // realtime voice: conversation audio is forwarded raw for the live model to hear,
+                    // with no on-device speech recognition
+                    let realtime = host.realtime();
+                    if realtime {
+                        listeners.clear();
+                        failed.clear();
+                        forwarders.retain(|track, f| {
+                            hears.iter().any(|h| h.track == *track && h.role == Role::Conversation && h.source == f.source) && !f.dead()
+                        });
+                        for h in hears.iter().filter(|h| h.role == Role::Conversation) {
+                            if !forwarders.contains_key(&h.track)
+                                && let Some(f) = Forwarder::start(&host, h)
+                            {
+                                forwarders.insert(h.track, f);
+                            }
+                        }
+                        let status: std::collections::HashMap<Id, HearStatus> = hears
+                            .iter()
+                            .map(|h| {
+                                let st = match h.role {
+                                    Role::Conversation if forwarders.contains_key(&h.track) => {
+                                        HearStatus { text: "Heard live by ChatGPT voice".into(), level: 0 }
+                                    }
+                                    Role::Conversation => HearStatus { text: "Starting…".into(), level: 1 },
+                                    Role::Content => HearStatus { text: "Content isn't used with ChatGPT voice".into(), level: 1 },
+                                };
+                                (h.track, st)
+                            })
+                            .collect();
+                        let mut current = host.0.hear_status.lock().unwrap_or_else(|e| e.into_inner());
+                        if *current != status {
+                            *current = status;
+                            drop(current);
+                            host.touch();
+                        }
+                        continue;
+                    }
+                    forwarders.clear();
                     listeners.retain(|track, l| {
                         hears.iter().any(|h| h.track == *track && h.role == l.role && h.source == l.source && h.engine == l.engine)
                     });
@@ -981,7 +1038,10 @@ pub fn icon_for(source: Option<&lightair_model::Source>, kind: &str) -> &'static
 /// co-host's last object removes its voice track (and the track's source), renaming the object
 /// renames the track and its source; a copied co-host gets a voice track of its own and comes in
 /// inactive while another is active. Other commands as they are.
-pub fn with_cohost_voice(before: &lightair_model::Workspace, command: lightair_model::Command) -> lightair_model::Command {
+pub fn with_cohost_voice(
+    before: &lightair_model::Workspace,
+    command: lightair_model::Command,
+) -> lightair_model::Command {
     use lightair_model::Command;
     fn touches(c: &Command) -> bool {
         match c {
@@ -1012,7 +1072,10 @@ pub fn with_cohost_voice(before: &lightair_model::Workspace, command: lightair_m
         if !is_cohost(source) {
             continue;
         }
-        let Some(track) = source.settings[COHOST]["voice_track"].as_str().and_then(|t| after.tracks.iter().find(|x| x.id.to_string() == t)) else {
+        let Some(track) = source.settings[COHOST]["voice_track"]
+            .as_str()
+            .and_then(|t| after.tracks.iter().find(|x| x.id.to_string() == t))
+        else {
             continue;
         };
         let was = before.objects_using(*id).next().map(|(_, o)| o.name.clone());
@@ -1042,7 +1105,10 @@ pub fn with_cohost_voice(before: &lightair_model::Workspace, command: lightair_m
 /// Co-host sources `command` adds as copies of others (their voice track already some other
 /// co-host's, or not in this workspace): given a voice track of their own, and made inactive
 /// while another co-host is active. Returns the commands that add the new voice tracks.
-fn adopt_copies(before: &lightair_model::Workspace, command: &mut lightair_model::Command) -> Vec<lightair_model::Command> {
+fn adopt_copies(
+    before: &lightair_model::Workspace,
+    command: &mut lightair_model::Command,
+) -> Vec<lightair_model::Command> {
     use lightair_model::Command;
     fn added_tracks(c: &Command, out: &mut Vec<String>) {
         match c {
@@ -1060,8 +1126,12 @@ fn adopt_copies(before: &lightair_model::Workspace, command: &mut lightair_model
     }
     let mut ours = Vec::new();
     added_tracks(command, &mut ours);
-    let live: Vec<&lightair_model::Source> =
-        before.sources.values().map(|s| &**s).filter(|s| is_cohost(s) && before.objects_using(s.id).next().is_some()).collect();
+    let live: Vec<&lightair_model::Source> = before
+        .sources
+        .values()
+        .map(|s| &**s)
+        .filter(|s| is_cohost(s) && before.objects_using(s.id).next().is_some())
+        .collect();
     let another_active = live.iter().any(|s| s.settings[COHOST]["active"].as_bool() != Some(false));
     let mut extra = Vec::new();
     walk(command, &mut |source| {
@@ -1069,7 +1139,10 @@ fn adopt_copies(before: &lightair_model::Workspace, command: &mut lightair_model
             return;
         }
         let vt = source.settings[COHOST]["voice_track"].as_str().unwrap_or("").to_string();
-        let shared = before.sources.values().any(|o| is_cohost(o) && o.settings[COHOST]["voice_track"].as_str() == Some(vt.as_str()));
+        let shared = before
+            .sources
+            .values()
+            .any(|o| is_cohost(o) && o.settings[COHOST]["voice_track"].as_str() == Some(vt.as_str()));
         let missing = !before.tracks.iter().any(|t| t.id.to_string() == vt) && !ours.contains(&vt);
         if !(shared || missing) {
             return;
@@ -1607,7 +1680,8 @@ impl Listener {
             stdin.write_all(line.as_bytes()).map_err(|e| format!("Speech recognition didn't start: {e}"))?;
         }
         let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let state = std::sync::Arc::new(Mutex::new(ListenState { started: Some(Instant::now()), ..Default::default() }));
+        let state =
+            std::sync::Arc::new(Mutex::new(ListenState { started: Some(Instant::now()), ..Default::default() }));
         // the track's sound into the helper
         let (s, st) = (stop.clone(), state.clone());
         std::thread::spawn(move || {
@@ -1666,7 +1740,17 @@ impl Listener {
                 }
             }
         });
-        Ok(Listener { child, role: h.role, source: h.source, name: h.name.clone(), lines: rx, stop, state, engine: h.engine.clone(), read_all })
+        Ok(Listener {
+            child,
+            role: h.role,
+            source: h.source,
+            name: h.name.clone(),
+            lines: rx,
+            stop,
+            state,
+            engine: h.engine.clone(),
+            read_all,
+        })
     }
 
     /// What the Inspector says under its track.
@@ -1713,6 +1797,53 @@ impl Drop for Listener {
         self.stop.store(true, Ordering::Relaxed);
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Realtime voice: a heard track's sound forwarded to PiAir raw (16 kHz mono s16le, base64, as
+/// `audio` messages), for the live model to hear, instead of on-device speech recognition.
+struct Forwarder {
+    source: Id,
+    stop: std::sync::Arc<AtomicBool>,
+    done: std::sync::Arc<AtomicBool>,
+}
+
+impl Forwarder {
+    fn start(host: &Host, h: &Hearing) -> Option<Forwarder> {
+        let source = h.source;
+        let (tap, mut consumer) = host.0.engine.call(move |e| {
+            e.reconciler.source_ref(source).map(|p| unsafe { lightair_engine::audio_tap::Tap::open(p) })
+        })?;
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let (s, d, host) = (stop.clone(), done.clone(), host.clone());
+        std::thread::spawn(move || {
+            let _tap = tap;
+            let _guard = Finally(d);
+            let mut bytes = Vec::with_capacity(8192);
+            while !s.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(20));
+                let n = consumer.slots();
+                if n == 0 {
+                    continue;
+                }
+                let Ok(chunk) = consumer.read_chunk(n) else { continue };
+                bytes.clear();
+                bytes.extend(chunk.into_iter().flat_map(i16::to_le_bytes));
+                host.send(json!({"t": "audio", "pcm": base64::engine::general_purpose::STANDARD.encode(&bytes)}));
+            }
+        });
+        Some(Forwarder { source: h.source, stop, done })
+    }
+
+    fn dead(&self) -> bool {
+        self.done.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Forwarder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
     }
 }
 

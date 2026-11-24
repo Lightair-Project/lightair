@@ -21,8 +21,15 @@ use super::{COHOST, Host, KeyState, Voices, keys};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 
-const VENDORS: &[(&str, &str)] =
-    &[("cartesia", "Cartesia"), ("elevenlabs", "ElevenLabs"), ("gemini", "Gemini"), ("none", "None")];
+const VENDORS: &[(&str, &str)] = &[
+    ("cartesia", "Cartesia"),
+    ("elevenlabs", "ElevenLabs"),
+    ("gemini", "Gemini"),
+    ("codex", "ChatGPT voice"),
+    ("none", "None"),
+];
+/// ChatGPT realtime voices offered for the co-host (OpenAI's live voices).
+const CHATGPT_VOICES: &[&str] = &["cove", "marin", "cedar", "ember", "breeze", "juniper", "maple", "vale"];
 const CHATTINESS: &[&str] = &["Quiet", "Normal", "Lively", "Chatty"];
 /// What moves the co-host's mouth (`cohost.mouth`).
 const MOUTHS: &[(&str, &str)] = &[("data", "Voice data"), ("audio", "Sound"), ("tracking", "Face tracking")];
@@ -520,7 +527,7 @@ impl CohostView {
         let mut body = vec![stacked(
             "Provider",
             Some(
-                "Cartesia and ElevenLabs answer in about a tenth of a second and give timings for the mouth. Gemini works with a Google key. None: it writes in Talk instead of speaking. It plays on the co-host's own mixer track.",
+                "Cartesia and ElevenLabs answer in about a tenth of a second and give timings for the mouth. Gemini works with a Google key. ChatGPT voice: the live model hears and speaks over a call on your ChatGPT plan (no separate brain, hearing or key). None: it writes in Talk instead of speaking. It plays on the co-host's own mixer track.",
             ),
             chips,
         )];
@@ -539,6 +546,24 @@ impl CohostView {
             ),
             mouth_chips,
         );
+        // ChatGPT realtime voice: the live model is the whole co-host, so no voice picker or key
+        if vendor == "codex" {
+            let realtime_voice = if chosen.is_empty() { "cove".to_string() } else { chosen.clone() };
+            let voices = CHATGPT_VOICES.iter().map(|v| (v.to_string(), realtime_voice == *v)).collect();
+            body.push(stacked(
+                "Voice",
+                Some("The ChatGPT voice the co-host speaks in."),
+                crate::piair::view::chips("cohost-rt-voice", voices, cx, |this, i, cx| {
+                    this.set(json!({"voice": {"voice": CHATGPT_VOICES[i]}}), cx)
+                }),
+            ));
+            body.push(status_line(
+                tok::warn(),
+                "Uses your ChatGPT sign-in in the Codex app on this computer. Experimental and for your own machine; it talks and listens itself, so the Brain and Hears settings don't apply.".into(),
+            ));
+            body.push(mouth_row);
+            return self.section("Voice", body, cx);
+        }
         if vendor == "none" {
             body.push(mouth_row);
             return self.section("Voice", body, cx);

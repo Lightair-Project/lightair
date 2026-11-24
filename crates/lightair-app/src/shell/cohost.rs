@@ -153,8 +153,14 @@ impl StudioWindow {
             .and_then(|t| workspace.tracks.iter().find(|x| x.id.to_string() == t))
             .map(|t| t.source.to_string());
         piair_voice::set_active(voice_source);
-        // what moves its mouth: the voice's data, its sound, or the avatar's face tracking
+        // realtime voice ("ChatGPT voice"): the live model hears and speaks, so conversation audio is
+        // forwarded raw instead of transcribed, and the mouth follows the sound
+        let realtime = want.and_then(|s| s.settings[COHOST]["piair"]["voice"]["vendor"].as_str()) == Some("codex");
+        self.piair.set_realtime(realtime);
+        // what moves its mouth: the voice's data, its sound, or the avatar's face tracking (realtime
+        // sends no timing marks, so its mouth follows the sound)
         face_drive::set_mouth_source(match want.and_then(|s| s.settings[COHOST]["mouth"].as_str()) {
+            _ if realtime => face_drive::MouthSource::Audio,
             Some("audio") => face_drive::MouthSource::Audio,
             Some("tracking") => face_drive::MouthSource::Tracking,
             _ => face_drive::MouthSource::Data,
