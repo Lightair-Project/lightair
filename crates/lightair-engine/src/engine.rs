@@ -371,6 +371,7 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
     crate::autoframe::register();
     crate::ndi::register();
     crate::rtsp::register();
+    crate::dslr::register();
     crate::piair_voice::register();
     crate::backdrop::register();
     crate::avatar::register();

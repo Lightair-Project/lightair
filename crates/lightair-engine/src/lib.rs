@@ -48,6 +48,9 @@ pub mod playlists;
 pub mod autoframe;
 pub mod ndi;
 pub mod rtsp;
+pub mod dslr;
+#[cfg(target_os = "macos")]
+pub mod vision;
 pub mod plugins;
 pub mod pointer;
 mod reconcile;

@@ -89,6 +89,7 @@ enum Kind {
     Shared,
     Ndi,
     Link,
+    Dslr,
 }
 
 /// Apps share pictures with Syphon on a Mac and Spout on Windows.
@@ -114,6 +115,7 @@ const KINDS: &[(Kind, Group, &str, &str, &str)] = &[
     (Kind::Shared, Group::Capture, "share-2", SHARED_NAME, "Another app's picture: VTube Studio, Resolume, TouchDesigner, a game"),
     (Kind::Ndi, Group::Capture, "network", "NDI", "A camera, computer or app sending NDI on your network"),
     (Kind::Link, Group::Capture, "monitor-smartphone", "Another computer", "Another computer's Lightair or OBS, sent here over the network (SRT)"),
+    (Kind::Dslr, Group::Capture, "aperture", "Camera over USB", "A mirrorless or DSLR camera's live view, without a capture card (libgphoto2)"),
     (Kind::Image, Group::Media, "image", "Image", "A picture or logo"),
     (Kind::Video, Group::Media, "clapperboard", "Video", "A video file, looped"),
     (Kind::Text, Group::Graphics, "type", "Text", "A title or caption"),
@@ -420,6 +422,16 @@ impl StudioWindow {
                 return;
             }
             Kind::Link => self.add_link(cx),
+            Kind::Dslr => {
+                if self.studio.read(cx).engine().call(|_| lightair_engine::dslr::available()) {
+                    self.add_placed_object("Camera over USB", lightair_engine::dslr::KIND, serde_json::json!({}), (1920.0, 1080.0), (0.5, 0.5), false, cx);
+                } else {
+                    self.studio.update(cx, |s, cx| {
+                        s.issue = Some("A camera over USB needs libgphoto2 (on a Mac: brew install libgphoto2), then add it again".into());
+                        cx.notify();
+                    });
+                }
+            }
             Kind::Ndi => {
                 let list = self.studio.read(cx).engine().call(|_| lightair_engine::ndi::sources());
                 if let Some(a) = &mut self.add_object {

@@ -26,6 +26,8 @@ crossbeam-channel.workspace = true
 libc = "0.2"
 # NDI's runtime, when it's installed (ndi.rs); VST3 modules on Windows
 libloading = "0.8"
+# a camera over USB's live view (JPEG; dslr.rs)
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parking_lot.workspace = true
 cpal = "0.18"

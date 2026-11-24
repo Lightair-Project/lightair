@@ -40,17 +40,28 @@ technique Draw { pass { vertex_shader = VSDefault(vert_in); pixel_shader = PSFra
 
 const BLUR_EFFECT: &str = r#"
 uniform texture2d image;
-uniform float4 face;
+uniform float4 face0;
+uniform float4 face1;
+uniform float4 face2;
+uniform float4 face3;
+uniform float4 face4;
+uniform float4 face5;
 uniform float2 texel;
 uniform float block;
 uniform float style;
 sampler_state def { Filter = Linear; AddressU = Clamp; AddressV = Clamp; };
+float inside_of(float2 uv, float4 face)
+{
+    if (face.z <= 0.0) return 0.0;
+    float2 c = face.xy + face.zw * 0.5;
+    float2 d = (uv - c) / max(face.zw * 0.5, float2(0.0001, 0.0001));
+    return 1.0 - smoothstep(0.85, 1.0, length(d));
+}
 float4 PSBlur(VertInOut vert_in) : TARGET
 {
     float2 uv = vert_in.uv;
-    float2 c = face.xy + face.zw * 0.5;
-    float2 d = (uv - c) / max(face.zw * 0.5, float2(0.0001, 0.0001));
-    float inside = 1.0 - smoothstep(0.85, 1.0, length(d));
+    float inside = max(max(max(inside_of(uv, face0), inside_of(uv, face1)), max(inside_of(uv, face2), inside_of(uv, face3))),
+                       max(inside_of(uv, face4), inside_of(uv, face5)));
     float4 orig = image.Sample(def, uv);
     if (inside <= 0.0) return orig;
     float4 hidden;
@@ -98,6 +109,10 @@ struct Watch {
     /// The face's box in the picture (0..1: x, y, w, h), and how many frames ago it was seen.
     face: Option<[f32; 4]>,
     missing: u32,
+    /// Where copies of the picture go too (Apple's Vision, for every face; macOS).
+    sink: Option<std::sync::mpsc::SyncSender<(Vec<u8>, usize, usize, usize)>>,
+    /// Every face Vision found lately, and when.
+    all: std::sync::Arc<std::sync::Mutex<(Vec<[f32; 4]>, std::time::Instant)>>,
 }
 
 impl Watch {
@@ -119,13 +134,51 @@ impl Watch {
             frames: 0,
             face: None,
             missing: 0,
+            sink: None,
+            all: std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), std::time::Instant::now()))),
         }
+    }
+
+    /// Also finds every face with Apple's Vision, on a thread of its own (macOS).
+    fn with_vision() -> Self {
+        #[allow(unused_mut)]
+        let mut w = Watch::new();
+        #[cfg(target_os = "macos")]
+        {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, usize, usize, usize)>(1);
+            let all = w.all.clone();
+            std::thread::Builder::new()
+                .name("lightair-faces".into())
+                .spawn(move || {
+                    while let Ok((mut bytes, w, h, stride)) = rx.recv() {
+                        let found = crate::vision::faces(&mut bytes, w, h, stride);
+                        if let Ok(mut a) = all.lock() {
+                            *a = (found, std::time::Instant::now());
+                        }
+                    }
+                })
+                .ok();
+            w.sink = Some(tx);
+        }
+        w
+    }
+
+    /// Every face seen lately: Vision's, else the tracker's one.
+    fn faces(&self) -> Vec<[f32; 4]> {
+        let mut faces: Vec<[f32; 4]> =
+            self.all.lock().ok().filter(|a| a.1.elapsed().as_millis() < 700).map(|a| a.0.clone()).unwrap_or_default();
+        if faces.is_empty()
+            && let Some(face) = self.face
+        {
+            faces.push(face);
+        }
+        faces
     }
 
     /// Hands the tracker the copy made last time, reads its face, and copies `target` again
     /// (every third frame). Graphics context held (in a render).
-    unsafe fn look(&mut self, target: *mut sys::obs_source_t, w: u32, h: u32) {
-        if self.tracker.is_null() || w == 0 || h == 0 {
+    unsafe fn look(&mut self, picture: *mut sys::gs_texture_t, w: u32, h: u32) {
+        if (self.tracker.is_null() && self.sink.is_none()) || w == 0 || h == 0 {
             return;
         }
         self.frames += 1;
@@ -150,9 +203,14 @@ impl Watch {
                 let mut data: *mut u8 = std::ptr::null_mut();
                 let mut linesize = 0u32;
                 if sys::gs_stagesurface_map(self.stage, &mut data, &mut linesize) {
+                    if let Some(sink) = &self.sink {
+                        let bytes = std::slice::from_raw_parts(data, linesize as usize * th as usize).to_vec();
+                        let _ = sink.try_send((bytes, tw as usize, th as usize, linesize as usize));
+                    }
                     self.frame_id += 1;
                     let (tracker, id) = (self.tracker, self.frame_id);
-                    if let Some(mut cd) = tracker_call(c"lightair_face_tracker_submit", |cd| {
+                    if !tracker.is_null()
+                        && let Some(mut cd) = tracker_call(c"lightair_face_tracker_submit", |cd| {
                         set_ptr(cd, c"tracker", tracker);
                         set_ptr(cd, c"data", data as *mut c_void);
                         set_int(cd, c"linesize", linesize as i64);
@@ -166,7 +224,9 @@ impl Watch {
                     sys::gs_stagesurface_unmap(self.stage);
                 }
                 self.waiting = false;
-                self.read_face(tw, th);
+                if !self.tracker.is_null() {
+                    self.read_face(tw, th);
+                }
             }
             sys::gs_texrender_reset(self.texrender);
             if sys::gs_texrender_begin(self.texrender, tw, th) {
@@ -175,7 +235,11 @@ impl Watch {
                 sys::gs_ortho(0.0, w as f32, 0.0, h as f32, -100.0, 100.0);
                 sys::gs_blend_state_push();
                 sys::gs_enable_blending(false);
-                sys::obs_source_video_render(target);
+                let default = sys::obs_get_base_effect(sys::OBS_EFFECT_DEFAULT);
+                sys::gs_effect_set_texture(sys::gs_effect_get_param_by_name(default, c"image".as_ptr()), picture);
+                while sys::gs_effect_loop(default, c"Draw".as_ptr()) {
+                    sys::gs_draw_sprite(picture, 0, w, h);
+                }
                 sys::gs_blend_state_pop();
                 sys::gs_texrender_end(self.texrender);
                 sys::gs_stage_texture(self.stage, sys::gs_texrender_get_texture(self.texrender));
@@ -237,6 +301,48 @@ impl Watch {
     }
 }
 
+/// The picture under the filter, drawn into `tr` (the filters' own copy; drawing the source
+/// itself from its own filter is skipped by libobs).
+unsafe fn picture(context: *mut sys::obs_source_t, tr: &mut *mut sys::gs_texrender_t, w: u32, h: u32) -> *mut sys::gs_texture_t {
+    unsafe {
+        if tr.is_null() {
+            *tr = sys::gs_texrender_create(sys::GS_RGBA, sys::GS_ZS_NONE);
+        }
+        if tr.is_null() {
+            return std::ptr::null_mut();
+        }
+        sys::gs_texrender_reset(*tr);
+        if !sys::gs_texrender_begin(*tr, w, h) {
+            return std::ptr::null_mut();
+        }
+        let clear = v4([0.0; 4]);
+        sys::gs_clear(sys::GS_CLEAR_COLOR, &clear, 0.0, 0);
+        sys::gs_ortho(0.0, w as f32, 0.0, h as f32, -100.0, 100.0);
+        if sys::obs_source_process_filter_begin(context, sys::GS_RGBA, sys::OBS_NO_DIRECT_RENDERING) {
+            sys::gs_blend_state_push();
+            sys::gs_blend_function(sys::GS_BLEND_ONE, sys::GS_BLEND_ZERO);
+            sys::obs_source_process_filter_end(context, sys::obs_get_base_effect(sys::OBS_EFFECT_DEFAULT), w, h);
+            sys::gs_blend_state_pop();
+        }
+        sys::gs_texrender_end(*tr);
+        sys::gs_texrender_get_texture(*tr)
+    }
+}
+
+/// Draws `tex` at `w`×`h` through `effect` (its `image` set to it).
+unsafe fn draw_through(effect: *mut sys::gs_effect_t, tex: *mut sys::gs_texture_t, w: u32, h: u32) {
+    unsafe {
+        sys::gs_effect_set_texture(sys::gs_effect_get_param_by_name(effect, c"image".as_ptr()), tex);
+        sys::gs_blend_state_push();
+        sys::gs_enable_blending(true);
+        sys::gs_blend_function(sys::GS_BLEND_ONE, sys::GS_BLEND_INVSRCALPHA);
+        while sys::gs_effect_loop(effect, c"Draw".as_ptr()) {
+            sys::gs_draw_sprite(tex, 0, w, h);
+        }
+        sys::gs_blend_state_pop();
+    }
+}
+
 unsafe fn target_size(context: *mut sys::obs_source_t) -> (*mut sys::obs_source_t, u32, u32) {
     let target = unsafe { sys::obs_filter_get_target(context) };
     if target.is_null() {
@@ -251,6 +357,7 @@ unsafe fn target_size(context: *mut sys::obs_source_t) -> (*mut sys::obs_source_
 struct AutoFrame {
     context: *mut sys::obs_source_t,
     effect: *mut sys::gs_effect_t,
+    full: *mut sys::gs_texrender_t,
     watch: Option<Watch>,
     shot: i64,
     speed: f32,
@@ -282,6 +389,7 @@ unsafe extern "C" fn af_create(settings: *mut sys::obs_data_t, context: *mut sys
     let mut f = Box::new(AutoFrame {
         context,
         effect: std::ptr::null_mut(),
+        full: std::ptr::null_mut(),
         watch: None,
         shot: 1,
         speed: 0.4,
@@ -301,6 +409,9 @@ unsafe extern "C" fn af_destroy(data: *mut c_void) {
         }
         if !f.effect.is_null() {
             sys::gs_effect_destroy(f.effect);
+        }
+        if !f.full.is_null() {
+            sys::gs_texrender_destroy(f.full);
         }
         sys::obs_leave_graphics();
     }
@@ -327,7 +438,8 @@ fn framing(face: Option<[f32; 4]>, shot: i64, max_zoom: f32, aspect: f32) -> [f3
 
 unsafe extern "C" fn af_tick(data: *mut c_void, seconds: f32) {
     let f = unsafe { &mut *(data as *mut AutoFrame) };
-    let face = f.watch.as_ref().and_then(|w| w.face);
+    // the biggest face (the person in front)
+    let face = f.watch.as_ref().and_then(|w| w.faces().into_iter().max_by(|a, b| (a[2] * a[3]).total_cmp(&(b[2] * b[3]))));
     let want = framing(face, f.shot, f.max_zoom, 16.0 / 9.0);
     // eases there; small moves inside a dead zone are left alone (no wobble)
     let k = (seconds * (0.6 + 4.0 * f.speed)).min(1.0);
@@ -341,23 +453,23 @@ unsafe extern "C" fn af_tick(data: *mut c_void, seconds: f32) {
 
 unsafe extern "C" fn af_render(data: *mut c_void, _: *mut sys::gs_effect_t) {
     let f = unsafe { &mut *(data as *mut AutoFrame) };
-    let (target, w, h) = unsafe { target_size(f.context) };
+    let (_, w, h) = unsafe { target_size(f.context) };
     if w == 0 || h == 0 {
         unsafe { sys::obs_source_skip_video_filter(f.context) };
         return;
     }
     unsafe {
-        f.watch.get_or_insert_with(Watch::new).look(target, w, h);
         if f.effect.is_null() {
             f.effect = make_effect(&format!("{VERTEX}{FRAME_EFFECT}"), c"lightair-autoframe.effect");
         }
-        if f.effect.is_null() || !sys::obs_source_process_filter_begin(f.context, sys::GS_RGBA, sys::OBS_ALLOW_DIRECT_RENDERING) {
-            sys::obs_source_skip_video_filter(f.context);
+        let tex = picture(f.context, &mut f.full, w, h);
+        if f.effect.is_null() || tex.is_null() {
             return;
         }
+        f.watch.get_or_insert_with(Watch::with_vision).look(tex, w, h);
         let v = v4(f.view);
         sys::gs_effect_set_vec4(sys::gs_effect_get_param_by_name(f.effect, c"view".as_ptr()), &v);
-        sys::obs_source_process_filter_end(f.context, f.effect, w, h);
+        draw_through(f.effect, tex, w, h);
     }
 }
 
@@ -367,6 +479,7 @@ unsafe extern "C" fn af_render(data: *mut c_void, _: *mut sys::gs_effect_t) {
 struct FaceBlur {
     context: *mut sys::obs_source_t,
     effect: *mut sys::gs_effect_t,
+    full: *mut sys::gs_texrender_t,
     watch: Option<Watch>,
     style: i64,
     strength: f32,
@@ -392,7 +505,15 @@ unsafe extern "C" fn fb_defaults(settings: *mut sys::obs_data_t) {
 }
 
 unsafe extern "C" fn fb_create(settings: *mut sys::obs_data_t, context: *mut sys::obs_source_t) -> *mut c_void {
-    let mut f = Box::new(FaceBlur { context, effect: std::ptr::null_mut(), watch: None, style: 0, strength: 0.6, grow: 0.3 });
+    let mut f = Box::new(FaceBlur {
+        context,
+        effect: std::ptr::null_mut(),
+        full: std::ptr::null_mut(),
+        watch: None,
+        style: 0,
+        strength: 0.6,
+        grow: 0.3,
+    });
     unsafe { fb_update(&mut *f as *mut FaceBlur as *mut c_void, settings) };
     Box::into_raw(f) as *mut c_void
 }
@@ -407,43 +528,54 @@ unsafe extern "C" fn fb_destroy(data: *mut c_void) {
         if !f.effect.is_null() {
             sys::gs_effect_destroy(f.effect);
         }
+        if !f.full.is_null() {
+            sys::gs_texrender_destroy(f.full);
+        }
         sys::obs_leave_graphics();
     }
 }
 
 unsafe extern "C" fn fb_render(data: *mut c_void, _: *mut sys::gs_effect_t) {
     let f = unsafe { &mut *(data as *mut FaceBlur) };
-    let (target, w, h) = unsafe { target_size(f.context) };
+    let (_, w, h) = unsafe { target_size(f.context) };
     if w == 0 || h == 0 {
         unsafe { sys::obs_source_skip_video_filter(f.context) };
         return;
     }
     unsafe {
-        let watch = f.watch.get_or_insert_with(Watch::new);
-        watch.look(target, w, h);
-        let Some([x, y, fw, fh]) = watch.face else {
-            sys::obs_source_skip_video_filter(f.context);
+        let watch = f.watch.get_or_insert_with(Watch::with_vision);
+        let tex = picture(f.context, &mut f.full, w, h);
+        if tex.is_null() {
             return;
-        };
+        }
+        watch.look(tex, w, h);
+        let faces = watch.faces();
         if f.effect.is_null() {
             f.effect = make_effect(&format!("{VERTEX}{BLUR_EFFECT}"), c"lightair-face-blur.effect");
         }
-        if f.effect.is_null() || !sys::obs_source_process_filter_begin(f.context, sys::GS_RGBA, sys::OBS_ALLOW_DIRECT_RENDERING) {
-            sys::obs_source_skip_video_filter(f.context);
+        if f.effect.is_null() {
             return;
         }
-        // the face's box, grown (hair, ears, chin)
+        // each face's box, grown (hair, ears, chin)
         let g = 1.0 + f.grow;
-        let (cx, cy) = (x + fw / 2.0, y + fh / 2.0);
-        let (gw, gh) = (fw * g * 1.1, fh * g * 1.25);
-        let face = v4([cx - gw / 2.0, cy - gh / 2.0, gw, gh]);
         let p = |n: &CStr| sys::gs_effect_get_param_by_name(f.effect, n.as_ptr());
-        sys::gs_effect_set_vec4(p(c"face"), &face);
+        let names = [c"face0", c"face1", c"face2", c"face3", c"face4", c"face5"];
+        for (i, name) in names.iter().enumerate() {
+            let face = match faces.get(i) {
+                Some([x, y, fw, fh]) => {
+                    let (cx, cy) = (x + fw / 2.0, y + fh / 2.0);
+                    let (gw, gh) = (fw * g * 1.1, fh * g * 1.25);
+                    v4([cx - gw / 2.0, cy - gh / 2.0, gw, gh])
+                }
+                None => v4([0.0; 4]),
+            };
+            sys::gs_effect_set_vec4(p(name), &face);
+        }
         let texel = sys::vec2 { __bindgen_anon_1: sys::vec2__bindgen_ty_1 { ptr: [1.0 / w as f32, 1.0 / h as f32] } };
         sys::gs_effect_set_vec2(p(c"texel"), &texel);
         sys::gs_effect_set_float(p(c"block"), 4.0 + f.strength * (w.min(h) as f32 / 18.0));
         sys::gs_effect_set_float(p(c"style"), f.style as f32);
-        sys::obs_source_process_filter_end(f.context, f.effect, w, h);
+        draw_through(f.effect, tex, w, h);
     }
 }
 
