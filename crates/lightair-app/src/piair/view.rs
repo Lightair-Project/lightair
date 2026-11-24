@@ -414,28 +414,55 @@ impl CohostView {
                 model_menu.into_any_element(),
             ),
         ];
-        // signed in, or where to: subscriptions and keys are in Settings → Connections
+        // signed in, or where to: subscriptions and keys are in Settings → Connections. A
+        // subscription signed in under another provider (ChatGPT is Pi's own provider, not
+        // OpenAI's API) is offered as the one to use.
         if signed_in {
             body.push(status_line(tok::ok(), "Signed in".into()));
         } else {
+            let other = providers
+                .iter()
+                .filter(|x| x["id"] != provider.as_str() && x["signedIn"].as_bool() == Some(true))
+                .filter(|x| x["auth"].as_array().is_some_and(|a| a.iter().any(|k| k == "oauth")))
+                .max_by_key(|x| related(&provider, x["id"].as_str().unwrap_or("")))
+                .cloned();
+            let name = p["name"].as_str().unwrap_or(&provider).to_string();
+            let text = match &other {
+                Some(o) => format!(
+                    "{name} isn't signed in. You're signed in to {}: use it instead?",
+                    o["name"].as_str().unwrap_or("a subscription")
+                ),
+                None if oauth => format!("{name} isn't signed in: sign in or add a key in Connections."),
+                None => format!("No {name} key yet: add one in Connections."),
+            };
             let line = div()
                 .flex()
-                .items_center()
+                .items_start()
                 .gap_2()
-                .child(div().flex_none().size(px(7.)).rounded_full().bg(tok::warn()))
-                .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(tok::text_secondary()).child(if oauth {
-                    "Not signed in: sign in or add a key"
-                } else {
-                    "No key yet"
-                }))
-                .child(
-                    Button::new("cohost-brain-connections")
-                        .label("Open Connections")
-                        .xsmall()
-                        .outline()
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(CohostEvent::OpenConnections))),
-                );
-            body.push(line.into_any_element());
+                .child(div().flex_none().mt(px(5.)).size(px(7.)).rounded_full().bg(tok::warn()))
+                .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(tok::text_secondary()).child(text));
+            let mut buttons = div().flex().flex_wrap().gap_1p5().pl(px(15.));
+            if let Some(o) = other {
+                let id = o["id"].as_str().unwrap_or("").to_string();
+                let first = o["models"]
+                    .as_array()
+                    .and_then(|m| m.first())
+                    .and_then(|m| m["id"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let label = format!("Use {}", o["name"].as_str().unwrap_or(&id));
+                buttons = buttons.child(Button::new("cohost-brain-use").label(label).xsmall().primary().on_click(
+                    cx.listener(move |this, _, _, cx| this.set(json!({"provider": id, "model": first}), cx)),
+                ));
+            }
+            buttons = buttons.child(
+                Button::new("cohost-brain-connections")
+                    .label("Open Connections")
+                    .xsmall()
+                    .outline()
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(CohostEvent::OpenConnections))),
+            );
+            body.push(div().flex().flex_col().gap_1p5().child(line).child(buttons).into_any_element());
         }
         self.section("Brain", body, cx)
     }
@@ -759,6 +786,13 @@ impl Render for CohostView {
             .child(self.persona(cx))
             .child(self.behaviour(cx))
     }
+}
+
+/// How close another provider is to the chosen one, for offering its sign-in instead: the same
+/// company's subscription first (OpenAI's API and ChatGPT).
+fn related(chosen: &str, other: &str) -> u8 {
+    let company = |id: &str| id.split('-').next().unwrap_or(id).to_string();
+    u8::from(company(chosen) == company(other))
 }
 
 /// Deep-merges `patch` into `base` (objects merged key by key, anything else replaced).

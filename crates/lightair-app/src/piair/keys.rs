@@ -40,7 +40,7 @@ pub const SERVICES: &[(&str, &str, Use, &str)] = &[
         "openai",
         "OpenAI",
         Use::Brain,
-        "platform.openai.com › API keys. With ChatGPT Plus or Pro, sign in under Subscriptions instead.",
+        "platform.openai.com › API keys. With a ChatGPT subscription, sign in under Subscriptions instead.",
     ),
     ("openrouter", "OpenRouter", Use::Brain, "openrouter.ai › Keys."),
     ("groq", "Groq", Use::Brain, "console.groq.com › API keys."),
@@ -57,7 +57,7 @@ pub const SUBSCRIPTIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "openai-codex",
-        "ChatGPT Plus or Pro",
+        "ChatGPT",
         "Sign in with your ChatGPT account: its page opens and comes back here by itself.",
     ),
     ("github-copilot", "GitHub Copilot", "Sign in with GitHub: its page opens; enter the code shown here."),
