@@ -215,10 +215,15 @@ pub fn hearing(w: &lightair_model::Workspace, cohost: &Value) -> Vec<crate::piai
             })
             .collect(),
         Value::String(t) => make(t, Role::Conversation).into_iter().collect(),
+        // nothing set: the first audio-input track (a mic or an audio device), as conversation
         _ => w
             .tracks
             .iter()
-            .find(|t| w.sources.get(&t.source).is_some_and(|s| s.kind == lightair_model::kinds::MIC))
+            .find(|t| {
+                w.sources.get(&t.source).is_some_and(|s| {
+                    s.kind == lightair_model::kinds::MIC || s.kind == lightair_model::kinds::AUDIO_DEVICE
+                })
+            })
             .and_then(|t| make(&t.id.to_string(), Role::Conversation))
             .into_iter()
             .collect(),
@@ -1833,6 +1838,7 @@ impl Forwarder {
                 host.send(json!({"t": "audio", "pcm": base64::engine::general_purpose::STANDARD.encode(&bytes)}));
             }
         });
+        tracing::info!(track = %h.name, "piair: forwarding this track's audio to ChatGPT voice");
         Some(Forwarder { source: h.source, stop, done })
     }
 

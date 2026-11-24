@@ -156,6 +156,9 @@ impl StudioWindow {
         // realtime voice ("ChatGPT voice"): the live model hears and speaks, so conversation audio is
         // forwarded raw instead of transcribed, and the mouth follows the sound
         let realtime = want.and_then(|s| s.settings[COHOST]["piair"]["voice"]["vendor"].as_str()) == Some("codex");
+        if realtime != self.piair.realtime() {
+            tracing::info!(realtime, "piair: realtime voice mode");
+        }
         self.piair.set_realtime(realtime);
         // what moves its mouth: the voice's data, its sound, or the avatar's face tracking (realtime
         // sends no timing marks, so its mouth follows the sound)
