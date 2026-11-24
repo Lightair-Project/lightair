@@ -415,8 +415,7 @@ impl CohostView {
             ),
         ];
         // signed in, or where to: subscriptions and keys are in Settings → Connections. A
-        // subscription signed in under another provider (ChatGPT is Pi's own provider, not
-        // OpenAI's API) is offered as the one to use.
+        // subscription signed in for another provider is offered as the one to use.
         if signed_in {
             body.push(status_line(tok::ok(), "Signed in".into()));
         } else {
@@ -789,7 +788,7 @@ impl Render for CohostView {
 }
 
 /// How close another provider is to the chosen one, for offering its sign-in instead: the same
-/// company's subscription first (OpenAI's API and ChatGPT).
+/// company's first (`github-copilot` for `github-…`).
 fn related(chosen: &str, other: &str) -> u8 {
     let company = |id: &str| id.split('-').next().unwrap_or(id).to_string();
     u8::from(company(chosen) == company(other))

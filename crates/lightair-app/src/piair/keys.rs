@@ -40,7 +40,7 @@ pub const SERVICES: &[(&str, &str, Use, &str)] = &[
         "openai",
         "OpenAI",
         Use::Brain,
-        "platform.openai.com › API keys. With a ChatGPT subscription, sign in under Subscriptions instead.",
+        "platform.openai.com › API keys. With a ChatGPT subscription, sign in under Subscriptions instead (one or the other).",
     ),
     ("openrouter", "OpenRouter", Use::Brain, "openrouter.ai › Keys."),
     ("groq", "Groq", Use::Brain, "console.groq.com › API keys."),
@@ -56,9 +56,9 @@ pub const SUBSCRIPTIONS: &[(&str, &str, &str)] = &[
         "Sign in with your Claude account: its page opens, then copy the code it shows and choose Paste code. Replaces an Anthropic key (one or the other).",
     ),
     (
-        "openai-codex",
+        "openai",
         "ChatGPT",
-        "Sign in with your ChatGPT account: its page opens and comes back here by itself.",
+        "Sign in with your ChatGPT account: its page opens and comes back here by itself. Your co-host then uses OpenAI's models on your subscription. Replaces an OpenAI key (one or the other).",
     ),
     ("github-copilot", "GitHub Copilot", "Sign in with GitHub: its page opens; enter the code shown here."),
     (
