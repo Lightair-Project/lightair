@@ -793,7 +793,7 @@ impl Reconciler {
                     unsafe { pause_off_air(src.as_ptr()) };
                 }
                 if timer {
-                    self.timers.add(source.id, src.as_ptr(), &source.settings);
+                    crate::timers::add(&self.timers, source.id, src.as_ptr(), &source.settings);
                     self.ensure_timers_tick();
                 }
                 if source.kind == crate::soundboard::KIND {

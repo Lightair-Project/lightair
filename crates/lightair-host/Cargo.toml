@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 lightair-model.workspace = true
 lightair-audio.workspace = true
+lightair-avatar.workspace = true
+glam = "0.30"
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true

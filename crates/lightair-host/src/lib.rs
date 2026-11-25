@@ -9,6 +9,7 @@ pub mod audio_host;
 pub mod buffers;
 pub mod clock;
 pub mod devices;
+pub mod face_drive;
 pub mod gpu;
 #[cfg(target_os = "macos")]
 pub mod media_player;
@@ -19,12 +20,14 @@ pub mod phone_camera;
 #[cfg(target_os = "macos")]
 pub mod phone_decode;
 pub mod phone_units;
+pub mod piair_voice;
 #[cfg(target_os = "macos")]
 pub mod own_outputs;
 pub mod program;
 pub mod plugins;
 pub mod rtsp;
 pub mod show;
+pub mod timers;
 #[cfg(target_os = "macos")]
 pub mod system_audio;
 #[cfg(any(target_os = "macos", windows))]
