@@ -30,7 +30,7 @@ use crate::sys;
 
 pub use lightair_host::avatar_pins::Anchor;
 
-use lightair_host::avatar_pins::keyed;
+use lightair_host::avatar_pins::mesh_anchors;
 pub(crate) use lightair_host::avatar_pins::vrm_anchors;
 
 /// A flat model's meshes' names and groups, in its own order.
@@ -55,24 +55,7 @@ fn flat_names(f: &Flat) -> Vec<(String, String)> {
 /// A flat model's anchors (its meshes), each with its mesh's index; the face and head ones first,
 /// as suggestions (listed again in their own group).
 pub(crate) fn flat_anchors(f: &Flat) -> Vec<(Anchor, usize)> {
-    let names = flat_names(f);
-    let keys = keyed(names.iter().map(|(n, _)| n.clone()));
-    let all: Vec<(Anchor, usize)> = names
-        .into_iter()
-        .zip(keys)
-        .enumerate()
-        .map(|(i, ((name, group), key))| (Anchor { key, label: name, group }, i))
-        .collect();
-    let suggested: Vec<(Anchor, usize)> = all
-        .iter()
-        .filter(|(a, _)| {
-            let l = a.label.to_lowercase();
-            ["face", "head", "顔", "頭"].iter().any(|w| l.contains(w))
-        })
-        .take(6)
-        .map(|(a, i)| (Anchor { group: "Suggested".into(), ..a.clone() }, *i))
-        .collect();
-    suggested.into_iter().chain(all).collect()
+    mesh_anchors(flat_names(f))
 }
 
 /// A flat model's mesh, posed: its points (model units, y up).
@@ -99,57 +82,9 @@ pub(crate) fn flat_frame(f: &Flat, framing: lightair_avatar::Framing, aspect: f3
     }
 }
 
-
 pub(crate) use lightair_host::avatar_pins::{best_axis, bone_spot, view_projection};
 
-/// A mesh at rest (the model's idle pose): its middle, the point farthest from it (its turn is
-/// read from that one), and how far its points lie from the middle (model units).
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct MeshRest {
-    pub far: usize,
-    centre: [f32; 2],
-    far_point: [f32; 2],
-    rms: f32,
-}
-
-pub(crate) fn mesh_rest(points: &[[f32; 2]]) -> MeshRest {
-    let c = middle(points);
-    let far = points.iter().enumerate().max_by(|a, b| dist(*a.1, c).total_cmp(&dist(*b.1, c))).map_or(0, |(i, _)| i);
-    let rms = (points.iter().map(|p| dist(*p, c).powi(2)).sum::<f32>() / points.len().max(1) as f32).sqrt();
-    MeshRest { far, centre: c, far_point: points.get(far).copied().unwrap_or(c), rms }
-}
-
-/// A mesh at rest in the picture.
-pub(crate) fn rest_spot(r: &MeshRest, frame: (f32, f32, f32, f32), w: f32, h: f32) -> Spot {
-    let (l, rt, t, b) = frame;
-    let px = |p: [f32; 2]| [(p[0] - l) / (rt - l) * w, (t - p[1]) / (t - b) * h];
-    let (c, f) = (px(r.centre), px(r.far_point));
-    Spot { x: c[0], y: c[1], angle: (f[1] - c[1]).atan2(f[0] - c[0]), scale: (r.rms * w / (rt - l)).abs().max(1e-3) }
-}
-
-fn middle(points: &[[f32; 2]]) -> [f32; 2] {
-    let n = points.len().max(1) as f32;
-    let s = points.iter().fold([0.0, 0.0], |a, p| [a[0] + p[0], a[1] + p[1]]);
-    [s[0] / n, s[1] / n]
-}
-
-fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
-    (a[0] - b[0]).hypot(a[1] - b[1])
-}
-
-/// A mesh in the picture, from its points and the frame it's drawn in (`w`×`h` pixels).
-pub(crate) fn mesh_spot(points: &[[f32; 2]], far: usize, frame: (f32, f32, f32, f32), w: f32, h: f32) -> Option<Spot> {
-    if points.is_empty() {
-        return None;
-    }
-    let (l, r, t, b) = frame;
-    let px = |p: [f32; 2]| [(p[0] - l) / (r - l) * w, (t - p[1]) / (t - b) * h];
-    let pts: Vec<[f32; 2]> = points.iter().map(|p| px(*p)).collect();
-    let c = middle(&pts);
-    let f = pts.get(far).copied().unwrap_or(c);
-    let rms = (pts.iter().map(|p| dist(*p, c).powi(2)).sum::<f32>() / pts.len() as f32).sqrt();
-    Some(Spot { x: c[0], y: c[1], angle: (f[1] - c[1]).atan2(f[0] - c[0]), scale: rms.max(1e-3) })
-}
+pub(crate) use lightair_host::avatar_pins::{MeshRest, mesh_rest, mesh_spot, rest_spot};
 
 // ------------------------------------------------------------------------------------- pins
 

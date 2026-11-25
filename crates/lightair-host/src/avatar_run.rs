@@ -10,9 +10,10 @@
 //!   and mirrored as the settings say, the co-host's face merged in when this is its avatar, the
 //!   body read, a PNGtuber's mic level and push to talk; published for the compositor.
 //! - **Status** for the Inspector: the model read once in the background (its name,
-//!   expressions, costumes, a VRM's anchors), whether a face is followed.
+//!   expressions, costumes, the anchors things can be pinned to), whether a face is followed.
 //!
-//! Not yet: what's pinned to the avatar following its anchors.
+//! What's pinned to the avatar follows its anchors as the compositor's renderer poses it; an
+//! anchor's place at rest comes from there too ([`AvatarRuntime::anchor_rest`]).
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -142,6 +143,13 @@ impl AvatarRuntime {
     pub fn status(&self) -> Status {
         self.shared.status.lock().clone()
     }
+
+    /// Where anchor `key` is in the avatar's picture at rest (pixels), once the compositor draws
+    /// its model. `size`: as it would be at that size of the picture instead.
+    pub fn anchor_rest(&self, key: &str, size: Option<(u32, u32)>) -> Option<crate::avatar_pins::Spot> {
+        let settings = self.shared.settings.lock().clone();
+        crate::avatar::anchor_rest(&settings, key, size)
+    }
 }
 
 impl Drop for AvatarRuntime {
@@ -191,7 +199,9 @@ fn run(s: Arc<Shared>) {
                         source::Posable::Vrm(a) => {
                             crate::avatar_pins::vrm_anchors(&a.model).into_iter().map(|(a, _)| a).collect()
                         }
-                        source::Posable::Flat(_) => Vec::new(),
+                        source::Posable::Flat(f) => {
+                            crate::avatar_pins::flat_anchors(f).into_iter().map(|(a, _)| a).collect()
+                        }
                     };
                     *status = Status {
                         loaded: true,

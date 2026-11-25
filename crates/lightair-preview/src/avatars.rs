@@ -43,6 +43,7 @@ use lightair_avatar::lightair_moc3::moc3::Moc3DrawableBlendMode;
 use lightair_avatar::source::{self, Flat, Input, Pngtuber, Posable, Poser, Settings};
 use lightair_avatar::vrm::{AlphaMode, Material, mip_chain};
 use lightair_avatar::{Avatar, live2d, uma};
+use lightair_host::avatar_pins::{AtRest, Spot};
 use lightair_render::media::Picture;
 use lightair_render::scene::Shot;
 use wgpu::util::DeviceExt;
@@ -93,15 +94,14 @@ pub struct AvatarRenderer {
     targets: Option<Targets>,
     scratch: Option<Scratch>,
     last: Option<Instant>,
-    /// A VRM at rest (its idle pose, nothing tracked) and its anchors by key, for what's pinned
-    /// to it (made when first asked).
-    rest: Option<(Avatar, std::collections::HashMap<String, usize>)>,
 }
 
 /// A model read and on the GPU.
 struct Ready {
     model: Posable,
     gpu: ModelGpu,
+    /// Its anchors at rest (its idle pose, nothing tracked), for what's pinned to it.
+    rest: std::sync::Arc<AtRest>,
     name: String,
     expressions: Vec<String>,
     costumes: Vec<String>,
@@ -129,7 +129,6 @@ impl AvatarRenderer {
             targets: None,
             scratch: None,
             last: None,
-            rest: None,
         };
         r.set_settings(settings);
         Ok(r)
@@ -180,34 +179,25 @@ impl AvatarRenderer {
     }
 
     /// Where each anchor of `keys` is in the avatar's picture at rest and as it's posed now
-    /// (pixels): (key, at rest, now). A VRM's bones; a flat model's anchors aren't followed yet.
-    pub fn pins(
-        &mut self,
-        keys: &[String],
-    ) -> Vec<(String, lightair_host::avatar_pins::Spot, lightair_host::avatar_pins::Spot)> {
-        use lightair_host::avatar_pins::{best_axis, bone_spot, view_projection, vrm_anchors};
-        let Some(Posable::Vrm(a)) = self.ready.as_ref().map(|r| &r.model) else { return Vec::new() };
-        if self.rest.as_ref().is_none_or(|(r, _)| !std::sync::Arc::ptr_eq(&r.model, &a.model)) {
-            let mut rest = Avatar::new(a.model.clone());
-            rest.update(&lightair_avatar::Controls::default(), 0.0);
-            let anchors = vrm_anchors(&a.model).into_iter().map(|(anchor, n)| (anchor.key, n)).collect();
-            self.rest = Some((rest, anchors));
-        }
-        let Some((rest, anchors)) = &self.rest else { return Vec::new() };
+    /// (pixels): (key, at rest, now). A VRM's bones, a flat model's meshes.
+    pub fn pins(&mut self, keys: &[String]) -> Vec<(String, Spot, Spot)> {
+        self.poll();
+        let Some(r) = &self.ready else { return Vec::new() };
         let s = &self.settings;
-        let (w, h) = (s.width as f32, s.height as f32);
-        let aspect = w / h.max(1.0);
-        let vp_rest = view_projection(&rest.camera(s.framing, aspect, s.zoom), aspect);
-        let vp_now = view_projection(&a.camera(s.framing, aspect, s.zoom), aspect);
-        keys.iter()
-            .filter_map(|key| {
-                let n = *anchors.get(key)?;
-                let axis = best_axis(rest.world.get(n)?);
-                let at_rest = bone_spot(rest.world.get(n)?, &vp_rest, w, h, axis)?;
-                let now = bone_spot(a.world.get(n)?, &vp_now, w, h, axis)?;
-                Some((key.clone(), at_rest, now))
-            })
-            .collect()
+        r.rest.pins(&r.model, keys, s.framing, s.zoom, s.width as f32, s.height as f32)
+    }
+
+    /// Where anchor `key` is in the avatar's picture at rest (pixels), once the model is ready.
+    /// `size`: as it would be at that size of the picture instead.
+    pub fn anchor_rest(&mut self, key: &str, size: Option<(u32, u32)>) -> Option<Spot> {
+        self.poll();
+        let r = self.ready.as_ref()?;
+        let s = &self.settings;
+        let (w, h) = match size {
+            Some((w, h)) if w > 0 && h > 0 => (w, h),
+            _ => (s.width, s.height),
+        };
+        r.rest.spot(key, s.framing, s.zoom, w as f32, h as f32)
     }
 
     /// Draws the avatar at rest, nothing tracked (a still picture of it).
@@ -280,7 +270,7 @@ impl AvatarRenderer {
     fn start_load(&mut self) {
         self.ready = None;
         self.pending = None;
-        let file = self.settings.file.clone();
+        let (file, revision) = (self.settings.file.clone(), self.settings.revision);
         if file.is_empty() {
             self.status = Status::default();
             return;
@@ -289,7 +279,7 @@ impl AvatarRenderer {
         let (tx, rx) = std::sync::mpsc::channel();
         let (device, queue) = (self.device.clone(), self.queue.clone());
         let spawned = std::thread::Builder::new().name("lightair-avatar-load".into()).spawn(move || {
-            let result = load(&device, &queue, &file);
+            let result = load(&device, &queue, &file, revision);
             match &result {
                 Ok(_) => tracing::info!(file, "avatar loaded (GPU)"),
                 Err(e) => tracing::warn!(file, error = %e, "avatar didn't load (GPU)"),
@@ -330,7 +320,7 @@ impl AvatarRenderer {
 }
 
 /// Reads an avatar's file and puts it on the GPU (on the loading thread).
-fn load(device: &wgpu::Device, queue: &wgpu::Queue, file: &str) -> Result<Box<Ready>, String> {
+fn load(device: &wgpu::Device, queue: &wgpu::Queue, file: &str, revision: i64) -> Result<Box<Ready>, String> {
     let loaded = source::load(file)?;
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let pipes = pipes(device, queue);
@@ -349,7 +339,17 @@ fn load(device: &wgpu::Device, queue: &wgpu::Queue, file: &str) -> Result<Box<Re
     if let Some(e) = popped(scope) {
         return Err(format!("the model couldn't be put on the GPU: {e}"));
     }
-    Ok(Box::new(Ready { model, gpu, name: loaded.name, expressions: loaded.expressions, costumes: loaded.costumes }))
+    // its anchors at rest, kept while it's drawn (where the Host finds an anchor's place at rest)
+    let rest = std::sync::Arc::new(AtRest::of(&mut model));
+    lightair_host::avatar::set_rest(file, revision, &rest);
+    Ok(Box::new(Ready {
+        model,
+        gpu,
+        rest,
+        name: loaded.name,
+        expressions: loaded.expressions,
+        costumes: loaded.costumes,
+    }))
 }
 
 /// The error an error scope caught, if any (wgpu's native scopes answer at once).
