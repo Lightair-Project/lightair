@@ -21,6 +21,14 @@
 //!   `lightair-feed`'s RTMP(S) and SRT senders and `lightair-engine`'s WHIP sender; replay buffers
 //!   keep the last N seconds of packets and write a clip on request. Their state goes to
 //!   [`outputs::runtime`] as libobs's outputs report theirs, so the interface reads it unchanged.
+//! - **Pictures out as they are:** the virtual camera and NDI take a canvas's frames unencoded
+//!   through a tap ([`add_tap`]): each frame copied into a buffer of the tap's own, then handed
+//!   to a thread of its own that sends it (the camera extension's sink queue, NDI's runtime).
+//! - **The RTSP server** is fed by a canvas's H.264 encoder (one already running without
+//!   B-frames when there is one) and the Program's AAC encoder.
+//! - **Following the primary canvas:** when another canvas becomes primary (another workspace
+//!   opened), whatever took the primary canvas's frames moves to it ([`canvas_moved`]), as
+//!   libobs's outputs on the primary output canvas carry on.
 //!
 //! Engine thread for everything that starts, stops or changes an output; the compositor's
 //! threads call [`frame`] and [`uses`].
@@ -141,10 +149,9 @@ trait Sink: Send + Sync {
 
 // ---------------------------------------------------------------- video encoders
 
-/// What decides whether two outputs can share a video encoder.
+/// What decides whether two outputs of one canvas can share a video encoder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VideoKey {
-    canvas: Id,
     codec: VideoCodec,
     width: u32,
     height: u32,
@@ -181,6 +188,8 @@ type Subs = Arc<Mutex<Vec<(u64, Arc<dyn Sink>)>>>;
 /// A canvas's video encoder and the outputs it feeds.
 struct VideoPipe {
     key: VideoKey,
+    /// The canvas whose frames it encodes (another when the primary canvas moves).
+    canvas: Mutex<Id>,
     encoder: VideoEncoder,
     transfer: Mutex<Transfer>,
     subs: Subs,
@@ -199,7 +208,7 @@ fn transfer_session() -> Option<CFRetained<VTPixelTransferSession>> {
 }
 
 impl VideoPipe {
-    fn open(key: VideoKey, settings: VideoSettings) -> Result<Arc<VideoPipe>, String> {
+    fn open(key: VideoKey, canvas: Id, settings: VideoSettings) -> Result<Arc<VideoPipe>, String> {
         let subs: Subs = Arc::default();
         let skipped = Arc::new(AtomicU32::new(0));
         let format: Arc<Mutex<Option<Arc<VideoFormat>>>> = Arc::default();
@@ -229,10 +238,11 @@ impl VideoPipe {
         let name = settings.codec.name();
         let encoder =
             VideoEncoder::new(settings, sink).map_err(|e| format!("Couldn't open the {name} encoder ({e})."))?;
-        tracing::info!(canvas = %key.canvas, codec = name, width = key.width, height = key.height, kbps = key.kbps,
+        tracing::info!(%canvas, codec = name, width = key.width, height = key.height, kbps = key.kbps,
             hardware = encoder.using_hardware(), "own outputs: video encoder open");
         Ok(Arc::new(VideoPipe {
             key,
+            canvas: Mutex::new(canvas),
             encoder,
             transfer: Mutex::new(Transfer { session: transfer_session(), last: None }),
             subs,
@@ -295,13 +305,38 @@ impl VideoPipe {
 
 // ---------------------------------------------------------------- the canvases' frames
 
-/// A canvas whose compositor feeds encoders: its frames go to a thread of its own.
+/// What takes a canvas's frames on the canvas's thread: a video encoder or a tap.
+trait Consumer: Send + Sync {
+    /// `frame` (`None`: the last one again) as canvas frame `slot`, shown at `pts`. Never blocks.
+    fn push(&self, frame: Option<&CVPixelBuffer>, slot: i64, pts: i64);
+}
+
+impl Consumer for VideoPipe {
+    fn push(&self, frame: Option<&CVPixelBuffer>, slot: i64, pts: i64) {
+        VideoPipe::push(self, frame, slot, pts);
+    }
+}
+
+type Consumers = Arc<Mutex<Vec<Arc<dyn Consumer>>>>;
+
+/// A canvas whose compositor feeds encoders or taps: its frames go to a thread of its own.
 struct CanvasFeed {
     tx: Sender<(Frame, i64)>,
-    pipes: Arc<Mutex<Vec<Arc<VideoPipe>>>>,
+    pipes: Consumers,
     /// Frames dropped because the encoders were behind.
     dropped: Arc<AtomicU32>,
     thread: Option<JoinHandle<()>>,
+}
+
+impl CanvasFeed {
+    /// Stops the feed's thread (never call with [`FEEDS`] held: the compositor may be handing a
+    /// frame over).
+    fn stop(mut self) {
+        drop(self.tx);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 static FEEDS: Mutex<Option<HashMap<Id, CanvasFeed>>> = Mutex::new(None);
@@ -326,15 +361,15 @@ fn dropped_of(canvas: Id) -> u32 {
     FEEDS.lock().as_ref().and_then(|f| f.get(&canvas)).map_or(0, |f| f.dropped.load(Ordering::Relaxed))
 }
 
-fn add_to_feed(canvas: Id, pipe: &Arc<VideoPipe>, fps: (u32, u32)) {
+fn add_to_feed(canvas: Id, consumer: Arc<dyn Consumer>, fps: (u32, u32)) {
     let mut feeds = FEEDS.lock();
     let feeds = feeds.get_or_insert_with(HashMap::new);
     if let Some(feed) = feeds.get(&canvas) {
-        feed.pipes.lock().push(pipe.clone());
+        feed.pipes.lock().push(consumer);
         return;
     }
     let (tx, rx) = bounded(QUEUED_FRAMES);
-    let pipes = Arc::new(Mutex::new(vec![pipe.clone()]));
+    let pipes: Consumers = Arc::new(Mutex::new(vec![consumer]));
     let p = pipes.clone();
     let thread = std::thread::Builder::new()
         .name("lightair-encode".into())
@@ -344,31 +379,67 @@ fn add_to_feed(canvas: Id, pipe: &Arc<VideoPipe>, fps: (u32, u32)) {
     feeds.insert(canvas, CanvasFeed { tx, pipes, dropped: Arc::new(AtomicU32::new(0)), thread });
 }
 
-/// Takes `pipe` off its canvas; the canvas's thread stops with its last encoder.
-fn remove_from_feed(pipe: &Arc<VideoPipe>) {
+/// Takes `consumer` off whichever canvas it's on; the canvas's thread stops with its last one.
+fn remove_from_feed(consumer: &Arc<dyn Consumer>) {
     let gone = {
         let mut feeds = FEEDS.lock();
         let Some(map) = feeds.as_mut() else { return };
-        let Some(feed) = map.get(&pipe.key.canvas) else { return };
-        let empty = {
+        let mut emptied = None;
+        for (canvas, feed) in map.iter() {
             let mut pipes = feed.pipes.lock();
-            pipes.retain(|p| !Arc::ptr_eq(p, pipe));
-            pipes.is_empty()
-        };
-        if empty { map.remove(&pipe.key.canvas) } else { None }
+            let before = pipes.len();
+            pipes.retain(|p| !std::ptr::addr_eq(Arc::as_ptr(p), Arc::as_ptr(consumer)));
+            if pipes.len() != before {
+                if pipes.is_empty() {
+                    emptied = Some(*canvas);
+                }
+                break;
+            }
+        }
+        emptied.and_then(|c| map.remove(&c))
     };
     // joined outside the lock: the compositor may be handing a frame over
-    if let Some(mut feed) = gone {
-        drop(feed.tx);
-        if let Some(t) = feed.thread.take() {
-            let _ = t.join();
-        }
+    if let Some(feed) = gone {
+        feed.stop();
     }
+}
+
+/// Engine thread: what takes canvas `from`'s frames takes canvas `to`'s from now on (the
+/// primary canvas's output handed to another canvas: another workspace opened).
+pub(crate) fn canvas_moved(from: Id, to: Id) {
+    if from == to {
+        return;
+    }
+    let merged = with(|st| {
+        for p in &st.videos {
+            let mut c = p.canvas.lock();
+            if *c == from {
+                *c = to;
+            }
+        }
+        let mut feeds = FEEDS.lock();
+        let map = feeds.as_mut()?;
+        let feed = map.remove(&from)?;
+        match map.get(&to) {
+            Some(there) => {
+                there.pipes.lock().append(&mut feed.pipes.lock());
+                Some(feed)
+            }
+            None => {
+                map.insert(to, feed);
+                None
+            }
+        }
+    });
+    if let Some(feed) = merged {
+        feed.stop();
+    }
+    tracing::info!(%from, %to, "own outputs: the primary canvas's outputs follow it");
 }
 
 /// A canvas's thread: each frame placed on the canvas's frame grid (from the first frame's
 /// time, at the canvas's rate) and encoded; the last frame repeated while none comes.
-fn run_canvas(rx: Receiver<(Frame, i64)>, pipes: Arc<Mutex<Vec<Arc<VideoPipe>>>>, fps: (u32, u32)) {
+fn run_canvas(rx: Receiver<(Frame, i64)>, pipes: Consumers, fps: (u32, u32)) {
     let (num, den) = (fps.0.max(1) as i128, fps.1.max(1) as i128);
     let frame_ns = (den * 1_000_000_000 / num) as i64;
     let grid = |origin: i64, slot: i64| origin + (slot as i128 * den * 1_000_000_000 / num) as i64;
@@ -416,6 +487,170 @@ fn run_canvas(rx: Receiver<(Frame, i64)>, pipes: Arc<Mutex<Vec<Arc<VideoPipe>>>>
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+// ---------------------------------------------------------------- taps: frames as pictures
+
+/// What a tap does with each picture (its own BGRA copy of the frame, and its time), on the
+/// tap's own thread.
+pub(crate) type TapFn = Box<dyn FnMut(&CVPixelBuffer, i64) + Send>;
+
+/// A pool of BGRA, IOSurface-backed buffers of one size.
+fn bgra_pool(width: u32, height: u32) -> Option<CFRetained<CVPixelBufferPool>> {
+    use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFString, CFType};
+    use objc2_core_video::{
+        kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
+        kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey, kCVPixelFormatType_32BGRA,
+    };
+    let empty: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(&[], &[]);
+    let (format, w, h) = (
+        CFNumber::new_i32(kCVPixelFormatType_32BGRA as i32),
+        CFNumber::new_i32(width as i32),
+        CFNumber::new_i32(height as i32),
+    );
+    // SAFETY: CoreVideo's constant keys, read only.
+    let keys: [&CFString; 5] = unsafe {
+        [
+            kCVPixelBufferPixelFormatTypeKey,
+            kCVPixelBufferWidthKey,
+            kCVPixelBufferHeightKey,
+            kCVPixelBufferIOSurfacePropertiesKey,
+            kCVPixelBufferMetalCompatibilityKey,
+        ]
+    };
+    let values: [&CFType; 5] = [format.as_ref(), w.as_ref(), h.as_ref(), empty.as_ref(), CFBoolean::new(true).as_ref()];
+    let attrs = CFDictionary::from_slices(&keys, &values);
+    let mut out: *mut CVPixelBufferPool = std::ptr::null_mut();
+    let status = unsafe { CVPixelBufferPool::create(None, None, Some(attrs.as_opaque()), NonNull::from(&mut out)) };
+    if status != 0 {
+        tracing::error!(status, width, height, "own outputs: no buffer pool");
+        return None;
+    }
+    NonNull::new(out).map(|p| unsafe { CFRetained::from_raw(p) })
+}
+
+/// A tap's copying side: the session that copies (and scales) the compositor's frames into the
+/// tap's pool, and the last copy (sent again while no new frame comes).
+struct TapCopy {
+    session: CFRetained<VTPixelTransferSession>,
+    pool: CFRetained<CVPixelBufferPool>,
+    last: Option<Buffer>,
+    last_pts: Option<i64>,
+}
+
+// SAFETY: used under its mutex only; the session, pool and buffers are thread-safe CF objects.
+unsafe impl Send for TapCopy {}
+
+impl Drop for TapCopy {
+    fn drop(&mut self) {
+        unsafe { self.session.invalidate() };
+    }
+}
+
+/// A canvas's frames taken unencoded (the virtual camera, NDI): copied on the canvas's thread,
+/// sent on the tap's own, so a slow receiver never holds up the canvas's encoders.
+struct Tap {
+    copy: Mutex<TapCopy>,
+    /// Pictures closer together than this are left out (a receiver slower than the canvas).
+    min_gap_ns: i64,
+    tx: Mutex<Option<Sender<(Frame, i64)>>>,
+    /// Pictures the receiver wasn't ready for.
+    skipped: AtomicU32,
+}
+
+impl Consumer for Tap {
+    fn push(&self, frame: Option<&CVPixelBuffer>, _slot: i64, pts: i64) {
+        let picture = {
+            let mut c = self.copy.lock();
+            if c.last_pts.is_some_and(|last| pts - last < self.min_gap_ns) {
+                return;
+            }
+            if let Some(src) = frame {
+                let mut out: *mut CVPixelBuffer = std::ptr::null_mut();
+                let made = unsafe { CVPixelBufferPool::create_pixel_buffer(None, &c.pool, NonNull::from(&mut out)) };
+                let Some(dst) = NonNull::new(out).filter(|_| made == 0).map(|p| unsafe { CFRetained::from_raw(p) })
+                else {
+                    self.skipped.fetch_add(1, Ordering::Relaxed);
+                    return;
+                };
+                if unsafe { c.session.transfer_image(src, &dst) } != 0 {
+                    self.skipped.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                c.last = Some(dst);
+            }
+            let Some(last) = c.last.clone() else { return };
+            c.last_pts = Some(pts);
+            last
+        };
+        if let Some(tx) = self.tx.lock().as_ref()
+            && let Err(TrySendError::Full(_)) = tx.try_send((Frame(picture), pts))
+        {
+            self.skipped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+struct TapEntry {
+    tap: Arc<Tap>,
+    thread: Option<JoinHandle<()>>,
+}
+
+static TAPS: Mutex<Option<HashMap<u64, TapEntry>>> = Mutex::new(None);
+
+/// Takes `canvas`'s frames as pictures from now on: each copied at `size` (`None`: the canvas's
+/// own), at most `max_fps` a second (`None`: every frame), and given to `f` on a thread of the
+/// tap's own; the last picture again while the compositor hands nothing over. Returns the tap,
+/// for [`remove_tap`]. Engine thread.
+pub(crate) fn add_tap(canvas: Id, size: Option<(u32, u32)>, max_fps: Option<u32>, mut f: TapFn) -> Result<u64, String> {
+    let (cw, ch, num, den) = canvas_shape(canvas).ok_or_else(|| "The canvas isn't ready yet.".to_string())?;
+    let (w, h) = size.unwrap_or((cw, ch));
+    let (w, h) = (w.max(2) & !1, h.max(2) & !1);
+    let pool = bgra_pool(w, h).ok_or_else(|| "Couldn't make pictures to send.".to_string())?;
+    let session = transfer_session().ok_or_else(|| "Couldn't copy the canvas's pictures.".to_string())?;
+    let (tx, rx) = bounded::<(Frame, i64)>(1);
+    let thread = std::thread::Builder::new()
+        .name("lightair-tap".into())
+        .spawn(move || {
+            while let Ok((picture, pts)) = rx.recv() {
+                f(&picture.0, pts);
+            }
+        })
+        .map_err(|e| format!("Couldn't start sending pictures: {e}"))?;
+    let min_gap_ns = max_fps.filter(|f| *f > 0).map_or(0, |f| 1_000_000_000 / f as i64 * 9 / 10);
+    let tap = Arc::new(Tap {
+        copy: Mutex::new(TapCopy { session, pool, last: None, last_pts: None }),
+        min_gap_ns,
+        tx: Mutex::new(Some(tx)),
+        skipped: AtomicU32::new(0),
+    });
+    let id = next_id();
+    add_to_feed(canvas, tap.clone(), (num, den));
+    TAPS.lock().get_or_insert_with(HashMap::new).insert(id, TapEntry { tap, thread: Some(thread) });
+    tracing::info!(%canvas, width = w, height = h, "own outputs: pictures taken from the compositor");
+    Ok(id)
+}
+
+/// Stops tap `id`: once this returns, its function isn't called again (and has been dropped).
+/// Engine thread.
+pub(crate) fn remove_tap(id: u64) {
+    let Some(mut entry) = TAPS.lock().as_mut().and_then(|t| t.remove(&id)) else { return };
+    remove_from_feed(&(entry.tap.clone() as Arc<dyn Consumer>));
+    entry.tap.tx.lock().take();
+    if let Some(t) = entry.thread.take() {
+        let _ = t.join();
+    }
+    let skipped = entry.tap.skipped.load(Ordering::Relaxed);
+    if skipped > 0 {
+        tracing::debug!(skipped, "own outputs: pictures the receiver wasn't ready for");
+    }
+}
+
+fn remove_all_taps() {
+    let ids: Vec<u64> = TAPS.lock().as_ref().map(|t| t.keys().copied().collect()).unwrap_or_default();
+    for id in ids {
+        remove_tap(id);
     }
 }
 
@@ -911,12 +1146,55 @@ impl RecordingOut {
 enum Out {
     Rtmp(RtmpSender),
     Srt(Mutex<SrtOut>),
+    Udp(Mutex<UdpOut>),
     Whip(Mutex<WhipSender>),
 }
 
 struct SrtOut {
     mux: Muxer,
     sender: SrtSender,
+}
+
+/// MPEG-TS over plain UDP (`udp://host:port`, multicast too): seven TS packets a datagram, as
+/// players and hardware decoders expect. No connection, so it's live from the start.
+struct UdpOut {
+    mux: Muxer,
+    socket: std::net::UdpSocket,
+    to: std::net::SocketAddr,
+    sent: u64,
+    /// Datagrams the system didn't take.
+    dropped: u64,
+    warned: bool,
+}
+
+impl UdpOut {
+    fn send(&mut self, packets: &[u8]) {
+        for datagram in packets.chunks(188 * 7) {
+            match self.socket.send_to(datagram, self.to) {
+                Ok(n) => self.sent += n as u64,
+                Err(e) => {
+                    self.dropped += 1;
+                    if !self.warned {
+                        self.warned = true;
+                        tracing::warn!(%e, to = %self.to, "own outputs: UDP not sent");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Where a `udp://host:port[?options]` address sends to (`@` before the host, as some players
+/// write a multicast group, is allowed).
+fn udp_target(server: &str) -> Result<std::net::SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+    let rest = server.trim();
+    let rest = rest.get(6..).unwrap_or_default();
+    let host = rest.split(['?', '/']).next().unwrap_or_default().trim_start_matches('@');
+    host.to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+        .ok_or_else(|| format!("{host} isn't an address to send to (udp://host:port)."))
 }
 
 struct Stats {
@@ -932,6 +1210,7 @@ impl Out {
         match self {
             Out::Rtmp(s) => s.parameter_sets(sets),
             Out::Srt(s) => s.lock().mux.parameter_sets(sets.to_vec()),
+            Out::Udp(s) => s.lock().mux.parameter_sets(sets.to_vec()),
             Out::Whip(s) => s.lock().parameter_sets(sets),
         }
     }
@@ -947,6 +1226,11 @@ impl Out {
                     o.sender.end_frame();
                 }
             }
+            Out::Udp(s) => {
+                let mut o = s.lock();
+                let packets = o.mux.video(&p.data, NalFormat::LengthPrefixed, pts_us, Some(dts_us), p.key);
+                o.send(&packets);
+            }
             Out::Whip(s) => s.lock().video(&p.data, false, pts_us, p.key),
         }
     }
@@ -961,6 +1245,11 @@ impl Out {
                     o.sender.write(&packets);
                     o.sender.flush();
                 }
+            }
+            Out::Udp(s) => {
+                let mut o = s.lock();
+                let packets = o.mux.audio(data, pts_us);
+                o.send(&packets);
             }
             Out::Whip(s) => s.lock().audio(data, pts_us),
         }
@@ -988,6 +1277,10 @@ impl Out {
                     retry_in: s.retry_in,
                 }
             }
+            Out::Udp(s) => {
+                let s = s.lock();
+                Stats { connected: true, sent_bytes: s.sent, dropped: s.dropped, error: None, retry_in: None }
+            }
             Out::Whip(s) => {
                 let s = s.lock().stats();
                 Stats {
@@ -1005,6 +1298,7 @@ impl Out {
         match self {
             Out::Rtmp(s) => s.take_keyframe_request(),
             Out::Srt(s) => s.lock().sender.take_keyframe_request(),
+            Out::Udp(_) => false,
             Out::Whip(s) => s.lock().take_keyframe_request(),
         }
     }
@@ -1014,6 +1308,7 @@ impl Out {
         match self {
             Out::Rtmp(s) => Some(s.queued_bytes()),
             Out::Srt(s) => Some(s.lock().sender.queued() as u64 * lightair_feed::srt::DATAGRAM as u64),
+            Out::Udp(_) => None,
             Out::Whip(s) => Some(s.lock().queued_bytes()),
         }
     }
@@ -1430,6 +1725,9 @@ struct State {
     recordings: HashMap<Id, RecordingOut>,
     streams: HashMap<Id, StreamOut>,
     clips: HashMap<Id, ClipsOut>,
+    /// The virtual camera's tap.
+    camera: Option<u64>,
+    rtsp: Option<RtspOut>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -1453,7 +1751,6 @@ impl State {
         let codec = video_codec(&enc.video_encoder);
         let prores = matches!(codec, VideoCodec::ProRes(_));
         let key = VideoKey {
-            canvas,
             codec,
             width: w.max(2) & !1,
             height: h.max(2) & !1,
@@ -1464,7 +1761,7 @@ impl State {
             reorder: reorder && !prores,
             owner: if exclusive { next_id() } else { 0 },
         };
-        if let Some(p) = self.videos.iter().find(|p| p.key == key) {
+        if let Some(p) = self.videos.iter().find(|p| p.key == key && *p.canvas.lock() == canvas) {
             return Ok(p.clone());
         }
         let settings = VideoSettings {
@@ -1482,9 +1779,9 @@ impl State {
             color: Color::BT709,
             hardware: Hardware::Prefer,
         };
-        let pipe = VideoPipe::open(key, settings)?;
+        let pipe = VideoPipe::open(key, canvas, settings)?;
         self.videos.push(pipe.clone());
-        add_to_feed(canvas, &pipe, (num, den));
+        add_to_feed(canvas, pipe.clone(), (num, den));
         Ok(pipe)
     }
 
@@ -1503,7 +1800,7 @@ impl State {
     fn release_video(&mut self, pipe: &Arc<VideoPipe>, sub: u64) {
         if pipe.others(sub) == 0 {
             self.videos.retain(|p| !Arc::ptr_eq(p, pipe));
-            remove_from_feed(pipe);
+            remove_from_feed(&(pipe.clone() as Arc<dyn Consumer>));
             pipe.encoder.flush();
         }
         pipe.unsubscribe(sub);
@@ -1764,7 +2061,8 @@ pub(crate) fn add_marker(name: &str) -> bool {
 }
 
 /// Whether Lightair sends to this destination itself: RTMP(S) with H.264 and no second sound
-/// track, SRT with H.264 or HEVC, WHIP with H.264. Others stay libobs's for now.
+/// track, SRT and UDP (MPEG-TS) with H.264 or HEVC, WHIP with H.264. Others stay libobs's for
+/// now: RTMP with HEVC or AV1 (enhanced RTMP) or a VOD track, RIST and MPEG-TS over TCP.
 pub(crate) fn can_stream(cfg: &StreamConfig) -> bool {
     let server = cfg.server.trim().to_ascii_lowercase();
     let codec = video_codec(&cfg.encoders.video_encoder);
@@ -1775,7 +2073,8 @@ pub(crate) fn can_stream(cfg: &StreamConfig) -> bool {
                 && cfg.vod_mix.is_none()
         }
         Some(StreamProtocol::MpegTs) => {
-            server.starts_with("srt://") && matches!(codec, VideoCodec::H264 | VideoCodec::Hevc { .. })
+            (server.starts_with("srt://") || server.starts_with("udp://"))
+                && matches!(codec, VideoCodec::H264 | VideoCodec::Hevc { .. })
         }
         Some(StreamProtocol::Whip) => codec == VideoCodec::H264,
         None => false,
@@ -1827,6 +2126,33 @@ pub(crate) fn start_stream(cfg: &StreamConfig, canvas: Id) -> Result<(), String>
                     Err(e) => return fail(e),
                 }
             }
+            Some(StreamProtocol::MpegTs) if server.to_ascii_lowercase().starts_with("udp://") => {
+                let to = match udp_target(&server) {
+                    Ok(a) => a,
+                    Err(e) => return fail(e),
+                };
+                let bind = match cfg.net.bind_ip.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(ip) => match ip.parse() {
+                        Ok(ip) => Some(bind_to(ip)),
+                        Err(_) => return fail(format!("{ip} isn't an address to send from.")),
+                    },
+                    None => None,
+                };
+                let socket = match lightair_feed::net::udp_for(&to, bind.as_ref()) {
+                    Ok(s) => s,
+                    Err(e) => return fail(format!("Couldn't open UDP to {to}: {e}")),
+                };
+                // blocking: a full send buffer makes the sender thread wait rather than drop
+                let _ = socket.set_nonblocking(false);
+                if let std::net::SocketAddr::V4(a) = to
+                    && a.ip().is_multicast()
+                {
+                    let _ = socket.set_multicast_ttl_v4(16);
+                }
+                let ts = if matches!(codec, VideoCodec::Hevc { .. }) { TsCodec::Hevc } else { TsCodec::H264 };
+                let mux = Muxer::new(ts, Some(AudioConfig { sample_rate: SAMPLE_RATE, channels: CHANNELS as u8 }));
+                Out::Udp(Mutex::new(UdpOut { mux, socket, to, sent: 0, dropped: 0, warned: false }))
+            }
             Some(StreamProtocol::MpegTs) => {
                 let mut target = match lightair_feed::srt::parse_url(&server) {
                     Ok(t) => t,
@@ -1849,9 +2175,9 @@ pub(crate) fn start_stream(cfg: &StreamConfig, canvas: Id) -> Result<(), String>
                     Err(e) => return fail(e),
                 }
             }
-            None => return fail("Use an rtmp://, rtmps://, srt:// or https:// (WHIP) address.".into()),
+            None => return fail("Use an rtmp://, rtmps://, srt://, udp:// or https:// (WHIP) address.".into()),
         };
-        // B-frames only over RTMP (the MPEG-TS and WebRTC senders give no decode times)
+        // B-frames only over RTMP (the SRT and WebRTC senders give no decode times)
         let reorder = enc.bframes && protocol == Some(StreamProtocol::Rtmp);
         let video = match st.video_pipe(canvas, &enc, reorder, enc.adaptive) {
             Ok(v) => v,
@@ -2063,7 +2389,7 @@ pub(crate) fn sample() {
     with(|st| {
         st.cleanup();
         for (canvas, r) in &st.recordings {
-            let skipped = (dropped_of(r.video.key.canvas) + r.video.skipped.load(Ordering::Relaxed))
+            let skipped = (dropped_of(*r.video.canvas.lock()) + r.video.skipped.load(Ordering::Relaxed))
                 .saturating_sub(r.skipped_base);
             let bytes = r.bytes.load(Ordering::Relaxed);
             let stopping = r.stopping;
@@ -2075,16 +2401,179 @@ pub(crate) fn sample() {
             });
         }
         for (id, s) in &st.streams {
-            let skipped = (dropped_of(s.video.key.canvas) + s.video.skipped.load(Ordering::Relaxed))
+            let skipped = (dropped_of(*s.video.canvas.lock()) + s.video.skipped.load(Ordering::Relaxed))
                 .saturating_sub(s.skipped_base);
             runtime().update(OutputKey::Stream(*id), |st| st.encoder_skipped = skipped);
         }
     });
 }
 
+// ---------------------------------------------------------------- the virtual camera
+
+/// Starts the virtual camera on `canvas`'s compositor frames: copied into buffers of its own
+/// and queued on the camera extension's sink stream (the canvas's size, BGRA, at most the
+/// camera's rate). Its status is `OutputKey::VirtualCamera`'s.
+pub(crate) fn start_virtual_camera(canvas: Id) -> Result<(), String> {
+    let key = OutputKey::VirtualCamera;
+    if with(|st| st.camera.is_some()) {
+        return Ok(());
+    }
+    let fail = |why: String| {
+        runtime().update(key, |s| s.state = OutputState::Failed(why.clone()));
+        Err(why)
+    };
+    runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
+    let mut camera = match crate::vcam::mac::Sink::open() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    let send: TapFn = Box::new(move |picture, pts| camera.send(picture, pts));
+    match add_tap(canvas, None, Some(crate::vcam::mac::FPS), send) {
+        Ok(id) => {
+            with(|st| st.camera = Some(id));
+            runtime().update(key, |s| s.state = OutputState::Active { since: Instant::now() });
+            tracing::info!(%canvas, "own outputs: the virtual camera shows the compositor's frames");
+            Ok(())
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// Stops the virtual camera Lightair sends itself; false when it wasn't running here.
+pub(crate) fn stop_virtual_camera() -> bool {
+    let Some(id) = with(|st| st.camera.take()) else { return false };
+    runtime().update(OutputKey::VirtualCamera, |s| {
+        if s.state.is_running() {
+            s.state = OutputState::Stopping
+        }
+    });
+    remove_tap(id);
+    runtime().update(OutputKey::VirtualCamera, |s| s.state = OutputState::Idle);
+    true
+}
+
+// ---------------------------------------------------------------- the RTSP server
+
+/// The RTSP server's encoders and what it hands their packets to.
+struct RtspOut {
+    video: Arc<VideoPipe>,
+    audio: Arc<AudioPipe>,
+    sub: u64,
+}
+
+struct RtspSink {
+    /// The time RTP's clocks start from.
+    base_ns: i64,
+    format: Mutex<Option<Arc<VideoFormat>>>,
+    video: Weak<VideoPipe>,
+}
+
+impl Sink for RtspSink {
+    fn video(&self, packet: &Arc<Pkt>, format: &Arc<VideoFormat>) {
+        {
+            let mut f = self.format.lock();
+            if f.as_ref().is_none_or(|x| !Arc::ptr_eq(x, format)) {
+                *f = Some(format.clone());
+                crate::rtsp::own_parameter_sets(&format.parameter_sets);
+            }
+        }
+        // a player that has just pressed play starts at the next keyframe
+        if crate::rtsp::take_keyframe_request()
+            && let Some(v) = self.video.upgrade()
+        {
+            v.encoder.request_keyframe();
+        }
+        crate::rtsp::own_video(&packet.data, packet.pts - self.base_ns);
+    }
+    fn audio(&self, track: usize, packet: &Arc<Pkt>) {
+        if track == 0 {
+            crate::rtsp::own_audio(&packet.data, packet.pts - self.base_ns);
+        }
+    }
+}
+
+/// Feeds the RTSP server from `canvas`: an H.264 encoder of the canvas already running without
+/// B-frames at the canvas's rate when there is one (a recording's or a destination's, not one
+/// whose bitrate follows its connection), else one of its own (6 Mbit/s CBR, a keyframe every
+/// second); the Program's AAC encoder likewise.
+pub(crate) fn start_rtsp(canvas: Id) -> Result<(), String> {
+    with(|st| {
+        if st.rtsp.is_some() {
+            return Ok(());
+        }
+        let shared = st
+            .videos
+            .iter()
+            .find(|p| {
+                *p.canvas.lock() == canvas
+                    && p.key.codec == VideoCodec::H264
+                    && !p.key.reorder
+                    && p.key.divisor == 1
+                    && p.key.owner == 0
+            })
+            .cloned();
+        let video = match shared {
+            Some(v) => v,
+            None => {
+                let enc = EncoderConfig {
+                    video_encoder: "h264".into(),
+                    video_bitrate_kbps: 6000,
+                    audio_encoder: "aac".into(),
+                    audio_bitrate_kbps: 160,
+                    constant_bitrate: true,
+                    bframes: false,
+                    keyint_sec: 1,
+                    scaled: None,
+                    audio_mix: 0,
+                    adaptive: false,
+                    fps_divisor: 1,
+                };
+                st.video_pipe(canvas, &enc, false, false)?
+            }
+        };
+        let shared = st.audios.iter().find(|a| a.key.mix == 0 && a.key.codec == AudioCodec::Aac).cloned();
+        let audio = match shared {
+            Some(a) => a,
+            None => match st.audio_pipe(0, AudioCodec::Aac, 160) {
+                Ok(a) => a,
+                Err(e) => {
+                    st.release_video(&video, 0);
+                    return Err(e);
+                }
+            },
+        };
+        crate::rtsp::own_audio_config(&audio.format.config, audio.format.sample_rate, audio.format.channels);
+        let sink: Arc<dyn Sink> =
+            Arc::new(RtspSink { base_ns: now_ns(), format: Mutex::new(None), video: Arc::downgrade(&video) });
+        let sub = video.subscribe(sink.clone());
+        audio.subscribe(0, sink, sub);
+        tracing::info!(%canvas, kbps = video.key.kbps, "own outputs: RTSP fed by Lightair's encoders");
+        st.rtsp = Some(RtspOut { video, audio, sub });
+        Ok(())
+    })
+}
+
+/// Stops feeding the RTSP server.
+pub(crate) fn stop_rtsp() {
+    with(|st| {
+        if let Some(r) = st.rtsp.take() {
+            st.release_video(&r.video, r.sub);
+            st.release_audio(&r.audio, r.sub);
+        }
+    });
+}
+
 /// Engine shutdown: every output stops, recordings finish their files first.
 pub(crate) fn shutdown() {
+    remove_all_taps();
     let Some(mut st) = STATE.lock().take() else { return };
+    if st.camera.take().is_some() {
+        runtime().update(OutputKey::VirtualCamera, |s| s.state = OutputState::Idle);
+    }
+    if let Some(r) = st.rtsp.take() {
+        st.release_video(&r.video, r.sub);
+        st.release_audio(&r.audio, r.sub);
+    }
     let ids: Vec<Id> = st.clips.keys().copied().collect();
     for id in ids {
         st.stop_clips(id);
@@ -2108,7 +2597,7 @@ pub(crate) fn shutdown() {
         }
     }
     for p in std::mem::take(&mut st.videos) {
-        remove_from_feed(&p);
+        remove_from_feed(&(p as Arc<dyn Consumer>));
     }
     for a in std::mem::take(&mut st.audios) {
         a.close();

@@ -139,8 +139,9 @@ pub enum OutputKey {
     /// The replay buffer of one canvas (by its canvas id), behind the Clip button; several can
     /// run at once.
     Clips(Id),
-    /// The virtual camera: a canvas as a camera other apps can pick (macOS: through the OBS
-    /// Virtual Camera extension, lightair-effect-stack's `lightair_virtualcam` output).
+    /// The virtual camera: a canvas as a camera other apps can pick (macOS: through Lightair's
+    /// camera extension, by lightair-effect-stack's `lightair_virtualcam` output, or straight
+    /// from the compositor with `LIGHTAIR_ENGINE=own`: `own_outputs::start_virtual_camera`).
     VirtualCamera,
 }
 
@@ -1462,10 +1463,21 @@ impl Outputs {
         video: Option<VideoOutput>,
         scene: Option<VirtualCameraScene>,
     ) -> Result<(), String> {
+        // Lightair's own: the canvas's compositor frames sent to the camera extension (one scene
+        // stays libobs's: the compositor draws canvases' programs only)
+        #[cfg(target_os = "macos")]
+        if scene.is_none()
+            && let Some(canvas) = crate::own_outputs::takes(video)
+        {
+            self.drop_virtual_camera();
+            return crate::own_outputs::start_virtual_camera(canvas);
+        }
         if self.virtual_camera.as_ref().is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
             return Ok(());
         }
         self.drop_virtual_camera();
+        #[cfg(target_os = "macos")]
+        crate::own_outputs::stop_virtual_camera();
         let video = match scene {
             Some(sc) => {
                 let canvas =
@@ -1552,6 +1564,8 @@ impl Outputs {
     }
 
     pub fn stop_virtual_camera(&mut self) {
+        #[cfg(target_os = "macos")]
+        crate::own_outputs::stop_virtual_camera();
         if let Some(r) = &self.virtual_camera {
             runtime().update(OutputKey::VirtualCamera, |s| {
                 if s.state.is_running() {

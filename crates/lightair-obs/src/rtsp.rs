@@ -3,10 +3,15 @@
 //! B-frames, AAC) feed a Lightair output whose packets go to every player that has asked:
 //! RTP over the RTSP connection itself (interleaved; RFC 2326 §10.12), H.264 by RFC 6184 (single
 //! NAL units and FU-A) and AAC by RFC 3640 (AAC-hbr). Lightair's own code.
+//!
+//! macOS, with `LIGHTAIR_ENGINE=own`: the packets come from Lightair's own encoders of the
+//! primary canvas's compositor frames instead (`own_outputs::start_rtsp`, which shares an
+//! encoder already running when one fits), through [`own_video`] and [`own_audio`].
 
 use std::ffi::{c_char, c_void};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -140,8 +145,25 @@ fn send_all(s: &mut Shared, build: impl Fn(&mut [u16; 2]) -> Vec<Vec<u8>>) {
     });
 }
 
-fn video_packet(s: &mut Shared, data: &[u8], ts: u32) {
-    let nals: Vec<Vec<u8>> = nal_units(data).into_iter().map(|n| n.to_vec()).collect();
+/// NAL units each after a 4-byte length (as Lightair's encoders give them).
+fn length_prefixed(mut data: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    while data.len() >= 4 {
+        let n = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        data = &data[4..];
+        if n > data.len() {
+            break;
+        }
+        if n > 0 {
+            out.push(&data[..n]);
+        }
+        data = &data[n..];
+    }
+    out
+}
+
+fn video_packet(s: &mut Shared, nals: Vec<&[u8]>, ts: u32) {
+    let nals: Vec<Vec<u8>> = nals.into_iter().map(|n| n.to_vec()).collect();
     // a keyframe without its parameter sets: they go first (a player joining now can start)
     let key = nals.iter().any(|n| n[0] & 0x1f == 5);
     let has_sps = nals.iter().any(|n| n[0] & 0x1f == 7);
@@ -273,6 +295,7 @@ fn serve(stream: TcpStream) {
                 }
             }
             "PLAY" => {
+                KEYFRAME_WANTED.store(true, Ordering::Release);
                 let (tx, rx) = sync_channel::<Vec<u8>>(512);
                 if let Ok(mut s) = shared().lock() {
                     s.players.push(Player { tx, seq: [0, 0] });
@@ -371,12 +394,65 @@ unsafe extern "C" fn out_packet(_: *mut c_void, packet: *mut sys::encoder_packet
     let seconds = |t: i64| t as f64 * p.timebase_num as f64 / p.timebase_den.max(1) as f64;
     if p.type_ == sys::OBS_ENCODER_VIDEO {
         let ts = (seconds(p.pts) * 90_000.0) as i64 as u32;
-        video_packet(&mut s, data, ts);
+        video_packet(&mut s, nal_units(data), ts);
     } else {
         let rate = s.audio.0.max(1) as f64;
         let ts = (seconds(p.pts) * rate) as i64 as u32;
         audio_packet(&mut s, data, ts);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Packets from Lightair's own encoders
+
+/// A player pressed play since this was last asked (its picture starts at a keyframe).
+static KEYFRAME_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a player is waiting for a keyframe (asked once per player).
+pub(crate) fn take_keyframe_request() -> bool {
+    KEYFRAME_WANTED.swap(false, Ordering::AcqRel)
+}
+
+/// The H.264 parameter sets (bare SPS and PPS) of the encoder feeding the server.
+pub(crate) fn own_parameter_sets(sets: &[Vec<u8>]) {
+    let Ok(mut s) = shared().lock() else { return };
+    for set in sets {
+        match set.first().map(|b| b & 0x1f) {
+            Some(7) => s.sps = set.clone(),
+            Some(8) => s.pps = set.clone(),
+            _ => {}
+        }
+    }
+}
+
+/// The AAC encoder's AudioSpecificConfig, sample rate and channels.
+pub(crate) fn own_audio_config(asc: &[u8], rate: u32, channels: u32) {
+    if let Ok(mut s) = shared().lock() {
+        s.asc = asc.to_vec();
+        s.audio = (rate, channels);
+    }
+}
+
+/// One encoded picture (NAL units each after a 4-byte length), `at_ns` after the server's
+/// clocks started.
+pub(crate) fn own_video(data: &[u8], at_ns: i64) {
+    let Ok(mut s) = shared().lock() else { return };
+    if s.players.is_empty() {
+        return;
+    }
+    let ts = (at_ns.max(0) as i128 * 90_000 / 1_000_000_000) as i64 as u32;
+    video_packet(&mut s, length_prefixed(data), ts);
+}
+
+/// One raw AAC frame, `at_ns` after the server's clocks started.
+pub(crate) fn own_audio(data: &[u8], at_ns: i64) {
+    let Ok(mut s) = shared().lock() else { return };
+    if s.players.is_empty() {
+        return;
+    }
+    let rate = s.audio.0.max(1) as i128;
+    let ts = (at_ns.max(0) as i128 * rate / 1_000_000_000) as i64 as u32;
+    audio_packet(&mut s, data, ts);
 }
 
 pub fn register() {
@@ -396,10 +472,12 @@ pub fn register() {
     unsafe { sys::obs_register_output_s(&info, std::mem::size_of::<sys::obs_output_info>()) };
 }
 
-struct Running {
-    output: *mut sys::obs_output_t,
-    video: *mut sys::obs_encoder_t,
-    audio: *mut sys::obs_encoder_t,
+enum Running {
+    /// libobs's encoders and the `lightair_rtsp` output.
+    Libobs { output: *mut sys::obs_output_t, video: *mut sys::obs_encoder_t, audio: *mut sys::obs_encoder_t },
+    /// Lightair's own encoders (macOS, `LIGHTAIR_ENGINE=own`).
+    #[cfg(target_os = "macos")]
+    Own,
 }
 
 unsafe impl Send for Running {}
@@ -419,14 +497,19 @@ pub fn address() -> Option<String> {
 pub fn set(on: bool, available_encoders: &[String]) -> Result<(), String> {
     let mut r = running().lock().map_err(|_| "busy".to_string())?;
     if let Some(old) = r.take() {
-        unsafe {
-            sys::obs_output_stop(old.output);
-            sys::obs_output_release(old.output);
-            sys::obs_encoder_release(old.video);
-            sys::obs_encoder_release(old.audio);
+        match old {
+            Running::Libobs { output, video, audio } => unsafe {
+                sys::obs_output_stop(output);
+                sys::obs_output_release(output);
+                sys::obs_encoder_release(video);
+                sys::obs_encoder_release(audio);
+            },
+            #[cfg(target_os = "macos")]
+            Running::Own => crate::own_outputs::stop_rtsp(),
         }
         if let Ok(mut s) = shared().lock() {
             s.players.clear();
+            (s.sps, s.pps, s.asc) = (Vec::new(), Vec::new(), Vec::new());
         }
     }
     if !on {
@@ -453,6 +536,16 @@ pub fn set(on: bool, available_encoders: &[String]) -> Result<(), String> {
     });
     if !ok {
         return Err(format!("Port {PORT} is taken by another app"));
+    }
+    // Lightair's own encoders, from the primary canvas's compositor
+    #[cfg(target_os = "macos")]
+    if crate::own_outputs::enabled()
+        && let Some(canvas) = crate::program_source::canvas_of_video(None)
+    {
+        crate::own_outputs::start_rtsp(canvas)?;
+        *r = Some(Running::Own);
+        tracing::info!(port = PORT, "serving the program over RTSP (Lightair's encoders)");
+        return Ok(());
     }
     let venc_id = crate::outputs::first_available(available_encoders, crate::outputs::H264_ENCODERS).unwrap_or_else(|| "obs_x264".into());
     let aenc_id = crate::outputs::aac_encoder(available_encoders);
@@ -484,7 +577,7 @@ pub fn set(on: bool, available_encoders: &[String]) -> Result<(), String> {
             sys::obs_encoder_release(audio);
             return Err("The RTSP output didn't start".into());
         }
-        *r = Some(Running { output, video, audio });
+        *r = Some(Running::Libobs { output, video, audio });
     }
     tracing::info!(port = PORT, "serving the program over RTSP");
     Ok(())

@@ -79,6 +79,8 @@ const FRAME_AUDIO: i32 = 2;
 const COLOR_BGRX_BGRA: i32 = 0;
 const BANDWIDTH_HIGHEST: i32 = 100;
 const FOURCC_BGRA: u32 = u32::from_le_bytes(*b"BGRA");
+#[cfg(target_os = "macos")]
+const FOURCC_BGRX: u32 = u32::from_le_bytes(*b"BGRX");
 const PROGRESSIVE: i32 = 1;
 const TIMECODE_SYNTHESIZE: i64 = i64::MAX;
 
@@ -338,8 +340,13 @@ struct Sender {
     fps: (i32, i32),
     rate: u32,
     /// The libobs output whose frames are sent (an `obs_output_t`, as a number); 0 when they come
-    /// from libobs's main canvas directly.
+    /// from libobs's main canvas directly, or from the compositor.
     output: usize,
+    /// macOS, with Lightair's own outputs: the tap that sends the compositor's frames (0: none).
+    tap: u64,
+    /// Video and sound carry their times as NDI timecodes (on the program clock, so receivers
+    /// line them up); otherwise NDI makes them up as they're sent.
+    timed: bool,
 }
 
 unsafe impl Send for Sender {}
@@ -392,7 +399,7 @@ unsafe extern "C" fn on_audio(param: *mut c_void, _mix: usize, data: *mut sys::a
         sample_rate: s.rate as i32,
         no_channels: 2,
         no_samples: n as i32,
-        timecode: TIMECODE_SYNTHESIZE,
+        timecode: if s.timed { (a.timestamp / 100) as i64 } else { TIMECODE_SYNTHESIZE },
         p_data: s.audio.as_mut_ptr(),
         channel_stride_in_bytes: (n * 4) as i32,
         p_metadata: std::ptr::null(),
@@ -403,14 +410,19 @@ unsafe extern "C" fn on_audio(param: *mut c_void, _mix: usize, data: *mut sys::a
 
 /// Sends the program out as the NDI source `name` ("" stops it). Call on the engine thread.
 pub fn set_output(name: &str) -> Result<(), String> {
-    let running = sender().lock().ok().and_then(|s| s.as_ref().map(|s| s.output));
-    if let Some(output) = running {
+    let running = sender().lock().ok().and_then(|s| s.as_ref().map(|s| (s.output, s.tap)));
+    if let Some((output, tap)) = running {
+        // the compositor's frames stop first: once the tap is gone nothing sends video
+        #[cfg(target_os = "macos")]
+        if tap != 0 {
+            crate::own_outputs::remove_tap(tap);
+        }
         unsafe {
             #[cfg(target_os = "macos")]
             if output != 0 {
                 stop_output(output as *mut sys::obs_output_t);
             }
-            if output == 0 {
+            if output == 0 && tap == 0 {
                 sys::obs_remove_raw_video_callback(Some(on_video), std::ptr::null_mut());
             }
             sys::obs_remove_raw_audio_callback(0, Some(on_audio), std::ptr::null_mut());
@@ -443,8 +455,18 @@ pub fn set_output(name: &str) -> Result<(), String> {
         range: sys::VIDEO_RANGE_FULL,
         colorspace: sys::VIDEO_CS_709,
     };
+    // Lightair's own outputs: the primary canvas's compositor frames, straight from it
+    #[cfg(target_os = "macos")]
+    let tap = start_tap(send, fps);
+    #[cfg(not(target_os = "macos"))]
+    let tap = 0u64;
     if let Ok(mut s) = sender().lock() {
-        *s = Some(Box::new(Sender { send, audio: Vec::new(), fps, rate, output: 0 }));
+        *s = Some(Box::new(Sender { send, audio: Vec::new(), fps, rate, output: 0, tap, timed: tap != 0 }));
+    }
+    if tap != 0 {
+        unsafe { sys::obs_add_raw_audio_callback(0, std::ptr::null(), Some(on_audio), std::ptr::null_mut()) };
+        tracing::info!(name, "sending the program over NDI (the compositor's frames)");
+        return Ok(());
     }
     // the primary canvas's output canvas (Lightair's own compositor's picture) when there is one
     #[cfg(target_os = "macos")]
@@ -467,7 +489,64 @@ pub fn set_output(name: &str) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// macOS, with `LIGHTAIR_ENGINE=own`: the output that sends the primary canvas's output canvas
+// macOS, with Lightair's own outputs: the compositor's frames of the primary canvas, sent as
+// they come (BGRX: they're opaque), each with its time on the program clock
+
+/// Starts sending the primary canvas's compositor frames through `send` (0 when Lightair's own
+/// outputs are off or there's no primary canvas: libobs's frames are sent then).
+#[cfg(target_os = "macos")]
+fn start_tap(send: Ptr, fps: (i32, i32)) -> u64 {
+    if !crate::own_outputs::enabled() {
+        return 0;
+    }
+    let Some(canvas) = crate::program_source::canvas_of_video(None) else { return 0 };
+    let send = send as usize;
+    let f: crate::own_outputs::TapFn = Box::new(move |picture, pts_ns| send_picture(send as Ptr, fps, picture, pts_ns));
+    match crate::own_outputs::add_tap(canvas, None, None, f) {
+        Ok(tap) => tap,
+        Err(e) => {
+            tracing::warn!(%e, "NDI: sending libobs's picture");
+            0
+        }
+    }
+}
+
+/// Sends one BGRA picture (the tap's own copy) as NDI video. The tap's thread.
+#[cfg(target_os = "macos")]
+fn send_picture(send: Ptr, fps: (i32, i32), picture: &objc2_core_video::CVPixelBuffer, pts_ns: i64) {
+    use objc2_core_video::{
+        CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
+        CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    };
+    let Some(l) = lib() else { return };
+    if unsafe { CVPixelBufferLockBaseAddress(picture, CVPixelBufferLockFlags::ReadOnly) } != 0 {
+        return;
+    }
+    let data = CVPixelBufferGetBaseAddress(picture) as *mut u8;
+    if !data.is_null() {
+        let v = VideoFrame {
+            xres: CVPixelBufferGetWidth(picture) as i32,
+            yres: CVPixelBufferGetHeight(picture) as i32,
+            four_cc: FOURCC_BGRX,
+            frame_rate_n: fps.0,
+            frame_rate_d: fps.1,
+            picture_aspect_ratio: 0.0,
+            frame_format_type: PROGRESSIVE,
+            timecode: pts_ns / 100,
+            p_data: data,
+            line_stride_in_bytes: CVPixelBufferGetBytesPerRow(picture) as i32,
+            p_metadata: std::ptr::null(),
+            timestamp: 0,
+        };
+        // NDI has the picture (compressed or copied) when this returns
+        unsafe { (l.send_send_video_v2)(send, &v) };
+    }
+    unsafe { CVPixelBufferUnlockBaseAddress(picture, CVPixelBufferLockFlags::ReadOnly) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// macOS, with `LIGHTAIR_ENGINE=own` and `LIGHTAIR_OUTPUTS=libobs`: the output that sends the
+// primary canvas's output canvas
 // (Lightair's own compositor's picture) instead of libobs's main canvas
 
 #[cfg(target_os = "macos")]

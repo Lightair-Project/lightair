@@ -7,8 +7,9 @@
 //!   draws the newest one as a libobs texture over its IOSurface (made once, then rebound to each
 //!   new surface). It holds the buffer it draws, so the compositor doesn't paint over it.
 //! - **Outputs:** every canvas gets a private libobs canvas of its own ([`attach`]) whose only
-//!   channel shows a `lightair_program` source for it. Recording, streaming, clips, the virtual
-//!   camera and NDI take that canvas's video ([`video`]) instead of the canvas's, so they carry
+//!   channel shows a `lightair_program` source for it. Outputs libobs still makes (with
+//!   `LIGHTAIR_OUTPUTS=libobs`, or those Lightair can't make yet: `own_outputs`) take that
+//!   canvas's video ([`video`]) instead of the canvas's, so they carry
 //!   the compositor's picture while the canvas's own channels stay as they are: the transition
 //!   on channel 0 and the overlay scenes keep their sources active and showing, captures keep
 //!   running, and libobs mixes their sound as before (outputs take libobs's audio, unchanged).
@@ -121,7 +122,9 @@ pub(crate) fn attach(canvas: &Canvas, libobs: CanvasRef, primary: bool) {
         return;
     }
     register();
-    if primary && adopt(canvas) {
+    if primary && let Some(old) = adopt(canvas) {
+        // Lightair's own outputs on the primary canvas follow it, as libobs's on its output do
+        crate::own_outputs::canvas_moved(old, canvas.id);
         return;
     }
     detach(canvas.id);
@@ -199,12 +202,13 @@ pub(crate) fn shape_of(canvas: &Canvas) -> (u32, u32, u32, u32) {
     shape(canvas)
 }
 
-/// The primary canvas's output, kept from the document before, given to `canvas`.
-fn adopt(canvas: &Canvas) -> bool {
+/// The primary canvas's output, kept from the document before, given to `canvas`; the canvas
+/// it was given before, if there was one.
+fn adopt(canvas: &Canvas) -> Option<Id> {
     let mut outs = OUTS.lock();
-    let Some(outs) = outs.0.as_mut() else { return false };
-    let Some(old) = outs.iter().find(|(_, o)| o.primary).map(|(id, _)| *id) else { return false };
-    let Some(mut out) = outs.remove(&old) else { return false };
+    let outs = outs.0.as_mut()?;
+    let old = outs.iter().find(|(_, o)| o.primary).map(|(id, _)| *id)?;
+    let mut out = outs.remove(&old)?;
     if let Some(p) = program_of(&out.source) {
         *p.canvas.lock() = Some(canvas.id);
     }
@@ -215,7 +219,7 @@ fn adopt(canvas: &Canvas) -> bool {
         set_size(&out.source, (w, h));
     }
     outs.insert(canvas.id, out);
-    true
+    Some(old)
 }
 
 /// Engine thread: removes `canvas`'s output.
