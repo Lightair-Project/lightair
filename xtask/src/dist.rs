@@ -172,9 +172,9 @@ fn ditto(from: &Path, to: &Path) -> anyhow::Result<()> {
     run(Command::new("ditto").arg(from).arg(to))
 }
 
-/// The OBS modules Lightair loads on macOS: `lightair_engine::DEFAULT_MODULES` (its first list).
+/// The OBS modules Lightair loads on macOS: `lightair_obs::DEFAULT_MODULES` (its first list).
 fn default_modules(root: &Path) -> anyhow::Result<Vec<String>> {
-    let lib = std::fs::read_to_string(root.join("crates/lightair-engine/src/lib.rs"))?;
+    let lib = std::fs::read_to_string(root.join("crates/lightair-obs/src/lib.rs"))?;
     let start = lib.find("pub const DEFAULT_MODULES").ok_or_else(|| anyhow::anyhow!("no DEFAULT_MODULES"))?;
     let list = &lib[start..];
     let list = &list[list.find("&[").unwrap() + 2..list.find("];").unwrap()];

@@ -3,7 +3,7 @@
 //!
 //! A program of its own, apart from `preview`: the switch is read once per process, and these
 //! tests turn it on. Each test that starts libobs runs in a process of its own
-//! (`lightair_engine::testing`), which sets the switch before anything reads it.
+//! (`lightair_obs::testing`), which sets the switch before anything reads it.
 
 #[cfg(target_os = "macos")]
 mod audio;
@@ -23,7 +23,7 @@ mod common {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    use lightair_engine::Engine;
+    use lightair_obs::Engine;
     use lightair_model::{Command, Document, diff};
     use lightair_preview::{Preview, frame_rgba, frame_size};
 
@@ -38,7 +38,7 @@ mod common {
     pub fn switch_on() {
         // SAFETY: no other thread reads or writes the environment now (libobs isn't running).
         unsafe { std::env::set_var("LIGHTAIR_ENGINE", "own") };
-        assert!(lightair_engine::bridge::own(), "the switch is on");
+        assert!(lightair_obs::bridge::own(), "the switch is on");
     }
 
     pub fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {

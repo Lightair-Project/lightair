@@ -105,7 +105,7 @@ macro_rules! panel_traits {
 
 /// The soundboard's source in `w`, if it has one.
 pub fn board_source(w: &Workspace) -> Option<Id> {
-    w.sources.values().find(|s| s.kind == lightair_engine::soundboard::KIND).map(|s| s.id)
+    w.sources.values().find(|s| s.kind == lightair_obs::soundboard::KIND).map(|s| s.id)
 }
 
 /// Plays `pad` on the workspace's soundboard (`None`: stops it). Used by the panel, the remote
@@ -168,7 +168,7 @@ impl SoundboardPanel {
                     let source = Source {
                         id: Id::new(),
                         name: "Soundboard".into(),
-                        kind: lightair_engine::soundboard::KIND.into(),
+                        kind: lightair_obs::soundboard::KIND.into(),
                         settings: json!({}),
                         effects: Vec::new(),
                     };

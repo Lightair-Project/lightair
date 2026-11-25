@@ -496,7 +496,7 @@ impl StudioWindow {
                     let mut own = None;
                     for _ in 0..40 {
                         cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
-                        own = lightair_engine::displays::screen_options(WINDOW, "window").into_iter().map(|(_, v)| v).find(|v| {
+                        own = lightair_obs::displays::screen_options(WINDOW, "window").into_iter().map(|(_, v)| v).find(|v| {
                             lightair_platform::apps::is_own_window(&v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string()))
                         });
                         if own.is_some() {
@@ -763,7 +763,7 @@ impl StudioWindow {
                 };
                 if page == Page::Audio {
                     self.headphones_devices =
-                        self.studio.read(cx).engine().call(|_| lightair_engine::monitoring::devices());
+                        self.studio.read(cx).engine().call(|_| lightair_obs::monitoring::devices());
                 }
                 if hook == "settings-canvases-edit" {
                     let id = self.studio.read(cx).workspace().primary_canvas().id;
@@ -1194,7 +1194,7 @@ impl StudioWindow {
                     } else if let Some(info) = if hook == "audio-vst3" {
                         crate::plugin_scan::vst3().into_iter().find(|p| p.name.contains("Surge"))
                     } else {
-                        lightair_engine::plugins::scan_audio_units()
+                        lightair_obs::plugins::scan_audio_units()
                             .into_iter()
                             .find(|p| p.vendor == "Apple" && p.name == "AUDelay")
                     } {

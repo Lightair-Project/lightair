@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_model::{Command, Document, Fit, Layout, Object, Scene, Source, Workspace, diff};
 use lightair_preview::{Preview, frame_rgba};
 use serde_json::json;
@@ -18,7 +18,7 @@ fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
 
 #[test]
 fn an_avatar_is_drawn() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
@@ -32,7 +32,7 @@ fn an_avatar_is_drawn() {
 /// A Live2D model the same way (LIGHTAIR_LIVE2D: a .model3.json, not checked in).
 #[test]
 fn a_live2d_avatar_is_drawn() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
@@ -46,7 +46,7 @@ fn a_live2d_avatar_is_drawn() {
 /// An Inochi2D puppet the same way (LIGHTAIR_INOCHI2D: an .inp or .inx, not checked in).
 #[test]
 fn an_inochi2d_avatar_is_drawn() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
@@ -60,7 +60,7 @@ fn an_inochi2d_avatar_is_drawn() {
 /// An Umamo puppet the same way (LIGHTAIR_UMA: a .uma, not checked in).
 #[test]
 fn an_umamo_avatar_is_drawn() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
@@ -121,7 +121,7 @@ fn drawn(file: PathBuf, picture: &str) {
 /// its wrists where the picture has them.
 #[test]
 fn the_body_tracker_sees_a_body() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let Some(picture) = std::env::var_os("LIGHTAIR_BODY_IMAGE").map(PathBuf::from) else {
@@ -149,7 +149,7 @@ fn the_body_tracker_sees_a_body() {
         let mix = |c: u8, bg: u32| ((c as u32 * a + bg * (255 - a)) / 255) as u8;
         bgra.extend_from_slice(&[mix(p[2], 70), mix(p[1], 60), mix(p[0], 60), 255]);
     }
-    let body = engine.call(move |_| lightair_engine::avatar::track_body_once(&bgra, w, h)).expect("a body");
+    let body = engine.call(move |_| lightair_obs::avatar::track_body_once(&bgra, w, h)).expect("a body");
     eprintln!(
         "3D: {}; left wrist 3D {:?}, 2D {:?}",
         body.joints3d.is_some(),

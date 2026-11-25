@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use lightair_model::{Command, Document, Fit, Id, Source, Object, Layout, Workspace, Scene, Shape, ShapeKind, diff};
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_preview::{Frame, Preview, sample_ycbcr};
 use serde_json::json;
 
@@ -46,7 +46,7 @@ fn black(p: (u8, u8, u8)) -> bool {
 
 #[test]
 fn flip_and_tilt() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();

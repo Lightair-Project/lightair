@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use lightair_model::{Command, Document, Layout, Object, Scene, Source, Workspace, diff};
-use lightair_engine::media::{MediaAction, MediaState};
-use lightair_engine::obs::{Data, ObsSource};
-use lightair_engine::{Engine, EngineConfig, sys};
+use lightair_obs::media::{MediaAction, MediaState};
+use lightair_obs::obs::{Data, ObsSource};
+use lightair_obs::{Engine, EngineConfig, sys};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
 
@@ -41,7 +41,7 @@ unsafe extern "C" fn heard(_: *mut std::ffi::c_void, _: *mut sys::obs_source_t, 
 
 #[test]
 fn a_local_video_plays_through_lightairs_own_source() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
@@ -147,7 +147,7 @@ fn a_local_video_plays_through_lightairs_own_source() {
 /// media source shows it sideways).
 #[test]
 fn a_rotated_video_shows_upright() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();

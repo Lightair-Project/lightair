@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use lightair_model::{Command, Document, Effect, Fit, Source, Object, Layout, Workspace, Scene, diff};
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
 
@@ -62,7 +62,7 @@ fn changed(a: &[(u8, u8, u8)], b: &[(u8, u8, u8)]) -> usize {
 
 #[test]
 fn the_follow_zoom_magnifies_and_lets_go() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
@@ -83,7 +83,7 @@ fn the_follow_zoom_magnifies_and_lets_go() {
 
     // the pointer filter as a scene's look puts it, always zoomed (the pointer not drawn)
     let look = |zoom: i64| json!({"draw": false, "clicks": 0, "zoom": zoom, "zoom_scale": 3.0, "zoom_motion": 0.0});
-    let fx = Effect::new("Screen look", lightair_engine::pointer::KIND, look(2));
+    let fx = Effect::new("Screen look", lightair_obs::pointer::KIND, look(2));
     let fid = fx.id;
     apply(&engine, &mut doc, Command::AddSourceEffect { source: iid, effect: fx, index: None });
     let zoomed = grid(&preview, Duration::from_millis(900));

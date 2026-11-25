@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use lightair_model::{
     Command, Direction, Document, Id, Source, Object, Layout, Workspace, Scene, TransitionKind, TransitionSettings, diff,
 };
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
 
@@ -60,7 +60,7 @@ fn transition(
 
 #[test]
 fn directional_and_dip_transitions() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();

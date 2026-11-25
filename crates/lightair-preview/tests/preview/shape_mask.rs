@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use lightair_model::{Command, Crop, Document, Fit, Id, Source, Object, Layout, Workspace, Scene, Shape, ShapeKind, diff};
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
 
@@ -38,7 +38,7 @@ fn white(p: (u8, u8, u8)) -> bool {
 
 #[test]
 fn shapes_are_per_object_and_follow_the_crop() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();

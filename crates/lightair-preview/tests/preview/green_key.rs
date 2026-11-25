@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use lightair_model::{Command, Document, Effect, Fit, Layout, Object, Scene, Source, Workspace, diff};
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::json;
 
@@ -52,7 +52,7 @@ fn picture(path: &std::path::Path, backdrop: [f32; 3]) {
 
 #[test]
 fn the_green_macos_paints_is_keyed_out() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();

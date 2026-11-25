@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_model::{Canvas, Command, Document, Fit, Id, Layout, Object, Scene, Source, Workspace};
 use lightair_preview::Preview;
 use serde_json::json;
@@ -180,7 +180,7 @@ fn wrong(v: &Video, red: (u32, u32), grey: (u32, u32)) -> Vec<(f64, [u8; 3], [u8
 
 #[test]
 fn a_recording_of_the_primary_canvas_carries_the_compositors_picture() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();
@@ -201,7 +201,7 @@ fn a_recording_of_the_primary_canvas_carries_the_compositors_picture() {
 
 #[test]
 fn an_extra_canvass_recording_carries_that_canvass_compositor_picture() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();
@@ -229,7 +229,7 @@ fn an_extra_canvass_recording_carries_that_canvass_compositor_picture() {
 
 #[test]
 fn with_the_preview_hidden_a_recording_keeps_getting_new_compositor_frames() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();
@@ -274,7 +274,7 @@ fn with_the_preview_hidden_a_recording_keeps_getting_new_compositor_frames() {
 
 #[test]
 fn with_no_compositor_every_output_shows_libobs_picture_of_the_program() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();
@@ -298,7 +298,7 @@ fn with_no_compositor_every_output_shows_libobs_picture_of_the_program() {
 
 #[test]
 fn a_canvas_keeps_its_size_while_its_output_records() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();
@@ -313,14 +313,14 @@ fn a_canvas_keeps_its_size_while_its_output_records() {
     let canvas = Canvas { width: 640, height: 360, ..stage.doc.workspace().primary_canvas().clone() };
     apply(&stage.engine, &mut stage.doc, Command::UpdateCanvas { canvas });
     let libobs_size = stage.engine.call(|_| unsafe {
-        let mut ovi = std::mem::zeroed::<lightair_engine::sys::obs_video_info>();
-        lightair_engine::sys::obs_get_video_info(&mut ovi);
+        let mut ovi = std::mem::zeroed::<lightair_obs::sys::obs_video_info>();
+        lightair_obs::sys::obs_get_video_info(&mut ovi);
         (ovi.base_width, ovi.base_height)
     });
     std::thread::sleep(Duration::from_millis(1000));
     let running = matches!(
-        lightair_engine::outputs::runtime().get(lightair_engine::outputs::OutputKey::Recording(stage.primary)).state,
-        lightair_engine::outputs::OutputState::Active { .. }
+        lightair_obs::outputs::runtime().get(lightair_obs::outputs::OutputKey::Recording(stage.primary)).state,
+        lightair_obs::outputs::OutputState::Active { .. }
     );
     record::stop(&stage.engine);
     assert_eq!(libobs_size, (W, H), "the canvas wasn't resized under its recording");
@@ -334,7 +334,7 @@ fn a_canvas_keeps_its_size_while_its_output_records() {
 
 #[test]
 fn a_canvas_resized_while_nothing_records_records_at_its_new_size() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();
@@ -369,7 +369,7 @@ fn a_canvas_resized_while_nothing_records_records_at_its_new_size() {
 
 #[test]
 fn opening_another_workspace_keeps_the_primary_output_and_shows_its_program() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();
@@ -408,8 +408,8 @@ fn opening_another_workspace_keeps_the_primary_output_and_shows_its_program() {
     std::thread::sleep(Duration::from_millis(2000));
     let reopened = opened.elapsed().as_secs_f64();
     let running = matches!(
-        lightair_engine::outputs::runtime().get(lightair_engine::outputs::OutputKey::Recording(stage.primary)).state,
-        lightair_engine::outputs::OutputState::Active { .. }
+        lightair_obs::outputs::runtime().get(lightair_obs::outputs::OutputKey::Recording(stage.primary)).state,
+        lightair_obs::outputs::OutputState::Active { .. }
     );
     record::stop(&stage.engine);
     assert!(running, "the recording carried on");
@@ -430,7 +430,7 @@ fn opening_another_workspace_keeps_the_primary_output_and_shows_its_program() {
 
 #[test]
 fn opening_a_workspace_of_another_size_records_its_canvases_at_their_sizes() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();

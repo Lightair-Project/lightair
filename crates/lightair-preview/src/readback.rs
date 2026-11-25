@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-use lightair_engine::sys;
+use lightair_obs::sys;
 use parking_lot::Mutex;
 
 use crate::render::{draw_scaled, draw_with};
@@ -174,7 +174,7 @@ impl Preview {
     }
 
     /// Previews another canvas (an additional format), e.g. from `Reconciler::canvas_ref`.
-    pub fn attach_canvas(canvas: lightair_engine::obs::CanvasRef) -> Self {
+    pub fn attach_canvas(canvas: lightair_obs::obs::CanvasRef) -> Self {
         Self::attach_to(Some(CanvasRef(canvas.into_raw())))
     }
 
@@ -201,7 +201,7 @@ impl Preview {
         self.0.shared.size.store(packed, Ordering::Relaxed);
     }
 
-    pub fn set_source(&self, source: Option<lightair_engine::obs::SourceRef>) {
+    pub fn set_source(&self, source: Option<lightair_obs::obs::SourceRef>) {
         let new = source.map(|s| {
             let p = s.into_raw();
             unsafe { sys::obs_source_inc_showing(p) };
@@ -235,8 +235,8 @@ impl Preview {
     }
 
     /// The source shown instead of the program, if any (a new reference).
-    pub fn source(&self) -> Option<lightair_engine::obs::SourceRef> {
-        self.0.shared.source.lock().as_ref().and_then(|s| unsafe { lightair_engine::obs::SourceRef::from_borrowed(s.0) })
+    pub fn source(&self) -> Option<lightair_obs::obs::SourceRef> {
+        self.0.shared.source.lock().as_ref().and_then(|s| unsafe { lightair_obs::obs::SourceRef::from_borrowed(s.0) })
     }
 
     pub fn set_active(&self, active: bool) {

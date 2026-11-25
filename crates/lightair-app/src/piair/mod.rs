@@ -31,8 +31,8 @@ use lightair_model::Id;
 use lightair_remote::{ApiError, Call, ErrorKind, Reply};
 use serde_json::{Value, json};
 
-use lightair_engine::face_drive;
-use lightair_engine::piair_voice;
+use lightair_obs::face_drive;
+use lightair_obs::piair_voice;
 
 /// Where calls go to be answered on the main thread (the remote API's queue).
 pub type Jobs = futures_channel::mpsc::UnboundedSender<(Call, std::sync::mpsc::Sender<Reply>)>;
@@ -118,7 +118,7 @@ pub struct Shared {
     /// The mixer tracks the co-host hears, and as what (the active co-host's "Hears").
     pub hears: Mutex<Vec<Hearing>>,
     /// The engine, to tap what it hears.
-    engine: std::sync::Arc<lightair_engine::Engine>,
+    engine: std::sync::Arc<lightair_obs::Engine>,
     /// AI keys, voice lists and previews (Settings → Connections, the Voice section).
     pub ai: Mutex<AiState>,
     /// How each heard track's listening is going, for the Inspector's Hears list.
@@ -202,13 +202,13 @@ pub fn hearing(w: &lightair_model::Workspace, cohost: &Value) -> Vec<crate::piai
     let echo: Vec<Id> = w
         .tracks
         .iter()
-        .filter(|t| w.sources.get(&t.source).is_some_and(|s| s.kind == lightair_engine::piair_voice::KIND))
+        .filter(|t| w.sources.get(&t.source).is_some_and(|s| s.kind == lightair_obs::piair_voice::KIND))
         .map(|t| t.id)
         .collect();
     let make = |track: &str, role: Role| -> Option<Hearing> {
         let t = w.tracks.iter().find(|t| t.id.to_string() == track)?;
         let source = w.sources.get(&t.source)?;
-        (source.kind != lightair_engine::piair_voice::KIND).then(|| Hearing {
+        (source.kind != lightair_obs::piair_voice::KIND).then(|| Hearing {
             track: t.id,
             source: t.source,
             name: t.name.clone(),
@@ -282,7 +282,7 @@ pub struct AiState {
 pub struct Host(pub Arc<Shared>);
 
 impl Host {
-    pub fn new(jobs: Jobs, hub: lightair_live::Hub, engine: std::sync::Arc<lightair_engine::Engine>) -> Host {
+    pub fn new(jobs: Jobs, hub: lightair_live::Hub, engine: std::sync::Arc<lightair_obs::Engine>) -> Host {
         let shared = Arc::new(Shared {
             state: Mutex::new(State { status: "idle".into(), ..Default::default() }),
             stdin: Mutex::new(None),
@@ -520,7 +520,7 @@ impl Host {
     fn halt(&self) {
         self.0.computer.ai_drives.store(false, Ordering::Relaxed);
         piair_voice::cancel(None);
-        lightair_engine::zoom_to::release();
+        lightair_obs::zoom_to::release();
         if let Some(q) = self.state().question.take() {
             let _ = q.answer.send(false);
         }
@@ -772,7 +772,7 @@ impl Host {
                     }
                     // the streamer talks: a mic above -42 dBFS, held 300 ms
                     let mics = host.0.mics.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    let loud = mics.iter().filter_map(|id| lightair_engine::meters::meters().get(*id)).any(|c| c.levels().magnitude.iter().any(|m| *m > -42.0));
+                    let loud = mics.iter().filter_map(|id| lightair_obs::meters::meters().get(*id)).any(|c| c.levels().magnitude.iter().any(|m| *m > -42.0));
                     if loud {
                         loud_until = Instant::now() + Duration::from_millis(300);
                     }
@@ -1052,7 +1052,7 @@ pub const COHOST: &str = "cohost";
 
 /// An avatar source that is an AI co-host.
 pub fn is_cohost(source: &lightair_model::Source) -> bool {
-    source.kind == lightair_engine::avatar::KIND && source.settings.get(COHOST).is_some_and(Value::is_object)
+    source.kind == lightair_obs::avatar::KIND && source.settings.get(COHOST).is_some_and(Value::is_object)
 }
 
 /// The Hierarchy's and Inspector's icon for a source: the co-host's own, else the kind's.
@@ -1173,7 +1173,7 @@ fn adopt_copies(
         if !(shared || missing) {
             return;
         }
-        let voice = lightair_model::Source::new(source.name.clone(), lightair_engine::piair_voice::KIND, json!({}));
+        let voice = lightair_model::Source::new(source.name.clone(), lightair_obs::piair_voice::KIND, json!({}));
         let track = lightair_model::Track::new(source.name.clone(), voice.id);
         source.settings[COHOST]["voice_track"] = json!(track.id.to_string());
         if crate::avatar_library::kind_of(source.settings["file"].as_str().unwrap_or("")) == "PNGtuber" {
@@ -1618,7 +1618,7 @@ fn apple_locale(code: &str) -> &str {
     }
 }
 
-/// Listening to one heard track: Lightair taps its sound (`lightair_engine::audio_tap`) and the
+/// Listening to one heard track: Lightair taps its sound (`lightair_obs::audio_tap`) and the
 /// bundled `lightair-speech` helper (Apple's on-device speech recognition) turns it into text.
 struct Listener {
     child: Child,
@@ -1653,7 +1653,7 @@ struct ListenState {
 
 impl Listener {
     /// Starts listening to a track, or says why it can't.
-    fn start(engine: &std::sync::Arc<lightair_engine::Engine>, h: &Hearing) -> Result<Listener, String> {
+    fn start(engine: &std::sync::Arc<lightair_obs::Engine>, h: &Hearing) -> Result<Listener, String> {
         if !cfg!(target_os = "macos") {
             return Err("Hearing needs macOS for now.".into());
         }
@@ -1830,22 +1830,22 @@ impl Drop for Listener {
 }
 
 
-/// A track's sound to hear (mono, [`lightair_engine::audio_host::LISTEN_RATE`]): from Lightair's
+/// A track's sound to hear (mono, [`lightair_obs::audio_host::LISTEN_RATE`]): from Lightair's
 /// mixer, after the track's effects and before its fader, silent while `muted` (a mic or audio
 /// interface is captured by the mixer itself: its libobs source is only a placeholder with no
 /// sound). With no mixer running, from the libobs source (the tap is then held with it).
 fn track_sound(
-    engine: &std::sync::Arc<lightair_engine::Engine>,
+    engine: &std::sync::Arc<lightair_obs::Engine>,
     track: Id,
     source: Id,
     muted: std::sync::Arc<AtomicBool>,
-) -> Option<(Option<lightair_engine::audio_tap::Tap>, rtrb::Consumer<i16>)> {
+) -> Option<(Option<lightair_obs::audio_tap::Tap>, rtrb::Consumer<i16>)> {
     engine.call(move |e| {
         if let Some(c) = e.reconciler.listen_track(track, lightair_audio::Tap::PreFader, muted) {
             return Some((None, c));
         }
         e.reconciler.source_ref(source).map(|s| {
-            let (tap, c) = lightair_engine::audio_tap::Tap::open_source(s);
+            let (tap, c) = lightair_obs::audio_tap::Tap::open_source(s);
             (Some(tap), c)
         })
     })
@@ -1880,7 +1880,7 @@ impl Hearer {
 
     fn new() -> Self {
         use sonora::config::EchoCanceller;
-        let rate = lightair_engine::audio_host::LISTEN_RATE;
+        let rate = lightair_obs::audio_host::LISTEN_RATE;
         let config = sonora::Config { echo_canceller: Some(EchoCanceller::default()), ..Default::default() };
         let apm = sonora::AudioProcessing::builder()
             .config(config)
@@ -1969,7 +1969,7 @@ impl Forwarder {
                 // never waits on it for long)
                 voices.retain(|v| !v.is_abandoned());
                 let n = match heard.slots() {
-                    n if n > lightair_engine::audio_host::LISTEN_RATE as usize => n,
+                    n if n > lightair_obs::audio_host::LISTEN_RATE as usize => n,
                     n => voices.iter().map(|v| v.slots()).fold(n, usize::min),
                 };
                 if n == 0 {
@@ -2053,7 +2053,7 @@ mod tests {
     use serde_json::json;
 
     use super::{Auth, FaceLook, Incoming, Line, parse_line, voice_track_commands};
-    use lightair_engine::piair_voice::Shape;
+    use lightair_obs::piair_voice::Shape;
 
     /// Turning PiAir on adds its voice source and the "PiAir" track once; a workspace that has
     /// them gets no second one.

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command as Proc;
 use std::time::{Duration, Instant};
 
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_model::{
     Command, Document, Fit, Id, Layout, Object, Scene, Show, Source, TransitionKind, TransitionSettings, Workspace,
 };
@@ -63,7 +63,7 @@ fn temp(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn a_scenes_media_sound_is_in_the_recording_while_the_scene_is_on_air() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();
@@ -123,7 +123,7 @@ fn a_scenes_media_sound_is_in_the_recording_while_the_scene_is_on_air() {
 
 #[test]
 fn a_source_in_an_overlay_stays_active() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();

@@ -88,7 +88,7 @@ mod mac {
 
 /// Every permission, as it stands now.
 pub fn all() -> Vec<Permission> {
-    use lightair_engine::access::{Media, allowed};
+    use lightair_obs::access::{Media, allowed};
     let av = |m| match allowed(m) {
         Some(true) => State::Allowed,
         Some(false) => State::Denied,
@@ -145,7 +145,7 @@ pub fn all() -> Vec<Permission> {
 
 /// Asks macOS for it where it can be asked (the prompt), else opens its System Settings pane.
 pub fn ask(key: &str) {
-    use lightair_engine::access::{Media, allowed, ask as ask_av};
+    use lightair_obs::access::{Media, allowed, ask as ask_av};
     match key {
         "camera" | "microphone" => {
             let m = if key == "camera" { Media::Camera } else { Media::Microphone };

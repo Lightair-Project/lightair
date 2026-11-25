@@ -19,7 +19,7 @@ use std::ptr::{self, NonNull};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use lightair_engine::sys;
+use lightair_obs::sys;
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType};
 use objc2_core_video::{
     CVAttachmentMode, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetIOSurface,
@@ -615,7 +615,7 @@ impl Preview {
     }
 
     /// Previews another canvas (an additional format), e.g. from `Reconciler::canvas_ref`.
-    pub fn attach_canvas(canvas: lightair_engine::obs::CanvasRef) -> Self {
+    pub fn attach_canvas(canvas: lightair_obs::obs::CanvasRef) -> Self {
         Self::attach_to(Some(CanvasRef(canvas.into_raw())))
     }
 
@@ -643,7 +643,7 @@ impl Preview {
     /// follows the primary canvas; another canvas's (`attach_canvas`), that canvas. False when
     /// the switch is off or the compositor couldn't start.
     pub fn compose_program(&self) -> bool {
-        if !lightair_engine::bridge::own() {
+        if !lightair_obs::bridge::own() {
             return false;
         }
         let target = match &self.0.shared.canvas {
@@ -674,7 +674,7 @@ impl Preview {
 
     /// Shows `source` (e.g. a scene that isn't on air) instead of the program, or the program
     /// again with `None`.
-    pub fn set_source(&self, source: Option<lightair_engine::obs::SourceRef>) {
+    pub fn set_source(&self, source: Option<lightair_obs::obs::SourceRef>) {
         let new = source.map(|s| {
             let p = s.into_raw();
             unsafe { sys::obs_source_inc_showing(p) };
@@ -704,8 +704,8 @@ impl Preview {
     }
 
     /// The source shown instead of the program, if any (a new reference).
-    pub fn source(&self) -> Option<lightair_engine::obs::SourceRef> {
-        self.0.shared.source.lock().as_ref().and_then(|s| unsafe { lightair_engine::obs::SourceRef::from_borrowed(s.0) })
+    pub fn source(&self) -> Option<lightair_obs::obs::SourceRef> {
+        self.0.shared.source.lock().as_ref().and_then(|s| unsafe { lightair_obs::obs::SourceRef::from_borrowed(s.0) })
     }
 
     /// Pauses or resumes rendering (hidden views cost nothing).
@@ -754,7 +754,7 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     }
     // with Lightair's own compositor libobs also draws each canvas's output canvas, and calls
     // this after each canvas: the preview is drawn after the first (the main canvas, drawn first)
-    if lightair_engine::bridge::own() {
+    if lightair_obs::bridge::own() {
         let frame = unsafe { sys::obs_get_video_frame_time() };
         if shared.last_frame.swap(frame, Ordering::Relaxed) == frame {
             return;

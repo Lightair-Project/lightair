@@ -245,7 +245,7 @@ impl Computer {
             "computer.zoom_to" => {
                 let at = self.point(p)?;
                 let hold = num(p, "hold_s").unwrap_or(4.0).clamp(0.5, 15.0);
-                lightair_engine::zoom_to::zoom_to(at, num(p, "scale"), Duration::from_secs_f32(hold));
+                lightair_obs::zoom_to::zoom_to(at, num(p, "scale"), Duration::from_secs_f32(hold));
                 Ok(json!({}))
             }
             _ => Err(refuse("unknown", format!("No method {method}"))),

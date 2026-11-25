@@ -302,7 +302,7 @@ impl StudioWindow {
                         this.shortcut_capture = None;
                         if p == Page::Audio {
                             this.headphones_devices =
-                                this.studio.read(cx).engine().call(|_| lightair_engine::monitoring::devices());
+                                this.studio.read(cx).engine().call(|_| lightair_obs::monitoring::devices());
                         }
                         cx.notify();
                     })),
@@ -325,8 +325,8 @@ impl StudioWindow {
             Page::About => self.about_page(cx),
         };
         let title = PAGES.iter().find(|(p, ..)| *p == page).map_or("", |(_, l, _)| *l);
-        let live = lightair_engine::outputs::runtime().any_stream_running()
-            || lightair_engine::outputs::runtime().any_recording_running();
+        let live = lightair_obs::outputs::runtime().any_stream_running()
+            || lightair_obs::outputs::runtime().any_recording_running();
         Some(
             div()
                 .absolute()
@@ -474,7 +474,7 @@ impl StudioWindow {
                                     this.studio
                                         .read(cx)
                                         .engine()
-                                        .call(move |_| lightair_engine::monitoring::set(&n2, &i2));
+                                        .call(move |_| lightair_obs::monitoring::set(&n2, &i2));
                                     this.set_pref(|p| p.headphones_device = (i != "default").then_some((n, i)), cx);
                                     this.apply_headphones(cx);
                                 });
@@ -513,7 +513,7 @@ impl StudioWindow {
         }
         let block = prefs.audio_block;
         let mut blocks = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
-        for (i, frames) in lightair_engine::audio_host::BLOCKS.into_iter().enumerate() {
+        for (i, frames) in lightair_obs::audio_host::BLOCKS.into_iter().enumerate() {
             let ms = frames as f32 * 1000.0 / running.max(1) as f32;
             blocks = blocks.child(
                 pref_chip(("audio-block", i), format!("{frames} · {ms:.1} ms"), block == frames)
@@ -1037,7 +1037,7 @@ impl StudioWindow {
             })
             .child({
                 let on = self.prefs.rtsp_output;
-                let address = on.then(lightair_engine::rtsp::address).flatten();
+                let address = on.then(lightair_obs::rtsp::address).flatten();
                 group_tip("RTSP", "Players on your network (VLC, a hardware decoder, a video wall) open the program by its address.")
                     .child(row(
                         "Serve the program over RTSP",
@@ -1051,7 +1051,7 @@ impl StudioWindow {
     pub(super) fn set_rtsp_output(&mut self, on: bool, cx: &mut Context<Self>) {
         let engine = self.studio.read(cx).engine().clone();
         let encoders = engine.capabilities.encoders.clone();
-        match engine.call(move |_| lightair_engine::rtsp::set(on, &encoders)) {
+        match engine.call(move |_| lightair_obs::rtsp::set(on, &encoders)) {
             Ok(()) => {
                 self.prefs.rtsp_output = on;
                 let _ = crate::prefs::save_to(&crate::prefs::path(), &self.prefs);
@@ -1068,7 +1068,7 @@ impl StudioWindow {
     pub(super) fn set_ndi_output(&mut self, on: bool, cx: &mut Context<Self>) {
         let name = if on { "Lightair".to_string() } else { String::new() };
         let n = name.clone();
-        let result = self.studio.read(cx).engine().call(move |_| lightair_engine::ndi::set_output(&n));
+        let result = self.studio.read(cx).engine().call(move |_| lightair_obs::ndi::set_output(&n));
         match result {
             Ok(()) => {
                 self.prefs.ndi_output = name;
@@ -1214,8 +1214,8 @@ impl StudioWindow {
     fn canvases_page(&self, cx: &mut Context<Self>) -> Div {
         let workspace = self.studio.read(cx).workspace().clone();
         let primary = workspace.primary_canvas().id;
-        let busy = lightair_engine::outputs::runtime().any_stream_running()
-            || lightair_engine::outputs::runtime().any_recording_running();
+        let busy = lightair_obs::outputs::runtime().any_stream_running()
+            || lightair_obs::outputs::runtime().any_recording_running();
         let mut list = group_tip("Canvases", "Each canvas is another shape of every scene (vertical for TikTok, say), recorded and streamed on its own.");
         for (i, f) in workspace.canvases.iter().enumerate() {
             let id = f.id;

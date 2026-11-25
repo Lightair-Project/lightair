@@ -376,7 +376,7 @@ fn dev(release: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The OBS modules the Windows app ships (lightair-engine's DEFAULT_MODULES for Windows, but
+/// The OBS modules the Windows app ships (lightair-obs's DEFAULT_MODULES for Windows, but
 /// Lightair's own Lightair Effect Stack, built here): keep the two lists alike.
 #[cfg(windows)]
 const WINDOWS_MODULES: &[&str] = &[
@@ -1048,8 +1048,8 @@ struct TestBin {
 const MEASUREMENTS: &[&str] = &["podcast_graph_cost", "frames_per_second", "swizzle_cost"];
 
 /// Test programs whose tests start libobs (process-global): each test runs as a process of its
-/// own (lightair_engine::testing).
-const OWN_PROCESS: &[&str] = &["lightair-engine/engine", "lightair-preview/preview"];
+/// own (lightair_obs::testing).
+const OWN_PROCESS: &[&str] = &["lightair-obs/engine", "lightair-preview/preview"];
 
 /// `cargo test` runs test programs one after another, and most of ours start libobs and record
 /// real seconds of video, so they spend their time waiting. This builds them all, then runs them

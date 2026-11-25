@@ -59,7 +59,7 @@ use crate::rows::{DraggedRow, Renaming, RowTarget};
 use crate::safe_areas::{self, Profile};
 use crate::studio::Studio;
 use crate::ui::{self, tok};
-use lightair_engine::outputs::{OutputState, runtime};
+use lightair_obs::outputs::{OutputState, runtime};
 use std::time::Instant;
 
 /// Output devices (name, id) and when they were read.
@@ -368,7 +368,7 @@ pub struct StudioWindow {
     /// What each source's face effects see (polled while it's selected).
     presence: std::collections::HashMap<Id, effects::Presence>,
     /// What each avatar is doing (polled while it's selected), and the last Calibrate's word.
-    avatar_status: std::collections::HashMap<Id, lightair_engine::avatar::Status>,
+    avatar_status: std::collections::HashMap<Id, lightair_obs::avatar::Status>,
     avatar_note: Option<(Id, String)>,
     /// The avatar library, its sheet, the "Pin to" picker, and the library entries whose picture
     /// was taken (or tried) since launch.
@@ -405,9 +405,9 @@ pub struct StudioWindow {
     /// Open plugin editor windows, by effect.
     plugin_editors: std::collections::HashMap<Id, crate::plugin_editor::Editor>,
     /// The installed plugins (scanned when the audio catalog first opens).
-    plugin_list: Option<std::sync::Arc<Vec<lightair_engine::plugins::PluginInfo>>>,
+    plugin_list: Option<std::sync::Arc<Vec<lightair_obs::plugins::PluginInfo>>>,
     /// Audio interfaces (for track channel pickers), and when they were read.
-    interfaces: RefCell<(std::time::Instant, Vec<lightair_engine::devices::DeviceInfo>)>,
+    interfaces: RefCell<(std::time::Instant, Vec<lightair_obs::devices::DeviceInfo>)>,
     /// The transition tile playing its preview (under the pointer), and since when.
     transition_hover: Option<(usize, Instant)>,
     /// The scene's transition being edited is its rule for switching from this scene:
@@ -556,7 +556,7 @@ const SNAP_PX: f32 = 8.0;
 /// the pointer, without Lightair's own windows.
 pub(crate) fn display_settings() -> serde_json::Value {
     let mut settings = json!({"mode": lightair_model::kinds::DISPLAY, "cursor": true, "hide_obs": true});
-    if let Some(uuid) = lightair_engine::displays::main_display_uuid() {
+    if let Some(uuid) = lightair_obs::displays::main_display_uuid() {
         settings["display"] = uuid.into();
     }
     settings
@@ -656,7 +656,7 @@ impl StudioWindow {
         cx.spawn(async move |this, cx| {
             let mut badge: Option<lightair_platform::pointer_badge::Badge> = None;
             loop {
-                let zoom = lightair_engine::pointer::live_zoom();
+                let zoom = lightair_obs::pointer::live_zoom();
                 if zoom.is_some() && badge.is_none() {
                     badge = lightair_platform::pointer_badge::Badge::new();
                 }
@@ -708,7 +708,7 @@ impl StudioWindow {
         if crate::prefs::load_from(&crate::prefs::path()).rtsp_output {
             let encoders = studio.read(cx).engine().capabilities.encoders.clone();
             studio.read(cx).engine().post(move |_| {
-                if let Err(e) = lightair_engine::rtsp::set(true, &encoders) {
+                if let Err(e) = lightair_obs::rtsp::set(true, &encoders) {
                     tracing::warn!(%e, "RTSP");
                 }
             });
@@ -717,7 +717,7 @@ impl StudioWindow {
         let ndi = crate::prefs::load_from(&crate::prefs::path()).ndi_output;
         if !ndi.is_empty() {
             studio.read(cx).engine().post(move |_| {
-                if let Err(e) = lightair_engine::ndi::set_output(&ndi) {
+                if let Err(e) = lightair_obs::ndi::set_output(&ndi) {
                     tracing::warn!(%e, "NDI output");
                 }
             });
@@ -1342,7 +1342,7 @@ impl StudioWindow {
                     .get((n as usize).saturating_sub(1))
                     .map(|d| d.id);
                 if let Some(id) = id {
-                    let running = runtime().get(lightair_engine::outputs::OutputKey::Stream(id)).state.is_running();
+                    let running = runtime().get(lightair_obs::outputs::OutputKey::Stream(id)).state.is_running();
                     self.studio.update(cx, |s, cx| {
                         if running {
                             s.stop_destination(id, cx)
@@ -1358,7 +1358,7 @@ impl StudioWindow {
             A::SaveClip => self.studio.update(cx, |s, cx| s.save_clip(cx)),
             A::MuteMics => self.studio.update(cx, |s, cx| s.toggle_mics(cx)),
             A::FollowZoom => {
-                lightair_engine::pointer::toggle_follow();
+                lightair_obs::pointer::toggle_follow();
                 cx.notify();
             }
             A::Scene(n) => self.scene_shortcut(n.saturating_sub(1) as usize, window, cx),
@@ -1459,7 +1459,7 @@ impl StudioWindow {
                 let preview = Preview::attach_canvas(canvas);
                 // Lightair's own compositor draws the canvas's program, as it does its outputs
                 #[cfg(target_os = "macos")]
-                if lightair_engine::bridge::own() && !preview.compose_program() {
+                if lightair_obs::bridge::own() && !preview.compose_program() {
                     tracing::warn!(canvas = f.name, "LIGHTAIR_ENGINE=own: the compositor didn't start; libobs draws the canvas");
                 }
                 self.previews.insert(id, preview);
@@ -2046,7 +2046,7 @@ impl StudioWindow {
         cx: &mut Context<Self>,
     ) -> Option<Id> {
         // a source with sound of its own (a web page) also gets a mixer track
-        let sound = kind == lightair_engine::web::KIND;
+        let sound = kind == lightair_obs::web::KIND;
         self.add_placed_object(name, kind, settings, size, (0.5, 0.5), sound, cx)
     }
 
@@ -2186,7 +2186,7 @@ impl StudioWindow {
             "color1": 0xFFFFFFFFu32,
             "color2": 0xFFFFFFFFu32,
         });
-        self.add_source_object("Countdown", lightair_engine::timers::TIMER_KIND, settings, (560.0, 200.0), cx)
+        self.add_source_object("Countdown", lightair_obs::timers::TIMER_KIND, settings, (560.0, 200.0), cx)
     }
 
     fn add_colour(&mut self, cx: &mut Context<Self>) {
@@ -2923,7 +2923,7 @@ impl StudioWindow {
 
     /// [● Record | ⌄]: the record button, and the mode beside it.
     /// (`compact`: idle, just its symbol, the label in the tooltip.)
-    fn record_control(&self, rec: &lightair_engine::outputs::OutputStatus, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn record_control(&self, rec: &lightair_obs::outputs::OutputStatus, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         use crate::prefs::RecordMode;
         use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
         let studio = self.studio.read(cx);
@@ -3071,8 +3071,8 @@ impl StudioWindow {
         }
         let on = matches!(state, OutputState::Active { .. });
         let busy = matches!(state, OutputState::Starting | OutputState::Stopping);
-        let installed = lightair_engine::vcam::installed();
-        let ours_installable = lightair_engine::vcam::lightair_installable();
+        let installed = lightair_obs::vcam::installed();
+        let ours_installable = lightair_obs::vcam::lightair_installable();
         let failed = match &state {
             OutputState::Failed(e) => Some(e.clone()),
             _ => None,
@@ -3081,7 +3081,7 @@ impl StudioWindow {
             format!("Virtual camera on, showing {shown_name}. In other apps, choose “{listed}”. Click to stop.").into()
         } else if busy {
             "Virtual camera starting…".into()
-        } else if let Some(e) = failed.as_ref().filter(|e| e.as_str() == lightair_engine::vcam::NOT_INSTALLED) {
+        } else if let Some(e) = failed.as_ref().filter(|e| e.as_str() == lightair_obs::vcam::NOT_INSTALLED) {
             format!("Virtual camera: {e} Install it from the menu (⌄): Windows asks for an administrator's approval.").into()
         } else if let Some(e) = &failed {
             format!("Virtual camera: {e} Click to try again.").into()
@@ -5188,9 +5188,9 @@ impl StudioWindow {
         } else {
             String::new()
         };
-        let encoder_skipped = lightair_engine::outputs::primary_skipped_frames();
+        let encoder_skipped = lightair_obs::outputs::primary_skipped_frames();
         let network_dropped: i64 =
-            lightair_engine::outputs::runtime().streams().iter().map(|(_, st)| st.dropped_frames.max(0) as i64).sum();
+            lightair_obs::outputs::runtime().streams().iter().map(|(_, st)| st.dropped_frames.max(0) as i64).sum();
         let panel = open.then(|| {
             deferred(
                 div()

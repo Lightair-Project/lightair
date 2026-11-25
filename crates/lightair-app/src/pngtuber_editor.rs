@@ -343,7 +343,7 @@ impl PngEditor {
         self.last = now;
         self.level_db = self
             .mic
-            .and_then(|id| lightair_engine::meters::meters().get(id))
+            .and_then(|id| lightair_obs::meters::meters().get(id))
             .map_or(f32::NEG_INFINITY, |m| m.levels().magnitude.iter().copied().fold(f32::NEG_INFINITY, f32::max));
         if self.dirty {
             self.puppet.set_avatar(self.avatar.clone());

@@ -876,7 +876,7 @@ impl Drop for Shared {
 mod tests {
     use super::*;
 
-    /// What Lightair's output does (crates/lightair-engine/src/vcam.rs), in short: one flat frame.
+    /// What Lightair's output does (crates/lightair-obs/src/vcam.rs), in short: one flat frame.
     fn write_frame(y: u8, uv: u8) -> bool {
         let n = wide(p::MEMORY_LOCAL);
         let global = wide(p::MEMORY_GLOBAL);

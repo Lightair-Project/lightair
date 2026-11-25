@@ -74,7 +74,7 @@ pub fn plain_workspace() -> Workspace {
     );
     let timer = Source::new(
         "Countdown",
-        lightair_engine::timers::TIMER_KIND,
+        lightair_obs::timers::TIMER_KIND,
         json!({"mode": "countdown", "seconds": 300, "font": {"face": crate::ui::TEXT_FACE, "size": 96, "flags": 0}, "color1": 0xFFFFFFFFu32, "color2": 0xFFFFFFFFu32}),
     );
     let icon = brand_icon();

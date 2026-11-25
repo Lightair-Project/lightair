@@ -71,7 +71,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::*;
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_preview::Preview;
 
 use crate::shell::StudioWindow;
@@ -139,7 +139,7 @@ fn main() {
     );
     tracing::info!(version = engine.version, workspace = %workspace_dir.display(), "libobs started");
     if let Some((name, id)) = prefs.headphones_device.clone() {
-        engine.call(move |_| lightair_engine::monitoring::set(&name, &id));
+        engine.call(move |_| lightair_obs::monitoring::set(&name, &id));
     }
     let monitor = prefs.low_latency_headphones.then(|| prefs.headphones_device.clone().map_or(String::new(), |(_, id)| id));
     let program = prefs.headphones_hear_program;
@@ -158,7 +158,7 @@ fn main() {
     let preview = Preview::attach();
     // Lightair's own compositor draws the program in the window instead of libobs
     #[cfg(target_os = "macos")]
-    if lightair_engine::bridge::own() && !preview.compose_program() {
+    if lightair_obs::bridge::own() && !preview.compose_program() {
         tracing::warn!("LIGHTAIR_ENGINE=own: the compositor didn't start; libobs draws the program");
     }
 
@@ -167,12 +167,12 @@ fn main() {
         // a camera (an iPhone's above all) that comes back: its captures start again
         lightair_platform::devices::watch_cameras(|uid| {
             tracing::debug!(%uid, "camera connected");
-            lightair_engine::on_screen::device_reconnected(&uid);
+            lightair_obs::on_screen::device_reconnected(&uid);
         });
         // VST3 plugins are made, edited and torn down on this thread
         // (GPUI's foreground executor: the main thread on both platforms)
         let (jobs, mut queue) = futures_channel::mpsc::unbounded::<Box<dyn FnOnce() + Send>>();
-        lightair_engine::plugins::set_main_thread(move |job| {
+        lightair_obs::plugins::set_main_thread(move |job| {
             let _ = jobs.unbounded_send(job);
         });
         cx.foreground_executor()

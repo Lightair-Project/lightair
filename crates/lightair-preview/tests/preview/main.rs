@@ -1,6 +1,6 @@
 //! lightair-preview's tests against real libobs, one test program (one build and link, not one per file).
 //! libobs runs once per process: a test that starts an engine runs in a process of its
-//! own (`lightair_engine::testing`).
+//! own (`lightair_obs::testing`).
 
 mod avatar;
 mod crop_view;

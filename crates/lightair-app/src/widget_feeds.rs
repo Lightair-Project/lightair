@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lightair_engine::Engine;
+use lightair_obs::Engine;
 use lightair_widgets::Widgets;
 use serde_json::{Value, json};
 
@@ -339,7 +339,7 @@ fn bands(samples: &[f32], rate: f32) -> Vec<f32> {
 }
 
 fn spectrum(w: Widgets, engine: Arc<Engine>) {
-    let rate = lightair_engine::audio_host::LISTEN_RATE as f32;
+    let rate = lightair_obs::audio_host::LISTEN_RATE as f32;
     loop {
         if !w.has_kind("visualiser") {
             std::thread::sleep(Duration::from_secs(1));

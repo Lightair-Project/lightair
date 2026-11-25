@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use gpui_kit::{Context, SharedString};
 use lightair_model::{Command, CommandError, Document, Id, Workspace, diff};
-use lightair_engine::outputs::{
+use lightair_obs::outputs::{
     ClipsConfig, Container, OutputKey, OutputState, RecordingConfig, StreamConfig, default_encoders, runtime,
 };
-use lightair_engine::{Engine, Stats};
+use lightair_obs::{Engine, Stats};
 use lightair_store::Package;
 use lightair_store::recordings::{self, File as ItemFile, Index, Item, Kind, Marker};
 
@@ -39,7 +39,7 @@ struct StudioTakeRun {
     started: std::time::Instant,
     recorder: Option<lightair_platform::input::Recorder>,
     log: Option<lightair_store::input_log::Writer>,
-    tracks: Vec<lightair_engine::studio_take::Track>,
+    tracks: Vec<lightair_obs::studio_take::Track>,
     /// Its track files, and whose sound each is (the mixer track's name).
     audio: Vec<(PathBuf, String)>,
     stopping: bool,
@@ -150,8 +150,8 @@ const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 fn stream_net(
     d: &lightair_model::Destination,
     interfaces: &[lightair_platform::net::Interface],
-) -> Result<lightair_engine::outputs::StreamNet, String> {
-    use lightair_engine::outputs::StreamProtocol;
+) -> Result<lightair_obs::outputs::StreamNet, String> {
+    use lightair_obs::outputs::StreamProtocol;
     use lightair_model::IpFamily;
     let net = &d.options.network;
     let rtmp = matches!(StreamProtocol::of(&d.server), Some(StreamProtocol::Rtmp));
@@ -184,7 +184,7 @@ fn stream_net(
             Some(address.to_string())
         }
     };
-    Ok(lightair_engine::outputs::StreamNet {
+    Ok(lightair_obs::outputs::StreamNet {
         bind_ip,
         ip_family: net.ip_family,
         delay: d.options.delay.filter(|x| x.seconds > 0).map(|x| (x.seconds, x.preserve_cutoff)),
@@ -485,7 +485,7 @@ impl Studio {
             let state = self.engine.call(move |s| s.reconciler.media_status(id)).map(|s| s.state);
             if matches!(
                 state,
-                None | Some(lightair_engine::media::MediaState::Ended | lightair_engine::media::MediaState::Error)
+                None | Some(lightair_obs::media::MediaState::Ended | lightair_obs::media::MediaState::Error)
             ) {
                 finished.push((*scene, *object, *source));
             }
@@ -507,12 +507,12 @@ impl Studio {
 
     /// Plays the mixer again once a plugin insert has loaded (it passes audio through until then).
     pub fn refresh_plugins(&mut self) {
-        if lightair_engine::plugins::changed() {
+        if lightair_obs::plugins::changed() {
             let workspace = self.workspace().clone();
             self.engine.post(move |s| s.reconciler.refresh_audio(&workspace));
         }
         // the camera and microphone sources held back for macOS's prompt, once answered
-        if lightair_engine::access::changed() {
+        if lightair_obs::access::changed() {
             let workspace = self.workspace().clone();
             self.engine.post(move |s| s.reconciler.access_answered(&workspace));
         }
@@ -809,7 +809,7 @@ impl Studio {
     /// Lightair's (Windows 11), used from the next start of the camera; OBS's elsewhere, there
     /// from Lightair's next start (libobs lists its outputs as it loads its modules).
     pub fn install_virtual_camera(&mut self, cx: &mut Context<Self>) {
-        if let Err(e) = lightair_engine::vcam::install() {
+        if let Err(e) = lightair_obs::vcam::install() {
             tracing::warn!(%e, "virtual camera install");
         }
         cx.notify();
@@ -827,7 +827,7 @@ impl Studio {
         self.engine.post(move |s| {
             let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
             let scene = scene.and_then(|id| s.reconciler.scene_source(id, canvas_id)).map(|source| {
-                lightair_engine::outputs::VirtualCameraScene { source, width: size.0, height: size.1, fps_num: size.2, fps_den: size.3 }
+                lightair_obs::outputs::VirtualCameraScene { source, width: size.0, height: size.1, fps_num: size.2, fps_den: size.3 }
             });
             if let Err(e) = s.outputs.start_virtual_camera(video, scene) {
                 tracing::warn!(%e, "virtual camera didn't start");
@@ -902,7 +902,7 @@ impl Studio {
     }
 
     pub fn is_recording(&self) -> bool {
-        runtime().any_recording_running() || lightair_engine::audio_host::STEMS_RUNNING.load(std::sync::atomic::Ordering::Relaxed)
+        runtime().any_recording_running() || lightair_obs::audio_host::STEMS_RUNNING.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn toggle_recording(&mut self, cx: &mut Context<Self>) {
@@ -1044,7 +1044,7 @@ impl Studio {
         let (f, p, caps) = (folder.clone(), workspace.clone(), self.engine.capabilities.encoders.clone());
         let started = self.engine.call(move |s| {
             let sources = s.reconciler.studio_take_sources(&p);
-            let studio_take = lightair_engine::studio_take::StudioTake::start(sources, &f, fps, &mut s.outputs, &caps)?;
+            let studio_take = lightair_obs::studio_take::StudioTake::start(sources, &f, fps, &mut s.outputs, &caps)?;
             let tracks = studio_take.tracks.clone();
             s.studio_take = Some(studio_take);
             Ok::<_, String>(tracks)
@@ -1383,7 +1383,7 @@ impl Studio {
         // Integrated loudness covers this show (a destination added to a show on air doesn't
         // start it over).
         if !runtime().any_stream_running() {
-            lightair_engine::loudness::reset_stream_loudness();
+            lightair_obs::loudness::reset_stream_loudness();
         }
         let together = crate::prefs::load_from(&crate::prefs::path()).start_together;
         if only.is_none() && enabled.len() > 1 && !together {
@@ -1458,11 +1458,11 @@ impl Studio {
                 let video = canvas.and_then(|f| s.reconciler.canvas_video(f));
                 if let Err(e) = s.outputs.start_stream(&cfg, video) {
                     tracing::error!(%e, "stream failed to start");
-                    lightair_engine::outputs::mark_failed(OutputKey::Stream(id), &e);
+                    lightair_obs::outputs::mark_failed(OutputKey::Stream(id), &e);
                 }
             });
         };
-        lightair_engine::outputs::mark_starting(OutputKey::Stream(id));
+        lightair_obs::outputs::mark_starting(OutputKey::Stream(id));
         if crate::keys::takes_account_key(d) {
             // the platform answers slowly: not on the main thread
             let (dest, title) = (d.clone(), format!("{} · {}", d.name, chrono::Local::now().format("%-d %b")));
@@ -1474,7 +1474,7 @@ impl Studio {
                     }
                     launch(&engine, cfg);
                 }
-                Err(e) => lightair_engine::outputs::mark_failed(OutputKey::Stream(id), &e),
+                Err(e) => lightair_obs::outputs::mark_failed(OutputKey::Stream(id), &e),
             });
         } else {
             cfg.key = crate::secrets::stream_key(id).ok_or_else(|| format!("No stream key saved for {}.", d.name))?;
@@ -1650,7 +1650,7 @@ impl Studio {
         self.announce_clips();
         self.track_recording();
         self.track_studio_take();
-        let stats = lightair_engine::read_stats();
+        let stats = lightair_obs::read_stats();
         self.recent_lagged = stats.lagged_frames.saturating_sub(self.stats.lagged_frames);
         self.stats = stats;
         self.sample_mics();
@@ -1669,7 +1669,7 @@ impl Studio {
         let mics = self.mic_tracks();
         self.mic_history.retain(|id, _| mics.iter().any(|(m, _)| m == id));
         for (id, _) in mics {
-            let Some(cell) = lightair_engine::meters::meters().get(id) else { continue };
+            let Some(cell) = lightair_obs::meters::meters().get(id) else { continue };
             let h = self.mic_history.entry(id).or_default();
             h.push_back(cell.take_window_peak());
             while h.len() > 10 {
@@ -1717,7 +1717,7 @@ impl Studio {
                 .collect(),
             encoder: encoder_ok.then(|| match encoders.video_encoder.as_str() {
                 "obs_x264" => "x264 (software)".to_string(),
-                id => format!("{} H.264", lightair_engine::outputs::encoder_maker(id)),
+                id => format!("{} H.264", lightair_obs::outputs::encoder_maker(id)),
             }),
             encoders: canvases.len() as u32,
             video_kbps: encoders.video_bitrate_kbps,
@@ -1837,9 +1837,9 @@ pub const VIRTUAL_CAMERA_NAMES: [&str; 2] = ["Lightair Virtual Camera", "OBS Vir
 fn virtual_camera_name() -> &'static str {
     // Windows: Lightair's camera (Windows 11) where it's installed, else OBS's
     if cfg!(windows) {
-        return lightair_engine::vcam::camera().unwrap_or(lightair_engine::vcam::Camera::Lightair).name();
+        return lightair_obs::vcam::camera().unwrap_or(lightair_obs::vcam::Camera::Lightair).name();
     }
-    let ours = lightair_engine::kinds::cameras().iter().any(|(_, uid)| VIRTUAL_CAMERAS.iter().any(|v| uid.eq_ignore_ascii_case(v)));
+    let ours = lightair_obs::kinds::cameras().iter().any(|(_, uid)| VIRTUAL_CAMERAS.iter().any(|v| uid.eq_ignore_ascii_case(v)));
     VIRTUAL_CAMERA_NAMES[usize::from(!ours)]
 }
 
@@ -1863,7 +1863,7 @@ fn with_page_cleanup(before: &lightair_model::Workspace, command: Command) -> Co
     let mut extra = vec![];
     for (id, source) in &before.sources {
         let gone = before.objects_using(*id).next().is_some() && after.objects_using(*id).next().is_none();
-        if source.kind != lightair_engine::web::KIND || !gone || !after.sources.contains_key(id) {
+        if source.kind != lightair_obs::web::KIND || !gone || !after.sources.contains_key(id) {
             continue;
         }
         extra.extend(after.tracks.iter().filter(|t| t.source == *id).map(|t| Command::RemoveTrack { track: t.id }));
@@ -1889,7 +1889,7 @@ mod page_cleanup {
     fn deleting_a_pages_last_object_removes_its_track() {
         let mut doc = Document::new(Workspace::new("Pages"));
         let f = doc.workspace().primary_canvas().id;
-        let page = Source::new("Page", lightair_engine::web::KIND, serde_json::json!({"url": "https://example.com"}));
+        let page = Source::new("Page", lightair_obs::web::KIND, serde_json::json!({"url": "https://example.com"}));
         let (pid, track) = (page.id, Track::new("Page", page.id));
         let mut a = Scene::new("A");
         let mut b = Scene::new("B");
@@ -1923,7 +1923,7 @@ mod page_cleanup {
 #[cfg(test)]
 mod start_sequence_tests {
     use super::{StartCheck, check_start};
-    use lightair_engine::outputs::OutputState;
+    use lightair_obs::outputs::OutputState;
     use std::time::{Duration, Instant};
 
     #[test]

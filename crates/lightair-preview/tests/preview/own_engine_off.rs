@@ -4,8 +4,8 @@
 
 use std::time::{Duration, Instant};
 
-use lightair_engine::outputs::{Container, OutputKey, OutputState, RecordingConfig, default_encoders, runtime};
-use lightair_engine::{Engine, EngineConfig, program_source, sys};
+use lightair_obs::outputs::{Container, OutputKey, OutputState, RecordingConfig, default_encoders, runtime};
+use lightair_obs::{Engine, EngineConfig, program_source, sys};
 use lightair_model::{Canvas, Command, Document, Layout, Object, Scene, Source, Workspace, diff};
 use lightair_preview::{Preview, frame_size, sample_ycbcr};
 use serde_json::json;
@@ -19,10 +19,10 @@ fn apply(engine: &Engine, doc: &mut Document, cmd: Command) {
 
 #[test]
 fn without_the_switch_libobs_draws_the_preview() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
-    if lightair_engine::bridge::own() {
+    if lightair_obs::bridge::own() {
         eprintln!("LIGHTAIR_ENGINE=own is set; skipping");
         return;
     }
@@ -70,10 +70,10 @@ fn without_the_switch_libobs_draws_the_preview() {
 
 #[test]
 fn without_the_switch_recordings_take_each_canvass_own_libobs_video() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
-    if lightair_engine::bridge::own() {
+    if lightair_obs::bridge::own() {
         eprintln!("LIGHTAIR_ENGINE=own is set; skipping");
         return;
     }

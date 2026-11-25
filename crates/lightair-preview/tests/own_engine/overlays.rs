@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_model::{
     Canvas, Command, Document, Fit, Id, Layout, Object, Scene, Show, Source, TransitionKind, TransitionSettings,
     Workspace,
@@ -108,7 +108,7 @@ impl Stage {
 
 #[test]
 fn an_overlay_shows_over_the_program_in_every_canvas_until_taken_out() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();
@@ -153,7 +153,7 @@ fn an_overlay_shows_over_the_program_in_every_canvas_until_taken_out() {
 
 #[test]
 fn an_overlay_stays_over_both_scenes_during_a_fade() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();

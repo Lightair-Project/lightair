@@ -66,7 +66,7 @@ pub(super) fn feed_widgets(automations: Automations, widgets: Option<lightair_wi
     {
         let a = automations.clone();
         let _ = std::thread::Builder::new().name("lightair-automation-outputs".into()).spawn(move || {
-            use lightair_engine::outputs::runtime;
+            use lightair_obs::outputs::runtime;
             std::thread::sleep(Duration::from_secs(2));
             a.started();
             let (mut streaming, mut recording) = (runtime().any_stream_running(), runtime().any_recording_running());

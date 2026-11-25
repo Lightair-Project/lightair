@@ -20,7 +20,7 @@ use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_engine::avatar_pins::{Placement, on_canvas};
+use lightair_obs::avatar_pins::{Placement, on_canvas};
 use lightair_model::{Command, Id, Layout, Object, Source};
 use serde_json::{Value, json};
 
@@ -73,7 +73,7 @@ pub(super) fn with_pin(
     settings: &Value,
     object: Id,
     key: Option<&str>,
-    at: Option<lightair_engine::avatar_pins::Spot>,
+    at: Option<lightair_obs::avatar_pins::Spot>,
 ) -> Value {
     let mut s = if settings.is_object() { settings.clone() } else { json!({}) };
     if !s["pins"].is_object() {
@@ -170,7 +170,7 @@ impl StudioWindow {
             let mut seen_at = None;
             let frame = loop {
                 cx.background_executor().timer(Duration::from_millis(150)).await;
-                let status = lightair_engine::avatar::status_of(&src);
+                let status = lightair_obs::avatar::status_of(&src);
                 if !status.error.is_empty() || start.elapsed() > Duration::from_secs(20) {
                     break None;
                 }
@@ -729,7 +729,7 @@ impl StudioWindow {
         avatar_source: Id,
         key: Option<&str>,
         cx: &App,
-    ) -> Option<lightair_engine::avatar_pins::Spot> {
+    ) -> Option<lightair_obs::avatar_pins::Spot> {
         let key = key?.to_string();
         self.studio.read(cx).engine().call(move |e| e.reconciler.avatar_anchor_rest(avatar_source, &key, None))
     }

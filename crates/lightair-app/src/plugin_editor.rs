@@ -6,8 +6,8 @@ use std::ffi::c_void;
 use std::sync::{Arc, mpsc};
 
 use block2::RcBlock;
-use lightair_engine::plugins::AudioUnitPlugin;
-use lightair_engine::plugins::vst3::Vst3Plugin;
+use lightair_obs::plugins::AudioUnitPlugin;
+use lightair_obs::plugins::vst3::Vst3Plugin;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{msg_send, sel};
@@ -133,7 +133,7 @@ unsafe fn generic_view(unit: *mut c_void) -> Option<Retained<AnyObject>> {
 /// What an editor window shows (dropped before the window: a VST3 view detaches first).
 enum Content {
     Au(#[allow(dead_code)] Arc<AudioUnitPlugin>),
-    Vst3(#[allow(dead_code)] lightair_engine::plugins::vst3::Vst3View, #[allow(dead_code)] Arc<Vst3Plugin>),
+    Vst3(#[allow(dead_code)] lightair_obs::plugins::vst3::Vst3View, #[allow(dead_code)] Arc<Vst3Plugin>),
 }
 
 /// An open editor window.
@@ -229,7 +229,7 @@ impl Editor {
             };
             // the content view lives as long as the window, which outlives the view (Content)
             let attached =
-                lightair_engine::plugins::vst3::Vst3View::attach(view, Retained::as_ptr(&content) as *mut c_void, resize)?;
+                lightair_obs::plugins::vst3::Vst3View::attach(view, Retained::as_ptr(&content) as *mut c_void, resize)?;
             show(&window);
             Some(Editor { _content: Content::Vst3(attached, plugin), window })
         }

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use lightair_model::kinds::{APP, DISPLAY, WINDOW};
-use lightair_engine::Engine;
-use lightair_engine::obs::ObsSource;
+use lightair_obs::Engine;
+use lightair_obs::obs::ObsSource;
 use lightair_preview::{Frame, Preview};
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -86,13 +86,13 @@ impl ScreenPick {
             .name("lightair-screen-pick".into())
             .spawn(move || {
                 let key = key_of(mode);
-                let options = lightair_engine::displays::screen_options(mode, key);
+                let options = lightair_obs::displays::screen_options(mode, key);
                 let hide = |v: &Value| {
                     lightair_platform::apps::hide_window(
                         &v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string()),
                     )
                 };
-                let main = lightair_engine::displays::main_display_uuid();
+                let main = lightair_obs::displays::main_display_uuid();
                 let items: Vec<Item> = super::source::choices(key, &options, |v| mode != DISPLAY && hide(v))
                     .into_iter()
                     .map(|c| {
@@ -113,7 +113,7 @@ impl ScreenPick {
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    let capture = lightair_engine::displays::screen_capture(mode, key, &item.value, &item.title);
+                    let capture = lightair_obs::displays::screen_capture(mode, key, &item.value, &item.title);
                     let mut f = f.lock();
                     if stop.load(Ordering::Relaxed) {
                         // the picker has gone: let it go where libobs's other work happens

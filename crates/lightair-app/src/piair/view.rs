@@ -1014,7 +1014,7 @@ impl CohostView {
             .filter(|t| !hears.iter().any(|h| h.track == t.id))
             .filter_map(|t| {
                 let s = w.sources.get(&t.source)?;
-                if s.kind == lightair_engine::piair_voice::KIND {
+                if s.kind == lightair_obs::piair_voice::KIND {
                     return None;
                 }
                 let talk = s.kind == lightair_model::kinds::MIC || s.kind == lightair_model::kinds::AUDIO_DEVICE;

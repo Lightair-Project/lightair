@@ -902,7 +902,7 @@ mod tests {
         let twitch = by_id("twitch").unwrap();
         assert_eq!(twitch.servers[0].1, AUTO_TWITCH);
         assert_eq!(nearest_server(twitch), 0, "a new Twitch destination starts on Automatic");
-        assert_eq!(lightair_engine::outputs::StreamProtocol::of(AUTO_TWITCH), Some(lightair_engine::outputs::StreamProtocol::Rtmp));
+        assert_eq!(lightair_obs::outputs::StreamProtocol::of(AUTO_TWITCH), Some(lightair_obs::outputs::StreamProtocol::Rtmp));
         assert!(!zone_guess().measured);
         assert!(zone_guess().url.starts_with("rtmp://"));
     }

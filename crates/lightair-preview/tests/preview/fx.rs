@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use lightair_model::{Command, Document, Effect, Fit, Source, Object, Layout, Workspace, Scene, diff};
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_preview::{Preview, sample_ycbcr};
 use serde_json::{Value, json};
 
@@ -33,7 +33,7 @@ fn changed(a: &[(u8, u8, u8)], b: &[(u8, u8, u8)]) -> usize {
 
 #[test]
 fn every_shader_effect_renders() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();

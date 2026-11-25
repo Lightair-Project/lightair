@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_engine::plugins::{PluginInfo, vst3};
+use lightair_obs::plugins::{PluginInfo, vst3};
 
 const PROBE_FLAG: &str = "--probe-vst3";
 

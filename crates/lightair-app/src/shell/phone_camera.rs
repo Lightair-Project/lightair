@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 use super::StudioWindow;
 use crate::ui::{self, tok};
 
-pub(super) const KIND: &str = lightair_engine::phone_camera::KIND;
+pub(super) const KIND: &str = lightair_obs::phone_camera::KIND;
 
 /// SRT's latency on a local network (lightair-live's docs/05 §6: about 4× the round trip).
 const LATENCY_MS: u64 = 40;
@@ -192,7 +192,7 @@ impl CameraHost for Host {
             }
             Some("state") => {
                 if let Some(r) = message["rotation"].as_i64() {
-                    lightair_engine::phone_camera::feed(source).set_rotation(r);
+                    lightair_obs::phone_camera::feed(source).set_rotation(r);
                 }
                 // (a state may carry only what changed)
                 match (cam.state.as_object_mut(), message.as_object()) {
@@ -212,11 +212,11 @@ impl CameraHost for Host {
 
     /// The clock frames are timed on (the sync answers on it too).
     fn now_us(&self) -> u64 {
-        lightair_engine::phone_camera::clock_us()
+        lightair_obs::phone_camera::clock_us()
     }
 
     fn clock(&self, source: &str, phone_us: u64, host_us: u64) {
-        lightair_engine::phone_camera::feed(source).clock_sample(phone_us, host_us);
+        lightair_obs::phone_camera::feed(source).clock_sample(phone_us, host_us);
     }
 
     fn disconnected(&self, source: &str) {
@@ -269,7 +269,7 @@ impl lightair_phone_camera::Feeds for Host {
     }
 
     fn started(&self, source: &str, _peer: SocketAddr) -> Option<SocketAddr> {
-        let feed = lightair_engine::phone_camera::feed(source);
+        let feed = lightair_obs::phone_camera::feed(source);
         feed.new_stream();
         // the decoder is new: a keyframe now, and again once it listens
         self.send(source, json!({"type": "keyframe"}));
@@ -281,17 +281,17 @@ impl lightair_phone_camera::Feeds for Host {
             });
         }
         self.changed.store(true, Ordering::Release);
-        (!lightair_engine::phone_camera::DECODES_DIRECTLY).then(|| feed.addr())
+        (!lightair_obs::phone_camera::DECODES_DIRECTLY).then(|| feed.addr())
     }
 
     fn data(&self, source: &str, n: usize) {
-        lightair_engine::phone_camera::feed(source).data(n);
+        lightair_obs::phone_camera::feed(source).data(n);
     }
 
     fn unit(&self, source: &str, unit: lightair_phone_camera::ts::Unit) {
-        use lightair_engine::phone_camera::{DECODES_DIRECTLY, Unit, UnitKind};
+        use lightair_obs::phone_camera::{DECODES_DIRECTLY, Unit, UnitKind};
         use lightair_phone_camera::ts::{Codec, Kind};
-        let feed = lightair_engine::phone_camera::feed(source);
+        let feed = lightair_obs::phone_camera::feed(source);
         let kind = match unit.kind {
             Kind::Video(Codec::H264) => UnitKind::H264,
             Kind::Video(Codec::Hevc) => UnitKind::Hevc,
@@ -354,8 +354,8 @@ impl StudioWindow {
         let staged_scene = studio.selected_scene.filter(|s| self.cue_scenes && Some(*s) != w.program);
         let program_scene = w.program.and_then(|s| w.scene(s)).map(|s| s.flatten());
         let staged_scene = staged_scene.and_then(|s| w.scene(s)).map(|s| s.flatten());
-        let on_air = lightair_engine::outputs::runtime().any_stream_running()
-            || lightair_engine::outputs::runtime().recording().state.is_running();
+        let on_air = lightair_obs::outputs::runtime().any_stream_running()
+            || lightair_obs::outputs::runtime().recording().state.is_running();
         let devices = self.remote.phones.pairing.devices();
         let key_der = self.remote.phones.identity_key();
         let mut tallies = vec![];
@@ -366,7 +366,7 @@ impl StudioWindow {
             cams.retain(|k, _| {
                 let kept = keep.contains(k);
                 if !kept {
-                    lightair_engine::phone_camera::forget(k);
+                    lightair_obs::phone_camera::forget(k);
                 }
                 kept
             });
@@ -394,7 +394,7 @@ impl StudioWindow {
                             c.send(cap);
                         }
                         if restart {
-                            lightair_engine::phone_camera::feed(&key).restart();
+                            lightair_obs::phone_camera::feed(&key).restart();
                             c.send(json!({"type": "keyframe"}));
                         }
                     }
@@ -412,7 +412,7 @@ impl StudioWindow {
                         .push(json!({"source": id, "program": program, "staged": staged, "live": program && on_air}));
                 }
                 // what the placeholder says
-                let feed = lightair_engine::phone_camera::feed(&key);
+                let feed = lightair_obs::phone_camera::feed(&key);
                 let paired = devices.iter().find(|d| d.source.as_deref() == Some(key.as_str())).map(|d| d.name.clone());
                 let message = match (&cam.channel, &cam.phone, paired) {
                     (Some(_), Some((phone, ..)), _) => format!("Waiting for {phone}'s picture"),
@@ -490,7 +490,7 @@ impl StudioWindow {
             self.studio.read(cx).workspace().sources.values().filter(|s| s.kind == KIND).map(|s| s.id).collect();
         let c = &mut self.remote.phones.cameras;
         for id in ids {
-            let bytes = lightair_engine::phone_camera::feed(&id.to_string()).bytes();
+            let bytes = lightair_obs::phone_camera::feed(&id.to_string()).bytes();
             let now = Instant::now();
             let e = c.rates.entry(id).or_insert((bytes, now, 0));
             let secs = now.duration_since(e.1).as_secs_f64();
@@ -622,7 +622,7 @@ impl StudioWindow {
                     .iter()
                     .map(|id| {
                         let k = id.to_string();
-                        let feed = lightair_engine::phone_camera::feed(&k);
+                        let feed = lightair_obs::phone_camera::feed(&k);
                         let c = cams.get(&k);
                         json!({
                             "source": id,
@@ -658,7 +658,7 @@ impl StudioWindow {
         let s = source.settings.clone();
         let label = |text: &'static str| div().text_size(px(11.)).text_color(tok::text_tertiary()).child(text);
         let p = &self.remote.phones;
-        let feed = lightair_engine::phone_camera::feed(&key);
+        let feed = lightair_obs::phone_camera::feed(&key);
         let live = feed.live();
         let usb = p.cameras.host.cams.lock().get(&key).is_some_and(|c| c.usb > 0);
         let (channel, phone, hello, state, health, fresh) = {
@@ -1041,8 +1041,8 @@ fn usb_watchers(host: &Arc<Host>) -> Vec<Box<dyn std::any::Any>> {
 }
 
 /// Each stage's time from capture (ms), for `camera.status`.
-fn latency_json(l: &lightair_engine::phone_camera::Latency) -> Value {
-    let stage = |s: Option<lightair_engine::phone_camera::Stage>| {
+fn latency_json(l: &lightair_obs::phone_camera::Latency) -> Value {
+    let stage = |s: Option<lightair_obs::phone_camera::Stage>| {
         s.map_or(
             Value::Null,
             |s| json!({"median_ms": s.median_ms, "min_ms": s.min_ms, "max_ms": s.max_ms, "frames": s.frames}),
@@ -1054,7 +1054,7 @@ fn latency_json(l: &lightair_engine::phone_camera::Latency) -> Value {
 /// The Inspector's line: how long frames take from the phone's camera to each stage here.
 /// `health` is the phone's last: its own stages, `encode_ms` (camera to encoded) and `send_ms`
 /// (muxed to written out).
-fn latency_line(l: &lightair_engine::phone_camera::Latency, health: &Value) -> Option<String> {
+fn latency_line(l: &lightair_obs::phone_camera::Latency, health: &Value) -> Option<String> {
     let mut parts = vec![];
     if let Some(e) = health["encode_ms"].as_f64() {
         parts.push(format!("encoded {e:.0} ms"));

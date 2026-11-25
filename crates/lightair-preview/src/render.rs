@@ -4,7 +4,7 @@
 use std::ffi::CString;
 use std::ptr;
 
-use lightair_engine::sys;
+use lightair_obs::sys;
 
 /// Renders `render` (a canvas's view or a source, in a `cw`×`ch` coordinate space) directly
 /// into `dst`, scaled to the preview.

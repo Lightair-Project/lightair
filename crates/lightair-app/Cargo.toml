@@ -18,7 +18,7 @@ embed-resource = "3"
 # automation triggers (triggers.rs): MIDI inputs, game controllers
 midir = "0.11"
 gilrs = "0.11"
-lightair-engine.workspace = true
+lightair-obs.workspace = true
 lightair-automation.workspace = true
 lightair-live.workspace = true
 lightair-widgets.workspace = true

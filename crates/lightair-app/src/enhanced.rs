@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lightair_engine::outputs::{Multitrack, MultitrackVideo, OutputKey, StreamConfig};
-use lightair_engine::Engine;
+use lightair_obs::outputs::{Multitrack, MultitrackVideo, OutputKey, StreamConfig};
+use lightair_obs::Engine;
 use lightair_live::enhanced_broadcasting::{self as eb, Ask, CanvasSize, Plan, Verdict};
 use lightair_model::{Destination, Id, Workspace};
 use parking_lot::Mutex;
@@ -67,7 +67,7 @@ pub fn answer(go: bool) {
     if go {
         (h.start)();
     } else {
-        lightair_engine::outputs::mark_idle(OutputKey::Stream(h.id));
+        lightair_obs::outputs::mark_idle(OutputKey::Stream(h.id));
     }
 }
 
@@ -158,7 +158,7 @@ pub fn go(engine: Arc<Engine>, cfg: StreamConfig, req: Request, single_canvas: O
                     };
                     if let Err(e) = result {
                         tracing::error!(%e, "multitrack stream failed to start");
-                        lightair_engine::outputs::mark_failed(OutputKey::Stream(id), &e);
+                        lightair_obs::outputs::mark_failed(OutputKey::Stream(id), &e);
                     }
                 });
             };
@@ -175,7 +175,7 @@ pub fn go(engine: Arc<Engine>, cfg: StreamConfig, req: Request, single_canvas: O
                 let video = single_canvas.and_then(|f| s.reconciler.canvas_video(f));
                 if let Err(e) = s.outputs.start_stream(&cfg, video) {
                     tracing::error!(%e, "stream failed to start");
-                    lightair_engine::outputs::mark_failed(OutputKey::Stream(id), &e);
+                    lightair_obs::outputs::mark_failed(OutputKey::Stream(id), &e);
                 }
             });
         }

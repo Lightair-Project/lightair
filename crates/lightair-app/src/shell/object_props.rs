@@ -11,8 +11,8 @@ use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_model::{Command, Id, Source};
-use lightair_engine::media::{MediaAction, MediaState, MediaStatus};
-use lightair_engine::timers::{TIMER_KIND, TimerAction, TimerStatus};
+use lightair_obs::media::{MediaAction, MediaState, MediaStatus};
+use lightair_obs::timers::{TIMER_KIND, TimerAction, TimerStatus};
 use serde_json::{Value, json};
 
 use super::StudioWindow;
@@ -67,7 +67,7 @@ pub(super) fn is_colour(kind: &str) -> bool {
     kind.starts_with("color_source")
 }
 pub(super) fn is_web(kind: &str) -> bool {
-    kind == lightair_engine::web::KIND
+    kind == lightair_obs::web::KIND
 }
 /// An address as typed, made loadable: without a scheme it gets https://.
 pub(super) fn web_address(typed: &str) -> String {
@@ -592,22 +592,22 @@ impl StudioWindow {
     ) -> Option<AnyElement> {
         use lightair_model::TrackChannels;
         let source = workspace.sources.get(&track.source)?;
-        if source.kind != lightair_engine::devices::DEVICE_KIND {
+        if source.kind != lightair_obs::devices::DEVICE_KIND {
             return None;
         }
         let device = source.settings["device"].as_str().unwrap_or("").to_string();
         let devices = {
             let mut cache = self.interfaces.borrow_mut();
             if cache.0.elapsed() > std::time::Duration::from_secs(5) || cache.1.is_empty() {
-                *cache = (std::time::Instant::now(), lightair_engine::devices::input_devices());
+                *cache = (std::time::Instant::now(), lightair_obs::devices::input_devices());
             }
             cache.1.clone()
         };
         let channels = devices
             .iter()
-            .find(|d| if lightair_engine::devices::is_system_default(&device) { d.default } else { d.id == device || d.name == device })
+            .find(|d| if lightair_obs::devices::is_system_default(&device) { d.default } else { d.id == device || d.name == device })
             .map_or(2, |d| d.channels);
-        let shown = lightair_engine::devices::device_name(&device).unwrap_or_else(|| crate::mixer::SYSTEM_DEFAULT.to_string());
+        let shown = lightair_obs::devices::device_name(&device).unwrap_or_else(|| crate::mixer::SYSTEM_DEFAULT.to_string());
         // the device: the system default, or any source the Mac has
         let picker = {
             let me = cx.entity().downgrade();
@@ -634,7 +634,7 @@ impl StudioWindow {
                                 // another device has other channels: start from all of them
                                 // the source takes the device's name (System Default for the system's); the
                                 // track keeps its own (crate::console::repoint)
-                                let name = crate::console::mic_name(&value, &lightair_engine::devices::device_name(&value).unwrap_or_default());
+                                let name = crate::console::mic_name(&value, &lightair_obs::devices::device_name(&value).unwrap_or_default());
                                 let t = lightair_model::Track { channels: TrackChannels::All, ..track.clone() };
                                 let cmd = Command::Batch {
                                     label: "Change input device".into(),
@@ -937,7 +937,7 @@ impl StudioWindow {
             _ => "",
         };
         let loop_settings = with(&source.settings, "looping", json!(!looping));
-        let playlist = lightair_engine::playlists::files(&source.settings);
+        let playlist = lightair_obs::playlists::files(&source.settings);
         let place = self.props.playlist.as_ref().filter(|(i, _)| *i == id).map(|(_, p)| p.clone());
         let file = match &place {
             Some((at, n, f)) => format!(
@@ -1077,7 +1077,7 @@ impl StudioWindow {
             let _ = this.update(cx, |this, cx| {
                 let workspace = this.studio.read(cx).workspace().clone();
                 let Some(src) = workspace.sources.get(&source) else { return };
-                let mut files = lightair_engine::playlists::files(&src.settings);
+                let mut files = lightair_obs::playlists::files(&src.settings);
                 // the file it plays now starts the list
                 if files.is_empty()
                     && let Some(f) = src.settings["local_file"].as_str().filter(|f| !f.is_empty())

@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lightair_engine::{Engine, EngineConfig, program_source};
+use lightair_obs::{Engine, EngineConfig, program_source};
 use lightair_model::{Command, Document, Fit, Id, Layout, Object, Scene, Source, Workspace};
 use lightair_preview::Preview;
 use serde_json::json;
@@ -115,7 +115,7 @@ fn composed(engine: &Engine) -> Preview {
 
 #[test]
 fn the_preview_shows_the_compositors_picture_of_the_program_as_libobs_draws_it() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();
@@ -142,7 +142,7 @@ fn the_preview_shows_the_compositors_picture_of_the_program_as_libobs_draws_it()
 
 #[test]
 fn a_lightair_program_source_shows_the_compositors_picture_in_libobs() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();

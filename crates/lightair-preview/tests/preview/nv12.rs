@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use lightair_model::{Command, Document, Layout, Object, Scene, Source, Workspace, diff};
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_preview::{Preview, frame_is_nv12, nv12, sample_ycbcr};
 use serde_json::json;
 
@@ -24,7 +24,7 @@ fn wait_frames(preview: &Preview, n: u64) {
 
 #[test]
 fn frames_come_as_nv12_with_the_same_colours() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();

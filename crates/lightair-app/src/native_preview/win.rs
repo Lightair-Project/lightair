@@ -739,7 +739,7 @@ fn meter_thread(shared: Arc<parking_lot::Mutex<Meters>>, device: Comp) {
         let Meters { strips, glyphs, .. } = &mut *guard;
         let mut changed = false;
         for (id, v) in strips.iter_mut() {
-            let levels = lightair_engine::meters::meters().get(*id).map(|c| c.levels());
+            let levels = lightair_obs::meters::meters().get(*id).map(|c| c.levels());
             let sh = &mut v.shown;
             let dt = now.duration_since(sh.last).as_secs_f32().min(0.1);
             sh.last = now;

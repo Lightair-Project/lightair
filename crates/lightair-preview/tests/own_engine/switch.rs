@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use lightair_engine::{Engine, EngineConfig};
+use lightair_obs::{Engine, EngineConfig};
 use lightair_model::{Command, Document, Layout, Object, Scene, Source, TransitionKind, TransitionSettings, Workspace};
 use lightair_preview::Preview;
 use serde_json::json;
@@ -22,7 +22,7 @@ fn mixed(c: [u8; 3]) -> bool {
 
 #[test]
 fn a_fade_shows_both_scenes_mixed_partway_through() {
-    if lightair_engine::testing::ran_in_own_process() {
+    if lightair_obs::testing::ran_in_own_process() {
         return;
     }
     switch_on();

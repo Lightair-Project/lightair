@@ -12,7 +12,7 @@ use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_model::{Command, Destination, Encoding, Canvas, Id, StreamOptions, Workspace, VideoEncoder};
-use lightair_engine::outputs::{OutputKey, OutputState, StreamProtocol, runtime};
+use lightair_obs::outputs::{OutputKey, OutputState, StreamProtocol, runtime};
 
 use crate::platforms::{self, PLATFORMS, Platform, Region, Shape};
 use crate::studio::Studio;
@@ -111,7 +111,7 @@ pub fn elapsed(since: Instant) -> String {
 }
 
 /// A row's state in words; a stream trying to get back counts down to its next try.
-fn status_of(st: &lightair_engine::outputs::OutputStatus) -> (String, Hsla) {
+fn status_of(st: &lightair_obs::outputs::OutputStatus) -> (String, Hsla) {
     match (&st.state, st.reconnect) {
         (OutputState::Reconnecting { .. }, Some(r)) => (reconnect_text(&r), tok::warn()),
         // a delayed stream keeps sending what it held back
@@ -124,7 +124,7 @@ fn status_of(st: &lightair_engine::outputs::OutputStatus) -> (String, Hsla) {
 }
 
 /// "Retrying in 8 s · try 3 of 20".
-fn reconnect_text(r: &lightair_engine::outputs::ReconnectInfo) -> String {
+fn reconnect_text(r: &lightair_obs::outputs::ReconnectInfo) -> String {
     let secs = r.seconds_left();
     let when = if secs == 0 { "Retrying now".to_string() } else { format!("Retrying in {secs} s") };
     if r.retries > 0 { format!("{when} · try {} of {}", r.attempt.min(r.retries), r.retries) } else { when }
@@ -142,13 +142,13 @@ fn status_text(state: &OutputState) -> (String, Hsla) {
 }
 
 /// "Apple hardware · H.264 · 6 Mbps · 1920×1080" for an encoder's settings.
-fn describe_encoder(cfg: &lightair_engine::outputs::EncoderConfig, canvas: &Canvas) -> String {
+fn describe_encoder(cfg: &lightair_obs::outputs::EncoderConfig, canvas: &Canvas) -> String {
     let (w, h) = cfg.scaled.unwrap_or((canvas.width, canvas.height));
     let codec = if cfg.video_encoder.contains("hevc") { "HEVC" } else { "H.264" };
     let mbps = cfg.video_bitrate_kbps as f32 / 1000.0;
     format!(
         "{} · {codec} · {} Mbps · {w}×{h}{}",
-        lightair_engine::outputs::encoder_maker(&cfg.video_encoder),
+        lightair_obs::outputs::encoder_maker(&cfg.video_encoder),
         if (mbps - mbps.round()).abs() < 0.05 { format!("{}", mbps.round() as u32) } else { format!("{mbps:.1}") },
         if cfg.adaptive { " · adaptive" } else { "" }
     )

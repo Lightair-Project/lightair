@@ -3,7 +3,7 @@
 //! a destination.
 
 use lightair_model::{Destination, Encoding, Canvas, Workspace, RecordingSettings, VideoEncoder};
-use lightair_engine::outputs::{
+use lightair_obs::outputs::{
     EncoderConfig, StreamProtocol, H264_ENCODERS, HEVC_ENCODERS, PRORES_ENCODERS, aac_encoder, first_available,
 };
 
@@ -94,7 +94,7 @@ pub fn share_groups(caps: &[String], workspace: &Workspace, destinations: &[&Des
     let canvas_of = |d: &Destination| d.canvas.unwrap_or(workspace.primary_canvas().id);
     let mut groups: Vec<(lightair_model::Id, EncoderConfig, Vec<lightair_model::Id>)> = Vec::new();
     for d in destinations {
-        let cfg = lightair_engine::outputs::stream_encoders(&d.server, &for_stream(caps, workspace, d));
+        let cfg = lightair_obs::outputs::stream_encoders(&d.server, &for_stream(caps, workspace, d));
         let canvas = canvas_of(d);
         let slot = (!cfg.adaptive).then(|| groups.iter_mut().find(|(c, g, _)| *c == canvas && *g == cfg)).flatten();
         match slot {
@@ -111,7 +111,7 @@ pub fn why_apart(caps: &[String], workspace: &Workspace, a: &Destination, b: &De
     if canvas_of(a) != canvas_of(b) {
         return Some("canvas");
     }
-    let cfg = |d: &Destination| lightair_engine::outputs::stream_encoders(&d.server, &for_stream(caps, workspace, d));
+    let cfg = |d: &Destination| lightair_obs::outputs::stream_encoders(&d.server, &for_stream(caps, workspace, d));
     let (ca, cb) = (cfg(a), cfg(b));
     // (adaptive destinations never share, even when everything else matches)
     ca.difference(&cb).or_else(|| ca.adaptive.then_some("adaptive bitrate"))

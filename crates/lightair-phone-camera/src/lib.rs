@@ -3,7 +3,7 @@
 //!
 //! - [`srt`]: the listener phones send their MPEG-TS to over Wi-Fi (SRT, the phone calling, AES-128
 //!   with a passphrase per session), each stream handed on as UDP datagrams to this machine's
-//!   decoder (libobs's FFmpeg has no SRT; `lightair_engine::phone_camera` decodes from UDP).
+//!   decoder (libobs's FFmpeg has no SRT; `lightair_obs::phone_camera` decodes from UDP).
 //!
 //! - [`link`]: the USB link (Lightair Live's `lightair_link::usb`): control tunnelled to the
 //!   phones' TLS port, media on its own channel; reached through [`usbmux`] (iPhones), [`aoa`]

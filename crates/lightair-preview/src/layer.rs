@@ -14,7 +14,7 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lightair_engine::sys;
+use lightair_obs::sys;
 use parking_lot::Mutex;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Resource, ID3D11Texture2D};

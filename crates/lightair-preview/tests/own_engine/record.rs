@@ -9,8 +9,8 @@ use std::path::Path;
 use std::process::{Command as Proc, Stdio};
 use std::time::{Duration, Instant};
 
-use lightair_engine::outputs::{Container, OutputKey, OutputState, RecordingConfig, default_encoders, runtime};
-use lightair_engine::{Engine, sys};
+use lightair_obs::outputs::{Container, OutputKey, OutputState, RecordingConfig, default_encoders, runtime};
+use lightair_obs::{Engine, sys};
 use lightair_model::Id;
 
 pub fn have(tool: &str) -> bool {
@@ -176,10 +176,10 @@ pub fn move_in_libobs(engine: &Engine, scene: Id, canvas: Id, source: Id, dx: f3
         if item.is_null() {
             return false;
         }
-        let mut pos = lightair_engine::obs::vec2(0.0, 0.0);
+        let mut pos = lightair_obs::obs::vec2(0.0, 0.0);
         sys::obs_sceneitem_get_pos(item, &mut pos);
         let (x, y) = (pos.__bindgen_anon_1.__bindgen_anon_1.x, pos.__bindgen_anon_1.__bindgen_anon_1.y);
-        sys::obs_sceneitem_set_pos(item, &lightair_engine::obs::vec2(x + dx, y + dy));
+        sys::obs_sceneitem_set_pos(item, &lightair_obs::obs::vec2(x + dx, y + dy));
         true
     });
     assert!(moved, "the object is in libobs's scene");

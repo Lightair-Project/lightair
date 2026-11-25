@@ -150,7 +150,7 @@ impl StreamPanel {
     /// How each of this channel's streams is going right now (Lightair's own outputs): bitrate,
     /// frames dropped, reconnecting. With a colour: fine, struggling, failing.
     fn health(&self, platform: &str, channel: &str, cx: &App) -> Vec<(String, Hsla)> {
-        use lightair_engine::outputs::{OutputKey, OutputState, runtime};
+        use lightair_obs::outputs::{OutputKey, OutputState, runtime};
         let workspace = self.studio.read(cx).workspace();
         let mut out = Vec::new();
         let mut sent = self.sent.borrow_mut();

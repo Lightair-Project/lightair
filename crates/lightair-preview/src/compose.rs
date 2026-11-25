@@ -27,7 +27,7 @@ use std::sync::{Arc, LazyLock, OnceLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use lightair_engine::{bridge, program_source};
+use lightair_obs::{bridge, program_source};
 use lightair_model::{Canvas, Id, Scene, Source, TransitionKind, Workspace};
 use lightair_render::SharedGpu;
 use lightair_render::media::Picture;
