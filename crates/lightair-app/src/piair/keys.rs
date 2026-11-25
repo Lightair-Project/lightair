@@ -81,6 +81,9 @@ pub fn subscription_name(provider: &str) -> &'static str {
 /// Whether a subscription is signed in (Pi's OAuth credential in the Keychain). Off the main
 /// thread.
 pub fn signed_in(provider: &str) -> bool {
+    if crate::secrets::keychain_off() {
+        return false;
+    }
     keyring::Entry::new(KEYCHAIN_SERVICE, &format!("provider:{provider}"))
         .ok()
         .and_then(|e| e.get_password().ok())
@@ -120,6 +123,9 @@ fn entry_name(id: &str) -> String {
 
 /// The key saved for a service, if any. Reads the Keychain: off the main thread.
 pub fn get(id: &str) -> Option<String> {
+    if crate::secrets::keychain_off() {
+        return None;
+    }
     let raw = keyring::Entry::new(KEYCHAIN_SERVICE, &entry_name(id)).ok()?.get_password().ok()?;
     if entry_name(id).starts_with("provider:") {
         // Pi's credential: {"type": "api_key", "key": …} (an OAuth sign-in isn't a key)
@@ -134,6 +140,9 @@ pub fn get(id: &str) -> Option<String> {
 
 /// Saves (or, with `None`, removes) a service's key.
 pub fn set(id: &str, key: Option<&str>) -> Result<(), String> {
+    if crate::secrets::keychain_off() {
+        return Err("the Keychain is off for this run (LIGHTAIR_NO_KEYCHAIN)".into());
+    }
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &entry_name(id)).map_err(|e| e.to_string())?;
     match key {
         Some(k) if entry_name(id).starts_with("provider:") => {

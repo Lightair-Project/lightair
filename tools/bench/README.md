@@ -23,6 +23,14 @@ settings folder: `obs-swap.sh in` renames yours to `obs-studio.lightair-bench-ba
 the clean one in its place; `out` puts yours back. Lightair runs on port 4466 with its own
 workspace (`target/bench/la-ws`), never yours.
 
+- Lightair runs quietly: in the background (it never comes in front of what you're doing) and
+  with the Keychain off (`LIGHTAIR_NO_KEYCHAIN=1`, its remote API password given at launch,
+  `BENCH_PASSWORD`), so no Keychain prompt appears. The release bundle is signed with your
+  Apple Development identity, so camera and screen permissions granted once stay granted across
+  rebuilds.
+- `compare-graphics [ROUNDS]`: libobs's OpenGL renderer against its Metal one
+  (`LIGHTAIR_GRAPHICS=metal`), alternating ROUNDS times (default 2): one launch per renderer and
+  round, Gameplay and Desktop each sampled 30 s in that session. Means are printed at the end.
 - `quick APP TAG`: 30 s idle with Gameplay on air (for iterating on a change); `BENCH_SCENE`
   picks another scene. It reports CPU energy (`power_mw`) and instructions (`instr_g`): compare
   those, not CPU %, which counts time on any core at any clock.

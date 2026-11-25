@@ -125,8 +125,8 @@ fn computer_name() -> String {
 /// The TLS identity from the Keychain, made (and saved) the first time.
 fn load_identity(id: &str) -> Result<Identity, String> {
     let b64 = base64::engine::general_purpose::STANDARD;
-    // a dev build (LIGHTAIR_DEV_PAIRING): its own identity in a file, not the Keychain
-    if dev_pairing() {
+    // a dev build (LIGHTAIR_DEV_PAIRING) or the Keychain off: its own identity in a file
+    if crate::secrets::keychain_off() {
         let file = folder().join("dev-identity.txt");
         if let Ok(saved) = std::fs::read_to_string(&file)
             && let Some((cert, key)) = saved.trim().split_once('.')
@@ -837,8 +837,8 @@ impl StudioWindow {
                 let shot = slot.get_or_insert_with(|| {
                     let preview = match other {
                         Some(c) => engine
-                            .call(move |e| e.reconciler.canvas_ref(c).map(|p| p as usize))
-                            .map(|p| lightair_preview::Preview::attach_canvas(p as *mut _))
+                            .call(move |e| e.reconciler.canvas_ref(c))
+                            .map(lightair_preview::Preview::attach_canvas)
                             .unwrap_or_else(lightair_preview::Preview::attach),
                         None => lightair_preview::Preview::attach(),
                     };
@@ -852,9 +852,9 @@ impl StudioWindow {
                 let scene = scene.filter(|s| Some(*s) != w.program);
                 if shot.scene != scene {
                     let source = scene.and_then(|s| {
-                        engine.call(move |e| e.reconciler.scene_source_ref(s, canvas).map(|p| p as usize))
+                        engine.call(move |e| e.reconciler.scene_source_ref(s, canvas))
                     });
-                    shot.preview.set_source(source.map(|p| p as *mut lightair_engine::sys::obs_source_t));
+                    shot.preview.set_source(source);
                     shot.scene = scene;
                     return shot.preview.frames() + 3;
                 }

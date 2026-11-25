@@ -24,6 +24,9 @@ LIGHTAIR_APP = os.environ.get("LIGHTAIR_APP", os.path.join(ROOT, "target", "rele
 OBS_APP = os.path.join(B, "obs/OBS.app")
 LA_WS = os.path.join(B, "la-ws")
 PORT = {"obs": 4460, "lightair": 4466}
+# Lightair runs with the Keychain off (LIGHTAIR_NO_KEYCHAIN), so nothing asks for it: its remote
+# API takes this password, given to it at launch, instead of the one saved in the Keychain.
+LA_PASSWORD = os.environ.get("BENCH_PASSWORD", "lightair-bench")
 SCENES = ["Starting Soon", "Gameplay", "Desktop", "Just Chatting", "BRB", "Ending"]
 
 
@@ -96,10 +99,7 @@ def connect(app, wait=60):
 
 
 def password(app):
-    if app == "obs":
-        return None
-    return subprocess.run(["security", "find-generic-password", "-s", "Lightair remote API", "-a", "password", "-w"],
-                          capture_output=True, text=True).stdout.strip()
+    return None if app == "obs" else LA_PASSWORD
 
 
 def setup(app):
@@ -148,9 +148,11 @@ def launch(app):
         cmd = ["open", "-n", "-a", OBS_APP, "--args", "--disable-updater", "--disable-shutdown-check",
                "--disable-missing-files-check"]
     else:
+        # in the background (never in front of what you're doing), the Keychain off
         env = {"LIGHTAIR_PROJECT": LA_WS, "LIGHTAIR_REMOTE_PORT": str(PORT["lightair"]),
-               "LIGHTAIR_LOG": "info,libobs=info", "LIGHTAIR_STARTER": "plain", **{k: v for k, v in os.environ.items() if k.startswith(("LIGHTAIR_TEMP", "LIGHTAIR_GPUI_PREVIEW", "LIGHTAIR_GRAPHICS", "LIGHTAIR_MEDIA"))}}
-        cmd = ["open", "-n"]
+               "LIGHTAIR_LOG": "info,libobs=info", "LIGHTAIR_STARTER": "plain",
+               "LIGHTAIR_BACKGROUND": "1", "LIGHTAIR_NO_KEYCHAIN": "1", "LIGHTAIR_REMOTE_PASSWORD": LA_PASSWORD, **{k: v for k, v in os.environ.items() if k.startswith(("LIGHTAIR_TEMP", "LIGHTAIR_GPUI_PREVIEW", "LIGHTAIR_GRAPHICS", "LIGHTAIR_MEDIA"))}}
+        cmd = ["open", "-n", "-g"]
         for k, v in env.items():
             cmd += ["--env", f"{k}={v}"]
         cmd += ["--stdout", log, "--stderr", log, LIGHTAIR_APP, "--args", "-ApplePersistenceIgnoreState", "YES"]
@@ -577,3 +579,55 @@ esac
 
 if __name__ == "__main__" and sys.argv[1] == "prepare":
     prepare()
+
+
+def compare(variants, rounds=2, scenes=("Gameplay", "Desktop"), seconds=30):
+    """Lightair under each variant (a tag and its environment), alternating `rounds` times; one
+    launch per variant and round, every scene sampled in that session. Results:
+    compare-<tag>-<scene>-<round>.json and a summary of the means."""
+    results = {}
+    for rnd in range(1, rounds + 1):
+        for tag, env in variants:
+            saved = {k: os.environ.get(k) for k in env}
+            os.environ.update({k: v for k, v in env.items() if v is not None})
+            for k, v in env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+            try:
+                p = main_pid("lightair")
+                if p:
+                    quit_app("lightair", p)
+                launch("lightair")
+                o = connect("lightair")
+                wait_ready("lightair", o)
+                time.sleep(12)
+                pid = main_pid("lightair")
+                for scene in scenes:
+                    o.req("SetCurrentProgramScene", {"sceneName": scene})
+                    time.sleep(5)
+                    rows, s0, s1 = sample(pid, seconds, o)
+                    sm = summarize(rows)
+                    out = {k: round(sm[k]["mean"], 2 if k == "instr_g" else 1)
+                           for k in ("power_mw", "instr_g", "cpu_tree", "cpu_main", "gpu", "rss_mb", "sys_WindowServer") if k in sm}
+                    out["render_ms"] = round(s1["averageFrameRenderTime"], 2)
+                    out["lagged"] = s1["renderSkippedFrames"] - s0["renderSkippedFrames"]
+                    print(tag, scene, rnd, json.dumps(out), flush=True)
+                    json.dump(out, open(os.path.join(B, f"compare-{tag}-{scene}-{rnd}.json"), "w"))
+                    results.setdefault((tag, scene), []).append(out)
+                quit_app("lightair", pid)
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+            time.sleep(5)
+    for (tag, scene), runs in sorted(results.items(), key=lambda r: (r[0][1], r[0][0])):
+        keys = runs[0].keys()
+        print("mean", tag, scene, json.dumps({k: round(statistics.mean(r[k] for r in runs), 2) for k in keys}))
+
+
+# `compare-graphics [rounds]`: libobs's OpenGL renderer against its Metal one (LIGHTAIR_GRAPHICS).
+if __name__ == "__main__" and sys.argv[1] == "compare-graphics":
+    compare([("opengl", {"LIGHTAIR_GRAPHICS": None}), ("metal", {"LIGHTAIR_GRAPHICS": "metal"})],
+            rounds=int(sys.argv[2]) if len(sys.argv) > 2 else 2)

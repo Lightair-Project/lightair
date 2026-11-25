@@ -661,6 +661,9 @@ impl Host {
             return r;
         }
         match method {
+            "secret.get" | "secret.set" if crate::secrets::keychain_off() => {
+                return Err(("failed".into(), "the Keychain is off for this run (LIGHTAIR_NO_KEYCHAIN)".into()));
+            }
             "secret.get" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let value = keyring::Entry::new(KEYCHAIN_SERVICE, name).ok().and_then(|e| e.get_password().ok());

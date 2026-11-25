@@ -9,15 +9,32 @@ fn entry(destination: Id) -> Option<keyring::Entry> {
     keyring::Entry::new(SERVICE, &destination.to_string()).ok()
 }
 
+/// `LIGHTAIR_NO_KEYCHAIN=1`, for runs nobody is watching (the benchmark, unattended checks): the
+/// app reads and writes nothing in the Keychain, so it never asks for it. Saved secrets act as
+/// absent and new ones aren't kept; the remote API's password is `LIGHTAIR_REMOTE_PASSWORD` (else
+/// one made for this run). Debug builds' phone pairing (`LIGHTAIR_DEV_PAIRING`) does the same.
+pub fn keychain_off() -> bool {
+    dev_pairing() || std::env::var("LIGHTAIR_NO_KEYCHAIN").is_ok_and(|v| v == "1")
+}
+
 pub fn set_stream_key(destination: Id, key: &str) -> Result<(), String> {
+    if keychain_off() {
+        return Err("the Keychain is off for this run (LIGHTAIR_NO_KEYCHAIN)".into());
+    }
     entry(destination).ok_or("credential store unavailable")?.set_password(key).map_err(|e| e.to_string())
 }
 
 pub fn stream_key(destination: Id) -> Option<String> {
+    if keychain_off() {
+        return None;
+    }
     entry(destination)?.get_password().ok()
 }
 
 pub fn delete_stream_key(destination: Id) {
+    if keychain_off() {
+        return;
+    }
     if let Some(e) = entry(destination) {
         let _ = e.delete_credential();
     }
@@ -36,7 +53,8 @@ pub fn dev_pairing() -> bool {
     cfg!(debug_assertions) && std::env::var("LIGHTAIR_DEV_PAIRING").is_ok_and(|v| v == "1")
 }
 
-/// `dev_pairing`'s remote API password: `LIGHTAIR_REMOTE_PASSWORD`, else one made for this run.
+/// The remote API's password while the Keychain is off: `LIGHTAIR_REMOTE_PASSWORD`, else one made
+/// for this run.
 fn dev_password() -> String {
     static P: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     P.get_or_init(|| std::env::var("LIGHTAIR_REMOTE_PASSWORD").unwrap_or_else(|_| lightair_remote::new_password()))
@@ -45,7 +63,7 @@ fn dev_password() -> String {
 
 /// The remote API's password, made (and saved) the first time it's asked for.
 pub fn remote_password() -> Option<String> {
-    if dev_pairing() {
+    if keychain_off() {
         return Some(dev_password());
     }
     let entry = remote_entry()?;
@@ -74,7 +92,7 @@ pub fn early_remote_password() -> Option<Option<String>> {
 
 /// A new remote API password (clients with the old one must reconnect with this).
 pub fn new_remote_password() -> Option<String> {
-    if dev_pairing() {
+    if keychain_off() {
         return Some(dev_password());
     }
     let p = lightair_remote::new_password();
@@ -86,10 +104,16 @@ const CONNECTION: &str = "Lightair connection";
 
 /// A connected service's token ("streamlabs", "streamelements", …).
 pub fn connection_token(service: &str) -> Option<String> {
+    if keychain_off() {
+        return None;
+    }
     keyring::Entry::new(CONNECTION, service).ok()?.get_password().ok().filter(|t| !t.is_empty())
 }
 
 pub fn set_connection_token(service: &str, token: &str) -> Result<(), String> {
+    if keychain_off() {
+        return Err("the Keychain is off for this run (LIGHTAIR_NO_KEYCHAIN)".into());
+    }
     let entry = keyring::Entry::new(CONNECTION, service).map_err(|e| e.to_string())?;
     if token.is_empty() {
         let _ = entry.delete_credential();

@@ -238,7 +238,8 @@ fn main() {
         // the keyboard from the app someone is typing in.
         // LIGHTAIR_STALLS=1: where the UI thread is when the window stops answering
         stall_watch::start(cx);
-        let background = std::env::var_os("LIGHTAIR_OPEN").is_some();
+        // LIGHTAIR_BACKGROUND=1 (the benchmark) also stays behind the app in front
+        let background = std::env::var_os("LIGHTAIR_OPEN").is_some() || std::env::var("LIGHTAIR_BACKGROUND").is_ok_and(|v| v == "1");
         // its size; a screenshot hook can ask for another ("900x700")
         let (w, h) = std::env::var("LIGHTAIR_WINDOW")
             .ok()
