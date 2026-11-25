@@ -1379,8 +1379,7 @@ fn made_here(source: &Source) -> bool {
     match source.kind.as_str() {
         templates::IMAGE => s["file"].as_str().is_some_and(|f| !f.is_empty()),
         templates::COLOUR | templates::TIMER => true,
-        // text read from a file stays libobs's
-        templates::TEXT => !s["from_file"].as_bool().unwrap_or(false),
+        templates::TEXT => true,
         // the built-in widgets the native widgets draw, once the app has given what they show
         widgets::KIND => widgets::instance(s).is_some_and(|i| widget_feed::drawn_here(&i)),
         avatar::KIND => s["file"].as_str().is_some_and(|f| !f.is_empty()),
@@ -1424,6 +1423,36 @@ fn effects_drawn(source: &Source, keyers: bool, looks: bool) -> bool {
         }
     }
     !studio_seen || (keyers && looks && looks::drawable(source))
+}
+
+/// A text source's file as text (read again when it changes, looked at twice a second); empty
+/// when it can't be read.
+fn file_text(path: &str) -> String {
+    type Read = (Instant, Option<std::time::SystemTime>, String);
+    static FILES: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, Read>>> =
+        std::sync::LazyLock::new(Default::default);
+    if path.is_empty() {
+        return String::new();
+    }
+    let mut files = FILES.lock();
+    if let Some((looked, _, text)) = files.get(path)
+        && looked.elapsed() < Duration::from_millis(500)
+    {
+        return text.clone();
+    }
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    if let Some((looked, was, text)) = files.get_mut(path)
+        && *was == modified
+    {
+        *looked = Instant::now();
+        return text.clone();
+    }
+    // (as the text source reads it: UTF-8, a byte-order mark left out)
+    let text = std::fs::read(path)
+        .map(|b| String::from_utf8_lossy(b.strip_prefix(b"\xEF\xBB\xBF".as_slice()).unwrap_or(&b)).into_owned())
+        .unwrap_or_default();
+    files.insert(path.to_string(), (Instant::now(), modified, text.clone()));
+    text
 }
 
 /// Says once per source that some of its effects aren't drawn (no libobs to draw them).
@@ -1556,6 +1585,10 @@ impl Native {
             // a timer: its text as the engine's timers have it now, drawn as its text source does
             templates::TIMER => {
                 let text = bridge::timer_text(source.id)?;
+                Some(self.text(&source.settings, &text)?)
+            }
+            templates::TEXT if source.settings["from_file"].as_bool().unwrap_or(false) => {
+                let text = file_text(source.settings["text_file"].as_str().unwrap_or(""));
                 Some(self.text(&source.settings, &text)?)
             }
             templates::TEXT => Some(self.text(&source.settings, source.settings["text"].as_str().unwrap_or(""))?),
