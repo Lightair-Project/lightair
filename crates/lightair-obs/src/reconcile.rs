@@ -370,7 +370,7 @@ impl Reconciler {
         }
         for (id, look) in want {
             let (Some(src), Some(source)) = (self.sources.get(&id), workspace.sources.get(&id)) else { continue };
-            let settings = screen_zoom_pointer_settings(&look);
+            let settings = crate::pointer::look_settings(&look);
             // drawn before (a new filter: as the capture was made, with its own pointer)
             let hid = self.screen_zoom_pointers.get(&id).map_or(draws_pointer(source), |(_, s)| s["hide_capture"] == true || draws_pointer(source));
             match self.screen_zoom_pointers.get_mut(&id) {
@@ -2110,33 +2110,9 @@ fn source_settings(source: &lightair_model::Source, drawn: bool) -> serde_json::
 }
 
 /// Whether a source is a screen capture (a display, a window, an app or a game).
-fn is_screen(source: &lightair_model::Source) -> bool {
+pub(crate) fn is_screen(source: &lightair_model::Source) -> bool {
     source.kind == lightair_model::kinds::SCREEN
         || matches!(source.kind.as_str(), "screen_capture" | "display_capture" | "monitor_capture" | "window_capture" | "game_capture")
-}
-
-/// A `ScreenZoomPointer` as the pointer filter's settings.
-fn screen_zoom_pointer_settings(l: &lightair_model::ScreenZoomPointer) -> serde_json::Value {
-    serde_json::json!({
-        "draw": l.pointer_drawn && !l.pointer_hidden,
-        // the capture's own pointer goes when Lightair draws one, or when there's to be none
-        "hide_capture": l.pointer_drawn || l.pointer_hidden,
-        "style": l.pointer_style,
-        "size": l.pointer_size,
-        "smoothing": l.pointer_smoothing,
-        "tilt": l.pointer_tilt,
-        "idle_s": l.pointer_idle_s,
-        // clicks are drawn with the pointer
-        "clicks": if l.pointer_drawn && !l.pointer_hidden { l.clicks } else { 0 },
-        "arrow_only": false,
-        "color": l.pointer_color,
-        "zoom": l.zoom,
-        "zoom_scale": l.zoom_scale,
-        "zoom_hold_s": l.zoom_hold_s,
-        "zoom_motion": l.zoom_motion,
-        "zoom_typing": l.zoom_typing,
-        "zoom_badge": l.zoom_badge,
-    })
 }
 
 /// Whether a source has the drawn pointer on.

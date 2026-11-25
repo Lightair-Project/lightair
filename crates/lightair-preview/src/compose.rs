@@ -546,6 +546,15 @@ impl State {
         let keyers = self.native.is_some();
         // the camera looks: with the engine's pictures, and a module that gives faces and masks
         let looked = keyers && looks::available();
+        // Lightair's own pointer and zoom (a screen look, a drawn pointer effect): drawn here on a
+        // source with no other effect, else by libobs with its filters
+        let pointed: HashMap<Id, lightair_obs::pointer::Style> = crate::pointer::styles(&base, &shown);
+        let pointer_here = |source: &Source| {
+            !pointed.contains_key(&source.id) || (keyers && !crate::pointer::has_other_effects(source))
+        };
+        if let Some(native) = self.native.as_mut() {
+            native.pointers.keep(&pointed);
+        }
         self.missing.retain(|id| shown.contains(id));
         // the screens and cameras shown, captured here (once for every canvas)
         self.keep_captures(&snapshot.workspace, &shown);
@@ -565,7 +574,7 @@ impl State {
             .iter()
             .filter_map(|id| base.sources.get(id))
             .filter_map(|source| {
-                let effects = effects_drawn(source, keyers, looked);
+                let effects = effects_drawn(source, keyers, looked) && pointer_here(source);
                 let made = keyers && effects && made_here(source) && !self.missing.contains(&source.id);
                 let taken = effects && (captured.contains_key(&source.id) || provided.contains_key(&source.id));
                 (!made && !taken).then_some((source.id, effects))
@@ -588,7 +597,7 @@ impl State {
         }
         for id in &shown {
             let Some(source) = base.sources.get(id) else { continue };
-            let effects = effects_drawn(source, keyers, looked);
+            let effects = effects_drawn(source, keyers, looked) && pointer_here(source);
             if effects
                 && made_here(source)
                 && let Some(native) = self.native.as_mut()
@@ -610,6 +619,7 @@ impl State {
                 && let Some(c) = captured.get(id)
                 && let Some(shot) = shot_of(self.native.as_mut(), source, &c.picture())
             {
+                let shot = with_pointer(self.native.as_mut(), &pointed, source, &c.buffer, shot, program);
                 kept.insert(*id);
                 shots.insert(*id, shot);
                 held.push(c.buffer.clone());
@@ -620,6 +630,7 @@ impl State {
                 && let Some(p) = provided.get(id)
                 && let Some(shot) = shot_of(self.native.as_mut(), source, p)
             {
+                let shot = with_pointer(self.native.as_mut(), &pointed, source, &p.buffer, shot, program);
                 kept.insert(*id);
                 shots.insert(*id, shot);
                 held.push(p.buffer.clone());
@@ -627,6 +638,11 @@ impl State {
             }
             let Some(picture) = bridge::picture(*id) else { continue };
             let Some(shot) = shot_of(self.native.as_mut(), source, &picture) else { continue };
+            let shot = if picture.unfiltered && effects {
+                with_pointer(self.native.as_mut(), &pointed, source, &picture.buffer, shot, program)
+            } else {
+                shot
+            };
             if picture.unfiltered {
                 kept.insert(*id);
             }
@@ -1301,6 +1317,21 @@ impl Pictures for Ready<'_> {
 /// its effects in it or has none the engine draws before the renderer; else (bare) through its
 /// looks, then its keys, by the engine (`None` without the engine's pictures: a bare picture is
 /// asked for only with them). The buffer must be held until the GPU is done.
+/// `shot` (of `buffer`, `source`'s picture) with Lightair's own pointer drawn over it and zoomed,
+/// when the compositor draws one on `source` (`pointed`); `on_air`: it counts for the badge.
+fn with_pointer(
+    native: Option<&mut Native>,
+    pointed: &HashMap<Id, lightair_obs::pointer::Style>,
+    source: &Source,
+    buffer: &bridge::Buffer,
+    shot: Shot,
+    on_air: bool,
+) -> Shot {
+    let (Some(native), Some(style)) = (native, pointed.get(&source.id)) else { return shot };
+    let Native { pointers, gpu, .. } = native;
+    pointers.draw(gpu, source, *style, buffer, on_air).unwrap_or(shot)
+}
+
 fn shot_of(native: Option<&mut Native>, source: &Source, picture: &bridge::Picture) -> Option<Shot> {
     let steps = if picture.unfiltered { keying::steps(source) } else { Vec::new() };
     if picture.unfiltered && looks::has_looks(source) {
@@ -1342,7 +1373,10 @@ fn made_here(source: &Source) -> bool {
 /// (they're drawn before the keys here). Sound effects don't count.
 fn effects_drawn(source: &Source, keyers: bool, looks: bool) -> bool {
     let (mut renderer_seen, mut keyer_seen, mut studio_seen) = (false, false, false);
-    for e in source.effects.iter().filter(|e| e.enabled && !e.kind.starts_with("audio.")) {
+    // (the drawn pointer is drawn with the source's pointer, `crate::pointer`)
+    for e in
+        source.effects.iter().filter(|e| e.enabled && !e.kind.starts_with("audio.") && !crate::pointer::is_pointer(e))
+    {
         if e.kind.starts_with("studio.") {
             if !studio_seen && (renderer_seen || keyer_seen) {
                 return false;
@@ -1396,6 +1430,8 @@ struct Native {
     looks: looks::Hosts,
     /// The avatars drawn here, by source.
     avatars: HashMap<Id, Avatar>,
+    /// Lightair's own pointer and zoom on the screens drawn here.
+    pointers: crate::pointer::Pointers,
 }
 
 /// An avatar source drawn here: its renderer (`None`: none could be made, libobs's picture
@@ -1445,6 +1481,7 @@ impl Native {
             widgets: HashMap::new(),
             looks: looks::Hosts::default(),
             avatars: HashMap::new(),
+            pointers: Default::default(),
         })
     }
 
