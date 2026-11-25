@@ -4553,7 +4553,7 @@ dependencies = [
 [[package]]
 name = "lightair-audio"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "ebur128",
  "nnnoiseless",
@@ -4563,7 +4563,7 @@ dependencies = [
 [[package]]
 name = "lightair-automation"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4603,7 +4603,7 @@ dependencies = [
 [[package]]
 name = "lightair-capture"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -4621,12 +4621,14 @@ dependencies = [
  "parking_lot",
  "thiserror 2.0.21",
  "tracing",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
 name = "lightair-encode"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "objc2-audio-toolbox",
  "objc2-core-audio-types",
@@ -4637,12 +4639,14 @@ dependencies = [
  "parking_lot",
  "thiserror 2.0.21",
  "tracing",
+ "unsafe-libopus",
+ "windows 0.62.2",
 ]
 
 [[package]]
 name = "lightair-engine"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "ash",
  "async-trait",
@@ -4686,7 +4690,7 @@ dependencies = [
 [[package]]
 name = "lightair-feed"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "bytes",
  "futures",
@@ -4704,7 +4708,7 @@ dependencies = [
 [[package]]
 name = "lightair-fonts"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "fontdb",
  "serde",
@@ -4732,7 +4736,7 @@ dependencies = [
 [[package]]
 name = "lightair-live"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4765,7 +4769,7 @@ dependencies = [
 [[package]]
 name = "lightair-model"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "serde",
  "serde_json",
@@ -4821,7 +4825,7 @@ dependencies = [
 [[package]]
 name = "lightair-overlay"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "lightair-fonts",
  "lightair-live",
@@ -4836,7 +4840,7 @@ dependencies = [
 [[package]]
 name = "lightair-packages"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "semver",
  "serde",
@@ -4866,7 +4870,7 @@ dependencies = [
 [[package]]
 name = "lightair-platform"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "block2 0.6.2",
  "dirs 6.0.0",
@@ -4881,7 +4885,7 @@ dependencies = [
 [[package]]
 name = "lightair-pngtuber"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "png 0.17.16",
  "serde",
@@ -4931,7 +4935,7 @@ dependencies = [
 [[package]]
 name = "lightair-remote"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4953,7 +4957,7 @@ dependencies = [
 [[package]]
 name = "lightair-render"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "cosmic-text",
  "lightair-audio",
@@ -4978,7 +4982,7 @@ dependencies = [
 [[package]]
 name = "lightair-store"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "lightair-model",
  "serde",
@@ -5010,7 +5014,7 @@ dependencies = [
 [[package]]
 name = "lightair-widgets"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -9671,6 +9675,17 @@ checksum = "fc1de2c688dc15305988b563c3854064043356019f97a4b46276fe734c4f07ea"
 dependencies = [
  "crypto-common 0.1.7",
  "subtle",
+]
+
+[[package]]
+name = "unsafe-libopus"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c757408e7256c910343c7b215c8c8b878948630eecc774baabcca0972376eb73"
+dependencies = [
+ "arrayref",
+ "num-complex",
+ "num-traits",
 ]
 
 [[package]]
