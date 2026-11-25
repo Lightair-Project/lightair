@@ -88,8 +88,9 @@ pub fn device_name(device: &str) -> Option<String> {
 }
 
 /// Turns a device's rate into the engine's by linear interpolation (devices that can't run at
-/// the engine's rate). Keeps its buffers between callbacks: no allocation once warm.
-struct Resampler {
+/// the engine's rate, and sound the engine is fed: `audio_host::InputFeed`). Keeps its buffers
+/// between callbacks: no allocation once warm.
+pub(crate) struct Resampler {
     channels: usize,
     step: f64,
     pos: f64,
@@ -98,7 +99,7 @@ struct Resampler {
 }
 
 impl Resampler {
-    fn new(channels: usize, from: u32, to: u32) -> Self {
+    pub(crate) fn new(channels: usize, from: u32, to: u32) -> Self {
         Self {
             channels,
             step: from as f64 / to as f64,
@@ -108,8 +109,20 @@ impl Resampler {
         }
     }
 
+    /// Converts from `from` to `to` from now on (the source's rate changed); the last frame is
+    /// kept, so the join is smooth. No allocation.
+    pub(crate) fn retune(&mut self, from: u32, to: u32) {
+        self.step = from as f64 / to.max(1) as f64;
+        self.pos = self.pos.fract();
+    }
+
+    /// What the last [`Self::run`] made (interleaved).
+    pub(crate) fn output(&self) -> &[f32] {
+        &self.out
+    }
+
     /// Interleaved input in, interleaved output (in `self.out`).
-    fn run(&mut self, input: &[f32]) {
+    pub(crate) fn run(&mut self, input: &[f32]) {
         self.out.clear();
         let n = input.len() / self.channels;
         let at = |i: isize, c: usize, last: &[f32]| if i < 0 { last[c] } else { input[i as usize * self.channels + c] };

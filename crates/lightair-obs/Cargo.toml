@@ -48,6 +48,9 @@ lightair-encode.workspace = true
 lightair-feed.workspace = true
 lightair-engine.workspace = true
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTPixelTransferSession", "VTSession", "objc2-core-video"] }
+# desktop and app audio captured for the mixer without libobs, with LIGHTAIR_ENGINE=own
+# (system_audio.rs)
+lightair-capture.workspace = true
 
 # VST3 modules (DLLs) on Windows
 [target.'cfg(windows)'.dependencies]

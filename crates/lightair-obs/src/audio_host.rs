@@ -2,7 +2,10 @@
 //!
 //! - **In**: each track's input is a libobs source; its audio (after any libobs filters) comes
 //!   through an audio-capture callback into a lock-free ring, and libobs no longer mixes the
-//!   source itself (its audio mixers are cleared).
+//!   source itself (its audio mixers are cleared). Audio interfaces are opened by the engine
+//!   itself (`devices.rs`), and a source that captures its own sound without libobs (desktop and
+//!   app audio with `LIGHTAIR_ENGINE=own`, `system_audio.rs`) registers with [`feeds_itself`]:
+//!   the engine hands it an [`InputFeed`] to push into instead of taking libobs's callbacks.
 //! - **Engine**: a real-time thread takes a block from each input's ring, runs the
 //!   `lightair-audio` graph, and
 //! - **Out**: hands Program and the mixes to libobs through `lightair_audio_out` sources, one per
@@ -195,6 +198,154 @@ unsafe extern "C" fn on_capture(param: *mut c_void, _: *mut sys::obs_source_t, d
         }
         unsafe { chunk.commit_all() };
     }
+}
+
+// ---------------------------------------------------------------- sources that feed the engine
+
+/// Ring size of an [`InputFeed`] (stereo frames): a second.
+const FEED_FRAMES: usize = 48_000;
+/// Buffered before a fed input starts playing, and the most kept (frames), at least: a capture
+/// that delivers on Core Audio's I/O cycle (512 frames, often) needs a little more than an
+/// interface opened at the engine's block size, far less than libobs's 1024-frame packets.
+const FEED_PRIME: usize = 1_024;
+const FEED_MOST: usize = 4_096;
+/// Frames a push takes without allocating (larger blocks grow the buffers once).
+const FEED_WARM: usize = 8_192;
+
+/// Where a source that captures its own sound pushes it: into one of the engine's inputs,
+/// brought to stereo and to the engine's rate on the way. Made by the engine
+/// ([`SoundFeeder::attach`]); dropping it ends nothing (the engine removes the input itself).
+pub struct InputFeed {
+    ring: rtrb::Producer<f32>,
+    /// The engine's rate.
+    rate: u32,
+    /// The rate the resampler is set for (the last block's).
+    from: u32,
+    resampler: crate::devices::Resampler,
+    stereo: Vec<f32>,
+}
+
+impl InputFeed {
+    fn new(ring: rtrb::Producer<f32>, rate: u32) -> Self {
+        Self {
+            ring,
+            rate,
+            from: rate,
+            resampler: crate::devices::Resampler::new(2, rate, rate),
+            stereo: Vec::with_capacity(FEED_WARM * 2),
+        }
+    }
+
+    /// The engine's rate.
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+
+    /// One block of sound: `samples` interleaved, `channels` to a frame (mono is heard on both
+    /// sides; past two, the first two are taken), at `rate` frames a second (resampled when it
+    /// isn't the engine's). Real-time safe: no locks, no waiting, and no allocation for blocks
+    /// up to 8192 frames; what doesn't fit (the engine stopped reading) is dropped.
+    pub fn push(&mut self, samples: &[f32], channels: u32, rate: u32) {
+        let ch = channels.max(1) as usize;
+        let frames = samples.len() / ch;
+        if frames == 0 || rate == 0 {
+            return;
+        }
+        self.stereo.clear();
+        for frame in samples.chunks_exact(ch) {
+            let l = frame[0];
+            let r = if ch > 1 { frame[1] } else { l };
+            self.stereo.push(l);
+            self.stereo.push(r);
+        }
+        self.send(rate);
+    }
+
+    /// [`Self::push`] for planar sound: one slice a channel, all the same length (a decoder's or
+    /// a web page's planes).
+    pub fn push_planar(&mut self, planes: &[&[f32]], rate: u32) {
+        let Some(l) = planes.first() else { return };
+        let r = planes.get(1).unwrap_or(l);
+        if l.is_empty() || r.is_empty() || rate == 0 {
+            return;
+        }
+        self.stereo.clear();
+        for (&a, &b) in l.iter().zip(r.iter()) {
+            self.stereo.push(a);
+            self.stereo.push(b);
+        }
+        self.send(rate);
+    }
+
+    /// The stereo block in `self.stereo`, at `rate`, into the engine's ring.
+    fn send(&mut self, rate: u32) {
+        if rate == self.rate {
+            write_ring(&mut self.ring, &self.stereo);
+        } else {
+            if rate != self.from {
+                self.resampler.retune(rate, self.rate);
+                self.from = rate;
+            }
+            self.resampler.run(&self.stereo);
+            write_ring(&mut self.ring, self.resampler.output());
+        }
+    }
+}
+
+/// `samples` into `ring` whole, or not at all when it hasn't the room (never waits).
+fn write_ring(ring: &mut rtrb::Producer<f32>, samples: &[f32]) {
+    if samples.is_empty() || ring.slots() < samples.len() {
+        return;
+    }
+    if let Ok(mut chunk) = ring.write_chunk_uninit(samples.len()) {
+        let (a, b) = chunk.as_mut_slices();
+        for (dst, src) in a.iter_mut().chain(b.iter_mut()).zip(samples) {
+            dst.write(*src);
+        }
+        unsafe { chunk.commit_all() };
+    }
+}
+
+/// A libobs source whose sound reaches the engine without libobs: it captures (or decodes, or
+/// renders) the sound itself and pushes it into the [`InputFeed`] it's given. Its libobs source
+/// stays the track's placeholder (it gives the engine no sound through libobs meanwhile).
+pub trait SoundFeeder: Send + Sync {
+    /// A track takes this source's sound: push it into `feed` from now on (`Some`), or nothing
+    /// takes it any more (`None`; the last feed is dropped, and anything only it needed, such as
+    /// a capture, can stop). Called on the engine thread: hand over and return, never wait on a
+    /// capture starting.
+    fn attach(&self, feed: Option<InputFeed>);
+}
+
+type Feeders = Vec<(usize, Arc<dyn SoundFeeder>)>;
+
+/// Sources that feed the engine themselves, by their libobs source.
+static FEEDERS: Mutex<Feeders> = Mutex::new(Vec::new());
+
+/// Registers `source` as feeding the engine itself (see [`SoundFeeder`]): from now on a track on
+/// it takes its sound from `feeder`, not from libobs's audio-capture callbacks. Call when the
+/// source is made, before any track can take it, and [`feeds_itself_no_more`] before it's freed.
+pub fn feeds_itself(source: *mut sys::obs_source_t, feeder: Arc<dyn SoundFeeder>) {
+    let mut all = FEEDERS.lock();
+    all.retain(|(s, _)| *s != source as usize);
+    all.push((source as usize, feeder));
+}
+
+/// Ends [`feeds_itself`] for `source` (it's being freed).
+pub fn feeds_itself_no_more(source: *mut sys::obs_source_t) {
+    FEEDERS.lock().retain(|(s, _)| *s != source as usize);
+}
+
+fn feeder_of(source: *mut sys::obs_source_t) -> Option<Arc<dyn SoundFeeder>> {
+    FEEDERS.lock().iter().find(|(s, _)| *s == source as usize).map(|(_, f)| f.clone())
+}
+
+/// How the engine takes an input's sound from its libobs source.
+enum Taken {
+    /// Through libobs's audio-capture callback.
+    Callback(Box<Capture>),
+    /// From the source itself, through an [`InputFeed`].
+    Fed(Arc<dyn SoundFeeder>),
 }
 
 // ---------------------------------------------------------------- the real-time side
@@ -600,7 +751,7 @@ pub struct AudioHost {
     garbage: rtrb::Consumer<FromRt>,
     /// Held for the audio thread, which pushes into them until it stops (in `drop`).
     _outs: Vec<ObsSource>,
-    captures: HashMap<lightair_model::Id, (ObsSource, Box<Capture>)>,
+    captures: HashMap<lightair_model::Id, (ObsSource, Taken)>,
     mixes: ([Option<la::NodeId>; OUT_MIXES - 1], Option<la::NodeId>),
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -712,18 +863,34 @@ impl AudioHost {
     }
 
     /// Starts taking `input`'s audio from its libobs source (which then stays out of libobs's
-    /// own mixes).
+    /// own mixes): from the source itself when it feeds the engine ([`feeds_itself`]), else
+    /// through libobs's audio-capture callback.
     pub fn capture(&mut self, input: lightair_model::Id, source: &ObsSource) {
         if self.captures.contains_key(&input) {
             return;
         }
-        let (producer, consumer) = rtrb::RingBuffer::new(RING_FRAMES * 2);
-        let cap = Box::new(Capture { producer: Mutex::new(producer) });
+        let Some(held) = (unsafe { ObsSource::from_borrowed(source.as_ptr()) }) else { return };
         unsafe {
             sys::obs_source_set_audio_mixers(source.as_ptr(), 0);
             sys::obs_source_set_volume(source.as_ptr(), 1.0);
             sys::obs_source_set_muted(source.as_ptr(), false);
             sys::obs_source_set_monitoring_enabled(source.as_ptr(), false);
+        }
+        if let Some(feeder) = feeder_of(source.as_ptr()) {
+            // buffered as an interface is (its own clock, resampled to the engine's rate on the
+            // way in, drift trimmed on the audio thread), with room for Core Audio's I/O cycle
+            let (producer, consumer) = rtrb::RingBuffer::new(FEED_FRAMES * 2);
+            let prime = (self.block * 2).max(FEED_PRIME);
+            let most = (self.block * 8).max(FEED_MOST);
+            let rt = RtInput::new(crate::audio::node(input), consumer, 2, prime, most);
+            let _ = self.commands.push(ToRt::AddInput(rt));
+            feeder.attach(Some(InputFeed::new(producer, self.sample_rate)));
+            self.captures.insert(input, (held, Taken::Fed(feeder)));
+            return;
+        }
+        let (producer, consumer) = rtrb::RingBuffer::new(RING_FRAMES * 2);
+        let cap = Box::new(Capture { producer: Mutex::new(producer) });
+        unsafe {
             sys::obs_source_add_audio_capture_callback(
                 source.as_ptr(),
                 Some(on_capture),
@@ -732,24 +899,29 @@ impl AudioHost {
         }
         let rt = RtInput::new(crate::audio::node(input), consumer, 2, PRIME, MOST);
         let _ = self.commands.push(ToRt::AddInput(rt));
-        let Some(held) = (unsafe { ObsSource::from_borrowed(source.as_ptr()) }) else { return };
-        self.captures.insert(input, (held, cap));
+        self.captures.insert(input, (held, Taken::Callback(cap)));
     }
 
-    /// Stops taking `input`'s audio; libobs mixes it again as it did before.
+    /// Stops taking `input`'s audio; libobs mixes it again as it did before (a source that feeds
+    /// the engine itself is told to stop).
     pub fn release(&mut self, input: lightair_model::Id) {
-        let Some((source, cap)) = self.captures.remove(&input) else { return };
-        unsafe {
-            sys::obs_source_remove_audio_capture_callback(
-                source.as_ptr(),
-                Some(on_capture),
-                &*cap as *const Capture as *mut c_void,
-            );
-            sys::obs_source_set_audio_mixers(source.as_ptr(), 0xFF);
+        let Some((source, taken)) = self.captures.remove(&input) else { return };
+        match taken {
+            Taken::Callback(cap) => {
+                unsafe {
+                    sys::obs_source_remove_audio_capture_callback(
+                        source.as_ptr(),
+                        Some(on_capture),
+                        &*cap as *const Capture as *mut c_void,
+                    );
+                }
+                // the callback is removed (libobs holds its lock while calling): the capture can go
+                drop(cap);
+            }
+            Taken::Fed(feeder) => feeder.attach(None),
         }
+        unsafe { sys::obs_source_set_audio_mixers(source.as_ptr(), 0xFF) };
         let _ = self.commands.push(ToRt::RemoveInput(crate::audio::node(input)));
-        // the callback is removed (libobs holds its lock while calling): the capture can go
-        drop(cap);
     }
 
     pub fn captured(&self) -> impl Iterator<Item = lightair_model::Id> + '_ {
