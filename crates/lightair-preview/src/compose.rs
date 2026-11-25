@@ -607,6 +607,8 @@ impl State {
         if let Some(native) = self.native.as_mut() {
             native.keep(&snapshot.workspace);
         }
+        // the pictures object masks cut to
+        let masks = mask_pictures(self.native.as_mut(), &base, &shown, &captured, &provided, pts_ns);
         for id in &shown {
             let Some(source) = base.sources.get(id) else { continue };
             let effects = drawn_here(source);
@@ -616,7 +618,7 @@ impl State {
             {
                 match native.picture(source, pts_ns) {
                     Some(shot) => {
-                        let shot = with_timed(Some(native), source, None, shot);
+                        let shot = with_timed(Some(native), source, None, shot, &masks);
                         self.missing.remove(id);
                         shots.insert(*id, shot);
                         kept.insert(*id);
@@ -633,7 +635,7 @@ impl State {
                 && let Some(shot) = shot_of(self.native.as_mut(), source, &c.picture())
             {
                 let shot = with_pointer(self.native.as_mut(), &pointed, source, &c.buffer, shot, program);
-                let shot = with_timed(self.native.as_mut(), source, Some(&c.buffer), shot);
+                let shot = with_timed(self.native.as_mut(), source, Some(&c.buffer), shot, &masks);
                 kept.insert(*id);
                 shots.insert(*id, shot);
                 held.push(c.buffer.clone());
@@ -645,7 +647,7 @@ impl State {
                 && let Some(shot) = shot_of(self.native.as_mut(), source, p)
             {
                 let shot = with_pointer(self.native.as_mut(), &pointed, source, &p.buffer, shot, program);
-                let shot = with_timed(self.native.as_mut(), source, Some(&p.buffer), shot);
+                let shot = with_timed(self.native.as_mut(), source, Some(&p.buffer), shot, &masks);
                 kept.insert(*id);
                 shots.insert(*id, shot);
                 held.push(p.buffer.clone());
@@ -655,7 +657,7 @@ impl State {
             let Some(shot) = shot_of(self.native.as_mut(), source, &picture) else { continue };
             let shot = if picture.unfiltered && effects {
                 let shot = with_pointer(self.native.as_mut(), &pointed, source, &picture.buffer, shot, program);
-                with_timed(self.native.as_mut(), source, Some(&picture.buffer), shot)
+                with_timed(self.native.as_mut(), source, Some(&picture.buffer), shot, &masks)
             } else {
                 shot
             };
@@ -1350,10 +1352,57 @@ fn with_pointer(
 
 /// `shot` (of `buffer`, `source`'s picture, if it's libobs's or captured) with the effects that
 /// work across frames drawn on it (`crate::timed`), when `source` has any.
-fn with_timed(native: Option<&mut Native>, source: &Source, buffer: Option<&bridge::Buffer>, shot: Shot) -> Shot {
+fn with_timed(
+    native: Option<&mut Native>,
+    source: &Source,
+    buffer: Option<&bridge::Buffer>,
+    shot: Shot,
+    masks: &HashMap<Id, wgpu::Texture>,
+) -> Shot {
     let Some(native) = native else { return shot };
     let Native { timed, gpu, .. } = native;
-    timed.draw(gpu, source, &shot, buffer).unwrap_or(shot)
+    timed.draw(gpu, source, &shot, buffer, masks).unwrap_or(shot)
+}
+
+/// The pictures object masks cut to this frame, by source: made here, captured or provided
+/// (a source drawn only by libobs can't be one).
+fn mask_pictures(
+    native: Option<&mut Native>,
+    base: &Workspace,
+    shown: &HashSet<Id>,
+    captured: &HashMap<Id, capture::Captured>,
+    provided: &HashMap<Id, bridge::Picture>,
+    pts_ns: i64,
+) -> HashMap<Id, wgpu::Texture> {
+    let mut out = HashMap::new();
+    let Some(native) = native else { return out };
+    let wanted: HashSet<Id> = shown
+        .iter()
+        .filter_map(|id| base.sources.get(id))
+        .flat_map(|s| s.effects.iter().filter(|e| e.enabled && e.kind == crate::timed::MASK))
+        .filter_map(crate::timed::mask_source)
+        .collect();
+    for id in wanted {
+        let Some(source) = base.sources.get(&id) else { continue };
+        let device = native.gpu.device();
+        let texture = if let Some(c) = captured.get(&id) {
+            lightair_engine::gpu::apple::sampled(device, &c.buffer)
+        } else if let Some(p) = provided.get(&id) {
+            lightair_engine::gpu::apple::sampled(device, &p.buffer)
+        } else if made_here(source) {
+            match native.picture(source, pts_ns).map(|s| s.picture) {
+                Some(Picture::Texture(t)) => Some(t),
+                Some(Picture::Buffer(b)) => b.rgba().map(|rgba| native.gpu.texture(&rgba, b.size())),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(t) = texture {
+            out.insert(id, t);
+        }
+    }
+    out
 }
 
 fn shot_of(native: Option<&mut Native>, source: &Source, picture: &bridge::Picture) -> Option<Shot> {

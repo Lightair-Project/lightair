@@ -15,6 +15,9 @@
 //! - **Auto-frame** (`lightair_autoframe`): crops in on the biggest face at a shot size (`shot`
 //!   0 close, 1 medium, 2 wide), no closer than `max_zoom`, easing there at `speed`.
 //!
+//! - **Object mask** (`lightair_source_mask`): cut to another source's picture this frame
+//!   (`source`, its id; stretched over this one): its alpha (`mode` 0) or its brightness (1),
+//!   `invert`ed or not.
 //! - **Camera motion** and **Ambience** (`studio.motion`, `studio.ambience`): the camera
 //!   looks' post pass (`crate::post`).
 //!
@@ -39,6 +42,13 @@ pub(crate) const SCROLL: &str = "scroll_filter";
 pub(crate) const REACT: &str = lightair_model::catalog::AUDIO_REACT_KIND;
 pub(crate) const FACE_BLUR: &str = lightair_model::catalog::FACE_BLUR_KIND;
 pub(crate) const AUTOFRAME: &str = lightair_model::catalog::AUTOFRAME_KIND;
+pub(crate) const MASK: &str = lightair_model::catalog::OBJECT_MASK_KIND;
+
+/// The source an object mask cuts to, when it names one.
+pub(crate) fn mask_source(e: &Effect) -> Option<Id> {
+    let id = e.settings.get("source")?.as_str().filter(|s| !s.is_empty())?;
+    serde_json::from_value(serde_json::Value::String(id.to_string())).ok()
+}
 
 /// The copy of the picture Vision looks at is at most this wide.
 const WATCH_WIDTH: usize = 320;
@@ -65,6 +75,8 @@ struct P {
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var picture: texture_2d<f32>;
 @group(0) @binding(2) var linear: sampler;
+// an object mask's picture (else the picture itself, unused)
+@group(0) @binding(3) var mask: texture_2d<f32>;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> Out {
@@ -98,6 +110,18 @@ fn hidden(uv: vec2<f32>) -> vec4<f32> {
 
 @fragment
 fn fs(v: Out) -> @location(0) vec4<f32> {
+    if (p.mode > 1.5) {
+        // object mask: block says alpha (0) or brightness (1), style inverted (1)
+        let m = textureSampleLevel(mask, linear, v.uv, 0.0);
+        var a = m.a;
+        if (p.block > 0.5) {
+            a = clamp(dot(m.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+        }
+        if (p.style > 0.5) {
+            a = 1.0 - a;
+        }
+        return textureSampleLevel(picture, linear, v.uv, 0.0) * a;
+    }
     if (p.mode > 0.5) {
         var inside = 0.0;
         for (var i = 0; i < 6; i++) {
@@ -122,7 +146,7 @@ fn fs(v: Out) -> @location(0) vec4<f32> {
 pub(crate) fn is_timed(e: &Effect) -> bool {
     matches!(
         e.kind.as_str(),
-        FREEZE | DELAY | SCROLL | REACT | FACE_BLUR | AUTOFRAME | crate::post::MOTION | crate::post::AMBIENCE
+        FREEZE | DELAY | SCROLL | REACT | FACE_BLUR | AUTOFRAME | MASK | crate::post::MOTION | crate::post::AMBIENCE
     )
 }
 
@@ -167,6 +191,16 @@ impl Pass {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
@@ -235,6 +269,8 @@ struct Draw<'a> {
     block: f32,
     style: f32,
     texel: (f32, f32),
+    /// An object mask's picture (block: brightness; style: inverted).
+    mask: Option<&'a wgpu::Texture>,
 }
 
 impl<'a> Draw<'a> {
@@ -252,6 +288,7 @@ impl<'a> Draw<'a> {
             block: 1.0,
             style: 0.0,
             texel: (0.0, 0.0),
+            mask: None,
         }
     }
 }
@@ -396,6 +433,7 @@ impl Timed {
         source: &Source,
         shot: &Shot,
         buffer: Option<&bridge::Buffer>,
+        masks: &HashMap<Id, wgpu::Texture>,
     ) -> Option<Shot> {
         let effects: Vec<&Effect> = source.effects.iter().filter(|e| e.enabled && is_timed(e)).collect();
         if effects.is_empty() {
@@ -587,6 +625,17 @@ impl Timed {
                         run(gpu, pass, &out, &[draw]);
                     }
                 }
+                MASK => {
+                    // no picture to cut to (yet): as it is
+                    let Some(m) = mask_source(e).and_then(|id| masks.get(&id)) else { continue };
+                    let draw = Draw {
+                        mask: Some(m),
+                        block: num("mode", 0.0) as f32,
+                        style: if flag("invert", false) { 1.0 } else { 0.0 },
+                        ..Draw::copy(&current)
+                    };
+                    run(gpu, pass, &out, &[draw]);
+                }
                 crate::post::MOTION | crate::post::AMBIENCE => {
                     let params = if e.kind == crate::post::MOTION {
                         crate::post::Params::motion(&e.settings)
@@ -640,7 +689,13 @@ fn run(gpu: &Gpu, pass: &Pass, target: &wgpu::Texture, draws: &[Draw]) {
                 d.gain,
                 0.0,
                 0.0,
-                if d.faces.is_some() { 1.0 } else { 0.0 },
+                if d.mask.is_some() {
+                    2.0
+                } else if d.faces.is_some() {
+                    1.0
+                } else {
+                    0.0
+                },
                 d.block,
                 d.style,
                 0.0,
@@ -659,6 +714,7 @@ fn run(gpu: &Gpu, pass: &Pass, target: &wgpu::Texture, draws: &[Draw]) {
             });
             gpu.queue().write_buffer(&buffer, 0, &bytes);
             let from = d.from.create_view(&Default::default());
+            let mask = d.mask.unwrap_or(d.from).create_view(&Default::default());
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("timed"),
                 layout: &pass.layout,
@@ -666,6 +722,7 @@ fn run(gpu: &Gpu, pass: &Pass, target: &wgpu::Texture, draws: &[Draw]) {
                     wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&from) },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&pass.sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&mask) },
                 ],
             })
         })
