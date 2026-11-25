@@ -188,13 +188,14 @@ fn camera_resolution(device: &str, height: u64) -> Option<String> {
     CAMERA_RESOLUTION.get().and_then(|f| f(device, height))
 }
 
-/// The cameras and capture cards: (name, the `device` setting).
+/// The cameras and capture cards: (name, the `device` setting: AVFoundation's unique id on
+/// macOS, Media Foundation's symbolic link on Windows).
 pub fn cameras() -> Vec<(String, String)> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     {
         lightair_capture::camera::cameras().into_iter().map(|c| (c.name, c.id)).collect()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     Vec::new()
 }
 

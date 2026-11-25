@@ -1,6 +1,7 @@
-//! macOS, with `LIGHTAIR_ENGINE=own`: screens (displays, windows, apps) and cameras captured by
-//! Lightair itself (`lightair-capture`: ScreenCaptureKit and AVFoundation) for the compositor,
-//! instead of through libobs.
+//! Screens (displays, windows, apps; games on Windows) and cameras captured by Lightair itself
+//! (`lightair-capture`: ScreenCaptureKit and AVFoundation on macOS; Windows Graphics Capture,
+//! Desktop Duplication and Media Foundation on Windows) for the compositor, instead of through
+//! libobs.
 //!
 //! - **One capture per source**, shared by every canvas's compositor. A compositor says which
 //!   sources the scenes it draws show ([`want`]); a capture runs while any compositor wants it and
@@ -16,7 +17,15 @@
 //!   source's newest picture ([`frame`]) and is handed to the source's libobs wrapper
 //!   (`on_screen::publish`), which then runs no capture of its own and draws these frames instead:
 //!   libobs's picture of the source (through its filters, in its own canvases, thumbnails and
-//!   Studio mode) stays right with one capture running.
+//!   Studio mode) stays right with one capture running. On Windows a frame is the capture's
+//!   shared Direct3D 11 texture (or, from some cameras, bytes), copied on the GPU into one of
+//!   Lightair's own pictures (`lightair_host::buffers::Copier`, after waiting on the GPU for the
+//!   capture's shared fence): the capture gets its texture back at once.
+//! - **Windows's settings:** a display is its monitor's device path (none, or a Mac's display:
+//!   the primary monitor); a window, an app or a game is libobs's window string
+//!   (`title:class:executable`), the window found again when its capture starts; a camera is
+//!   Media Foundation's symbolic link, or libobs's DirectShow id (`name:path`) of an older
+//!   project.
 //! - **What stays libobs's:** a capture card whose sound comes in the same stream as its pictures
 //!   (a muxed device: libobs's capture carries that sound into the mix), screens and cameras
 //!   before access is given, and a capture that couldn't start or ended by itself (a window
@@ -27,15 +36,18 @@
 //! draws or hides it), as the libobs capture is set up (`reconcile::source_settings`).
 
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use lightair_capture::{Error, Frame, PixelFormat, VideoSink, camera, screen};
-use lightair_model::{Id, Source, Workspace, catalog, kinds};
 use lightair_host::bridge;
+use lightair_model::{Id, Source, Workspace, catalog, kinds};
+#[cfg(target_os = "macos")]
 use objc2_core_foundation::CFRetained;
+#[cfg(target_os = "macos")]
 use objc2_core_video::CVPixelBuffer;
 use parking_lot::Mutex;
 
@@ -48,19 +60,38 @@ const RETRY_ENDED: Duration = Duration::from_secs(3);
 /// Pixel buffers a screen capture may have in flight: the newest picture, the one libobs's
 /// wrapper draws, one per compositor drawing it, the looks' analysis, and spares for the window
 /// server.
+#[cfg(target_os = "macos")]
 const SCREEN_QUEUE_DEPTH: u32 = 8;
+/// Windows: shared textures a screen capture may have in flight (each is copied into Lightair's
+/// own picture as it arrives, and given back at once).
+#[cfg(windows)]
+const SCREEN_QUEUE_DEPTH: u32 = 4;
 /// A window capture's picture follows the window's size when they differ by more than this
 /// (pixels).
 const RESIZE_SLACK: u32 = 2;
 
 // ---------------------------------------------------------------- what a capture is
 
+/// What a screen capture takes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Aim {
+    /// A display by its UUID or device path ("" for the main display), a window by its id, or
+    /// an app's windows.
+    Target(screen::Target),
+    /// Windows: a window by libobs's window string, found when its capture starts.
+    #[cfg(windows)]
+    Window(String),
+    /// Windows: a game, by its executable (its file name), captured as the game capture sees
+    /// fit.
+    #[cfg(windows)]
+    Game(String),
+}
+
 /// What a source's capture is: what it takes and how.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Plan {
     Screen {
-        /// A display by its UUID ("" for the main display), a window, or an app's windows.
-        target: screen::Target,
+        aim: Aim,
         /// Lightair's own windows left out of a display capture (`hide_obs`).
         exclude_own: bool,
         fps: u32,
@@ -90,14 +121,9 @@ impl Plan {
         };
         match source.kind.as_str() {
             kinds::SCREEN => {
-                let target = match s["mode"].as_i64().unwrap_or(kinds::DISPLAY) {
-                    // a game is a window here
-                    kinds::WINDOW | kinds::GAME => screen::Target::Window(text("window")?.parse().ok()?),
-                    kinds::APP => screen::Target::App { bundle: text("app")?, display: text("display") },
-                    _ => screen::Target::Display(text("display").unwrap_or_default()),
-                };
+                let aim = screen_aim(s["mode"].as_i64().unwrap_or(kinds::DISPLAY), text)?;
                 Some(Plan::Screen {
-                    target,
+                    aim,
                     exclude_own: s["hide_obs"].as_bool().unwrap_or(false),
                     fps: fps.ceil() as u32,
                     cursor: s["cursor"].as_bool().unwrap_or(true) && !pointer_hidden(ws, source),
@@ -116,7 +142,7 @@ impl Plan {
     /// pointer (the same screen target), rather than starting again.
     fn reconfigures(&self, other: &Plan) -> bool {
         match (self, other) {
-            (Plan::Screen { target: a, exclude_own: ea, .. }, Plan::Screen { target: b, exclude_own: eb, .. }) => {
+            (Plan::Screen { aim: a, exclude_own: ea, .. }, Plan::Screen { aim: b, exclude_own: eb, .. }) => {
                 a == b && ea == eb
             }
             _ => false,
@@ -124,12 +150,66 @@ impl Plan {
     }
 
     fn is_window(&self) -> bool {
-        matches!(self, Plan::Screen { target: screen::Target::Window(_), .. })
+        match self {
+            Plan::Screen { aim: Aim::Target(screen::Target::Window(_)), .. } => true,
+            #[cfg(windows)]
+            Plan::Screen { aim: Aim::Window(_), .. } => true,
+            _ => false,
+        }
     }
 }
 
-/// The short side an older project's camera preset asks for (`use_preset` with `preset`).
+/// What a screen source in `mode` takes, from its settings (`text`); `None` with nothing chosen.
+#[cfg(target_os = "macos")]
+fn screen_aim(mode: i64, text: impl Fn(&str) -> Option<String>) -> Option<Aim> {
+    Some(Aim::Target(match mode {
+        // a game is a window here
+        kinds::WINDOW | kinds::GAME => screen::Target::Window(text("window")?.parse().ok()?),
+        kinds::APP => screen::Target::App { bundle: text("app")?, display: text("display") },
+        _ => screen::Target::Display(text("display").unwrap_or_default()),
+    }))
+}
+
+/// What a screen source in `mode` takes, from its settings (`text`); `None` with nothing chosen.
+/// A window, app or game is libobs's window string (a window's id is taken too); an app or game
+/// by its executable. A game with none chosen (libobs's "any full-screen application") isn't
+/// captured yet.
+#[cfg(windows)]
+fn screen_aim(mode: i64, text: impl Fn(&str) -> Option<String>) -> Option<Aim> {
+    use lightair_host::displays::parse_window_string;
+    let exe = |value: String| match parse_window_string(&value) {
+        Some((_, _, exe)) => exe,
+        None => value,
+    };
+    Some(match mode {
+        kinds::WINDOW => {
+            let window = text("window")?;
+            match window.parse() {
+                Ok(id) => Aim::Target(screen::Target::Window(id)),
+                Err(_) => Aim::Window(window),
+            }
+        }
+        kinds::APP => Aim::Target(screen::Target::App { bundle: exe(text("app")?), display: None }),
+        kinds::GAME => {
+            let Some(window) = text("window") else {
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| tracing::info!("not yet: a game capture of any full-screen application"));
+                return None;
+            };
+            Aim::Game(exe(window))
+        }
+        _ => Aim::Target(screen::Target::Display(text("display").unwrap_or_default())),
+    })
+}
+
+/// The short side an older project's camera preset asks for (`use_preset` with `preset`; on
+/// Windows, `res_type` 1 with `resolution`).
 fn preset_height(s: &serde_json::Value) -> Option<u32> {
+    if s["res_type"].as_i64() == Some(1) {
+        let (w, h) = s["resolution"].as_str()?.split_once('x')?;
+        let (w, h): (u32, u32) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+        return Some(w.min(h));
+    }
     if s["use_preset"].as_bool() != Some(true) {
         return None;
     }
@@ -174,12 +254,16 @@ fn screen_config(plan: &Plan, size: Option<(u32, u32)>) -> Option<screen::Config
         cursor: *cursor,
         exclude_own: *exclude_own,
         queue_depth: SCREEN_QUEUE_DEPTH,
+        // Windows Graphics Capture, Desktop Duplication where it isn't there
+        #[cfg(windows)]
+        backend: screen::Backend::Auto,
     })
 }
 
 // ---------------------------------------------------------------- pictures
 
-/// A captured picture: BGRA, IOSurface-backed, as the capture made it.
+/// A captured picture: BGRA; IOSurface-backed as the capture made it (macOS), or a copy of it
+/// in a shared texture (Windows).
 #[derive(Clone)]
 pub(crate) struct Captured {
     pub(crate) buffer: bridge::Buffer,
@@ -197,7 +281,9 @@ impl Captured {
 
 // SAFETY: CoreVideo's buffers are reference counted thread-safely, and a captured picture isn't
 // written again once it's handed over.
+#[cfg(target_os = "macos")]
 unsafe impl Send for Captured {}
+#[cfg(target_os = "macos")]
 unsafe impl Sync for Captured {}
 
 /// What a running capture's sink shares with the rest.
@@ -266,6 +352,9 @@ struct Sink {
     source: Id,
     latest: Arc<Latest>,
     window: bool,
+    /// Windows: copies each frame into Lightair's own pictures.
+    #[cfg(windows)]
+    copier: lightair_host::buffers::Copier,
 }
 
 impl VideoSink for Sink {
@@ -276,10 +365,7 @@ impl VideoSink for Sink {
         if self.window {
             self.follow_window(&frame);
         }
-        let raw = frame.into_raw();
-        let Some(raw) = NonNull::new(raw.cast::<CVPixelBuffer>()) else { return };
-        // SAFETY: `into_raw` gave up the frame's reference, now this one's
-        let buffer = unsafe { CFRetained::from_raw(raw) };
+        let Some(buffer) = self.buffer_of(frame) else { return };
         let serial = self.latest.serial.fetch_add(1, Ordering::AcqRel) + 1;
         let mut f = self.latest.frame.lock();
         if !f.0 {
@@ -298,6 +384,30 @@ impl VideoSink for Sink {
 }
 
 impl Sink {
+    /// The frame as Lightair's picture: the pixel buffer itself.
+    #[cfg(target_os = "macos")]
+    fn buffer_of(&mut self, frame: Frame) -> Option<bridge::Buffer> {
+        let raw = NonNull::new(frame.into_raw().cast::<CVPixelBuffer>())?;
+        // SAFETY: `into_raw` gave up the frame's reference, now this one's
+        Some(unsafe { CFRetained::from_raw(raw) })
+    }
+
+    /// The frame copied into Lightair's own picture (none while pictures aren't taken); the
+    /// capture has its texture back once this returns.
+    #[cfg(windows)]
+    fn buffer_of(&mut self, frame: Frame) -> Option<bridge::Buffer> {
+        use lightair_capture::Image;
+        if !self.latest.frame.lock().0 {
+            return None;
+        }
+        match frame.image() {
+            Image::Texture(t) => {
+                self.copier.copy(t.shared_handle(), frame.size, t.fence().map(|f| (f.handle, f.value)))
+            }
+            Image::Memory(m) => self.copier.from_memory(&m.data, m.stride, frame.size),
+        }
+    }
+
     /// A window drawn into a picture of another size (it was resized): the size that fits it,
     /// for the capture to be changed to (the window's content in points, ÷ how much it was
     /// scaled to fit, × the display's pixels to a point).
@@ -324,6 +434,8 @@ impl Sink {
 enum Running {
     Screen(screen::ScreenCapture),
     Camera(camera::CameraCapture),
+    #[cfg(windows)]
+    Game(lightair_capture::game::GameCapture),
 }
 
 impl Running {
@@ -331,6 +443,8 @@ impl Running {
     fn describe(&self) -> String {
         match self {
             Running::Screen(c) => format!("screen {}x{}", c.size().0, c.size().1),
+            #[cfg(windows)]
+            Running::Game(c) => format!("game {}x{}", c.size().0, c.size().1),
             Running::Camera(c) => {
                 let f = c.format();
                 format!("camera {}x{} {} at {:.2} fps", f.size.0, f.size.1, f.fourcc_text(), c.fps())
@@ -535,9 +649,13 @@ fn spawn(job: Job) {
         // (a camera's session stops before this returns)
         Job::Stop(capture) => drop(capture),
         Job::Change { capture, config, latest } => {
-            if let Running::Screen(c) = &*capture
-                && let Err(e) = c.reconfigure(&config)
-            {
+            let changed = match &*capture {
+                Running::Screen(c) => c.reconfigure(&config),
+                #[cfg(windows)]
+                Running::Game(c) => c.reconfigure(&config),
+                Running::Camera(_) => Ok(()),
+            };
+            if let Err(e) = changed {
                 tracing::warn!(%e, "capture: couldn't change a screen capture");
             }
             latest.changing.store(false, Ordering::Release);
@@ -604,26 +722,56 @@ fn start(source: Id, plan: &Plan, generation: u64, latest: Arc<Latest>) {
 /// Opens `plan`'s capture into `latest`. Blocks; never asks for access.
 fn open(source: Id, plan: &Plan, latest: &Arc<Latest>) -> Result<Running, Refused> {
     let later = |reason: &str| Refused { reason: reason.into(), retry: Some(Duration::from_secs(5)) };
-    let sink = Sink { source, latest: latest.clone(), window: plan.is_window() };
+    let sink = Sink {
+        source,
+        latest: latest.clone(),
+        window: plan.is_window(),
+        #[cfg(windows)]
+        copier: lightair_host::buffers::Copier::new(),
+    };
+    // the capture's textures on the graphics adapter of Lightair's own pictures, so they can be
+    // copied there
+    #[cfg(windows)]
+    lightair_capture::set_adapter(lightair_host::buffers::adapter());
     match plan {
-        Plan::Screen { target, .. } => {
+        Plan::Screen { aim, .. } => {
+            #[cfg(target_os = "macos")]
             if !screen::access() {
                 return Err(later("screen recording isn't allowed yet"));
             }
-            let target = match target {
-                screen::Target::Display(d) if d.is_empty() => screen::Target::Display(
-                    lightair_host::displays::main_display_uuid().ok_or_else(|| later("no main display"))?,
-                ),
-                t => t.clone(),
-            };
             let config = screen_config(plan, None).ok_or_else(|| later("not a screen"))?;
+            let target = match aim {
+                Aim::Target(screen::Target::Display(d)) => {
+                    screen::Target::Display(display_of(d).ok_or_else(|| later("no main display"))?)
+                }
+                Aim::Target(t) => t.clone(),
+                #[cfg(windows)]
+                Aim::Window(named) => screen::Target::Window(
+                    lightair_host::displays::find_window(named).ok_or_else(|| later("the window isn't open"))?,
+                ),
+                #[cfg(windows)]
+                Aim::Game(exe) => {
+                    return Ok(Running::Game(lightair_capture::game::GameCapture::start(
+                        &game_path(exe),
+                        &config,
+                        sink,
+                    )?));
+                }
+            };
             Ok(Running::Screen(screen::ScreenCapture::start(&target, &config, sink)?))
         }
         Plan::Camera { device, height, fps } => {
-            if camera::access() != camera::Access::Allowed {
+            let access = camera::access();
+            // Windows asks desktop apps nothing: only its privacy setting says no
+            let allowed = if cfg!(windows) {
+                matches!(access, camera::Access::Allowed | camera::Access::NotAsked)
+            } else {
+                access == camera::Access::Allowed
+            };
+            if !allowed {
                 return Err(later("the camera isn't allowed yet"));
             }
-            let Some(found) = camera::cameras().into_iter().find(|c| c.id == *device) else {
+            let Some(found) = camera::cameras().into_iter().find(|c| same_camera(device, c)) else {
                 return Err(later("the camera isn't connected"));
             };
             if found.muxed {
@@ -632,7 +780,56 @@ fn open(source: Id, plan: &Plan, latest: &Arc<Latest>) -> Result<Running, Refuse
             }
             let config =
                 camera::Config { format: None, height: *height, fps: Some(*fps), pixel_format: PixelFormat::Bgra };
-            Ok(Running::Camera(camera::CameraCapture::start(device, &config, sink)?))
+            Ok(Running::Camera(camera::CameraCapture::start(&found.id, &config, sink)?))
         }
     }
+}
+
+/// The display a setting names: the main one for none.
+#[cfg(target_os = "macos")]
+fn display_of(display: &str) -> Option<String> {
+    if display.is_empty() { lightair_host::displays::main_display_uuid() } else { Some(display.to_string()) }
+}
+
+/// The display a setting names: the primary monitor for none, or for one that isn't a Windows
+/// monitor's (a project from a Mac).
+#[cfg(windows)]
+fn display_of(display: &str) -> Option<String> {
+    let monitor = display.starts_with(r"\\") || display.parse::<u32>().is_ok();
+    if monitor { Some(display.to_string()) } else { lightair_host::displays::main_display_uuid() }
+}
+
+/// A game's executable (its file name, as libobs's window string has it) as a full path, from
+/// the game running now (its file name while it isn't: the game capture waits for it).
+#[cfg(windows)]
+fn game_path(exe: &str) -> String {
+    let name = |path: &str| path.rsplit(['\\', '/']).next().unwrap_or(path).to_ascii_lowercase();
+    lightair_capture::game::running()
+        .into_iter()
+        .find(|g| name(&g.exe) == name(exe))
+        .map_or_else(|| exe.to_string(), |g| g.exe)
+}
+
+/// Whether `camera` is the one a `device` setting names: its id.
+#[cfg(target_os = "macos")]
+fn same_camera(device: &str, camera: &camera::Camera) -> bool {
+    camera.id == device
+}
+
+/// Whether `camera` is the one a `device` setting names: its symbolic link; or libobs's
+/// DirectShow id of an older project (`name:path`, `:` written `#3A`): the same device (its
+/// path but for its device class, the last `#{…}` part), else the same name.
+#[cfg(windows)]
+fn same_camera(device: &str, camera: &camera::Camera) -> bool {
+    if camera.id.eq_ignore_ascii_case(device) {
+        return true;
+    }
+    let Some((name, path)) = device.split_once(':') else { return false };
+    let decode = |s: &str| s.replace("#3A", ":").replace("#22", "#");
+    let (name, path) = (decode(name), decode(path));
+    let device_of = |p: &str| p.rsplit_once("#{").map_or(p, |(d, _)| d).to_ascii_lowercase();
+    if !path.is_empty() && device_of(&path) == device_of(&camera.id) {
+        return true;
+    }
+    !name.is_empty() && camera.name == name
 }
