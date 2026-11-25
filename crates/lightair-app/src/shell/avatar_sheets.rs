@@ -11,7 +11,6 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-#[cfg(feature = "libobs")]
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::Sizable;
@@ -21,8 +20,8 @@ use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_obs::avatar_pins::{Placement, on_canvas};
 use lightair_model::{Command, Id, Layout, Object, Source};
+use lightair_obs::avatar_pins::{Placement, on_canvas};
 use serde_json::{Value, json};
 
 use super::StudioWindow;
@@ -157,8 +156,7 @@ impl StudioWindow {
         };
         let engine = self.studio.read(cx).engine().clone();
         let file = e.file.clone();
-        let Some(src) = engine.call(move |s| s.reconciler.avatar_snapshot_source(&file, &framing))
-        else {
+        let Some(src) = engine.call(move |s| s.reconciler.avatar_snapshot_source(&file, &framing)) else {
             return self.next_picture(cx);
         };
         self.picture_busy = true;
@@ -203,11 +201,39 @@ impl StudioWindow {
         .detach();
     }
 
-    /// Library pictures from a model's file need an avatar drawn off screen: not yet without
-    /// libobs (the queue is let go; an avatar on screen still gets its picture).
+    /// Takes the next queued library picture from the model's file, one at a time: the
+    /// compositor's avatar renderer draws it at rest, off screen, in the background.
     #[cfg(not(feature = "libobs"))]
-    fn next_picture(&mut self, _cx: &mut Context<Self>) {
-        self.picture_queue.clear();
+    fn next_picture(&mut self, cx: &mut Context<Self>) {
+        if self.picture_busy {
+            return;
+        }
+        let Some(entry) = self.picture_queue.pop_front() else { return };
+        let Some(e) = self.avatar_library.get(entry).cloned() else { return self.next_picture(cx) };
+        let framing = if lib::kind_of(&e.file) == "PNGtuber" {
+            "full".to_string()
+        } else {
+            e.look["framing"].as_str().unwrap_or("bust").to_string()
+        };
+        self.picture_busy = true;
+        let settings =
+            json!({"file": e.file, "framing": framing, "width": 1080, "height": 1080, "mirror": true, "device": ""});
+        cx.spawn(async move |this, cx| {
+            let png = cx.background_executor().spawn(async move { picture_at_rest(&settings) }).await;
+            let _ = this.update(cx, |this, cx| {
+                match png {
+                    Some(png) => {
+                        this.avatar_library.set_picture(entry, &png);
+                        this.avatar_library.save();
+                    }
+                    None => tracing::warn!(%entry, "no library picture: the model didn't load"),
+                }
+                this.picture_busy = false;
+                this.next_picture(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn close_avatar_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -339,11 +365,24 @@ impl StudioWindow {
         self.read_avatar_picture(preview, entry, cx);
     }
 
-    /// Without libobs: the avatar as the compositor draws it alone isn't there yet (a source
-    /// shown on its own), so no picture is taken.
+    /// Without libobs: the avatar drawn at rest, off screen, with its source's settings.
     #[cfg(not(feature = "libobs"))]
-    fn take_avatar_picture(&mut self, _source: Id, entry: Id, _cx: &mut Context<Self>) {
+    fn take_avatar_picture(&mut self, source: Id, entry: Id, cx: &mut Context<Self>) {
         self.avatar_pictures.insert(entry);
+        let workspace = self.studio.read(cx).workspace().clone();
+        let Some(src) = workspace.sources.get(&source) else { return };
+        let mut settings = src.settings.clone();
+        settings["device"] = json!("");
+        cx.spawn(async move |this, cx| {
+            let png = cx.background_executor().spawn(async move { picture_at_rest(&settings) }).await;
+            let Some(png) = png else { return };
+            let _ = this.update(cx, |this, cx| {
+                this.avatar_library.set_picture(entry, &png);
+                this.avatar_library.save();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Reads `preview` back once it has drawn a few frames: the library picture of `entry`.
@@ -1144,7 +1183,54 @@ fn picture_size(w: u32, h: u32) -> (u32, u32) {
 #[cfg_attr(not(feature = "libobs"), allow(dead_code))]
 fn picture_png(frame: &lightair_preview::Frame) -> Option<Vec<u8>> {
     let (w, h, rgba) = lightair_preview::frame_rgba(frame, 360)?;
-    let mut img = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
+    png_of(image::RgbaImage::from_raw(w as u32, h as u32, rgba)?)
+}
+
+/// An avatar's model (`settings`: an avatar source's) drawn at rest by the compositor's renderer,
+/// as a library picture; `None` when it doesn't load (in 20 seconds). Off the UI thread.
+#[cfg(not(feature = "libobs"))]
+fn picture_at_rest(settings: &Value) -> Option<Vec<u8>> {
+    use lightair_render::media::Picture;
+    let mut r = lightair_preview::avatars::AvatarRenderer::new(settings).ok()?;
+    let start = Instant::now();
+    loop {
+        let status = r.status();
+        if !status.error.is_empty() || start.elapsed() > Duration::from_secs(20) {
+            return None;
+        }
+        if status.loaded {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // a few frames, settled
+    let mut shot = None;
+    for _ in 0..8 {
+        shot = r.draw_at_rest().or(shot);
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    let Picture::Texture(texture) = shot?.picture else { return None };
+    let (w, h) = (texture.width(), texture.height());
+    let rgba = lightair_render::compose::read_texture(&texture)?;
+    let img = image::RgbaImage::from_raw(w, h, rgba)?;
+    let k = 360.0 / w.max(h) as f32;
+    let img = if k < 1.0 {
+        image::imageops::resize(
+            &img,
+            (w as f32 * k) as u32,
+            (h as f32 * k) as u32,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        img
+    };
+    png_of(img)
+}
+
+/// A picture cut to what's drawn (where the background is see-through), as a PNG.
+fn png_of(img: image::RgbaImage) -> Option<Vec<u8>> {
+    let (w, h) = img.dimensions();
+    let mut img = img;
     let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
     for (x, y, p) in img.enumerate_pixels() {
         if p[3] > 8 {
@@ -1154,7 +1240,7 @@ fn picture_png(frame: &lightair_preview::Frame) -> Option<Vec<u8>> {
             y1 = y1.max(y);
         }
     }
-    if x0 < x1 && y0 < y1 && (x1 - x0 + 1, y1 - y0 + 1) != (w as u32, h as u32) {
+    if x0 < x1 && y0 < y1 && (x1 - x0 + 1, y1 - y0 + 1) != (w, h) {
         img = image::imageops::crop_imm(&img, x0, y0, x1 - x0 + 1, y1 - y0 + 1).to_image();
     }
     let mut png = std::io::Cursor::new(Vec::new());

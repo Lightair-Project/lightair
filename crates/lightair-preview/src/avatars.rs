@@ -175,6 +175,11 @@ impl AvatarRenderer {
         shot
     }
 
+    /// Draws the avatar at rest, nothing tracked (a still picture of it).
+    pub fn draw_at_rest(&mut self) -> Option<Shot> {
+        self.draw(&Input::default(), None)
+    }
+
     /// As [`AvatarRenderer::draw`], recording into `encoder` (the uploads it needs are queued
     /// and land at the caller's next submit, before the encoder's work).
     pub fn encode(
