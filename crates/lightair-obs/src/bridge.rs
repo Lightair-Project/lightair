@@ -7,8 +7,9 @@
 //!   can't render into an IOSurface directly on OpenGL: the copy is a framebuffer blit there, a
 //!   texture copy on Metal). A GPU fence says when a copy is done; only finished buffers are
 //!   handed on, and [`picture`] gives the newest one from any thread. Sources nobody wants
-//!   aren't drawn. A source is drawn through its libobs filters, so its effects are already in
-//!   the picture.
+//!   aren't drawn. A source is drawn through its libobs filters (its effects already in the
+//!   picture), or, when every compositor drawing it asks, without them: the compositor then
+//!   draws its effects itself. Each picture says which it is.
 //! - **Sources:** the engine thread keeps a map from document source to libobs source, updated
 //!   as the reconciler makes and removes them ([`source_added`], [`source_removed`]), so the
 //!   graphics thread never touches the reconciler.
@@ -17,7 +18,7 @@
 //!
 //! With the switch off every entry point returns at once and nothing is registered with libobs.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -98,15 +99,17 @@ pub(crate) fn set_switch(switch: Option<Switch>) {
 // ---------------------------------------------------------------- sources
 
 /// A retained `CVPixelBuffer`: BGRA, IOSurface-backed.
-type Buffer = CFRetained<CVPixelBuffer>;
+pub type Buffer = CFRetained<CVPixelBuffer>;
 
 struct Bridge {
     /// Document source → its libobs source (engine thread writes; graphics thread reads).
     sources: Mutex<HashMap<Id, SourceRef>>,
-    /// The sources each compositor (by canvas) wants pictures of.
-    wanted: Mutex<HashMap<Id, HashSet<Id>>>,
-    /// The newest finished picture of each source drawn.
-    latest: Mutex<HashMap<Id, Buffer>>,
+    /// The sources each compositor (by canvas) wants pictures of, each with whether it wants
+    /// it without its libobs filters.
+    wanted: Mutex<HashMap<Id, HashMap<Id, bool>>>,
+    /// The newest finished picture of each source drawn, and whether it was drawn without its
+    /// filters.
+    latest: Mutex<HashMap<Id, (Buffer, bool)>>,
     /// Each drawn source's ring (graphics thread only).
     rings: Mutex<HashMap<Id, Ring>>,
 }
@@ -158,8 +161,10 @@ pub(crate) fn clear() {
 }
 
 /// The compositor for `canvas` wants pictures of `sources` from the next frame on (replacing
-/// what it wanted before; empty when it stops).
-pub fn want(canvas: Id, sources: HashSet<Id>) {
+/// what it wanted before; empty when it stops). `true`: without the source's libobs filters
+/// (drawn so only when every compositor drawing it asks, and the source has no filter that
+/// isn't one of its effects).
+pub fn want(canvas: Id, sources: HashMap<Id, bool>) {
     if !own() {
         return;
     }
@@ -175,11 +180,60 @@ pub fn want(canvas: Id, sources: HashSet<Id>) {
     }
 }
 
+/// A source's picture: a BGRA, IOSurface-backed pixel buffer, colours multiplied by alpha.
+pub struct Picture {
+    pub buffer: Buffer,
+    /// Drawn without the source's libobs filters: its effects aren't in it.
+    pub unfiltered: bool,
+}
+
+impl Picture {
+    /// The buffer as the renderer takes it.
+    pub fn pixel_buffer(&self) -> Option<lightair_render::texture::PixelBuffer> {
+        let buffer = self.buffer.clone();
+        // SAFETY: the reference made by `clone` is given up to the pixel buffer, which releases it.
+        unsafe { lightair_render::texture::PixelBuffer::from_raw(CFRetained::into_raw(buffer).as_ptr().cast()) }
+    }
+}
+
 /// The newest finished picture of `source`, if it's wanted and has been drawn. Any thread.
-pub fn picture(source: Id) -> Option<lightair_render::texture::PixelBuffer> {
-    let buffer = BRIDGE.latest.lock().get(&source)?.clone();
-    // SAFETY: the reference made by `clone` is given up to the pixel buffer, which releases it.
-    unsafe { lightair_render::texture::PixelBuffer::from_raw(CFRetained::into_raw(buffer).as_ptr().cast()) }
+pub fn picture(source: Id) -> Option<Picture> {
+    let (buffer, unfiltered) = BRIDGE.latest.lock().get(&source)?.clone();
+    Some(Picture { buffer, unfiltered })
+}
+
+// ---------------------------------------------------------------- timers
+
+/// What each timer shows now (the engine's timers write it once a second, while the switch is
+/// on), so the compositor can draw them itself.
+static TIMER_TEXTS: LazyLock<Mutex<HashMap<Id, String>>> = LazyLock::new(Default::default);
+
+/// The text the timer `source` shows now, once its first tick has made one.
+pub fn timer_text(source: Id) -> Option<String> {
+    TIMER_TEXTS.lock().get(&source).cloned()
+}
+
+/// The engine's timers: `source` now shows `text` (`None`: the timer is gone).
+pub(crate) fn set_timer_text(source: Id, text: Option<&str>) {
+    if !own() {
+        return;
+    }
+    let mut texts = TIMER_TEXTS.lock();
+    match text {
+        Some(t) => {
+            texts.insert(source, t.to_string());
+        }
+        None => {
+            texts.remove(&source);
+        }
+    }
+}
+
+/// The engine's timers were all removed.
+pub(crate) fn clear_timer_texts() {
+    if own() {
+        TIMER_TEXTS.lock().clear();
+    }
 }
 
 // ---------------------------------------------------------------- buffers
@@ -296,6 +350,8 @@ struct Slot {
     tex: *mut sys::gs_texture_t,
     /// Set while the GPU is still filling it (OpenGL).
     fence: Option<gl::GLsync>,
+    /// What's in it was drawn without the source's filters.
+    unfiltered: bool,
 }
 
 /// A source's buffers at one size. Graphics thread only.
@@ -368,7 +424,7 @@ impl Ring {
         let (w, h) = self.size;
         let buffer = bgra_buffer(w, h)?;
         let surface = surface_of(&buffer)?;
-        let mut slot = Slot { buffer, gl: 0, tex: ptr::null_mut(), fence: None };
+        let mut slot = Slot { buffer, gl: 0, tex: ptr::null_mut(), fence: None, unfiltered: false };
         if self.metal {
             slot.tex = unsafe { sys::gs_texture_create_from_iosurface(surface) };
             if slot.tex.is_null() {
@@ -481,10 +537,18 @@ impl Ring {
     }
 }
 
-/// Draws `source` at its own size (`w`×`h`) into `target`, on transparent black, its colours
-/// multiplied by its alpha (as libobs draws a source for its filters). Inside libobs's graphics
-/// context.
-unsafe fn draw_source(source: *mut sys::obs_source_t, w: u32, h: u32, target: *mut sys::gs_texture_t) {
+/// Draws `source` at `w`×`h` into `target`, on transparent black, its colours multiplied by its
+/// alpha (as libobs draws a source for its filters): through its filters, or, given its
+/// innermost filter (`skip`), without any of them (libobs draws the filter's target as the
+/// filter would see it, which for the innermost one is the source itself). Inside libobs's
+/// graphics context.
+unsafe fn draw_source(
+    source: *mut sys::obs_source_t,
+    skip: Option<*mut sys::obs_source_t>,
+    w: u32,
+    h: u32,
+    target: *mut sys::gs_texture_t,
+) {
     unsafe {
         let prev_rt = sys::gs_get_render_target();
         let prev_zs = sys::gs_get_zstencil_target();
@@ -505,12 +569,62 @@ unsafe fn draw_source(source: *mut sys::obs_source_t, w: u32, h: u32, target: *m
             sys::GS_BLEND_ONE,
             sys::GS_BLEND_INVSRCALPHA,
         );
-        sys::obs_source_video_render(source);
+        match skip {
+            Some(filter) => sys::obs_source_skip_video_filter(filter),
+            None => sys::obs_source_video_render(source),
+        }
         sys::gs_blend_state_pop();
         sys::gs_set_render_target(prev_rt, prev_zs);
         sys::gs_matrix_pop();
         sys::gs_projection_pop();
         sys::gs_viewport_pop();
+    }
+}
+
+/// How `source` can be drawn without its filters: `Unfiltered::Plain` it has none,
+/// `Unfiltered::Skip(f)` by skipping its innermost filter `f` (a reference the caller releases),
+/// `Unfiltered::No` when one of its filters isn't one of its document effects (the screen look's
+/// pointer filter, which the compositor doesn't draw yet). Inside libobs's graphics context.
+enum Unfiltered {
+    Plain,
+    Skip(*mut sys::obs_source_t),
+    No,
+}
+
+unsafe fn unfiltered(source: *mut sys::obs_source_t) -> Unfiltered {
+    struct Found {
+        filters: usize,
+        innermost: *mut sys::obs_source_t,
+        other: bool,
+    }
+    unsafe extern "C" fn each(parent: *mut sys::obs_source_t, child: *mut sys::obs_source_t, param: *mut c_void) {
+        let found = unsafe { &mut *(param as *mut Found) };
+        found.filters += 1;
+        let id = unsafe { sys::obs_source_get_id(child) };
+        if !id.is_null() {
+            let id = unsafe { std::ffi::CStr::from_ptr(id) }.to_bytes();
+            if id == lightair_model::catalog::POINTER_KIND.as_bytes()
+                || id == lightair_model::catalog::OLD_POINTER_KIND.as_bytes()
+            {
+                found.other = true;
+            }
+        }
+        if found.innermost.is_null() && unsafe { sys::obs_filter_get_target(child) } == parent {
+            // held while drawn: the engine thread may take the filter off meanwhile
+            found.innermost = unsafe { sys::obs_source_get_ref(child) };
+        }
+    }
+    let mut found = Found { filters: 0, innermost: ptr::null_mut(), other: false };
+    unsafe { sys::obs_source_enum_filters(source, Some(each), (&mut found as *mut Found).cast()) };
+    match found {
+        Found { filters: 0, .. } => Unfiltered::Plain,
+        Found { other: false, innermost, .. } if !innermost.is_null() => Unfiltered::Skip(innermost),
+        Found { innermost, .. } => {
+            if !innermost.is_null() {
+                unsafe { sys::obs_source_release(innermost) };
+            }
+            Unfiltered::No
+        }
     }
 }
 
@@ -527,10 +641,12 @@ unsafe extern "C" fn on_rendered(_: *mut c_void) {
         return;
     }
     let b = &*BRIDGE;
-    // each source, and how many compositors want it
-    let mut wanted: HashMap<Id, usize> = HashMap::new();
-    for id in b.wanted.lock().values().flatten() {
-        *wanted.entry(*id).or_default() += 1;
+    // each source, how many compositors want it, and whether all of them want it unfiltered
+    let mut wanted: HashMap<Id, (usize, bool)> = HashMap::new();
+    for (id, bare) in b.wanted.lock().values().flatten() {
+        let e = wanted.entry(*id).or_insert((0, true));
+        e.0 += 1;
+        e.1 &= *bare;
     }
     let mut rings = b.rings.lock();
     if wanted.is_empty() && rings.is_empty() {
@@ -546,11 +662,30 @@ unsafe extern "C" fn on_rendered(_: *mut c_void) {
         }
         keep
     });
-    for (id, &compositors) in &wanted {
+    for (id, &(compositors, bare)) in &wanted {
         let Some(src) = sources.get(id) else { continue };
         let src = src.as_ptr();
-        let (w, h) = unsafe { (sys::obs_source_get_width(src), sys::obs_source_get_height(src)) };
+        let route = if bare { unsafe { unfiltered(src) } } else { Unfiltered::No };
+        let skip = match route {
+            Unfiltered::Skip(f) => Some(f),
+            _ => None,
+        };
+        let unfiltered = !matches!(route, Unfiltered::No);
+        // unfiltered: the source's own size (its filters may crop or scale it)
+        let (w, h) = unsafe {
+            if unfiltered {
+                (sys::obs_source_get_base_width(src), sys::obs_source_get_base_height(src))
+            } else {
+                (sys::obs_source_get_width(src), sys::obs_source_get_height(src))
+            }
+        };
+        let release = || {
+            if let Some(f) = skip {
+                unsafe { sys::obs_source_release(f) };
+            }
+        };
         if w == 0 || h == 0 {
+            release();
             continue;
         }
         if rings.get(id).is_some_and(|r| r.size != (w, h))
@@ -559,18 +694,30 @@ unsafe extern "C" fn on_rendered(_: *mut c_void) {
             unsafe { old.destroy() };
         }
         if !rings.contains_key(id) {
-            let Some(ring) = (unsafe { Ring::new((w, h)) }) else { continue };
+            let Some(ring) = (unsafe { Ring::new((w, h)) }) else {
+                release();
+                continue;
+            };
             rings.insert(*id, ring);
         }
-        let Some(ring) = rings.get_mut(id) else { continue };
+        let Some(ring) = rings.get_mut(id) else {
+            release();
+            continue;
+        };
         if let Some(i) = unsafe { ring.finished() } {
-            b.latest.lock().insert(*id, ring.slots[i].buffer.clone());
+            let slot = &ring.slots[i];
+            b.latest.lock().insert(*id, (slot.buffer.clone(), slot.unfiltered));
         }
         // every buffer in use: this frame of the source is skipped rather than waited for
-        let Some(slot) = (unsafe { ring.free_slot(RING + compositors) }) else { continue };
+        let Some(slot) = (unsafe { ring.free_slot(RING + compositors) }) else {
+            release();
+            continue;
+        };
         unsafe {
-            draw_source(src, w, h, ring.target);
+            draw_source(src, skip, w, h, ring.target);
+            ring.slots[slot].unfiltered = unfiltered;
             ring.copy(slot);
         }
+        release();
     }
 }

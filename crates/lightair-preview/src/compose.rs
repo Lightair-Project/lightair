@@ -8,20 +8,35 @@
 //! (`program_source::in_use`, asked by the hub a few times a second), and idles otherwise, so it
 //! keeps drawing for a recording while the window's preview is hidden.
 //!
-//! Each frame it reads the document the engine last applied (`bridge::snapshot`), tells the
-//! bridge which sources the program and the show's overlays show, takes their newest pictures
-//! from it (IOSurfaces libobs drew them into), and draws the program (or the switch under way)
-//! on the GPU, then the overlays ("Show over every scene") over it, as libobs draws its overlay
-//! channels over what's on air. The frame is copied into a BGRA IOSurface from a small ring: the
-//! previews show that buffer as they show libobs's Metal frames (the window's layer takes it as
-//! it is, GPUI's `surface()` an NV12 copy), and the canvas's `lightair_program` sources draw it
-//! for libobs's outputs.
+//! Each frame it reads the document the engine last applied (`bridge::snapshot`), makes the
+//! pictures of the sources the program and the show's overlays show, and draws the program (or
+//! the switch under way) on the GPU, then the overlays ("Show over every scene") over it, as
+//! libobs draws its overlay channels over what's on air. The frame is copied into a BGRA
+//! IOSurface from a small ring: the previews show that buffer as they show libobs's Metal frames
+//! (the window's layer takes it as it is, GPUI's `surface()` an NV12 copy), and the canvas's
+//! `lightair_program` sources draw it for libobs's outputs.
 //!
-//! libobs draws each source through its own filters, so the renderer is given the document
-//! without the sources' effects (they'd be drawn twice). It does the rest: position, fit, crop,
-//! turn, flip, tilt, shape, opacity, and the switch between scenes.
+//! The pictures ([`Native`]):
+//!
+//! - **Made here**, with `lightair-engine`'s pictures: images (GIFs animated), colours (and so
+//!   the shapes, which are colours cut by their layout), text, timers (their text from the
+//!   engine's timers) and the native widgets that need no live data (labels). Until one is ready
+//!   (an image decoding, a timer before its first tick) libobs's picture stands in.
+//! - **From libobs** (`bridge`), for everything else: captures, cameras, media files, web pages,
+//!   avatars, devices, NDI…
+//!
+//! Effects: the compositor draws a source's effects when it can draw all of them: the
+//! renderer's (shader effects, the colour filter, a `.cube` LUT) and the engine's sharpen and
+//! keyers (chroma, colour, luma key), the keyers first in the stack, as they're drawn first
+//! here. Such a source's picture is made bare (the bridge draws it without its libobs
+//! filters), keyed on the GPU, then given to the renderer with its effects. A source with any
+//! other effect (the Effect Stack's looks, the camera studio filter, masks, freeze, scroll…)
+//! is drawn by libobs through all its filters, and the renderer is given it without its effects
+//! so nothing is drawn twice. The renderer does the rest: position, fit, crop, turn, flip,
+//! tilt, shape, opacity, and the switch between scenes.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock, Weak};
 use std::thread::JoinHandle;
@@ -32,6 +47,9 @@ use lightair_model::{Canvas, Id, Scene, Source, TransitionKind, Workspace};
 use lightair_render::SharedGpu;
 use lightair_render::media::Picture;
 use lightair_render::scene::{Pictures, SceneRenderer, Shot};
+use lightair_engine::gpu::Gpu;
+use lightair_engine::hot::{Hot, Program};
+use lightair_engine::{keying, templates, widgets};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_core_video::{CVPixelBufferGetIOSurface, kCVPixelFormatType_32BGRA};
@@ -200,6 +218,9 @@ fn run(canvas: Id, stop: &AtomicBool) {
         drawer: None,
         failed: None,
         doc: Doc::default(),
+        native: None,
+        native_failed: false,
+        missing: HashSet::new(),
         wanted: None,
         fed: Vec::new(),
         clock: Instant::now(),
@@ -231,8 +252,14 @@ struct State {
     /// A size nothing could be made for (not tried again).
     failed: Option<(u32, u32)>,
     doc: Doc,
-    /// The sources last asked of the bridge.
-    wanted: Option<HashSet<Id>>,
+    /// The pictures made here and the keyers (made at the first frame).
+    native: Option<Native>,
+    /// No GPU for them: every picture comes from libobs, with its filters unless it has no keys.
+    native_failed: bool,
+    /// Sources made here whose picture wasn't there last frame: libobs's stands in meanwhile.
+    missing: HashSet<Id>,
+    /// The sources last asked of the bridge, and whether each was asked for without its filters.
+    wanted: Option<HashMap<Id, bool>>,
     /// The previews given frames.
     fed: Vec<Weak<Shared>>,
     /// The clock moving effects run on.
@@ -260,18 +287,18 @@ impl State {
             self.idle();
             return period;
         }
-        let ws = self.doc.update(&snapshot.workspace);
+        let base = self.doc.update(&snapshot.workspace);
         let now = Instant::now();
         // the switch to what's on air, while it runs
-        let switch = snapshot.switch.filter(|s| ws.program == Some(s.to) && s.progress(now) < 1.0);
+        let switch = snapshot.switch.filter(|s| base.program == Some(s.to) && s.progress(now) < 1.0);
         let mut scenes: Vec<Id> = match switch {
             Some(s) => {
                 let over = (s.settings.kind == TransitionKind::Scene)
-                    .then(|| ws.scene(s.to).and_then(|sc| sc.transition_scene).or(ws.show.transition_scene))
+                    .then(|| base.scene(s.to).and_then(|sc| sc.transition_scene).or(base.show.transition_scene))
                     .flatten();
                 [Some(s.from), Some(s.to), over].into_iter().flatten().collect()
             }
-            None => ws.program.into_iter().collect(),
+            None => base.program.into_iter().collect(),
         };
         let overlays = self.doc.overlays;
         scenes.extend(overlays);
@@ -291,16 +318,80 @@ impl State {
                 return period;
             }
         }
-        let shown = self.doc.shown(&ws, canvas.id, &scenes);
-        if self.wanted.as_ref() != Some(&shown) {
-            bridge::want(canvas.id, shown.clone());
-            self.wanted = Some(shown);
+        let shown = self.doc.shown(&base, canvas.id, &scenes);
+        if self.native.is_none() && !self.native_failed {
+            self.native = Native::new();
+            self.native_failed = self.native.is_none();
+        }
+        let keyers = self.native.is_some();
+        self.missing.retain(|id| shown.contains(id));
+        // what libobs is asked for: the sources not made here (bare when the compositor draws
+        // all their effects), and those made here whose picture isn't ready
+        let want: HashMap<Id, bool> = shown
+            .iter()
+            .filter_map(|id| base.sources.get(id))
+            .filter_map(|source| {
+                let effects = effects_drawn(source, keyers);
+                let made = keyers && effects && made_here(source) && !self.missing.contains(&source.id);
+                (!made).then_some((source.id, effects))
+            })
+            .collect();
+        if self.wanted.as_ref() != Some(&want) {
+            bridge::want(canvas.id, want.clone());
+            self.wanted = Some(want);
         }
 
         let Some(drawer) = self.drawer.as_mut() else { return period };
 
         let time = self.clock.elapsed().as_secs_f32();
-        let mut pictures = Bridged;
+        // every picture, before drawing: which sources keep their effects depends on them
+        let mut shots: HashMap<Id, Shot> = HashMap::new();
+        let mut kept: BTreeSet<Id> = BTreeSet::new();
+        // libobs's buffers, held until the GPU is done with the frame
+        let mut held: Vec<bridge::Buffer> = Vec::new();
+        let pts_ns = self.clock.elapsed().as_nanos() as i64;
+        if let Some(native) = self.native.as_mut() {
+            native.keep(&snapshot.workspace);
+        }
+        for id in &shown {
+            let Some(source) = base.sources.get(id) else { continue };
+            let effects = effects_drawn(source, keyers);
+            if effects
+                && made_here(source)
+                && let Some(native) = self.native.as_mut()
+            {
+                match native.picture(source, pts_ns) {
+                    Some(shot) => {
+                        self.missing.remove(id);
+                        shots.insert(*id, shot);
+                        kept.insert(*id);
+                        continue;
+                    }
+                    None => {
+                        self.missing.insert(*id);
+                    }
+                }
+            }
+            let Some(picture) = bridge::picture(*id) else { continue };
+            let steps = if picture.unfiltered { keying::steps(source) } else { Vec::new() };
+            let shot = if steps.is_empty() {
+                picture.pixel_buffer().map(|b| Shot { size: b.size(), picture: Picture::Buffer(b), premultiplied: true })
+            } else {
+                // keyed here; without the keyers it isn't drawn (it wasn't asked for bare)
+                self.native.as_mut().and_then(|n| n.keyed(source.id, &picture.buffer, &steps))
+            };
+            let Some(shot) = shot else { continue };
+            if picture.unfiltered {
+                kept.insert(*id);
+            }
+            shots.insert(*id, shot);
+            held.push(picture.buffer);
+        }
+        if let Some(native) = self.native.as_mut() {
+            native.end_frame();
+        }
+        let ws = self.doc.drawn(kept);
+        let mut pictures = Ready(&shots);
         match (switch, ws.program) {
             (Some(s), _) => {
                 let _ = drawer.renderer.transition(
@@ -337,6 +428,8 @@ impl State {
             return period;
         }
         drawer.ring.handed(i);
+        // the GPU is done with the sources' buffers
+        drop(held);
         let frame = &drawer.ring.slots[i].buffer;
         for preview in showing {
             preview.feed(frame);
@@ -352,7 +445,7 @@ impl State {
     /// picture.
     fn idle(&mut self) {
         if self.wanted.take().is_some() {
-            bridge::want(self.canvas, HashSet::new());
+            bridge::want(self.canvas, HashMap::new());
         }
         program_source::withdraw(self.canvas);
     }
@@ -377,10 +470,15 @@ fn frame_period(canvas: Option<&Canvas>) -> Duration {
 
 // ---------------------------------------------------------------- the document
 
-/// The workspace as the renderer is given it, made again only when the engine's changes.
+/// The workspace as the renderer is given it, made again only when the engine's changes or the
+/// sources that keep their effects do.
 struct Doc {
     from: Option<Arc<Workspace>>,
-    drawn: Option<Arc<Workspace>>,
+    /// The engine's workspace with the overlays' scene, effects as they are.
+    base: Option<Arc<Workspace>>,
+    /// What the renderer was last given: `base` with effects only on the sources listed (the
+    /// ones whose pictures came without them).
+    drawn: Option<(BTreeSet<Id>, Arc<Workspace>)>,
     /// The scene the drawn workspace has for the show's overlays (every overlay scene's objects,
     /// bottom first), when there are any.
     overlays: Option<Id>,
@@ -392,25 +490,44 @@ struct Doc {
 
 impl Default for Doc {
     fn default() -> Doc {
-        Doc { from: None, drawn: None, overlays: None, overlays_id: Id::new(), shown: None }
+        Doc { from: None, base: None, drawn: None, overlays: None, overlays_id: Id::new(), shown: None }
     }
 }
 
 impl Doc {
+    /// The engine's workspace `ws` with the overlays' scene.
     fn update(&mut self, ws: &Arc<Workspace>) -> Arc<Workspace> {
-        match (&self.from, &self.drawn) {
-            (Some(from), Some(drawn)) if Arc::ptr_eq(from, ws) => drawn.clone(),
+        match (&self.from, &self.base) {
+            (Some(from), Some(base)) if Arc::ptr_eq(from, ws) => base.clone(),
             _ => {
-                let mut drawn = without_effects(ws);
+                let mut base = Workspace::clone(ws);
                 self.overlays = overlay_scene(ws, self.overlays_id).map(|scene| {
-                    drawn.scenes.push(Arc::new(scene));
+                    base.scenes.push(Arc::new(scene));
                     self.overlays_id
                 });
-                let drawn = Arc::new(drawn);
+                let base = Arc::new(base);
                 self.from = Some(ws.clone());
-                self.drawn = Some(drawn.clone());
+                self.base = Some(base.clone());
+                self.drawn = None;
                 self.shown = None;
-                drawn
+                base
+            }
+        }
+    }
+
+    /// The workspace for the renderer: effects only on the sources in `kept` (their pictures
+    /// came without them); every other source's are already in its picture.
+    fn drawn(&mut self, kept: BTreeSet<Id>) -> Arc<Workspace> {
+        let Some(base) = &self.base else { return Arc::new(Workspace::new("")) };
+        // only sources with effects tell two workspaces apart
+        let kept: BTreeSet<Id> =
+            kept.into_iter().filter(|id| base.sources.get(id).is_some_and(|s| !s.effects.is_empty())).collect();
+        match &self.drawn {
+            Some((k, ws)) if *k == kept => ws.clone(),
+            _ => {
+                let ws = Arc::new(without_effects(base, &kept));
+                self.drawn = Some((kept, ws.clone()));
+                ws
             }
         }
     }
@@ -456,11 +573,12 @@ fn overlay_scene(ws: &Workspace, id: Id) -> Option<Scene> {
     Some(scene)
 }
 
-/// `ws` with no source effects: libobs has drawn them into the sources' pictures already.
-fn without_effects(ws: &Workspace) -> Workspace {
+/// `ws` with no effects on the sources not in `kept`: libobs has drawn them into those
+/// sources' pictures already.
+fn without_effects(ws: &Workspace, kept: &BTreeSet<Id>) -> Workspace {
     let mut out = ws.clone();
     for source in out.sources.values_mut() {
-        if !source.effects.is_empty() {
+        if !source.effects.is_empty() && !kept.contains(&source.id) {
             let mut bare = Source::clone(source);
             bare.effects.clear();
             *source = Arc::new(bare);
@@ -469,15 +587,177 @@ fn without_effects(ws: &Workspace) -> Workspace {
     out
 }
 
-/// The sources' pictures: the bridge's newest buffers, colours already multiplied by alpha (as
-/// libobs draws them).
-struct Bridged;
+/// The frame's pictures, made before it's drawn.
+struct Ready<'a>(&'a HashMap<Id, Shot>);
 
-impl Pictures for Bridged {
+impl Pictures for Ready<'_> {
     fn picture(&mut self, source: &Source) -> Option<Shot> {
-        let buffer = bridge::picture(source.id)?;
-        let size = buffer.size();
-        Some(Shot { picture: Picture::Buffer(buffer), size, premultiplied: true })
+        self.0.get(&source.id).cloned()
+    }
+}
+
+// ---------------------------------------------------------------- pictures made here
+
+/// The native widgets drawn here: the ones whose picture is their settings alone (the others
+/// show chat, alerts or what the widget server stores, which the compositor isn't given yet).
+const NATIVE_WIDGETS: &[&str] = &["label"];
+
+/// Whether the compositor makes `source`'s picture itself (when it draws all its effects).
+fn made_here(source: &Source) -> bool {
+    let s = &source.settings;
+    match source.kind.as_str() {
+        templates::IMAGE => s["file"].as_str().is_some_and(|f| !f.is_empty()),
+        templates::COLOUR | templates::TIMER => true,
+        // text read from a file stays libobs's
+        templates::TEXT => !s["from_file"].as_bool().unwrap_or(false),
+        widgets::KIND => widgets::instance(s).is_some_and(|i| NATIVE_WIDGETS.contains(&i.kind.as_str())),
+        _ => false,
+    }
+}
+
+/// Whether the compositor draws every effect of `source` that changes its picture: the
+/// renderer's (shader effects, the colour filter, a LUT from a `.cube` file, as
+/// `lightair_render::scene::unsupported` counts them) and, with `keyers`, sharpen and the
+/// keyers, which must come before the renderer's in the stack (they're drawn first here).
+/// Sound effects don't count.
+fn effects_drawn(source: &Source, keyers: bool) -> bool {
+    let mut renderer_seen = false;
+    for e in source.effects.iter().filter(|e| e.enabled && !e.kind.starts_with("audio.")) {
+        if keying::KINDS.contains(&e.kind.as_str()) {
+            if !keyers || renderer_seen {
+                return false;
+            }
+        } else if renderer_draws(e) {
+            renderer_seen = true;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// An effect lightair-render's scene renderer draws.
+fn renderer_draws(e: &lightair_model::Effect) -> bool {
+    let cube = || {
+        e.settings.get("image_path").and_then(|p| p.as_str()).is_some_and(|p| p.to_ascii_lowercase().ends_with(".cube"))
+    };
+    e.kind.starts_with("fx.") || e.kind == "color_filter_v2" || (e.kind == "clut_filter" && cube())
+}
+
+/// The pictures made here, with `lightair-engine`'s pictures (decoded images and GIFs, text,
+/// colours and widgets kept as textures while they're the same), and the keyers for libobs's
+/// bare pictures, on the renderer's GPU.
+struct Native {
+    gpu: Gpu,
+    cache: lightair_engine::pictures::Cache,
+    /// What the engine's pictures read besides the source (no feeds, chat or alerts here).
+    hot: Hot,
+    program: Program,
+    keying: keying::Pipeline,
+    keyed: keying::Targets,
+    /// The workspace the per-source textures were last kept for.
+    sources_of: usize,
+    /// Each image file's own size (a GIF's frames are kept smaller; the layout's crop is in the
+    /// file's pixels, as libobs has it).
+    sizes: HashMap<PathBuf, Option<(u32, u32)>>,
+}
+
+impl Native {
+    fn new() -> Option<Native> {
+        let gpu = Gpu::new().map_err(|e| tracing::error!(%e, "compositor: no GPU for its own pictures")).ok()?;
+        let program = Program {
+            workspace: Arc::new(Workspace::new("")),
+            folder: PathBuf::new(),
+            scene: Id::nil(),
+            canvas: Id::nil(),
+            switch: None,
+            privacy_scene: None,
+            feeds: HashMap::new(),
+            on_air_ns: 0,
+            utc_offset_min: 0,
+            frozen: Vec::new(),
+        };
+        let hot = Hot::new(program.clone(), 0);
+        let keying = keying::Pipeline::new(gpu.device());
+        Some(Native {
+            gpu,
+            cache: Default::default(),
+            hot,
+            program,
+            keying,
+            keyed: Default::default(),
+            sources_of: 0,
+            sizes: HashMap::new(),
+        })
+    }
+
+    /// Lets go of what sources no longer in `ws` kept (checked when the workspace changes).
+    fn keep(&mut self, ws: &Arc<Workspace>) {
+        self.cache.keep_sources(ws);
+        let at = Arc::as_ptr(ws) as usize;
+        if at != self.sources_of {
+            self.sources_of = at;
+            let keep: Vec<Id> = ws.sources.keys().copied().collect();
+            self.keyed.forget_others(&keep);
+            self.sizes.retain(|path, _| {
+                ws.sources.values().any(|s| s.settings["file"].as_str().is_some_and(|f| Path::new(f) == path))
+            });
+        }
+    }
+
+    /// `source`'s picture made here, keyed if it has keys; `None` while it isn't ready.
+    fn picture(&mut self, source: &Source, pts_ns: i64) -> Option<Shot> {
+        // a timer: its text as the engine's timers have it now, drawn as text in its style
+        let timer;
+        let source = if source.kind == templates::TIMER {
+            let text = bridge::timer_text(source.id)?;
+            let mut s = Source::clone(source);
+            s.kind = templates::TEXT.into();
+            if let serde_json::Value::Object(m) = &mut s.settings {
+                m.insert("text".into(), text.into());
+            } else {
+                s.settings = serde_json::json!({ "text": text });
+            }
+            timer = s;
+            &timer
+        } else {
+            source
+        };
+        let mut frame = lightair_engine::pictures::Frame {
+            gpu: &self.gpu,
+            cache: &mut self.cache,
+            hot: &self.hot,
+            program: &self.program,
+            host_ns: 0,
+            pts_ns,
+            used: Vec::new(),
+        };
+        let mut shot = frame.picture(source)?;
+        if source.kind == templates::IMAGE
+            && let Some(file) = source.settings["file"].as_str()
+        {
+            let path = PathBuf::from(file);
+            // the file's header only
+            let size = *self.sizes.entry(path).or_insert_with_key(|p| image::image_dimensions(p).ok());
+            if let Some(size) = size {
+                shot.size = size;
+            }
+        }
+        Some(shot)
+    }
+
+    /// libobs's bare picture of source `id` (colours multiplied by alpha) through its sharpen and
+    /// keyer passes, as a straight-alpha texture. The buffer must be held until the GPU is done.
+    fn keyed(&mut self, id: Id, buffer: &bridge::Buffer, steps: &[keying::Step]) -> Option<Shot> {
+        let texture = lightair_engine::gpu::apple::sampled(self.gpu.device(), buffer)?;
+        let out = keying::draw(&self.gpu, &self.keying, &mut self.keyed, id, &texture, true, steps, None);
+        let size = (out.width(), out.height());
+        Some(Shot { picture: Picture::Texture(out), size, premultiplied: false })
+    }
+
+    /// Drops the made pictures no frame used lately.
+    fn end_frame(&mut self) {
+        self.cache.end_frame();
     }
 }
 

@@ -19,6 +19,11 @@ objc2-video-toolbox = { version = "0.3.2", default-features = false, features = 
 # Lightair's own compositor (compose.rs): the program drawn on the GPU into IOSurfaces
 lightair-model.workspace = true
 lightair-render.workspace = true
+# the native pictures (images, GIFs, colours, text, timers, widgets) and the keyers
+lightair-engine.workspace = true
+serde_json.workspace = true
+# an image file's own size (its header)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 wgpu = "30"
 objc2 = "0.6.3"
 objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLTexture", "MTLPixelFormat", "MTLResource", "MTLTypes", "objc2-io-surface"] }

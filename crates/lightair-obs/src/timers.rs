@@ -133,8 +133,10 @@ impl Timer {
         }
     }
 
-    /// Advances one tick: autostart, end detection, text. Returns true when a countdown just ended.
-    fn tick(&mut self) -> bool {
+    /// Advances one tick: autostart, end detection, text (also given to Lightair's own
+    /// compositor as `id`'s). Returns true when a countdown just ended.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    fn tick(&mut self, id: Id) -> bool {
         let mut just_ended = false;
         if self.config.autostart && !self.started_once && unsafe { sys::obs_source_active(self.source) } {
             self.start();
@@ -157,6 +159,8 @@ impl Timer {
             let mut d = Data::new();
             d.set_str("text", &text);
             unsafe { sys::obs_source_update(self.source, d.as_ptr()) };
+            #[cfg(target_os = "macos")]
+            crate::bridge::set_timer_text(id, Some(&text));
             self.last_text = text;
         }
         just_ended
@@ -215,11 +219,15 @@ impl Timers {
 
     pub(crate) fn remove(&self, id: Id) {
         self.map.lock().remove(&id);
+        #[cfg(target_os = "macos")]
+        crate::bridge::set_timer_text(id, None);
     }
 
     pub(crate) fn clear(&self) {
         self.map.lock().clear();
         self.ended.lock().clear();
+        #[cfg(target_os = "macos")]
+        crate::bridge::clear_timer_texts();
     }
 
     pub(crate) fn action(&self, id: Id, action: TimerAction) {
@@ -260,7 +268,7 @@ impl Timers {
     /// Runs on libobs's tick (video thread); skips the frame rather than wait for a lock.
     fn tick(&self) {
         let Some(mut map) = self.map.try_lock() else { return };
-        let ended: Vec<Id> = map.iter_mut().filter_map(|(id, t)| t.tick().then_some(*id)).collect();
+        let ended: Vec<Id> = map.iter_mut().filter_map(|(id, t)| t.tick(*id).then_some(*id)).collect();
         drop(map);
         if !ended.is_empty() {
             self.ended.lock().extend(ended);
