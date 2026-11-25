@@ -554,6 +554,7 @@ impl State {
         };
         if let Some(native) = self.native.as_mut() {
             native.pointers.keep(&pointed);
+            native.timed.keep(&shown);
         }
         self.missing.retain(|id| shown.contains(id));
         // the screens and cameras shown, captured here (once for every canvas)
@@ -604,6 +605,7 @@ impl State {
             {
                 match native.picture(source, pts_ns) {
                     Some(shot) => {
+                        let shot = with_timed(Some(native), source, None, shot);
                         self.missing.remove(id);
                         shots.insert(*id, shot);
                         kept.insert(*id);
@@ -620,6 +622,7 @@ impl State {
                 && let Some(shot) = shot_of(self.native.as_mut(), source, &c.picture())
             {
                 let shot = with_pointer(self.native.as_mut(), &pointed, source, &c.buffer, shot, program);
+                let shot = with_timed(self.native.as_mut(), source, Some(&c.buffer), shot);
                 kept.insert(*id);
                 shots.insert(*id, shot);
                 held.push(c.buffer.clone());
@@ -631,6 +634,7 @@ impl State {
                 && let Some(shot) = shot_of(self.native.as_mut(), source, p)
             {
                 let shot = with_pointer(self.native.as_mut(), &pointed, source, &p.buffer, shot, program);
+                let shot = with_timed(self.native.as_mut(), source, Some(&p.buffer), shot);
                 kept.insert(*id);
                 shots.insert(*id, shot);
                 held.push(p.buffer.clone());
@@ -639,7 +643,8 @@ impl State {
             let Some(picture) = bridge::picture(*id) else { continue };
             let Some(shot) = shot_of(self.native.as_mut(), source, &picture) else { continue };
             let shot = if picture.unfiltered && effects {
-                with_pointer(self.native.as_mut(), &pointed, source, &picture.buffer, shot, program)
+                let shot = with_pointer(self.native.as_mut(), &pointed, source, &picture.buffer, shot, program);
+                with_timed(self.native.as_mut(), source, Some(&picture.buffer), shot)
             } else {
                 shot
             };
@@ -1332,6 +1337,14 @@ fn with_pointer(
     pointers.draw(gpu, source, *style, buffer, on_air).unwrap_or(shot)
 }
 
+/// `shot` (of `buffer`, `source`'s picture, if it's libobs's or captured) with the effects that
+/// work across frames drawn on it (`crate::timed`), when `source` has any.
+fn with_timed(native: Option<&mut Native>, source: &Source, buffer: Option<&bridge::Buffer>, shot: Shot) -> Shot {
+    let Some(native) = native else { return shot };
+    let Native { timed, gpu, .. } = native;
+    timed.draw(gpu, source, &shot, buffer).unwrap_or(shot)
+}
+
 fn shot_of(native: Option<&mut Native>, source: &Source, picture: &bridge::Picture) -> Option<Shot> {
     let steps = if picture.unfiltered { keying::steps(source) } else { Vec::new() };
     if picture.unfiltered && looks::has_looks(source) {
@@ -1370,7 +1383,8 @@ fn made_here(source: &Source) -> bool {
 /// which must come before the renderer's in the stack (they're drawn first here); and with
 /// `looks` too, the camera looks the engine draws (`looks::drawable`), which libobs draws as one
 /// filter at the first one's place: that place must come before any keyer or renderer effect
-/// (they're drawn before the keys here). Sound effects don't count.
+/// (they're drawn before the keys here). With `keyers`, freeze, render delay and scroll too
+/// (`crate::timed`), before any renderer effect. Sound effects don't count.
 fn effects_drawn(source: &Source, keyers: bool, looks: bool) -> bool {
     let (mut renderer_seen, mut keyer_seen, mut studio_seen) = (false, false, false);
     // (the drawn pointer is drawn with the source's pointer, `crate::pointer`)
@@ -1387,6 +1401,11 @@ fn effects_drawn(source: &Source, keyers: bool, looks: bool) -> bool {
                 return false;
             }
             keyer_seen = true;
+        } else if crate::timed::is_timed(e) {
+            // drawn on the picture as made, keyed and looked, before the renderer's
+            if !keyers || renderer_seen {
+                return false;
+            }
         } else if renderer_draws(e) {
             renderer_seen = true;
         } else {
@@ -1435,6 +1454,8 @@ struct Native {
     avatars: HashMap<Id, Avatar>,
     /// Lightair's own pointer and zoom on the screens drawn here.
     pointers: crate::pointer::Pointers,
+    /// Freeze, render delay and scroll on the sources drawn here.
+    timed: crate::timed::Timed,
 }
 
 /// An avatar source drawn here: its renderer (`None`: none could be made, libobs's picture
@@ -1485,6 +1506,7 @@ impl Native {
             looks: looks::Hosts::default(),
             avatars: HashMap::new(),
             pointers: Default::default(),
+            timed: Default::default(),
         })
     }
 

@@ -17,6 +17,8 @@ mod capture;
 #[cfg(target_os = "macos")]
 mod pointer;
 #[cfg(target_os = "macos")]
+mod timed;
+#[cfg(target_os = "macos")]
 mod compose;
 #[cfg(target_os = "macos")]
 pub mod providers;
