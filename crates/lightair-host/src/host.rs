@@ -1211,10 +1211,15 @@ impl Host {
         }
     }
 
-    /// Whether the source's effects see a person (`None`: not known here yet).
-    pub fn person_present(&self, _source: Id) -> Option<bool> {
-        not_yet("person_present");
-        None
+    /// Whether the source's effects see a person right now (`None`: none looking).
+    pub fn person_present(&self, source: Id) -> Option<bool> {
+        #[cfg(target_os = "macos")]
+        return crate::bridge::person_seen(source);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = source;
+            None
+        }
     }
 
     /// Turns one of a source's effects on or off live, leaving the document alone
