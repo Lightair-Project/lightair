@@ -6,10 +6,9 @@
 //!   listens on its port (SRT, the other computer calling) on a thread of its own; a second after
 //!   no compositor shows it, it stops listening, and nothing listens until it's shown again (the
 //!   other computer keeps calling until then).
-//! - **The port.** libobs's media source for the link would listen on the same port, so while
-//!   the switch is on its address is emptied once this provider first shows the source, and
-//!   again whenever the source's settings bring it back: libobs opens nothing for it. The
-//!   document keeps the address.
+//! - **The port.** While the switch is on, the reconciler gives libobs's media source for the
+//!   link no address (`bridge::link_received_by_compositor`), so libobs never listens on the port
+//!   this provider listens on. The document keeps the address.
 //! - **Pictures.** The stream is split into access units as it arrives (the same MPEG-TS
 //!   demuxer as the phone cameras') and decoded by VideoToolbox into BGRA IOSurfaces, shown the
 //!   moment they're decoded, after a reorder of a few frames when the stream has B-frames. Each
@@ -27,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use lightair_model::{Id, Source};
-use lightair_obs::obs::{Data, SourceRef};
+use lightair_obs::obs::SourceRef;
 use lightair_obs::phone_camera::{Decoder, Pictures};
 use lightair_obs::{bridge, sys};
 use lightair_phone_camera::ts::{Codec, Demuxer, Kind, Unit};
@@ -43,13 +42,11 @@ use tokio::sync::oneshot;
 
 use crate::providers::{Frame, Provider};
 
-/// The document's kind for a media source (a link is one, with a `link_port`).
-const KIND: &str = "ffmpeg_source";
 /// How long listening goes on once no compositor shows the source.
 const LINGER: Duration = Duration::from_secs(1);
 /// SRT's latency when the address doesn't give one.
 const LATENCY: Duration = Duration::from_millis(200);
-/// How long libobs's media source may take to let go of the port.
+/// How long an earlier receiver of the link may take to let go of the port.
 const BIND_FOR: Duration = Duration::from_secs(3);
 /// Access units waiting to be decoded, at most (more are dropped: the decoder is behind).
 const QUEUE: usize = 256;
@@ -197,38 +194,16 @@ fn libobs_source(id: Id) -> Option<SourceRef> {
     unsafe { SourceRef::from_owned(sys::obs_get_source_by_name(name.as_ptr())) }
 }
 
-/// libobs's media source for the link opens nothing: its address emptied (when it has one), so
-/// it lets go of the port. libobs applies it on its next tick.
-fn quiet(source: &SourceRef) {
-    // SAFETY: the source is held; its settings are a new reference released here
-    let open = unsafe {
-        let settings = sys::obs_source_get_settings(source.as_ptr());
-        if settings.is_null() {
-            return;
-        }
-        let input = sys::obs_data_get_string(settings, c"input".as_ptr());
-        let open = !input.is_null() && *input != 0;
-        sys::obs_data_release(settings);
-        open
-    };
-    if open {
-        let blank = Data::from_json(&serde_json::json!({ "input": "" }));
-        // SAFETY: both are held for the call
-        unsafe { sys::obs_source_update(source.as_ptr(), blank.as_ptr()) };
-    }
-}
-
 // ---------------------------------------------------------------- receiving
 
-/// Receives a link until `stopped` (its sender dropped): binds its port once libobs has let go,
-/// listens for SRT, splits what arrives into access units and has them decoded on a thread of
+/// Receives a link until `stopped` (its sender dropped): binds its port (retrying for a moment
+/// while an earlier receiver of the link lets go of it), listens for SRT, splits what arrives into access units and has them decoded on a thread of
 /// their own.
 fn receive(id: Id, plan: Plan, slot: Arc<Slot>, mut stopped: oneshot::Receiver<()>) {
     let Some(source) = libobs_source(id) else {
         tracing::info!(%id, "another computer: no media source to receive for");
         return;
     };
-    quiet(&source);
     let started = Instant::now();
     let socket = loop {
         match std::net::UdpSocket::bind(("0.0.0.0", plan.port)) {
@@ -352,7 +327,6 @@ fn decode(source: SourceRef, slot: Arc<Slot>, units: mpsc::Receiver<Unit>) {
     let into = slot;
     let pictures: Pictures = Arc::new(move |image, pts| into.decoded(image, pts));
     let mut decoder = Decoder::new(true, pictures);
-    let mut looked = Instant::now();
     loop {
         match units.recv_timeout(Duration::from_secs(1)) {
             Ok(unit) => match unit.kind {
@@ -362,11 +336,6 @@ fn decode(source: SourceRef, slot: Arc<Slot>, units: mpsc::Receiver<Unit>) {
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-        if looked.elapsed() >= Duration::from_secs(1) {
-            // (the source's settings applied anew bring its address back)
-            quiet(&source);
-            looked = Instant::now();
         }
     }
 }
@@ -396,7 +365,7 @@ pub(crate) struct Srt {
 
 impl Provider for Srt {
     fn handles(&self, source: &Source) -> bool {
-        source.kind == KIND && source.settings["link_port"].as_u64().is_some()
+        bridge::link_received_by_compositor(source)
     }
 
     fn want(&self, canvas: Id, shown: &[&Source]) {

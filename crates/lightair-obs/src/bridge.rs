@@ -45,6 +45,31 @@ pub fn own() -> bool {
     *ON.get_or_init(|| std::env::var("LIGHTAIR_ENGINE").is_ok_and(|v| v.trim().eq_ignore_ascii_case("own")))
 }
 
+/// Whether a source is a link from another computer (a media source with a `link_port`) that
+/// Lightair's compositor receives itself (with the switch on): the reconciler then gives its
+/// libobs media source no address, so only the compositor's receiver listens on the port.
+pub fn link_received_by_compositor(source: &lightair_model::Source) -> bool {
+    own()
+        && source.kind == "ffmpeg_source"
+        && source.settings["link_port"].as_u64().is_some_and(|p| u16::try_from(p).is_ok())
+}
+
+/// The document scene and canvas a libobs scene stands for, from the name the reconciler gives
+/// it (`<scene id>:<canvas id>`); `None` for any other source.
+pub fn scene_of(source: *mut sys::obs_source_t) -> Option<(Id, Id)> {
+    if source.is_null() || unsafe { sys::obs_scene_from_source(source) }.is_null() {
+        return None;
+    }
+    let name = unsafe { sys::obs_source_get_name(source) };
+    if name.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().ok()?;
+    let (scene, canvas) = name.split_once(':')?;
+    let id = |s: &str| serde_json::from_value::<Id>(serde_json::Value::String(s.to_string())).ok();
+    Some((id(scene)?, id(canvas)?))
+}
+
 // ---------------------------------------------------------------- the document
 
 /// A scene switch under way: what the compositor needs to draw it.

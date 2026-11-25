@@ -2089,6 +2089,14 @@ fn source_settings(source: &lightair_model::Source, drawn: bool) -> serde_json::
             o.insert(key.into(), false.into());
         }
     }
+    // a link from another computer is received by Lightair's compositor (macOS, own engine),
+    // which listens on its port: libobs's media source opens nothing (the document keeps the address)
+    #[cfg(target_os = "macos")]
+    if crate::bridge::link_received_by_compositor(source)
+        && let Some(o) = s.as_object_mut()
+    {
+        o.insert("input".into(), "".into());
+    }
     s
 }
 
