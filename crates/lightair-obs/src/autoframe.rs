@@ -220,7 +220,7 @@ impl Watch {
                         set_int(cd, c"width", tw as i64);
                         set_int(cd, c"height", th as i64);
                         set_int(cd, c"frame_id", id as i64);
-                        set_int(cd, c"timestamp_ns", sys::os_gettime_ns() as i64);
+                        set_int(cd, c"timestamp_ns", crate::clock::now_ns() as i64);
                     }) {
                         free_cd(&mut cd);
                     }

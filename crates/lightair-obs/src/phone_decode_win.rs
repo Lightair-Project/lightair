@@ -208,7 +208,7 @@ impl Video {
             let mut f = sys::obs_source_frame {
                 width: l.width,
                 height: l.height,
-                timestamp: sys::os_gettime_ns(),
+                timestamp: crate::clock::now_ns(),
                 format: sys::VIDEO_FORMAT_NV12,
                 full_range: l.full,
                 color_matrix: m,
@@ -341,7 +341,7 @@ impl Audio {
                         speakers: if self.channels >= 2 { sys::SPEAKERS_STEREO } else { sys::SPEAKERS_MONO },
                         format: sys::AUDIO_FORMAT_FLOAT,
                         samples_per_sec: self.rate,
-                        timestamp: sys::os_gettime_ns(),
+                        timestamp: crate::clock::now_ns(),
                         ..Default::default()
                     };
                     a.data[0] = p as *const u8;

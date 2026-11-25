@@ -269,7 +269,7 @@ unsafe fn to_libobs(frames: *mut sys::obs_source_t, image: &CVPixelBuffer) {
         let format = CVPixelBufferGetPixelFormatType(image);
         let (w, h) = (CVPixelBufferGetWidth(image) as u32, CVPixelBufferGetHeight(image) as u32);
         let mut f =
-            sys::obs_source_frame { width: w, height: h, timestamp: sys::os_gettime_ns(), ..Default::default() };
+            sys::obs_source_frame { width: w, height: h, timestamp: crate::clock::now_ns(), ..Default::default() };
         let ok = match format {
             FOURCC_420V | FOURCC_420F => {
                 let full = format == FOURCC_420F;
@@ -534,7 +534,7 @@ impl Audio {
             speakers: if self.channels >= 2 { sys::SPEAKERS_STEREO } else { sys::SPEAKERS_MONO },
             format: sys::AUDIO_FORMAT_FLOAT_PLANAR,
             samples_per_sec: self.rate,
-            timestamp: unsafe { sys::os_gettime_ns() },
+            timestamp: crate::clock::now_ns(),
             ..Default::default()
         };
         for (o, p) in a.data.iter_mut().zip(&planes) {

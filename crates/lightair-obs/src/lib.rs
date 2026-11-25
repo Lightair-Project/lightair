@@ -17,6 +17,7 @@ mod avatar_uma;
 pub mod backdrop;
 #[cfg(target_os = "macos")]
 pub mod bridge;
+pub mod clock;
 pub mod devices;
 pub mod displays;
 pub mod face_drive;

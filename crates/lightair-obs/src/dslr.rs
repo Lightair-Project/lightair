@@ -126,7 +126,7 @@ fn run(src: SrcPtr, stop: Arc<AtomicBool>) {
                         frame.height = h;
                         frame.format = sys::VIDEO_FORMAT_RGBA;
                         frame.full_range = true;
-                        frame.timestamp = unsafe { sys::os_gettime_ns() };
+                        frame.timestamp = crate::clock::now_ns();
                         unsafe { sys::obs_source_output_video(src.0, &frame) };
                     }
                     Err(_) => failures += 1,

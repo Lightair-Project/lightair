@@ -280,7 +280,7 @@ unsafe extern "C" fn read(
         return 0;
     }
     let host = unsafe { input_time.as_ref() }.map_or(0, |t| t.host_time);
-    let timestamp = if host > 0 { host as u128 * r.timebase.0 as u128 / r.timebase.1 as u128 } else { (unsafe { sys::os_gettime_ns() }) as u128 };
+    let timestamp = if host > 0 { host as u128 * r.timebase.0 as u128 / r.timebase.1 as u128 } else { (crate::clock::now_ns()) as u128 };
     let mut audio: sys::obs_source_audio = unsafe { std::mem::zeroed() };
     if planar {
         for (slot, b) in audio.data.iter_mut().zip(buffers) {

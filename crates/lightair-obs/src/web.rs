@@ -89,7 +89,7 @@ fn open(
             frame.height = h;
             frame.format = sys::VIDEO_FORMAT_BGRA;
             frame.full_range = true;
-            frame.timestamp = sys::os_gettime_ns();
+            frame.timestamp = crate::clock::now_ns();
             // (libobs copies it)
             sys::obs_source_output_video(source as *mut sys::obs_source_t, &frame);
         }
@@ -120,7 +120,7 @@ fn open(
             };
             audio.format = sys::AUDIO_FORMAT_FLOAT_PLANAR;
             audio.samples_per_sec = rate;
-            audio.timestamp = sys::os_gettime_ns();
+            audio.timestamp = crate::clock::now_ns();
             // (libobs copies it)
             sys::obs_source_output_audio(source as *mut sys::obs_source_t, &audio);
         }

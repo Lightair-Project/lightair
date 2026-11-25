@@ -1010,7 +1010,7 @@ impl Render {
                 if sys::gs_stagesurface_map(prev, &mut data, &mut linesize) {
                     g.frame_id += 1;
                     let id = g.frame_id;
-                    let now = sys::os_gettime_ns();
+                    let now = crate::clock::now_ns();
                     if let Some(mut cd) = tracker_call(c"lightair_face_tracker_submit", |cd| {
                         set_ptr(cd, c"tracker", tracker);
                         set_ptr(cd, c"data", data as *mut c_void);

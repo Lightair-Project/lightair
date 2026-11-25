@@ -314,7 +314,7 @@ impl Receiver {
                                 frame.height = video.yres as u32;
                                 frame.format = sys::VIDEO_FORMAT_BGRA;
                                 frame.full_range = true;
-                                frame.timestamp = unsafe { sys::os_gettime_ns() };
+                                frame.timestamp = crate::clock::now_ns();
                                 unsafe { sys::obs_source_output_video(src.0, &frame) };
                                 if let Some(tap) = tap_of(&me_name).filter(|_| video.line_stride_in_bytes >= video.xres * 4) {
                                     let stride = video.line_stride_in_bytes as usize;
@@ -362,7 +362,7 @@ impl Receiver {
                                 };
                                 out.format = sys::AUDIO_FORMAT_FLOAT_PLANAR;
                                 out.samples_per_sec = audio.sample_rate.max(1) as u32;
-                                out.timestamp = unsafe { sys::os_gettime_ns() };
+                                out.timestamp = crate::clock::now_ns();
                                 unsafe { sys::obs_source_output_audio(src.0, &out) };
                             }
                             unsafe { (l.recv_free_audio_v2)(recv, &audio) };

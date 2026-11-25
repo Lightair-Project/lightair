@@ -366,7 +366,7 @@ unsafe extern "C" fn create(_settings: *mut sys::obs_data_t, source: *mut sys::o
             let src = src;
             let mut block = [0f32; BLOCK];
             let mut mouth = Mouth { env: 0.0, bright: 0.0, last: [0.0; BLOCK], speaking: false };
-            let start = unsafe { sys::os_gettime_ns() };
+            let start = crate::clock::now_ns();
             let mut sent = 0u64;
             while !s.load(Ordering::Relaxed) {
                 // only the active co-host's voice takes the speech; the others are silent
@@ -395,7 +395,7 @@ unsafe extern "C" fn create(_settings: *mut sys::obs_data_t, source: *mut sys::o
                 unsafe { sys::obs_source_output_audio(src.0, &audio) };
                 sent += BLOCK as u64;
                 let due = start + sent * 1_000_000_000 / RATE as u64;
-                let now = unsafe { sys::os_gettime_ns() };
+                let now = crate::clock::now_ns();
                 if due > now {
                     std::thread::sleep(Duration::from_nanos(due - now));
                 } else if now - due > 200_000_000 {

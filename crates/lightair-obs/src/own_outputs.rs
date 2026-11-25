@@ -12,7 +12,7 @@
 //!   (`audio_host`'s out sources), are read raw (`audio_output_connect`) and encoded to AAC, or
 //!   Opus for WHIP.
 //! - **One clock:** pictures are stamped with libobs's video frame time when they're handed
-//!   over, sound with libobs's audio times; both are `os_gettime_ns`, so picture and sound line
+//!   over, sound with libobs's audio times; both are `crate::clock`'s, so picture and sound line
 //!   up the same way in every file and stream, whatever the compositor's own timing.
 //! - **Sharing:** recordings, destinations and replay buffers whose settings match share one
 //!   video encoder per canvas and one audio encoder per mix.
@@ -102,9 +102,9 @@ pub(crate) fn takes(video: Option<outputs::VideoOutput>) -> Option<Id> {
     crate::program_source::canvas_of_video(video.map(|v| v.0).filter(|p| !p.is_null()))
 }
 
-/// The program clock: libobs's (`os_gettime_ns`), which its audio times are on.
+/// The program clock (`crate::clock`), which the audio times are on.
 fn now_ns() -> i64 {
-    unsafe { sys::os_gettime_ns() as i64 }
+    crate::clock::now_ns() as i64
 }
 
 /// When a frame handed over now was made: the frame libobs drew last (whose sources the

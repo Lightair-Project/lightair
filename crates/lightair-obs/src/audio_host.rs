@@ -93,7 +93,7 @@ unsafe extern "C" fn tone_create(settings: *mut sys::obs_data_t, source: *mut sy
         let sr = 48_000.0;
         let frames = 1024usize;
         let (mut l, mut phase) = (vec![0f32; frames], 0f64);
-        let start = unsafe { sys::os_gettime_ns() };
+        let start = crate::clock::now_ns();
         let mut sent = 0u64;
         while !s.load(Ordering::Relaxed) {
             for x in l.iter_mut() {
@@ -111,7 +111,7 @@ unsafe extern "C" fn tone_create(settings: *mut sys::obs_data_t, source: *mut sy
             unsafe { sys::obs_source_output_audio(src.0, &audio) };
             sent += frames as u64;
             let due = start + sent * 1_000_000_000 / 48_000;
-            let now = unsafe { sys::os_gettime_ns() };
+            let now = crate::clock::now_ns();
             if due > now {
                 std::thread::sleep(Duration::from_nanos(due - now));
             }
@@ -591,7 +591,7 @@ fn rt_loop(
     }
     let start = Instant::now();
     let mut blocks = 0u64;
-    let anchor = unsafe { sys::os_gettime_ns() };
+    let anchor = crate::clock::now_ns();
     let ns_per_frame = 1e9 / sample_rate as f64;
     // the engine's output is stamped this far behind real time: what the inputs buffer
     let latency_ns = (PRIME as f64 * ns_per_frame) as u64;

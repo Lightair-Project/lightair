@@ -467,7 +467,7 @@ struct Control {
     /// The reader should be reading (playing or paused).
     reading: bool,
     start_at: i64,
-    /// The clock: the media time `base_media` was (or will be) at `base_os` (os_gettime_ns).
+    /// The clock: the media time `base_media` was (or will be) at `base_os` (`crate::clock`).
     base_os: u64,
     base_media: i64,
     /// Media time added by the loops so far.
@@ -530,7 +530,7 @@ impl Shared {
         c.reading = !c.settings.path.is_empty();
         c.start_at = at;
         c.base_media = at;
-        c.base_os = unsafe { sys::os_gettime_ns() } + PREROLL_NS;
+        c.base_os = crate::clock::now_ns() + PREROLL_NS;
         c.loop_offset = 0;
         c.state = match () {
             _ if !c.reading => sys::OBS_MEDIA_STATE_NONE,
@@ -558,7 +558,7 @@ impl Shared {
 
     fn pause(&self, pause: bool) {
         let mut c = self.control.lock();
-        let now = unsafe { sys::os_gettime_ns() };
+        let now = crate::clock::now_ns();
         match c.state {
             sys::OBS_MEDIA_STATE_PLAYING if pause => {
                 c.base_media = c.clock(now);
@@ -588,7 +588,7 @@ impl Shared {
             sys::OBS_MEDIA_STATE_ENDED => return c.duration,
             _ => {}
         }
-        let mut t = c.clock(unsafe { sys::os_gettime_ns() }) - c.loop_offset;
+        let mut t = c.clock(crate::clock::now_ns()) - c.loop_offset;
         if t < 0 && c.duration > 0 && c.loop_offset > 0 {
             t += c.duration;
         }
@@ -820,7 +820,7 @@ fn play(shared: &Shared, asset: &Asset, ring: &mut Ring, run: u64, start: i64) {
                 if c.quit || c.run != run {
                     return;
                 }
-                let now = unsafe { sys::os_gettime_ns() };
+                let now = crate::clock::now_ns();
                 (c.state, c.clock(now), c.base_os, c.base_media, c.settings.looping)
             };
             if video.is_none() && !video_done {
@@ -897,7 +897,7 @@ fn play(shared: &Shared, asset: &Asset, ring: &mut Ring, run: u64, start: i64) {
                 // the end: once the clock gets there
                 let end = offset + shared.control.lock().duration;
                 let mut c = shared.control.lock();
-                while !c.quit && c.run == run && c.clock(unsafe { sys::os_gettime_ns() }) < end {
+                while !c.quit && c.run == run && c.clock(crate::clock::now_ns()) < end {
                     shared.wake.wait_for(&mut c, Duration::from_millis(10));
                 }
                 if c.quit || c.run != run {
@@ -1211,7 +1211,7 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
     let shared = &media(data).shared;
     let (now, run) = {
         let c = shared.control.lock();
-        (c.clock(unsafe { sys::os_gettime_ns() }), c.run)
+        (c.clock(crate::clock::now_ns()), c.run)
     };
     let mut due = None;
     {
