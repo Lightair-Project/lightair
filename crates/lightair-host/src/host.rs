@@ -1178,9 +1178,14 @@ impl Host {
         let _ = (source, held);
     }
 
-    /// Where an avatar's anchor is in its picture at rest (`None`: not without libobs yet).
-    pub fn avatar_anchor_rest(&self, _source: Id, _key: &str, _size: Option<(u32, u32)>) -> Option<Spot> {
-        not_yet("avatar_anchor_rest");
+    /// Where an avatar's anchor is in its picture at rest (pixels), once the compositor draws its
+    /// model. `size`: as it would be at that size of the picture instead.
+    pub fn avatar_anchor_rest(&self, source: Id, key: &str, size: Option<(u32, u32)>) -> Option<Spot> {
+        #[cfg(target_os = "macos")]
+        if let Some(Runtime::Avatar(avatar)) = self.runtimes.get(&source) {
+            return avatar.anchor_rest(key, size);
+        }
+        let _ = (source, key, size);
         None
     }
 
