@@ -12,7 +12,8 @@
 //! segmenter, on Core ML and Vision), which takes each new picture, scales it to the analysis
 //! size the module's own filter uses (720 on its short side), and pushes what the models give,
 //! before the tracker smooths it, with the picture's time. A camera no longer drawn with looks
-//! lets its host go after a while.
+//! lets its host go after a while. The faces each host finds are also shared with the face
+//! stickers and the landmarks overlay (`crate::stickers::share`), so a camera isn't analysed twice.
 
 use std::collections::HashMap;
 use std::ptr::NonNull;
@@ -58,22 +59,24 @@ pub(crate) fn has_looks(source: &Source) -> bool {
     source.effects.iter().any(|e| e.enabled && is_look(&e.kind))
 }
 
-/// A `studio.*` effect the engine's looks draw (camera motion and ambience are the compositor's
-/// own pass: `crate::post`).
+/// A `studio.*` effect the engine's looks draw (camera motion, ambience and face stickers are the
+/// compositor's own passes: `crate::post`, `crate::stickers`).
 fn is_look(kind: &str) -> bool {
-    kind.starts_with("studio.") && !matches!(kind, crate::post::MOTION | crate::post::AMBIENCE)
+    kind.starts_with("studio.") && !matches!(kind, crate::post::MOTION | crate::post::AMBIENCE | crate::stickers::KIND)
 }
 
 /// Whether the engine's looks draw everything `source`'s looks do: beauty, light, the grade and
-/// the background effects, and not the makeup look's own `.cube` LUT or the landmarks overlay
-/// (stickers, camera motion and ambience aren't drawn by the engine either).
+/// the background effects (the makeup look's own `.cube` LUT is the renderer's:
+/// `compose::with_makeup_luts`; the landmarks overlay is drawn over the looks by
+/// `crate::stickers`).
 pub(crate) fn drawable(source: &Source) -> bool {
-    let studio = source.effects.iter().filter(|e| e.enabled && is_look(&e.kind));
-    if !studio.clone().all(|e| drawn_kind(&e.kind)) {
-        return false;
-    }
-    // (the makeup look's LUT is the renderer's: `compose::with_makeup_luts`)
-    Settings::from_source(source).is_none_or(|s| !s.show_landmarks)
+    source.effects.iter().filter(|e| e.enabled && is_look(&e.kind)).all(|e| drawn_kind(&e.kind))
+}
+
+/// Whether `source`'s looks analyse its faces when the compositor draws them (their faces are
+/// then shared: `crate::stickers::share`).
+pub(crate) fn analyses_faces(source: &Source) -> bool {
+    has_looks(source) && Needs::of(source).faces
 }
 
 /// Whether the Effect Stack module gives what the looks need (asked again every few seconds
@@ -174,7 +177,7 @@ impl Hosts {
         feeds: &mut HashMap<Id, u32>,
     ) -> bool {
         if !self.hosts.contains_key(&source.id) {
-            let Some(host) = self.host() else { return false };
+            let Some(host) = self.host(source.id) else { return false };
             hot.feeds.write().insert(host.feed_id, host.feed.clone());
             feeds.insert(source.id, host.feed_id);
             self.hosts.insert(source.id, host);
@@ -234,7 +237,7 @@ impl Hosts {
         out
     }
 
-    fn host(&mut self) -> Option<Host> {
+    fn host(&mut self, source: Id) -> Option<Host> {
         self.next_feed += 1;
         let feed = Arc::new(Feed::Video(VideoFeed::default()));
         let (jobs, rx) = mpsc::sync_channel(1);
@@ -243,7 +246,7 @@ impl Hosts {
             let (feed, stop) = (feed.clone(), stop.clone());
             std::thread::Builder::new()
                 .name("lightair-looks".into())
-                .spawn(move || analyse(&feed, &rx, &stop))
+                .spawn(move || analyse(source, &feed, &rx, &stop))
                 .map_err(|e| tracing::error!(%e, "compositor: no thread for the looks' analysis"))
                 .ok()?
         };
@@ -254,8 +257,8 @@ impl Hosts {
 // ---------------------------------------------------------------- the analysis thread
 
 /// A camera's analysis: each picture given scaled and handed to the tracker, and what the
-/// models found pushed to the camera's feed as it comes.
-fn analyse(feed: &Feed, jobs: &Receiver<Job>, stop: &AtomicBool) {
+/// models found pushed to the camera's feed as it comes (its faces also shared under `source`).
+fn analyse(source: Id, feed: &Feed, jobs: &Receiver<Job>, stop: &AtomicBool) {
     let Some(v) = feed.video() else { return };
     let Some(tracker) = FaceTracker::new() else {
         tracing::warn!("compositor: no face tracker for the looks");
@@ -278,12 +281,13 @@ fn analyse(feed: &Feed, jobs: &Receiver<Job>, stop: &AtomicBool) {
                     needs = Some(n);
                 }
                 id += 1;
-                scaler.submit(&tracker, &job, id);
+                scaler.submit(&tracker, &job.buffer, id, job.time_ns);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
         if let Some(f) = tracker.raw_face(&mut faces) {
+            crate::stickers::share(source, &f);
             v.push_face(f.time_ns, f.found, if f.found { 1.0 } else { 0.0 }, f.points, f.size);
         }
         if let Some(m) = tracker.raw_mask(false, &mut masks) {
@@ -295,16 +299,18 @@ fn analyse(feed: &Feed, jobs: &Receiver<Job>, stop: &AtomicBool) {
             v.push_mask(m.bytes, m.size, 0, false);
         }
     }
+    crate::stickers::unshare(source);
 }
 
-/// Scales pictures to the analysis size on the GPU (VideoToolbox) into a buffer of its own.
-struct Scaler {
+/// Scales pictures to the analysis size on the GPU (VideoToolbox) into a BGRA buffer of its own,
+/// and hands them to a face tracker.
+pub(crate) struct Scaler {
     session: Option<CFRetained<VTPixelTransferSession>>,
     small: Option<CFRetained<CVPixelBuffer>>,
 }
 
 impl Scaler {
-    fn new() -> Scaler {
+    pub(crate) fn new() -> Scaler {
         let mut session: *mut VTPixelTransferSession = std::ptr::null_mut();
         // SAFETY: `session` is a valid place for the new session
         let rc = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut session)) };
@@ -318,17 +324,17 @@ impl Scaler {
         Scaler { session, small: None }
     }
 
-    /// `job`'s picture, scaled to at most [`TRACK_SHORT_SIDE`] on its short side (even sides),
-    /// given to the tracker.
-    fn submit(&mut self, tracker: &FaceTracker, job: &Job, id: u64) {
-        let (w, h) = (CVPixelBufferGetWidth(&job.buffer) as u32, CVPixelBufferGetHeight(&job.buffer) as u32);
+    /// `buffer`, scaled to at most [`TRACK_SHORT_SIDE`] on its short side (even sides), given to
+    /// the tracker with `id` and its time.
+    pub(crate) fn submit(&mut self, tracker: &FaceTracker, buffer: &CVPixelBuffer, id: u64, time_ns: i64) {
+        let (w, h) = (CVPixelBufferGetWidth(buffer) as u32, CVPixelBufferGetHeight(buffer) as u32);
         let s = (TRACK_SHORT_SIDE / w.min(h).max(1) as f32).min(1.0);
         let (sw, sh) = (((w as f32 * s) as u32) & !1, ((h as f32 * s) as u32) & !1);
         if sw < 16 || sh < 16 {
             return;
         }
         let picture: &CVPixelBuffer = if (sw, sh) == (w, h) {
-            &job.buffer
+            buffer
         } else {
             let Some(session) = &self.session else { return };
             if self
@@ -340,7 +346,7 @@ impl Scaler {
             }
             let Some(small) = &self.small else { return };
             // SAFETY: both are valid BGRA pixel buffers
-            if unsafe { session.transfer_image(&job.buffer, small) } != 0 {
+            if unsafe { session.transfer_image(buffer, small) } != 0 {
                 return;
             }
             small
@@ -353,7 +359,7 @@ impl Scaler {
             let base = CVPixelBufferGetBaseAddress(picture) as *const u8;
             let row = CVPixelBufferGetBytesPerRow(picture);
             if !base.is_null() && row >= sw as usize * 4 {
-                tracker.submit(base, row, sw, sh, id, job.time_ns);
+                tracker.submit(base, row, sw, sh, id, time_ns);
             }
             CVPixelBufferUnlockBaseAddress(picture, CVPixelBufferLockFlags::ReadOnly);
         }

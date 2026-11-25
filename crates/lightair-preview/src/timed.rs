@@ -20,6 +20,9 @@
 //!   `invert`ed or not.
 //! - **Camera motion** and **Ambience** (`studio.motion`, `studio.ambience`): the camera
 //!   looks' post pass (`crate::post`).
+//! - **Face stickers** (`studio.stickers`) and the looks' **landmarks overlay**
+//!   (`show_landmarks`): `crate::stickers`. The landmarks are drawn over the first stickers
+//!   effect, or before every other effect here when there's none.
 //!
 //! Faces are found with Apple's Vision on a small copy of the source's picture every third
 //! frame, on a thread of each source's own; a picture made here (not a buffer) has none.
@@ -146,7 +149,16 @@ fn fs(v: Out) -> @location(0) vec4<f32> {
 pub(crate) fn is_timed(e: &Effect) -> bool {
     matches!(
         e.kind.as_str(),
-        FREEZE | DELAY | SCROLL | REACT | FACE_BLUR | AUTOFRAME | MASK | crate::post::MOTION | crate::post::AMBIENCE
+        FREEZE
+            | DELAY
+            | SCROLL
+            | REACT
+            | FACE_BLUR
+            | AUTOFRAME
+            | MASK
+            | crate::post::MOTION
+            | crate::post::AMBIENCE
+            | crate::stickers::KIND
     )
 }
 
@@ -319,6 +331,9 @@ struct State {
     watch: Option<Watch>,
     view: Option<[f32; 4]>,
     framed: Option<Instant>,
+    /// The face the stickers and landmarks follow, and when the stickers' animations started.
+    faces: Option<crate::stickers::Faces>,
+    started: Option<Instant>,
 }
 
 /// Every face in a source's picture, found by Apple's Vision on a thread of its own from a
@@ -416,6 +431,7 @@ fn framing(face: Option<[f32; 4]>, shot: i64, max_zoom: f32) -> [f32; 4] {
 pub(crate) struct Timed {
     pass: Option<Pass>,
     post: Option<crate::post::Post>,
+    stickers: Option<crate::stickers::Stickers>,
     states: HashMap<Id, State>,
 }
 
@@ -435,7 +451,14 @@ impl Timed {
         buffer: Option<&bridge::Buffer>,
         masks: &HashMap<Id, wgpu::Texture>,
     ) -> Option<Shot> {
-        let effects: Vec<&Effect> = source.effects.iter().filter(|e| e.enabled && is_timed(e)).collect();
+        let mut effects: Vec<&Effect> = source.effects.iter().filter(|e| e.enabled && is_timed(e)).collect();
+        // the landmarks overlay: over the first stickers effect, else a step of its own first
+        let mut landmarks = crate::stickers::show_landmarks(source);
+        let marks = (landmarks && !effects.iter().any(|e| e.kind == crate::stickers::KIND))
+            .then(|| Effect::new("Face landmarks", crate::stickers::LANDMARKS, serde_json::Value::Null));
+        if let Some(m) = &marks {
+            effects.insert(0, m);
+        }
         if effects.is_empty() {
             self.states.remove(&source.id);
             return None;
@@ -443,6 +466,7 @@ impl Timed {
         let device = gpu.device();
         let pass = self.pass.get_or_insert_with(|| Pass::new(device));
         let post = &mut self.post;
+        let stickers = &mut self.stickers;
         let mut current = match &shot.picture {
             Picture::Texture(t) => t.clone(),
             Picture::Buffer(_) => lightair_engine::gpu::apple::sampled(device, buffer?)?,
@@ -645,6 +669,21 @@ impl Timed {
                     };
                     let Some(params) = params else { continue };
                     post.get_or_insert_with(|| crate::post::Post::new(device)).draw(gpu, &current, &out, &params);
+                }
+                crate::stickers::KIND | crate::stickers::LANDMARKS => {
+                    let looks = crate::looks::analyses_faces(source);
+                    let seen = state.faces.get_or_insert_with(Default::default).see(source.id, buffer, looks);
+                    bridge::set_face_seen(source.id, seen.face.present);
+                    let settings = (e.kind == crate::stickers::KIND).then_some(&e.settings);
+                    // the animations' time, starting again every hour
+                    let t = now.duration_since(*state.started.get_or_insert(now)).as_secs_f32() % 3600.0;
+                    let art = stickers.get_or_insert_with(|| crate::stickers::Stickers::new(device));
+                    let look = crate::stickers::Look { seen: &seen, settings, t, landmarks };
+                    let drawn = art.draw(gpu, &current, &out, &look);
+                    landmarks = false;
+                    if !drawn {
+                        continue;
+                    }
                 }
                 _ => continue,
             }

@@ -46,6 +46,8 @@ mod looks;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
+mod stickers;
+#[cfg(target_os = "macos")]
 mod stinger;
 #[cfg(target_os = "macos")]
 mod slideshow;
