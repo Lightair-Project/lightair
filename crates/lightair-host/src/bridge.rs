@@ -179,6 +179,8 @@ static TAKEN: Mutex<Taken> = Mutex::new(Taken(None));
 /// instead). Any thread (a capture's own queue: the lock is held only to swap a reference).
 pub fn publish_capture(source: Id, buffer: &Buffer) {
     TAKEN.lock().0.get_or_insert_with(HashMap::new).insert(source, buffer.clone());
+    // a Studio take recording it
+    crate::studio_take::frame(source, buffer);
 }
 
 /// The compositor no longer captures `source`.

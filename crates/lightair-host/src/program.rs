@@ -22,9 +22,25 @@ pub fn set_output_shapes(shapes: Vec<(Id, (u32, u32, u32, u32))>) {
     *OUTPUT_SHAPES.lock() = Some(shapes.into_iter().collect());
 }
 
-/// `canvas`'s output's shape, when it has one.
+/// Shapes of feeds that aren't canvases (a Studio take's sources), by their key.
+static FEED_SHAPES: Mutex<Option<HashMap<Id, Shape>>> = Mutex::new(None);
+
+/// `canvas`'s output's shape, when it has one (or a feed's: [`set_feed_shape`]).
 pub fn output_shape(canvas: Id) -> Option<(u32, u32, u32, u32)> {
+    if let Some(s) = FEED_SHAPES.lock().as_ref().and_then(|f| f.get(&canvas)) {
+        return Some(*s);
+    }
     OUTPUT_SHAPES.lock().as_ref()?.get(&canvas).copied()
+}
+
+/// The shape of a feed of frames that isn't a canvas's (`None`: it's gone).
+pub fn set_feed_shape(key: Id, shape: Option<Shape>) {
+    let mut f = FEED_SHAPES.lock();
+    let f = f.get_or_insert_with(HashMap::new);
+    match shape {
+        Some(s) => f.insert(key, s),
+        None => f.remove(&key),
+    };
 }
 
 // ------------------------------------------------------------------ one scene for an output
