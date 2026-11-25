@@ -127,6 +127,26 @@ impl Capture {
     }
 }
 
+/// A display captured for a thumbnail. None is made here yet (see [`screen_capture`]).
+#[cfg(not(target_os = "macos"))]
+pub struct Capture(std::convert::Infallible);
+
+#[cfg(not(target_os = "macos"))]
+impl Capture {
+    /// Its picture's size.
+    pub fn size(&self) -> (u32, u32) {
+        match self.0 {}
+    }
+}
+
+/// No thumbnails of displays here yet without libobs: `None`, said in the log once.
+#[cfg(not(target_os = "macos"))]
+pub fn screen_capture(_value: &serde_json::Value, _fit: (u32, u32)) -> Option<Capture> {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| tracing::info!("not yet: display thumbnails on this platform without libobs"));
+    None
+}
+
 /// A capture of display `value` (its UUID) at most `fit` big, for a thumbnail; `None` without
 /// access or the display. Blocks a moment: off the UI thread.
 #[cfg(target_os = "macos")]

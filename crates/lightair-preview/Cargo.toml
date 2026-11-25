@@ -14,6 +14,7 @@ libobs = ["dep:lightair-obs"]
 [dependencies]
 lightair-obs = { workspace = true, optional = true }
 lightair-host.workspace = true
+lightair-model.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
 
@@ -23,7 +24,6 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = ["s
 objc2-io-surface = { version = "0.3", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "objc2-core-foundation"] }
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTPixelRotationProperties", "VTPixelRotationSession", "VTPixelTransferProperties", "VTPixelTransferSession", "VTSession", "objc2-core-video"] }
 # Lightair's own compositor (compose.rs): the program drawn on the GPU into IOSurfaces
-lightair-model.workspace = true
 lightair-render.workspace = true
 # the native pictures (images, GIFs, colours, text, timers, widgets) and the keyers
 lightair-engine.workspace = true

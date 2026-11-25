@@ -13,6 +13,7 @@ pub mod computer;
 #[cfg(target_os = "macos")]
 pub mod input_mac;
 pub mod keys;
+#[cfg(target_os = "macos")]
 mod path;
 pub mod view;
 pub mod voice_sheet;

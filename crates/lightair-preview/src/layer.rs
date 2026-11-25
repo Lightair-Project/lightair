@@ -10,22 +10,35 @@
 //! would make the program skip frames. The swap chain has a frame-latency waitable object; a
 //! frame is presented only when it's signalled (the compositor has taken the last one), else
 //! the preview skips that frame and the program goes on.
+//!
+//! Without libobs there's no libobs device to present on: the layer isn't made (the window shows
+//! the preview's frames as images) until Lightair's own compositor runs on Windows.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "libobs")]
 use lightair_obs::sys;
+#[cfg(feature = "libobs")]
 use parking_lot::Mutex;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+#[cfg(feature = "libobs")]
+use windows::Win32::Foundation::WAIT_OBJECT_0;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+#[cfg(feature = "libobs")]
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Resource, ID3D11Texture2D};
+#[cfg(feature = "libobs")]
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
 };
+use windows::Win32::Graphics::Dxgi::IDXGISwapChain1;
+#[cfg(feature = "libobs")]
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT_DO_NOT_WAIT,
-    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
-    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIFactory2, IDXGISwapChain1, IDXGISwapChain2,
+    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIFactory2, IDXGISwapChain2,
 };
+#[cfg(feature = "libobs")]
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::core::Interface;
 
@@ -38,6 +51,7 @@ pub struct Layer {
     /// The back buffers' size, packed (width << 32 | height).
     size: AtomicU64,
     /// The back buffers' format (graphics thread).
+    #[cfg(feature = "libobs")]
     format: Mutex<DXGI_FORMAT>,
     /// The size the picture is shown at (pixels, packed; 0: not known): frames are rendered at
     /// it (up to the canvas's own size), so the compositor shows them as they are. On a laptop
@@ -45,6 +59,7 @@ pub struct Layer {
     /// width is a ninth of the copying.
     wanted: AtomicU64,
     /// Serialises presenting (graphics thread) with dropping.
+    #[cfg(feature = "libobs")]
     lock: Mutex<()>,
 }
 
@@ -54,11 +69,14 @@ pub struct Layer {
 unsafe impl Send for Layer {}
 unsafe impl Sync for Layer {}
 
+#[cfg(feature = "libobs")]
 const START: u32 = 16;
+#[cfg(feature = "libobs")]
 const FLAGS: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
 impl Layer {
     /// A swap chain on libobs's device (libobs must be running on Direct3D 11).
+    #[cfg(feature = "libobs")]
     pub fn new() -> Option<Self> {
         unsafe {
             sys::obs_enter_graphics();
@@ -88,6 +106,15 @@ impl Layer {
         }
     }
 
+    /// Without libobs: none yet (the window shows the preview's frames as images).
+    #[cfg(not(feature = "libobs"))]
+    pub fn new() -> Option<Self> {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| tracing::info!("not yet: the preview's swap chain without libobs (frames shown as images)"));
+        None
+    }
+
+    #[cfg(feature = "libobs")]
     unsafe fn make(device: *mut c_void) -> Option<IDXGISwapChain1> {
         unsafe {
             let device = ID3D11Device::from_raw_borrowed(&device)?;
@@ -121,6 +148,7 @@ impl Layer {
     }
 
     /// What `show_at` asked for, if anything.
+    #[cfg(feature = "libobs")]
     pub(crate) fn shown_at(&self) -> Option<(u32, u32)> {
         let p = self.wanted.load(Ordering::Relaxed);
         (p != 0).then_some(((p >> 32) as u32, p as u32))
@@ -134,11 +162,13 @@ impl Layer {
 
     /// Whether `tex` can be presented as it is (8-bit BGRA or RGBA: the formats a composition
     /// swap chain takes, and a copy keeps).
+    #[cfg(feature = "libobs")]
     pub(crate) unsafe fn can_present(&self, tex: *mut sys::gs_texture_t) -> bool {
         format_of(unsafe { sys::gs_texture_get_color_format(tex) }).is_some()
     }
 
     /// Whether the swap chain can take a frame now, without `Present` waiting.
+    #[cfg(feature = "libobs")]
     fn can_take(&self) -> bool {
         self.ready.is_invalid() || unsafe { WaitForSingleObject(self.ready, 0) } == WAIT_OBJECT_0
     }
@@ -146,6 +176,7 @@ impl Layer {
     /// Copies `tex` (a `w`×`h` render target of libobs's) into the back buffer and presents it,
     /// never waiting: when the compositor hasn't taken the last frame yet, this one is skipped.
     /// Graphics thread, inside libobs's graphics context. Whether it was presented.
+    #[cfg(feature = "libobs")]
     pub(crate) unsafe fn present(&self, tex: *mut sys::gs_texture_t, w: u32, h: u32) -> bool {
         let _held = self.lock.lock();
         if !self.can_take() {
@@ -192,6 +223,7 @@ impl Drop for Layer {
     }
 }
 
+#[cfg(feature = "libobs")]
 fn format_of(format: sys::gs_color_format) -> Option<DXGI_FORMAT> {
     match format {
         sys::GS_BGRA => Some(DXGI_FORMAT_B8G8R8A8_UNORM),

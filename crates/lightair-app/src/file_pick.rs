@@ -10,8 +10,9 @@ use futures_channel::oneshot;
 use gpui_kit::*;
 
 /// What to choose: the panel's title, its line saying what's allowed, its button, and the ends
-/// of the names it takes (lower case).
+/// of the names it takes (lower case). The title and the line are shown on macOS only.
 #[derive(Clone, Copy)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct Choose {
     pub title: &'static str,
     pub message: &'static str,

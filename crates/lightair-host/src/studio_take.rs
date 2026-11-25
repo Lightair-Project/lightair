@@ -53,6 +53,7 @@ pub fn frame(source: Id, buffer: &crate::buffers::Buffer) {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn even(v: u32) -> u32 {
     v.max(2) & !1
 }

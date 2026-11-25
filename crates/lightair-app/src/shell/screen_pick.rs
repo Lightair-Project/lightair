@@ -59,9 +59,15 @@ impl Thumb {
     }
 
     /// The live picture, once the capture has one.
-    #[cfg(not(feature = "libobs"))]
+    #[cfg(all(not(feature = "libobs"), target_os = "macos"))]
     pub fn frame(&self) -> Option<Frame> {
         self.capture.as_ref().and_then(|c| c.latest())
+    }
+
+    /// No thumbnails of displays here yet without libobs (`displays::screen_capture` makes none).
+    #[cfg(all(not(feature = "libobs"), not(target_os = "macos")))]
+    pub fn frame(&self) -> Option<Frame> {
+        None
     }
 }
 

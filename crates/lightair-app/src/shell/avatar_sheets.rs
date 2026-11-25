@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+#[cfg(any(feature = "libobs", target_os = "macos"))]
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::Sizable;
@@ -1186,9 +1187,16 @@ fn picture_png(frame: &lightair_preview::Frame) -> Option<Vec<u8>> {
     png_of(image::RgbaImage::from_raw(w as u32, h as u32, rgba)?)
 }
 
+/// No library pictures of avatars here yet without libobs: the compositor's avatar renderer runs
+/// on macOS only.
+#[cfg(all(not(feature = "libobs"), not(target_os = "macos")))]
+fn picture_at_rest(_settings: &Value) -> Option<Vec<u8>> {
+    None
+}
+
 /// An avatar's model (`settings`: an avatar source's) drawn at rest by the compositor's renderer,
 /// as a library picture; `None` when it doesn't load (in 20 seconds). Off the UI thread.
-#[cfg(not(feature = "libobs"))]
+#[cfg(all(not(feature = "libobs"), target_os = "macos"))]
 fn picture_at_rest(settings: &Value) -> Option<Vec<u8>> {
     use lightair_render::media::Picture;
     let mut r = lightair_preview::avatars::AvatarRenderer::new(settings).ok()?;

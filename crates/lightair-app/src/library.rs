@@ -976,8 +976,10 @@ impl Library {
         #[cfg(feature = "libobs")]
         let frame = p.preview.latest_frame();
         // (without libobs, straight from the player)
-        #[cfg(not(feature = "libobs"))]
+        #[cfg(all(not(feature = "libobs"), target_os = "macos"))]
         let frame = p.player.frame();
+        #[cfg(all(not(feature = "libobs"), not(target_os = "macos")))]
+        let frame = p.preview.latest_frame();
         let sound_only = w == 0 || h == 0;
         Some(
             div()

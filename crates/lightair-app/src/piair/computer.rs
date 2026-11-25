@@ -1,14 +1,21 @@
 //! PiAir's hands (piair/docs/design.md §6–7): every `computer.*` call passes Lightair's gates
 //! (AI drives on, the human not touching anything, the app allowed, no password field, destructive
 //! actions confirmed) before anything moves. Coordinates arrive in the pixels of the last
-//! screenshot and are mapped back to display points here.
+//! screenshot and are mapped back to display points here. Only macOS has the hands; elsewhere
+//! every call is refused, and what only the hands use is unused.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
 use base64::Engine as _;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(target_os = "macos")]
+use serde_json::json;
 
 #[cfg(target_os = "macos")]
 use super::input_mac as imp;
