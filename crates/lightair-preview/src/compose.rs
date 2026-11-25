@@ -1,6 +1,6 @@
-//! macOS, with `LIGHTAIR_ENGINE=own`: each canvas's program drawn by Lightair's own compositor
-//! (`lightair-render`'s `SceneRenderer`) instead of libobs, for the canvas's previews and its
-//! outputs.
+//! Each canvas's program drawn by Lightair's own compositor (`lightair-render`'s
+//! `SceneRenderer`) instead of libobs, for the canvas's previews and its outputs: on macOS with
+//! Metal into IOSurfaces, on Windows with Direct3D 12 into shared Direct3D 11 textures.
 //!
 //! A hub thread follows the document's canvases and runs one compositor thread per canvas, at
 //! the canvas's frame rate. A canvas's compositor draws while one of the canvas's previews shows
@@ -15,6 +15,14 @@
 //! IOSurface from a small ring: the previews show that buffer as they show libobs's Metal frames
 //! (the window's layer takes it as it is, GPUI's `surface()` an NV12 copy), and the canvas's
 //! `lightair_program` sources draw it for libobs's outputs.
+//!
+//! Windows: the ring's buffers are Lightair's own pictures there (`lightair_host::buffers`: BGRA
+//! Direct3D 11 textures with NT shared handles), opened on the compositor's Direct3D 12 device
+//! (`crate::win_gpu`); the window's preview copies each into its swap chain
+//! (`readback::own`). Captured frames and pictures from the providers are opened the same way and
+//! drawn as textures (`crate::buffer_gpu`). What has no Windows side yet (the camera looks, face
+//! detection, stinger videos, web pages, media files and the other providers) is drawn as
+//! nothing, or without that effect, and says so in the log once.
 //!
 //! The pictures ([`Native`]):
 //!
@@ -78,26 +86,29 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use lightair_avatar::source::Input;
-use lightair_model::{Canvas, Fit, Id, Layout, Scene, Source, Stinger, TransitionKind, TransitionSettings, Workspace};
-use lightair_host::avatar_pins::{Placement, Spot, on_canvas};
-use lightair_host::program as program_source;
-use lightair_host::{avatar, bridge};
-use lightair_render::SharedGpu;
-use lightair_render::media::Picture;
-use lightair_render::scene::{Pictures, SceneRenderer, Shot};
 use lightair_engine::gpu::Gpu;
 use lightair_engine::hot::{Hot, Program};
 use lightair_engine::{keying, templates, widgets};
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_core_video::{CVPixelBufferGetIOSurface, kCVPixelFormatType_32BGRA};
-use objc2_metal::{MTLDevice, MTLPixelFormat, MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage};
+use lightair_host::avatar_pins::{Placement, Spot, on_canvas};
+use lightair_host::program as program_source;
+use lightair_host::{avatar, bridge};
+use lightair_model::{Canvas, Fit, Id, Layout, Scene, Source, Stinger, TransitionKind, TransitionSettings, Workspace};
+use lightair_render::SharedGpu;
+use lightair_render::media::Picture;
+use lightair_render::scene::{Pictures, SceneRenderer, Shot};
 use parking_lot::Mutex;
 
 use crate::avatars::{AvatarRenderer, TrackingView};
+use crate::buffer_gpu;
 use crate::capture;
 use crate::looks;
-use crate::mac::{Frame, SceneView, Shared, pixel_buffer};
+#[cfg(target_os = "macos")]
+use crate::mac::{Frame, SceneView, Shared};
+#[cfg(windows)]
+use crate::readback::{SceneView, Shared};
+/// A finished frame: one of Lightair's own pictures.
+#[cfg(windows)]
+type Frame = lightair_host::buffers::Buffer;
 use crate::stinger::Player;
 use crate::widget_feed;
 
@@ -153,6 +164,19 @@ struct Hub {
 
 static HUB: LazyLock<Mutex<Hub>> = LazyLock::new(Default::default);
 
+/// Windows: Lightair's own pictures and captures are made on the compositor's graphics adapter
+/// from now on (once), so its device can open them.
+#[cfg(windows)]
+pub(crate) fn share_adapter() {
+    static SHARED: OnceLock<()> = OnceLock::new();
+    SHARED.get_or_init(|| {
+        let Ok(gpu) = lightair_render::shared_gpu() else { return };
+        if !crate::win_gpu::share_adapter(&gpu.device) {
+            tracing::error!("compositor: its device isn't Direct3D 12; it can't open Lightair's pictures");
+        }
+    });
+}
+
 /// Starts the hub (once); false when there's no GPU to draw with.
 pub(crate) fn start() -> bool {
     static STARTED: OnceLock<bool> = OnceLock::new();
@@ -161,6 +185,8 @@ pub(crate) fn start() -> bool {
             tracing::error!(%e, "compositor: no GPU; libobs draws the program");
             return false;
         }
+        #[cfg(windows)]
+        share_adapter();
         std::thread::Builder::new()
             .name("lightair-compose-hub".into())
             .spawn(run_hub)
@@ -674,7 +700,18 @@ impl State {
                 held.push(p.buffer.clone());
                 continue;
             }
-            let Some(picture) = bridge::picture(*id) else { continue };
+            let Some(picture) = bridge::picture(*id) else {
+                // Windows: nothing else draws a kind the compositor doesn't make (screens and
+                // cameras are the captures', which say why they don't run)
+                #[cfg(windows)]
+                if alone
+                    && !made_here(source)
+                    && !matches!(source.kind.as_str(), lightair_model::kinds::SCREEN | lightair_model::kinds::CAMERA)
+                {
+                    buffer_gpu::not_yet(&format!("{} sources in the compositor", source.kind));
+                }
+                continue;
+            };
             let Some(shot) = shot_of(self.native.as_mut(), source, &picture) else { continue };
             let shot = if picture.unfiltered && effects {
                 let shot = with_pointer(self.native.as_mut(), &pointed, source, &picture.buffer, shot, program);
@@ -702,9 +739,7 @@ impl State {
         // a stinger switch: the renderer is given the stinger it plays (the scene's own, or the
         // workspace's) and its frame now, held until the GPU is done with it
         let playing = switch.as_ref().and_then(|p| p.stinger.as_ref());
-        let stinger = playing
-            .and_then(|(st, at)| self.stingers.get(&st.path)?.frame(*at))
-            .map(|b| Shot { size: b.size(), picture: Picture::Buffer(b), premultiplied: false });
+        let stinger = playing.and_then(|(st, at)| crate::stinger::shot(self.stingers.get(&st.path)?.frame(*at)?));
         if program && let Some(drawer) = self.drawer.as_mut() {
             let ws = match playing {
                 Some((st, _)) if ws.stinger.as_ref() != Some(st) => {
@@ -797,7 +832,8 @@ impl State {
         let Some(sc) = ws.scenes.iter().find(|s| s.id == scene) else { return ws };
         let Some(index) = sc.objects.iter().position(|o| o.id == object) else { return ws };
         let o = &sc.objects[index];
-        let (Some(layout), Some(size)) = (o.layouts.get(&on), o.source.and_then(|s| shots.get(&s)).map(|s| s.size)) else {
+        let (Some(layout), Some(size)) = (o.layouts.get(&on), o.source.and_then(|s| shots.get(&s)).map(|s| s.size))
+        else {
             return ws;
         };
         let mut whole = layout.uncropped((size.0 as f32, size.1 as f32));
@@ -1524,12 +1560,13 @@ fn mask_pictures(
         let Some(source) = base.sources.get(&id) else { continue };
         let device = native.gpu.device();
         let texture = if let Some(c) = captured.get(&id) {
-            lightair_engine::gpu::apple::sampled(device, &c.buffer)
+            buffer_gpu::sampled(device, &c.buffer)
         } else if let Some(p) = provided.get(&id) {
-            lightair_engine::gpu::apple::sampled(device, &p.buffer)
+            buffer_gpu::sampled(device, &p.buffer)
         } else if made_here(source) {
             match native.picture(source, pts_ns).map(|s| s.picture) {
                 Some(Picture::Texture(t)) => Some(t),
+                #[cfg(target_os = "macos")]
                 Some(Picture::Buffer(b)) => b.rgba().map(|rgba| native.gpu.texture(&rgba, b.size())),
                 _ => None,
             }
@@ -1549,7 +1586,7 @@ fn shot_of(native: Option<&mut Native>, source: &Source, picture: &bridge::Pictu
         // its looks (then its keys) drawn by the engine
         native?.looked(source, picture)
     } else if steps.is_empty() {
-        picture.pixel_buffer().map(|b| Shot { size: b.size(), picture: Picture::Buffer(b), premultiplied: true })
+        buffer_gpu::shot(&picture.buffer, true)
     } else {
         native?.keyed(source.id, &picture.buffer, &steps)
     }
@@ -1767,7 +1804,8 @@ impl Native {
             self.keyed.forget_others(&keep);
             self.widgets.retain(|id, _| ws.sources.contains_key(id));
             self.backdrops.retain(|id, _| ws.sources.contains_key(id));
-            self.slideshows.keep(|id| ws.sources.get(&id).is_some_and(|s| crate::slideshow::KINDS.contains(&s.kind.as_str())));
+            self.slideshows
+                .keep(|id| ws.sources.get(&id).is_some_and(|s| crate::slideshow::KINDS.contains(&s.kind.as_str())));
             self.persons.retain(|id, _| ws.sources.contains_key(id));
             self.avatars.retain(|id, _| ws.sources.get(id).is_some_and(|s| s.kind == avatar::KIND));
             let gone = self.looks.sweep(|id| ws.sources.contains_key(&id), &self.hot, &mut self.program.feeds);
@@ -1805,8 +1843,16 @@ impl Native {
                 return Some(shot);
             }
             let Picture::Texture(texture) = &shot.picture else { return Some(shot) };
-            let out =
-                keying::draw(&self.gpu, &self.keying, &mut self.keyed, source.id, texture, shot.premultiplied, &steps, None);
+            let out = keying::draw(
+                &self.gpu,
+                &self.keying,
+                &mut self.keyed,
+                source.id,
+                texture,
+                shot.premultiplied,
+                &steps,
+                None,
+            );
             return Some(Shot { picture: Picture::Texture(out), size: shot.size, premultiplied: false });
         }
         let mut frame = lightair_engine::pictures::Frame {
@@ -1837,9 +1883,7 @@ impl Native {
     /// its analysis pushed); the bare picture as it is if that can't be drawn. The buffer must
     /// be held until the GPU is done.
     fn looked(&mut self, source: &Source, picture: &bridge::Picture) -> Option<Shot> {
-        let bare = || {
-            picture.pixel_buffer().map(|b| Shot { size: b.size(), picture: Picture::Buffer(b), premultiplied: true })
-        };
+        let bare = || buffer_gpu::shot(&picture.buffer, true);
         if !self.looks.push(source, picture, &self.hot, &mut self.program.feeds) {
             return bare();
         }
@@ -1919,7 +1963,7 @@ impl Native {
     /// libobs's bare picture of source `id` (colours multiplied by alpha) through its sharpen and
     /// keyer passes, as a straight-alpha texture. The buffer must be held until the GPU is done.
     fn keyed(&mut self, id: Id, buffer: &bridge::Buffer, steps: &[keying::Step]) -> Option<Shot> {
-        let texture = lightair_engine::gpu::apple::sampled(self.gpu.device(), buffer)?;
+        let texture = buffer_gpu::sampled(self.gpu.device(), buffer)?;
         let out = keying::draw(&self.gpu, &self.keying, &mut self.keyed, id, &texture, true, steps, None);
         let size = (out.width(), out.height());
         Some(Shot { picture: Picture::Texture(out), size, premultiplied: false })
@@ -2052,7 +2096,7 @@ impl Drawer {
         renderer.keep_on_gpu(true);
         let blit = Blit::new(&gpu.device, renderer.target().format().is_srgb());
         let mut ring = Ring { size, slots: Vec::new(), recent: VecDeque::new() };
-        // one to start with: none means this device can't draw into IOSurfaces
+        // one to start with: none means this device can't draw into Lightair's pictures
         ring.free(&gpu.device)?;
         Some(Drawer { size, renderer, over: None, ring, blit })
     }
@@ -2068,17 +2112,31 @@ fn overlay_renderer(size: (u32, u32)) -> Option<SceneRenderer> {
     Some(renderer)
 }
 
-/// An output buffer: a BGRA IOSurface-backed pixel buffer, and a texture over its memory that
-/// frames are drawn into.
+/// An output buffer: a BGRA IOSurface-backed pixel buffer (macOS) or shared Direct3D 11 texture
+/// (Windows), and a texture over its memory that frames are drawn into.
 struct Out {
     buffer: Frame,
     texture: wgpu::Texture,
 }
 
 impl Out {
+    #[cfg(windows)]
     fn new(device: &wgpu::Device, size: (u32, u32)) -> Option<Out> {
+        let (buffer, texture) = crate::win_gpu::new_output(device, size)?;
+        Some(Out { buffer, texture })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn new(device: &wgpu::Device, size: (u32, u32)) -> Option<Out> {
+        use objc2::rc::Retained;
+        use objc2::runtime::ProtocolObject;
+        use objc2_core_video::{CVPixelBufferGetIOSurface, kCVPixelFormatType_32BGRA};
+        use objc2_metal::{
+            MTLDevice, MTLPixelFormat, MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
+        };
+
         let (w, h) = size;
-        let buffer = pixel_buffer(w, h, kCVPixelFormatType_32BGRA)?;
+        let buffer = crate::mac::pixel_buffer(w, h, kCVPixelFormatType_32BGRA)?;
         let iosurface = CVPixelBufferGetIOSurface(Some(&buffer))?;
         let raw: Retained<ProtocolObject<dyn MTLTexture>> = {
             // SAFETY: the raw Metal device is only used to make a texture here.
@@ -2141,8 +2199,8 @@ impl Ring {
     /// A buffer nothing else holds and not handed on lately; a new one while there are fewer
     /// than [`MOST`].
     fn free(&mut self, device: &wgpu::Device) -> Option<usize> {
-        let free =
-            (0..self.slots.len()).find(|i| !self.recent.contains(i) && self.slots[*i].buffer.retain_count() == 1);
+        let free = (0..self.slots.len())
+            .find(|i| !self.recent.contains(i) && !buffer_gpu::held_elsewhere(&self.slots[*i].buffer));
         match free {
             Some(i) => Some(i),
             None if self.slots.len() < MOST => {

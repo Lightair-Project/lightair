@@ -77,19 +77,19 @@ pub fn scene_targets(canvas: Id) -> Vec<SceneTarget> {
     SCENE_TARGETS.lock().iter().filter(|t| t.canvas == canvas).copied().collect()
 }
 
-/// Hands `frame` (BGRA, IOSurface-backed, complete on the GPU) over as the newest picture of the
-/// scene drawn for `key`. Any thread.
-#[cfg(target_os = "macos")]
-pub fn publish_scene(key: Id, frame: &crate::own_outputs::Buffer) {
-    crate::own_outputs::frame(key, frame);
+/// Hands `frame` (BGRA, complete on the GPU) over as the newest picture of the scene drawn for
+/// `key`. Any thread.
+#[cfg(any(target_os = "macos", windows))]
+pub fn publish_scene(key: Id, frame: &crate::buffers::Buffer) {
+    frames::to_outputs(key, frame);
 }
 
 // ------------------------------------------------------------------ each canvas's program
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub use frames::{newest, publish, set_libobs_in_use, withdraw};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod frames {
     use std::collections::HashMap;
     use std::sync::OnceLock;
@@ -112,22 +112,31 @@ mod frames {
     /// The newest finished program picture of each canvas.
     struct Programs(Option<HashMap<Id, Published>>);
 
-    // SAFETY: CoreVideo's buffers are reference counted thread-safely, and a finished picture
+    // SAFETY: Lightair's buffers are reference counted thread-safely, and a finished picture
     // isn't written while it's handed over.
     unsafe impl Send for Programs {}
     unsafe impl Sync for Programs {}
 
     static PROGRAMS: Mutex<Programs> = Mutex::new(Programs(None));
 
-    /// Hands `frame` (BGRA, IOSurface-backed, complete on the GPU) over as `canvas`'s newest
-    /// program picture, to Lightair's outputs and anything drawing it. Any thread.
+    /// Hands `frame` (BGRA, complete on the GPU) over as `canvas`'s newest program picture, to
+    /// Lightair's outputs and anything drawing it. Any thread.
     pub fn publish(canvas: Id, frame: &Buffer) {
         PROGRAMS
             .lock()
             .0
             .get_or_insert_with(HashMap::new)
             .insert(canvas, Published { buffer: frame.clone(), at: Instant::now() });
-        crate::own_outputs::frame(canvas, frame);
+        to_outputs(canvas, frame);
+    }
+
+    /// `frame` to Lightair's own outputs as `key`'s newest picture. Windows: they don't run
+    /// there yet.
+    pub(super) fn to_outputs(key: Id, frame: &Buffer) {
+        #[cfg(target_os = "macos")]
+        crate::own_outputs::frame(key, frame);
+        #[cfg(not(target_os = "macos"))]
+        let _ = (key, frame);
     }
 
     /// Forgets `canvas`'s picture (its compositor stopped).
@@ -154,11 +163,15 @@ mod frames {
     /// Whether something records or streams `canvas`'s program: Lightair's own encoders, or
     /// libobs's outputs while there are any. Any thread.
     pub fn in_use(canvas: Id) -> bool {
-        crate::own_outputs::uses(canvas) || LIBOBS_IN_USE.get().is_some_and(|f| f(canvas))
+        #[cfg(target_os = "macos")]
+        let own = crate::own_outputs::uses(canvas);
+        #[cfg(not(target_os = "macos"))]
+        let own = false;
+        own || LIBOBS_IN_USE.get().is_some_and(|f| f(canvas))
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub use frames::in_use;
 
 /// The primary canvas (the document's first), as the show has it now.

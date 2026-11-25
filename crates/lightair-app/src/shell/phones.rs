@@ -30,7 +30,7 @@ use super::StudioWindow;
 use crate::ui::tok;
 
 /// The most frames a second Lightair's own compositor draws a scene for a phone's shot.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 const SHOT_FPS: u32 = 15;
 
 /// What phones are told this desktop answers (lightair-live's docs/05 §9).
@@ -848,7 +848,7 @@ impl StudioWindow {
                     };
                     // with Lightair's own compositor: its program, and a scene shown here drawn by
                     // it a few times a second (a still is all a phone takes)
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", windows))]
                     {
                         preview.compose_program();
                         preview.set_rate(Some(SHOT_FPS));

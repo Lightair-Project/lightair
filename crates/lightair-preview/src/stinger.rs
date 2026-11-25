@@ -1,4 +1,5 @@
-//! macOS, with `LIGHTAIR_ENGINE=own`: a stinger transition's video for the compositor.
+//! A stinger transition's video for the compositor (macOS; Windows reads none yet, so its
+//! stingers are `failed`).
 //!
 //! A [`Player`] decodes its file on a thread of its own with the desktop's hardware path
 //! (AVFoundation and VideoToolbox, `lightair_obs::media_source::Frames`): BGRA IOSurface-backed
@@ -13,18 +14,43 @@ use std::path::Path;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use lightair_host::media_player::Frames;
+use lightair_render::scene::Shot;
+use parking_lot::{Condvar, Mutex};
+
+/// A stinger's frame as decoded: a BGRA pixel buffer the renderer draws as it is (macOS).
+#[cfg(target_os = "macos")]
+pub(crate) type Frame = lightair_render::texture::PixelBuffer;
+/// A stinger's frame as decoded: one of Lightair's own pictures (Windows).
+#[cfg(windows)]
+pub(crate) type Frame = lightair_host::buffers::Buffer;
+
+/// A stinger's frame as the renderer draws it.
+#[cfg(target_os = "macos")]
+pub(crate) fn shot(frame: Frame) -> Option<Shot> {
+    let size = frame.size();
+    Some(Shot { size, picture: lightair_render::media::Picture::Buffer(frame), premultiplied: false })
+}
+
+/// A stinger's frame as the renderer draws it.
+#[cfg(windows)]
+pub(crate) fn shot(frame: Frame) -> Option<Shot> {
+    crate::buffer_gpu::shot(&frame, false)
+}
 
 /// A stinger's frames: AVFoundation's, else (WebM with alpha, and what else it can't read)
 /// the `ffmpeg` tool's.
+#[cfg(target_os = "macos")]
 enum Reader {
-    Av(Frames),
+    Av(lightair_host::media_player::Frames),
     Ff(lightair_host::ffmpeg_media::Frames),
 }
 
+#[cfg(target_os = "macos")]
 impl Reader {
     fn open(path: &str) -> Option<Reader> {
-        Frames::open(path).map(Reader::Av).or_else(|| lightair_host::ffmpeg_media::Frames::open(path).map(Reader::Ff))
+        lightair_host::media_player::Frames::open(path)
+            .map(Reader::Av)
+            .or_else(|| lightair_host::ffmpeg_media::Frames::open(path).map(Reader::Ff))
     }
 
     fn duration_ms(&self) -> u32 {
@@ -34,15 +60,33 @@ impl Reader {
         }
     }
 
-    fn next_frame(&mut self) -> Option<(u32, lightair_render::texture::PixelBuffer)> {
+    fn next_frame(&mut self) -> Option<(u32, Frame)> {
         match self {
             Reader::Av(f) => f.next_frame(),
             Reader::Ff(f) => f.next_frame(),
         }
     }
 }
-use lightair_render::texture::PixelBuffer;
-use parking_lot::{Condvar, Mutex};
+
+/// Windows: no stinger video is read yet.
+#[cfg(windows)]
+enum Reader {}
+
+#[cfg(windows)]
+impl Reader {
+    fn open(_path: &str) -> Option<Reader> {
+        crate::buffer_gpu::not_yet("stinger videos in the compositor");
+        None
+    }
+
+    fn duration_ms(&self) -> u32 {
+        match *self {}
+    }
+
+    fn next_frame(&mut self) -> Option<(u32, Frame)> {
+        match *self {}
+    }
+}
 
 /// Frames decoded ahead of the one shown (the decoder's own buffers: few, so it isn't held up).
 const AHEAD: usize = 3;
@@ -63,7 +107,7 @@ struct State {
     /// Bumped to read from the start again.
     run: u64,
     /// The frames read for `run`, oldest first: (time in ms, frame). The first is the one shown.
-    frames: VecDeque<(u32, PixelBuffer)>,
+    frames: VecDeque<(u32, Frame)>,
     /// The file's end was reached in `run`.
     ended: bool,
     /// AVFoundation can't read the file.
@@ -104,7 +148,7 @@ impl Player {
 
     /// The frame for `at_ms` into the video: the newest decoded at or before it (the first until
     /// then); `None` before the first is decoded.
-    pub(crate) fn frame(&self, at_ms: u32) -> Option<PixelBuffer> {
+    pub(crate) fn frame(&self, at_ms: u32) -> Option<Frame> {
         let mut s = self.shared.state.lock();
         while s.frames.len() > 1 && s.frames[1].0 <= at_ms {
             s.frames.pop_front();

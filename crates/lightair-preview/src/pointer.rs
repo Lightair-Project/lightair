@@ -18,9 +18,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use lightair_engine::gpu::Gpu;
-use lightair_model::{Id, Source, Workspace};
 use lightair_host::bridge;
 use lightair_host::pointer::{Art, Pointer, Style};
+use lightair_model::{Id, Source, Workspace};
 use lightair_render::media::Picture;
 use lightair_render::scene::Shot;
 use lightair_render::shapes::{RES, arrow, crosshair, disc, dot, ibeam, ring};
@@ -276,10 +276,10 @@ impl Pointers {
         });
     }
 
-    /// `source`'s picture (`buffer`, a BGRA IOSurface) with its pointer drawn over it, zoomed
-    /// as the pointer's camera is; `on_air`: the badge counts it. `None` when there's nothing to
-    /// draw over it (not zoomed, no pointer showing) or the GPU couldn't: draw the picture as
-    /// it is.
+    /// `source`'s picture (`buffer`, one of Lightair's BGRA pictures) with its pointer drawn over
+    /// it, zoomed as the pointer's camera is; `on_air`: the badge counts it. `None` when there's
+    /// nothing to draw over it (not zoomed, no pointer showing) or the GPU couldn't: draw the
+    /// picture as it is.
     pub(crate) fn draw(
         &mut self,
         gpu: &Gpu,
@@ -288,10 +288,7 @@ impl Pointers {
         buffer: &bridge::Buffer,
         on_air: bool,
     ) -> Option<Shot> {
-        let size = (
-            objc2_core_video::CVPixelBufferGetWidth(buffer) as u32,
-            objc2_core_video::CVPixelBufferGetHeight(buffer) as u32,
-        );
+        let size = crate::buffer_gpu::size(buffer);
         let now = Instant::now();
         let drawn = self.drawn.entry(source.id).or_insert_with(|| Drawn {
             pointer: Pointer::new(style),
@@ -313,7 +310,7 @@ impl Pointers {
         let device = gpu.device();
         let queue = gpu.queue();
         let pass = self.pass.get_or_insert_with(|| Pass::new(device));
-        let picture = lightair_engine::gpu::apple::sampled(device, buffer)?;
+        let picture = crate::buffer_gpu::sampled(device, buffer)?;
         // the picture, zoomed or as it is, into the source's own texture
         if drawn.target.as_ref().is_none_or(|t| (t.width(), t.height()) != size) {
             drawn.target = Some(device.create_texture(&wgpu::TextureDescriptor {

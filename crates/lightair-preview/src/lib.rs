@@ -8,19 +8,21 @@
 //! Threading: the compositor never waits on the UI; the only shared lock is held for a pointer
 //! swap.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod avatars;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod backdrop;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod capture;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
+mod buffer_gpu;
+#[cfg(any(target_os = "macos", windows))]
 mod pointer;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod timed;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod compose;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod providers;
 #[cfg(target_os = "macos")]
 mod provide_web;
@@ -28,9 +30,9 @@ mod provide_web;
 mod provide_ndi;
 #[cfg(target_os = "macos")]
 mod provide_syphon;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod post;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod provide_frames;
 #[cfg(target_os = "macos")]
 mod provide_media;
@@ -38,19 +40,19 @@ mod provide_media;
 mod provide_srt;
 #[cfg(target_os = "macos")]
 mod provide_phone;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod looks;
 #[cfg(target_os = "macos")]
 mod mac;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod stickers;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod stinger;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod slideshow;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod text;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod widget_feed;
 #[cfg(not(target_os = "macos"))]
 mod readback;
@@ -63,7 +65,9 @@ pub use layer::Layer;
 
 #[cfg(target_os = "macos")]
 pub use mac::{Frame, Preview, frame_is_nv12, frame_rgba, frame_size, nv12, sample_ycbcr};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub use widget_feed::feed_widgets;
 #[cfg(not(target_os = "macos"))]
 pub use readback::{CpuFrame, Frame, Preview, frame_rgba, frame_size, sample_ycbcr};
+#[cfg(windows)]
+pub use readback::frame_of_buffer;

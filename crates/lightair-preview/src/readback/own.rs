@@ -1,17 +1,16 @@
-//! Without libobs: a preview's frames come from Lightair's own compositor (`compose`), which
-//! runs on macOS only today (docs/plans/no-libobs.md, step 10). Here the preview keeps what it's
-//! asked to show (the canvas, a scene in the program's place, the size, the rate, the window's
-//! layer); asking for the program says "not yet" in the log, once, and the preview stays empty.
-//!
-//! On Windows the compositor's side is ready for it, with the same calls as macOS's (`mac.rs`):
-//! the compositor feeds each finished frame (a shared texture, `lightair_host::buffers::Buffer`)
-//! to [`Shared::feed`] or [`Shared::feed_scene`]; the frame is presented to the window's swap
-//! chain on the GPU ([`crate::Layer::present_buffer`]) and read back to memory only while
-//! something asks for frames ([`Preview::latest_frame`]: thumbnails, screenshots, the colour
-//! picker) or there's no swap chain.
+//! A preview's frames from Lightair's own compositor (`compose`), on Windows. The preview keeps
+//! what it's asked to show (the canvas, a scene in the program's place, the size, the rate, the
+//! window's layer), with the same calls as macOS's (`mac.rs`): the compositor feeds each
+//! finished frame (a shared texture, `lightair_host::buffers::Buffer`) to [`Shared::feed`] or
+//! [`Shared::feed_scene`]; the frame is presented to the window's swap chain on the GPU
+//! ([`crate::Layer::present_buffer`]) and read back to memory only while something asks for
+//! frames ([`Preview::latest_frame`]: thumbnails, screenshots, the colour picker) or there's no
+//! swap chain. Elsewhere (no compositor) asking for the program says "not yet" in the log, once,
+//! and the preview stays empty.
 
 use std::ffi::c_void;
 use std::sync::Arc;
+#[cfg(not(windows))]
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
@@ -69,7 +68,6 @@ unsafe impl Sync for Shared {}
 /// A scene a preview shows instead of the program, as Lightair's own compositor draws it.
 #[cfg(windows)]
 #[derive(Clone, Copy)]
-#[allow(dead_code, reason = "Lightair's own compositor reads it once it runs on Windows")]
 pub(crate) struct SceneView {
     pub(crate) scene: Id,
     pub(crate) canvas: Id,
@@ -81,9 +79,29 @@ pub(crate) struct SceneView {
     pub(crate) rate: Option<u32>,
 }
 
-/// Handle to a preview of a canvas. Cheap to clone.
+/// Handle to a preview of a canvas. Cheap to clone; the compositor stops feeding it when the
+/// last clone is dropped.
 #[derive(Clone)]
-pub struct Preview(Arc<Shared>);
+pub struct Preview(Arc<Handle>);
+
+struct Handle {
+    shared: Arc<Shared>,
+    /// Lightair's own compositor gives this preview its program frames (`compose_program`).
+    #[cfg(windows)]
+    composed: AtomicBool,
+    /// Lightair's own compositor draws the scenes shown in the program's place (`set_source`).
+    #[cfg(windows)]
+    scenes: AtomicBool,
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if self.composed.load(Ordering::Relaxed) || self.scenes.load(Ordering::Relaxed) {
+            crate::compose::unwatch(&self.shared);
+        }
+    }
+}
 
 impl Preview {
     /// A preview of the primary canvas.
@@ -97,7 +115,11 @@ impl Preview {
     }
 
     fn attach_to(canvas: Option<Id>) -> Self {
-        Self(Arc::new(Shared {
+        // Lightair's pictures on the compositor's graphics adapter before the window's swap
+        // chain is made
+        #[cfg(windows)]
+        crate::compose::share_adapter();
+        let shared = Arc::new(Shared {
             canvas,
             scene: Mutex::new(Shown::default()),
             size: AtomicU64::new(0),
@@ -111,11 +133,36 @@ impl Preview {
             layer: Mutex::new(None),
             #[cfg(windows)]
             staging: Mutex::new(None),
+        });
+        Self(Arc::new(Handle {
+            shared,
+            #[cfg(windows)]
+            composed: AtomicBool::new(false),
+            #[cfg(windows)]
+            scenes: AtomicBool::new(false),
         }))
+    }
+
+    /// Shows the canvas's program as Lightair's own compositor draws it. The main canvas's
+    /// preview (`attach`) follows the primary canvas; another canvas's (`attach_canvas`), that
+    /// canvas. False when the compositor couldn't start.
+    #[cfg(windows)]
+    pub fn compose_program(&self) -> bool {
+        let target = match self.0.shared.canvas {
+            None => crate::compose::Target::Primary,
+            Some(c) => crate::compose::Target::Canvas(c.to_string()),
+        };
+        if !crate::compose::start() {
+            return false;
+        }
+        crate::compose::watch(target, &self.0.shared);
+        self.0.composed.store(true, Ordering::Relaxed);
+        true
     }
 
     /// Shows the canvas's program as Lightair's own compositor draws it. False: the compositor
     /// doesn't run on this platform yet.
+    #[cfg(not(windows))]
     pub fn compose_program(&self) -> bool {
         static SAID: Once = Once::new();
         SAID.call_once(|| {
@@ -127,26 +174,34 @@ impl Preview {
     /// Renders at this pixel size; `None` follows the canvas resolution.
     pub fn set_size(&self, size: Option<(u32, u32)>) {
         let packed = size.map_or(0, |(w, h)| (((w.max(2) & !1) as u64) << 32) | (h.max(2) & !1) as u64);
-        self.0.size.store(packed, Ordering::Relaxed);
+        self.0.shared.size.store(packed, Ordering::Relaxed);
     }
 
     /// Shows a scene (and the canvas it's laid out in) instead of the program, or the program
     /// again with `None`.
     pub fn set_source(&self, source: Option<(Id, Id)>) {
-        let mut shown = self.0.scene.lock();
-        shown.at = source;
-        shown.generation += 1;
-        *self.0.latest.lock() = None;
+        let shared = &self.0.shared;
+        {
+            let mut shown = shared.scene.lock();
+            shown.at = source;
+            shown.generation += 1;
+            *shared.latest.lock() = None;
+        }
+        // the compositor draws it
+        #[cfg(windows)]
+        if source.is_some() && crate::compose::start() && !self.0.scenes.swap(true, Ordering::Relaxed) {
+            crate::compose::watch_scenes(shared);
+        }
     }
 
     /// The most frames a second a scene shown here is drawn; `None`: the canvas's rate.
     pub fn set_rate(&self, fps: Option<u32>) {
-        self.0.rate.store(fps.unwrap_or(0), Ordering::Relaxed);
+        self.0.shared.rate.store(fps.unwrap_or(0), Ordering::Relaxed);
     }
 
     /// Draws the source at its own size rather than where it sits on the canvas.
     pub fn set_own_size(&self, own: bool) {
-        self.0.own_size.store(own, Ordering::Relaxed);
+        self.0.shared.own_size.store(own, Ordering::Relaxed);
     }
 
     /// Presents each frame to `layer` too (Windows: a `Layer`, as `Arc::as_ptr` gives it; a
@@ -159,7 +214,7 @@ impl Preview {
                 Arc::increment_strong_count(l);
                 Arc::from_raw(l)
             });
-            let old = std::mem::replace(&mut *self.0.layer.lock(), new);
+            let old = std::mem::replace(&mut *self.0.shared.layer.lock(), new);
             drop(old);
         }
         #[cfg(not(windows))]
@@ -168,39 +223,33 @@ impl Preview {
 
     /// The scene shown instead of the program, if any, and its canvas.
     pub fn source(&self) -> Option<(Id, Id)> {
-        self.0.scene.lock().at
+        self.0.shared.scene.lock().at
     }
 
     /// Pauses or resumes rendering.
     pub fn set_active(&self, active: bool) {
-        self.0.active.store(active, Ordering::Relaxed);
+        self.0.shared.active.store(active, Ordering::Relaxed);
     }
 
     /// The newest finished frame, if any. Asking keeps frames read back for a while.
     pub fn latest_frame(&self) -> Option<Frame> {
-        self.0.asked.store(now_ms(), Ordering::Relaxed);
-        self.0.latest.lock().clone()
+        self.0.shared.asked.store(now_ms(), Ordering::Relaxed);
+        self.0.shared.latest.lock().clone()
     }
 
     /// Frames shown since attach (diagnostics).
     pub fn frames(&self) -> u64 {
-        self.0.frames.load(Ordering::Relaxed)
+        self.0.shared.frames.load(Ordering::Relaxed)
     }
 }
 
 /// What the compositor calls, as on macOS (`mac::Shared`).
 #[cfg(windows)]
-#[allow(dead_code, reason = "Lightair's own compositor calls these once it runs on Windows")]
 impl Shared {
     /// Whether the compositor's program frames are wanted now: the preview is active and shows
     /// the program (not a scene in its place).
     pub(crate) fn wants_program(&self) -> bool {
         self.active.load(Ordering::Relaxed) && self.scene.lock().at.is_none()
-    }
-
-    /// The canvas previewed; `None`: the primary canvas.
-    pub(crate) fn canvas(&self) -> Option<Id> {
-        self.canvas
     }
 
     /// The compositor's newest finished program frame. Ignored while a scene is shown instead.
@@ -246,17 +295,6 @@ impl Shared {
     /// The compositor no longer draws the scene shown.
     pub(crate) fn unfeed_scene(&self) {}
 
-    /// The size asked for (`Preview::set_size`); `None`: the canvas's.
-    pub(crate) fn size(&self) -> Option<(u32, u32)> {
-        let packed = self.size.load(Ordering::Relaxed);
-        (packed != 0).then_some(((packed >> 32) as u32, packed as u32))
-    }
-
-    /// Whether a source is drawn at its own size.
-    pub(crate) fn own_size(&self) -> bool {
-        self.own_size.load(Ordering::Relaxed)
-    }
-
     /// Presents `frame` to the window's swap chain, and reads it back while frames are asked
     /// for (or there's no swap chain to show it).
     fn show(&self, frame: &lightair_host::buffers::Buffer) {
@@ -276,54 +314,70 @@ impl Shared {
         }
     }
 
-    /// `frame`'s pixels, copied through a staging texture on its device (waits for the copy).
+    /// `frame`'s pixels, copied through this preview's staging texture (waits for the copy).
     fn read_back(&self, frame: &lightair_host::buffers::Buffer) -> Option<super::CpuFrame> {
-        use windows::Win32::Graphics::Direct3D11::{
-            D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-        };
-        use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
-
-        let (w, h) = frame.size();
-        let mut staging = self.staging.lock();
-        let fits = staging.as_ref().is_some_and(|s| {
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            unsafe { s.GetDesc(&mut desc) };
-            let same_device = unsafe { s.GetDevice() }.is_ok_and(|d| d == *frame.device());
-            (desc.Width, desc.Height) == (w, h) && same_device
-        });
-        if !fits {
-            let desc = D3D11_TEXTURE2D_DESC {
-                Width: w,
-                Height: h,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                Usage: D3D11_USAGE_STAGING,
-                BindFlags: 0,
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                MiscFlags: 0,
-            };
-            let mut made = None;
-            unsafe { frame.device().CreateTexture2D(&desc, None, Some(&mut made)) }.ok()?;
-            *staging = made;
-        }
-        let staging = staging.as_ref()?;
-        let _held = frame.lock();
-        let context = frame.context();
-        unsafe { context.CopyResource(staging, frame.texture()) };
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        // SAFETY: a staging texture of `w`×`h` BGRA, mapped for reading and unmapped below.
-        unsafe { context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }.ok()?;
-        let (w, h) = (w as usize, h as usize);
-        let mut bgra = vec![0u8; w * h * 4];
-        for row in 0..h {
-            let src = unsafe {
-                std::slice::from_raw_parts((mapped.pData as *const u8).add(row * mapped.RowPitch as usize), w * 4)
-            };
-            bgra[row * w * 4..(row + 1) * w * 4].copy_from_slice(src);
-        }
-        unsafe { context.Unmap(staging, 0) };
-        Some(super::CpuFrame { width: w, height: h, bgra })
+        read_back(&mut self.staging.lock(), frame)
     }
+}
+
+/// One of Lightair's own pictures as a frame in memory (a thumbnail of a capture, say): its
+/// pixels copied through a staging texture made for it. Waits for the copy.
+#[cfg(windows)]
+pub fn frame_of_buffer(buffer: &lightair_host::buffers::Buffer) -> Option<Frame> {
+    read_back(&mut None, buffer).map(Arc::new)
+}
+
+/// `frame`'s pixels, copied through `staging` (made again when it doesn't fit: another size or
+/// device). Waits for the copy.
+#[cfg(windows)]
+fn read_back(
+    staging: &mut Option<windows::Win32::Graphics::Direct3D11::ID3D11Texture2D>,
+    frame: &lightair_host::buffers::Buffer,
+) -> Option<super::CpuFrame> {
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+    let (w, h) = frame.size();
+    let fits = staging.as_ref().is_some_and(|s| {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { s.GetDesc(&mut desc) };
+        let same_device = unsafe { s.GetDevice() }.is_ok_and(|d| d == *frame.device());
+        (desc.Width, desc.Height) == (w, h) && same_device
+    });
+    if !fits {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let mut made = None;
+        unsafe { frame.device().CreateTexture2D(&desc, None, Some(&mut made)) }.ok()?;
+        *staging = made;
+    }
+    let staging = staging.as_ref()?;
+    let _held = frame.lock();
+    let context = frame.context();
+    unsafe { context.CopyResource(staging, frame.texture()) };
+    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    // SAFETY: a staging texture of `w`×`h` BGRA, mapped for reading and unmapped below.
+    unsafe { context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }.ok()?;
+    let (w, h) = (w as usize, h as usize);
+    let mut bgra = vec![0u8; w * h * 4];
+    for row in 0..h {
+        let src = unsafe {
+            std::slice::from_raw_parts((mapped.pData as *const u8).add(row * mapped.RowPitch as usize), w * 4)
+        };
+        bgra[row * w * 4..(row + 1) * w * 4].copy_from_slice(src);
+    }
+    unsafe { context.Unmap(staging, 0) };
+    Some(super::CpuFrame { width: w, height: h, bgra })
 }

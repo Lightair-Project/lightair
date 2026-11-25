@@ -54,6 +54,7 @@ pub(crate) fn mask_source(e: &Effect) -> Option<Id> {
 }
 
 /// The copy of the picture Vision looks at is at most this wide.
+#[cfg(target_os = "macos")]
 const WATCH_WIDTH: usize = 320;
 /// The most faces blurred.
 const FACES: usize = 6;
@@ -337,7 +338,8 @@ struct State {
 }
 
 /// Every face in a source's picture, found by Apple's Vision on a thread of its own from a
-/// small copy of every third picture.
+/// small copy of every third picture (macOS; Windows has no face detector yet).
+#[cfg_attr(windows, allow(dead_code, reason = "no face detector on Windows yet"))]
 struct Watch {
     to: std::sync::mpsc::SyncSender<(Vec<u8>, usize, usize)>,
     /// The faces found last (x, y, w, h, 0..1 from the top left), and when.
@@ -346,6 +348,18 @@ struct Watch {
 }
 
 impl Watch {
+    /// Windows: no face detector yet.
+    #[cfg(windows)]
+    fn new() -> Option<Watch> {
+        crate::buffer_gpu::not_yet("face detection in the compositor (Face blur, Auto-frame)");
+        None
+    }
+
+    /// Windows: no face detector yet.
+    #[cfg(windows)]
+    fn look(&mut self, _buffer: &bridge::Buffer) {}
+
+    #[cfg(target_os = "macos")]
     fn new() -> Option<Watch> {
         let (to, from) = std::sync::mpsc::sync_channel::<(Vec<u8>, usize, usize)>(1);
         let found = std::sync::Arc::new(parking_lot::Mutex::new((Vec::new(), Instant::now())));
@@ -363,6 +377,7 @@ impl Watch {
     }
 
     /// Hands Vision a small copy of `buffer` (every third time asked; dropped while it's busy).
+    #[cfg(target_os = "macos")]
     fn look(&mut self, buffer: &bridge::Buffer) {
         use objc2_core_video::{
             CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
@@ -469,7 +484,8 @@ impl Timed {
         let stickers = &mut self.stickers;
         let mut current = match &shot.picture {
             Picture::Texture(t) => t.clone(),
-            Picture::Buffer(_) => lightair_engine::gpu::apple::sampled(device, buffer?)?,
+            #[cfg(target_os = "macos")]
+            Picture::Buffer(_) => crate::buffer_gpu::sampled(device, buffer?)?,
             Picture::Rgba(_) => return None,
         };
         let size = (current.width(), current.height());

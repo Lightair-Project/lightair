@@ -24,7 +24,7 @@ pub(super) type JobSender = futures_channel::mpsc::UnboundedSender<Job>;
 /// How long a client waits for the app to answer.
 const ANSWER_WITHIN: Duration = Duration::from_secs(20);
 /// The most frames a second Lightair's own compositor draws a scene for a screenshot.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 const SHOT_FPS: u32 = 15;
 
 /// The server, and what the window keeps for it.
@@ -1400,7 +1400,7 @@ impl StudioWindow {
                     let preview = Preview::attach();
                     // with Lightair's own compositor: its program, and a scene shown here drawn by
                     // it a few times a second (a screenshot is a still)
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", windows))]
                     {
                         preview.compose_program();
                         preview.set_rate(Some(SHOT_FPS));

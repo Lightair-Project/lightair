@@ -124,7 +124,7 @@ fn need(source: &Source) -> Need {
         kinds::DESKTOP_AUDIO | kinds::APP_AUDIO => Need::Missing("desktop or app sound"),
         crate::phone_camera::KIND if mac => Need::Phone,
         crate::phone_camera::KIND => Need::Missing("phone camera"),
-        crate::avatar::KIND if mac => Need::Avatar,
+        crate::avatar::KIND if cfg!(any(target_os = "macos", windows)) => Need::Avatar,
         crate::avatar::KIND => Need::Missing("avatar"),
         crate::dslr::KIND if mac => Need::Dslr,
         crate::dslr::KIND => Need::Missing("camera by USB"),
@@ -194,7 +194,7 @@ enum Runtime {
     Link,
     #[cfg(target_os = "macos")]
     Phone(crate::phone_run::PhoneCamera),
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     Avatar(crate::avatar_run::AvatarRuntime),
     #[cfg(target_os = "macos")]
     Ffmpeg {
@@ -571,7 +571,7 @@ impl Host {
                         *was = now;
                     }
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 Runtime::Avatar(avatar) => avatar.set_shown(showing.contains(id)),
                 #[cfg(target_os = "macos")]
                 Runtime::Ffmpeg { media, active: was } => {
@@ -637,7 +637,7 @@ impl Host {
             },
             #[cfg(any(target_os = "macos", windows))]
             Some(Runtime::Web { page, .. }) => page.set_options(page_options(s)),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Some(Runtime::Avatar(avatar)) => avatar.set_settings(s),
             #[cfg(target_os = "macos")]
             Some(Runtime::Ffmpeg { media, .. }) => media.update(crate::ffmpeg_media::Settings::from_json(s)),
@@ -730,7 +730,7 @@ impl Host {
             }
             #[cfg(target_os = "macos")]
             Need::Phone => Runtime::Phone(crate::phone_run::PhoneCamera::new(id)),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Need::Avatar => Runtime::Avatar(crate::avatar_run::AvatarRuntime::new(id, s)),
             #[cfg(target_os = "macos")]
             Need::Ffmpeg => Runtime::Ffmpeg {
@@ -1154,7 +1154,7 @@ impl Host {
 
     /// An avatar source's status (`None`: avatars don't run without libobs yet).
     pub fn avatar_status(&self, source: Id) -> Option<AvatarStatus> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(Runtime::Avatar(avatar)) = self.runtimes.get(&source) {
             return Some(avatar.status());
         }
@@ -1171,7 +1171,7 @@ impl Host {
 
     /// A PNGtuber's push to talk held, or let go.
     pub fn avatar_push_to_talk(&self, source: Id, held: bool) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(Runtime::Avatar(avatar)) = self.runtimes.get(&source) {
             avatar.set_push_to_talk(held);
         }
@@ -1181,7 +1181,7 @@ impl Host {
     /// Where an avatar's anchor is in its picture at rest (pixels), once the compositor draws its
     /// model. `size`: as it would be at that size of the picture instead.
     pub fn avatar_anchor_rest(&self, source: Id, key: &str, size: Option<(u32, u32)>) -> Option<Spot> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(Runtime::Avatar(avatar)) = self.runtimes.get(&source) {
             return avatar.anchor_rest(key, size);
         }
@@ -1192,7 +1192,7 @@ impl Host {
     /// Takes the face an avatar sees now as its neutral one: the calibration's JSON (`None`: no
     /// face seen).
     pub fn avatar_calibrate(&self, source: Id) -> Option<String> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(Runtime::Avatar(avatar)) = self.runtimes.get(&source) {
             return avatar.calibrate();
         }
@@ -1202,9 +1202,9 @@ impl Host {
 
     /// Whether the source's face effects see a face right now (`None`: none looking).
     pub fn face_present(&self, source: Id) -> Option<bool> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         return crate::bridge::face_seen(source);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = source;
             None
@@ -1213,9 +1213,9 @@ impl Host {
 
     /// Whether the source's effects see a person right now (`None`: none looking).
     pub fn person_present(&self, source: Id) -> Option<bool> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         return crate::bridge::person_seen(source);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = source;
             None

@@ -17,17 +17,21 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Instant;
 
 use lightair_model::Id;
+#[cfg(target_os = "macos")]
 use objc2_core_foundation::CFRetained;
 use parking_lot::Mutex;
 
-pub use crate::buffers::{Buffer, bgra_buffer, surface_of};
+#[cfg(target_os = "macos")]
+pub use crate::buffers::surface_of;
+pub use crate::buffers::{Buffer, bgra_buffer};
 pub use crate::show::{
     Snapshot, Switch, clear_timer_texts, crop_view, link_received_by_compositor, live_off, own, publish, set_switch,
     set_timer_text, snapshot, timer_text,
 };
 pub use crate::tracker::{FACE_POINTS, FaceTracker, RawFace, RawMask};
 
-/// A source's picture: a BGRA, IOSurface-backed pixel buffer, colours multiplied by alpha.
+/// A source's picture: a BGRA, IOSurface-backed pixel buffer (macOS) or shared Direct3D 11
+/// texture (Windows), colours multiplied by alpha.
 pub struct Picture {
     pub buffer: Buffer,
     /// Drawn without the source's own filters elsewhere: its effects aren't in it.
@@ -36,6 +40,7 @@ pub struct Picture {
     pub serial: u64,
 }
 
+#[cfg(target_os = "macos")]
 impl Picture {
     /// The buffer as the renderer takes it.
     pub fn pixel_buffer(&self) -> Option<lightair_render::texture::PixelBuffer> {
@@ -170,19 +175,20 @@ pub fn avatar_posing(source: Id) -> Option<(Arc<AvatarPosing>, Option<TrackingPi
 /// The newest picture of each document source whose capture Lightair's compositor runs itself.
 struct Taken(Option<HashMap<Id, Buffer>>);
 
-// SAFETY: CoreVideo's buffers are reference counted thread-safely, and a captured picture isn't
+// SAFETY: Lightair's buffers are reference counted thread-safely, and a captured picture isn't
 // written again once it's handed over.
 unsafe impl Send for Taken {}
 unsafe impl Sync for Taken {}
 
 static TAKEN: Mutex<Taken> = Mutex::new(Taken(None));
 
-/// The compositor captures document source `source` itself, and `buffer` (BGRA, IOSurface-backed)
+/// The compositor captures document source `source` itself, and `buffer` (BGRA)
 /// is its newest picture (libobs's wrapper of the source lets its own capture go and draws this
 /// instead). Any thread (a capture's own queue: the lock is held only to swap a reference).
 pub fn publish_capture(source: Id, buffer: &Buffer) {
     TAKEN.lock().0.get_or_insert_with(HashMap::new).insert(source, buffer.clone());
     // a Studio take recording it
+    #[cfg(target_os = "macos")]
     crate::studio_take::frame(source, buffer);
 }
 

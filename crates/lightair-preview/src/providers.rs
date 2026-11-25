@@ -3,15 +3,18 @@
 //! A source a provider has a frame for is drawn from that frame, as a captured screen or camera
 //! is, with the effects the compositor draws; until it has one, libobs's picture stands in.
 //!
-//! A provider gives BGRA IOSurface-backed buffers with premultiplied colours (opaque pictures
-//! are both), and must not draw into a buffer again while the compositor may still hold it: give
-//! a new buffer for each new picture.
+//! A provider gives Lightair's own BGRA pictures (`lightair_host::buffers`) with premultiplied
+//! colours (opaque pictures are both), and must not draw into a buffer again while the
+//! compositor may still hold it: give a new buffer for each new picture.
+//!
+//! Windows has only the pictures lightair-host's runtimes make (`provide_frames`) yet; the other
+//! providers are macOS's.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use lightair_model::{Id, Source};
 use lightair_host::bridge;
+use lightair_model::{Id, Source};
 
 /// One kind of source whose picture is made outside libobs.
 pub trait Provider: Send + Sync {
@@ -44,12 +47,15 @@ fn providers() -> &'static [Arc<dyn Provider>] {
 fn builtin() -> Vec<Arc<dyn Provider>> {
     #[allow(unused_mut)]
     let mut all: Vec<Arc<dyn Provider>> = Vec::new();
-    all.push(Arc::new(crate::provide_web::Web::default()));
-    all.push(Arc::new(crate::provide_ndi::Ndi::default())); // NDI
-    all.push(Arc::new(crate::provide_syphon::Syphon::default())); // Syphon
-    all.push(Arc::new(crate::provide_srt::Srt::default())); // SRT from another computer
-    all.push(Arc::new(crate::provide_phone::Phone::default())); // the phone camera
-    all.push(Arc::new(crate::provide_media::Media)); // media files
+    #[cfg(target_os = "macos")]
+    {
+        all.push(Arc::new(crate::provide_web::Web::default()));
+        all.push(Arc::new(crate::provide_ndi::Ndi::default())); // NDI
+        all.push(Arc::new(crate::provide_syphon::Syphon::default())); // Syphon
+        all.push(Arc::new(crate::provide_srt::Srt::default())); // SRT from another computer
+        all.push(Arc::new(crate::provide_phone::Phone::default())); // the phone camera
+        all.push(Arc::new(crate::provide_media::Media)); // media files
+    }
     all.push(Arc::new(crate::provide_frames::Frames)); // what lightair-host's runtimes make
     all
 }

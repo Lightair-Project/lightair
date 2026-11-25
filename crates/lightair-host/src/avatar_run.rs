@@ -1,4 +1,4 @@
-//! An avatar source's tracking without libobs (macOS): the compositor draws and poses the model
+//! An avatar source's tracking without libobs: the compositor draws and poses the model
 //! (`lightair-preview`'s avatars); this runs what poses it and publishes each frame's posing by
 //! the source's id (`crate::bridge::set_avatar_posing`), as libobs's avatar source did.
 //!
@@ -14,8 +14,13 @@
 //!
 //! What's pinned to the avatar follows its anchors as the compositor's renderer poses it; an
 //! anchor's place at rest comes from there too ([`AvatarRuntime::anchor_rest`]).
+//!
+//! Windows has no tracker library yet: the camera isn't opened there (the log says so once), so
+//! a VRM or a flat avatar settles at rest; a PNGtuber's mic and push to talk, the model's status
+//! and its anchors work as on macOS.
 
 use std::ffi::c_void;
+#[cfg(target_os = "macos")]
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,7 +30,9 @@ use lightair_avatar::body::{BodyFrame, BodyMode, HAND_POINTS, JOINTS};
 use lightair_avatar::source::{self, Settings};
 use lightair_avatar::{Calibration, Landmarks, Measures};
 use lightair_model::Id;
+#[cfg(target_os = "macos")]
 use objc2_core_foundation::CFRetained;
+#[cfg(target_os = "macos")]
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
     CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
@@ -40,6 +47,7 @@ const LINGER: Duration = Duration::from_secs(2);
 /// How often the posing is worked out and published.
 const STEP: Duration = Duration::from_millis(16);
 /// The tracking view's picture: at most this wide.
+#[cfg(target_os = "macos")]
 const VIEW_WIDTH: u32 = 640;
 
 /// The body tracker's frame (body-tracker.h's `bt_body`).
@@ -163,9 +171,16 @@ impl Drop for AvatarRuntime {
     }
 }
 
+/// The source's camera while it runs (macOS).
+#[cfg(target_os = "macos")]
+type Camera = lightair_capture::camera::CameraCapture;
+/// Windows: none is opened.
+#[cfg(windows)]
+type Camera = ();
+
 /// The stepping thread: the camera kept, the model read, the posing published, until dropped.
 fn run(s: Arc<Shared>) {
-    let mut camera: Option<(String, lightair_capture::camera::CameraCapture)> = None;
+    let mut camera: Option<(String, Camera)> = None;
     let mut hidden_since: Option<Instant> = None;
     let mut read: Option<(String, i64)> = None;
     let mut loading: Option<std::thread::JoinHandle<Result<source::Loaded, String>>> = None;
@@ -244,8 +259,19 @@ fn run(s: Arc<Shared>) {
     }
 }
 
+/// Windows: no tracker library to give the camera's frames to yet.
+#[cfg(windows)]
+fn open_camera(_s: &Arc<Shared>, _device: &str) -> Option<Camera> {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        tracing::warn!("not yet on this platform: an avatar's face and body tracking (no tracker library)")
+    });
+    None
+}
+
 /// The source's camera, its frames going to the trackers as they come.
-fn open_camera(s: &Arc<Shared>, device: &str) -> Option<lightair_capture::camera::CameraCapture> {
+#[cfg(target_os = "macos")]
+fn open_camera(s: &Arc<Shared>, device: &str) -> Option<Camera> {
     use lightair_capture::{PixelFormat, camera};
     let config = camera::Config { format: None, height: Some(720), fps: Some(30.0), pixel_format: PixelFormat::Bgra };
     let to = s.clone();
@@ -269,6 +295,7 @@ fn open_camera(s: &Arc<Shared>, device: &str) -> Option<lightair_capture::camera
 
 impl Shared {
     /// A camera frame to the trackers (the capture's queue).
+    #[cfg(target_os = "macos")]
     fn track(&self, buffer: &CVPixelBuffer) {
         let settings = self.settings.lock().clone();
         let body = !settings.is_flat() && settings.body_mode() != BodyMode::Off;
@@ -431,6 +458,7 @@ fn mic_level(track: &str) -> f32 {
 }
 
 /// A BGRA picture at most [`VIEW_WIDTH`] wide (every n-th pixel), rows packed.
+#[cfg(target_os = "macos")]
 fn small(bytes: &[u8], stride: usize, (w, h): (u32, u32)) -> View {
     let step = w.div_ceil(VIEW_WIDTH).max(1);
     let (sw, sh) = (w / step, h / step);

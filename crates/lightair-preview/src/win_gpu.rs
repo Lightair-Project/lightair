@@ -12,7 +12,11 @@
 //! before the submit that reads it ([`wait_before_next_submit`]), and an encoder's fence is
 //! signalled after the submit that draws its input slot ([`signal_after_next_submit`]).
 
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Weak};
+
 use lightair_host::buffers::Buffer;
+use parking_lot::Mutex;
 use windows::Win32::Foundation::{HANDLE, LUID};
 use windows::Win32::Graphics::Direct3D12::{ID3D12Fence, ID3D12Resource};
 
@@ -23,11 +27,13 @@ pub fn adapter_of(device: &wgpu::Device) -> Option<LUID> {
     Some(unsafe { hal.raw_device().GetAdapterLuid() })
 }
 
-/// Makes Lightair's own pictures (`lightair_host::buffers`) on `device`'s adapter from now on, so
-/// the compositor can open them. False when `device` doesn't run on Direct3D 12.
+/// Makes Lightair's own pictures (`lightair_host::buffers`) and captured frames
+/// (`lightair_capture`) on `device`'s adapter from now on, so the compositor can open them. False
+/// when `device` doesn't run on Direct3D 12.
 pub fn share_adapter(device: &wgpu::Device) -> bool {
     let Some(luid) = adapter_of(device) else { return false };
     lightair_host::buffers::set_adapter(Some(luid));
+    lightair_capture::set_adapter(Some(luid));
     true
 }
 
@@ -80,6 +86,28 @@ pub fn open(
 /// One of Lightair's own pictures as a BGRA texture on `device`, drawn into or read.
 pub fn open_buffer(device: &wgpu::Device, buffer: &Buffer, usage: wgpu::TextureUsages) -> Option<wgpu::Texture> {
     open(device, buffer.handle(), buffer.size(), wgpu::TextureFormat::Bgra8Unorm, usage)
+}
+
+/// One of Lightair's own pictures as a texture on `device` to sample or copy from, opened once
+/// and kept while the buffer lives (rings reuse their buffers). The buffer must be held until
+/// the GPU is done with the texture.
+pub fn texture_of(device: &wgpu::Device, buffer: &Buffer) -> Option<wgpu::Texture> {
+    type Opened = HashMap<usize, (Weak<lightair_host::buffers::Shared>, wgpu::Device, wgpu::Texture)>;
+    static OPENED: LazyLock<Mutex<Opened>> = LazyLock::new(Default::default);
+    // a buffer's address: kept for it by its weak reference, so never another buffer's
+    let at = Arc::as_ptr(buffer) as usize;
+    let mut opened = OPENED.lock();
+    if let Some((_, d, t)) = opened.get(&at)
+        && d == device
+    {
+        return Some(t.clone());
+    }
+    // the textures of buffers gone are let go
+    opened.retain(|_, (b, _, _)| b.strong_count() > 0);
+    let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC;
+    let texture = open_buffer(device, buffer, usage)?;
+    opened.insert(at, (Arc::downgrade(buffer), device.clone(), texture.clone()));
+    Some(texture)
 }
 
 /// A new picture of `size` to draw into (an output frame): the buffer, and its texture on

@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::Sizable;
@@ -21,8 +21,8 @@ use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_model::{Command, Id, Layout, Object, Source};
 use lightair_host::avatar_pins::{Placement, on_canvas};
+use lightair_model::{Command, Id, Layout, Object, Source};
 use serde_json::{Value, json};
 
 use super::StudioWindow;
@@ -1066,15 +1066,16 @@ pub(super) fn expression_keys(workspace: &lightair_model::Workspace) -> Vec<(Id,
 /// avatar stretched into it. Retaken when the library opens.
 const OLD_PICTURE: (u32, u32) = (320, 180);
 
-/// No library pictures of avatars here yet: the compositor's avatar renderer runs on macOS only.
-#[cfg(not(target_os = "macos"))]
+/// No library pictures of avatars here yet: the compositor's avatar renderer runs on macOS and
+/// Windows only.
+#[cfg(not(any(target_os = "macos", windows)))]
 fn picture_at_rest(_settings: &Value) -> Option<Vec<u8>> {
     None
 }
 
 /// An avatar's model (`settings`: an avatar source's) drawn at rest by the compositor's renderer,
 /// as a library picture; `None` when it doesn't load (in 20 seconds). Off the UI thread.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn picture_at_rest(settings: &Value) -> Option<Vec<u8>> {
     use lightair_render::media::Picture;
     let mut r = lightair_preview::avatars::AvatarRenderer::new(settings).ok()?;

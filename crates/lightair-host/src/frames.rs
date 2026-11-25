@@ -1,6 +1,6 @@
 //! Pictures a runtime makes for a source (a camera over USB, a media file FFmpeg decodes), by
 //! the source's id: the newest one, which the compositor draws (`lightair-preview`'s
-//! `provide_frames`). macOS.
+//! `provide_frames`).
 
 use std::collections::HashMap;
 
@@ -12,7 +12,7 @@ use crate::buffers::Buffer;
 /// Each source's newest picture and how many it has had.
 struct Frames(Option<HashMap<Id, (Buffer, u64)>>);
 
-// SAFETY: CoreVideo's buffers are reference counted thread-safely, and a picture isn't written
+// SAFETY: Lightair's buffers are reference counted thread-safely, and a picture isn't written
 // again once it's published.
 unsafe impl Send for Frames {}
 unsafe impl Sync for Frames {}

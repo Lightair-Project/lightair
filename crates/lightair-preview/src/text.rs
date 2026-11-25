@@ -1,10 +1,11 @@
-//! macOS, with `LIGHTAIR_ENGINE=own`: text and timer objects (libobs's `text_ft2_source_v2`
-//! settings) drawn by the compositor as libobs draws them, with lightair-render's text.
+//! Text and timer objects (libobs's `text_ft2_source_v2` settings) drawn by the compositor as
+//! libobs draws them, with lightair-render's text.
 //!
 //! - **Faces**: libobs's text source finds a font by its name among the files in the system's
-//!   font folders (`~/Library/Fonts`, `/Library/Fonts`, `/Network/Library/Fonts`,
-//!   `/System/Library/Fonts`, and their subfolders). [`install_fonts`] gives lightair-render the
-//!   same files, with the desktop's own text face as the sans-serif for text that names none.
+//!   font folders (macOS: `~/Library/Fonts`, `/Library/Fonts`, `/Network/Library/Fonts`,
+//!   `/System/Library/Fonts`; Windows: the Windows folder's `Fonts` and the user's own fonts;
+//!   and their subfolders). [`install_fonts`] gives lightair-render the same files, with the
+//!   desktop's own text face as the sans-serif for text that names none.
 //! - **Size**: the font size is the em in pixels in both.
 //! - **Layout**: lines start at the left (libobs's text has no alignment); they wrap at the
 //!   custom width when word wrap is on, and the picture is at least that wide when a custom
@@ -22,20 +23,38 @@ use lightair_render::generate;
 use serde_json::Value;
 
 /// The face text that names none is drawn in (the desktop's own default text face).
+#[cfg(target_os = "macos")]
 const DEFAULT_FACE: &str = "Helvetica Neue";
+/// The face text that names none is drawn in (the desktop's own default text face).
+#[cfg(windows)]
+const DEFAULT_FACE: &str = "Segoe UI";
 
-/// Draws text from now on with the fonts libobs's text source finds on this Mac. Called once,
-/// before the first compositor draws any text (lightair-render keeps the system's own fonts
-/// otherwise).
-pub(crate) fn install_fonts() {
-    let mut set = FontSet::new();
+/// The system's font folders, as libobs's text source looks in them.
+#[cfg(target_os = "macos")]
+fn font_folders() -> Vec<Option<PathBuf>> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let folders = [
+    vec![
         home.map(|h| h.join("Library/Fonts")),
         Some(PathBuf::from("/Library/Fonts")),
         Some(PathBuf::from("/Network/Library/Fonts")),
         Some(PathBuf::from("/System/Library/Fonts")),
-    ];
+    ]
+}
+
+/// The system's font folders, as libobs's text source looks in them.
+#[cfg(windows)]
+fn font_folders() -> Vec<Option<PathBuf>> {
+    let windows = std::env::var_os("WINDIR").or_else(|| std::env::var_os("SystemRoot")).map(PathBuf::from);
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    vec![windows.map(|w| w.join("Fonts")), local.map(|l| l.join("Microsoft/Windows/Fonts"))]
+}
+
+/// Draws text from now on with the fonts libobs's text source finds on this computer. Called
+/// once, before the first compositor draws any text (lightair-render keeps the system's own
+/// fonts otherwise).
+pub(crate) fn install_fonts() {
+    let mut set = FontSet::new();
+    let folders = font_folders();
     for folder in folders.into_iter().flatten().filter(|f| f.is_dir()) {
         set.add_folder(&folder);
     }

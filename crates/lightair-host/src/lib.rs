@@ -8,9 +8,9 @@ pub mod audio_host;
 pub mod audio_tap;
 pub mod avatar;
 pub mod avatar_pins;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod avatar_run;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod bridge;
 #[cfg(target_os = "macos")]
 pub mod buffers;
@@ -25,7 +25,7 @@ pub mod engine;
 pub mod face_drive;
 #[cfg(target_os = "macos")]
 pub mod ffmpeg_media;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod frames;
 pub mod gpu;
 pub mod host;
@@ -62,7 +62,7 @@ pub mod rtsp;
 pub mod shared_video;
 pub mod show;
 pub mod timers;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod tracker;
 #[cfg(target_os = "macos")]
 pub mod system_audio;

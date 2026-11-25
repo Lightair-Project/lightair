@@ -12,12 +12,8 @@ lightair-model.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
-objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2-io-surface"] }
-objc2-io-surface = { version = "0.3", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "objc2-core-foundation"] }
-objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTPixelRotationProperties", "VTPixelRotationSession", "VTPixelTransferProperties", "VTPixelTransferSession", "VTSession", "objc2-core-video"] }
-# Lightair's own compositor (compose.rs): the program drawn on the GPU into IOSurfaces
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# Lightair's own compositor (compose.rs): the program drawn on the GPU into Lightair's own pictures
 lightair-render.workspace = true
 # the native pictures (images, GIFs, colours, text, timers, widgets) and the keyers
 lightair-engine.workspace = true
@@ -28,17 +24,23 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 lightair-live.workspace = true
 lightair-widgets.workspace = true
 tungstenite = "0.30"
-# the faces text is drawn with (the folders libobs's text source finds fonts in)
+# the faces text is drawn with (the system's font folders)
 lightair-fonts.workspace = true
 wgpu = "30"
-objc2 = "0.6.3"
-objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLTexture", "MTLPixelFormat", "MTLResource", "MTLTypes", "objc2-io-surface"] }
 # avatars drawn on the GPU (avatars.rs): the models and their posing, the joints' matrices, buffers
 lightair-avatar.workspace = true
 glam = "0.30"
 bytemuck = "1"
 # screens, windows, apps and cameras captured by Lightair itself (capture.rs)
 lightair-capture.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2-io-surface"] }
+objc2-io-surface = { version = "0.3", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "objc2-core-foundation"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTPixelRotationProperties", "VTPixelRotationSession", "VTPixelTransferProperties", "VTPixelTransferSession", "VTSession", "objc2-core-video"] }
+objc2 = "0.6.3"
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLTexture", "MTLPixelFormat", "MTLResource", "MTLTypes", "objc2-io-surface"] }
 # another computer's stream over SRT (provide_srt.rs): the listener, and the MPEG-TS demuxer
 # phone cameras use
 srt-tokio = "0.4.4"
@@ -53,7 +55,6 @@ block2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 # the compositor's device (Direct3D 12), which opens shared textures (win_gpu.rs)
-wgpu = "30"
 windows = { version = "0.62", features = [
     "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Threading",

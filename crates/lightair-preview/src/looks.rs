@@ -1,4 +1,4 @@
-//! macOS, with `LIGHTAIR_ENGINE=own`: the Effect Stack's camera looks (beauty, makeup, face
+//! macOS: the Effect Stack's camera looks (beauty, makeup, face
 //! shape, light, the colour grade, background blur, removal and replacement) drawn by the
 //! compositor with `lightair-engine`'s looks, on the bridge's picture of the camera without its
 //! libobs filters.
@@ -16,9 +16,13 @@
 //! stickers and the landmarks overlay (`crate::stickers::share`), so a camera isn't analysed twice.
 //! A face stickers preset's face distortion is drawn by the looks' warp: the source the engine
 //! reads is given it first ([`with_sticker_shape`]).
+//!
+//! Windows: no looks yet (no face tracker there, and the engine's feeds take no Direct3D
+//! texture); a source with looks is drawn without them, and the log says so once.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
@@ -27,24 +31,29 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use lightair_engine::feeds::{Feed, Picture as Pushed, VideoFeed};
+#[cfg(target_os = "macos")]
 use lightair_engine::gpu::apple::Kept;
 use lightair_engine::hot::Hot;
 use lightair_engine::looks::render::{EFFECT_SHAPE, Settings};
 use lightair_engine::{background, clock, looks};
 use lightair_host::bridge::{self, FaceTracker};
 use lightair_model::{Id, Source};
+#[cfg(target_os = "macos")]
 use objc2_core_foundation::CFRetained;
+#[cfg(target_os = "macos")]
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
     CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
     kCVPixelFormatType_32BGRA,
 };
+#[cfg(target_os = "macos")]
 use objc2_video_toolbox::VTPixelTransferSession;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
 /// The analysis picture's short side at most (the Effect Stack filter's: eyelid detail for
 /// eyeliner on HD cameras).
+#[cfg(target_os = "macos")]
 const TRACK_SHORT_SIDE: f32 = 720.0;
 /// How often the analysis thread looks for new results while no picture comes.
 const POLL: Duration = Duration::from_millis(8);
@@ -222,11 +231,7 @@ impl Hosts {
         let Some(host) = self.hosts.get_mut(&source.id) else { return false };
         host.used = Instant::now();
         let Some(v) = host.feed.video() else { return false };
-        let Some(pixels) = picture.pixel_buffer() else { return false };
-        // SAFETY: the bridge's buffer is a valid CVPixelBuffer
-        let Some(kept) = (unsafe { Kept::retain(CFRetained::as_ptr(&picture.buffer).as_ptr().cast()) }) else {
-            return false;
-        };
+        let Some(pushed) = pushed(picture) else { return false };
         // a picture keeps the time it was first seen at, so its faces match it
         let fresh = host.last.is_none_or(|(serial, _)| serial != picture.serial);
         let time_ns = match host.last {
@@ -236,7 +241,7 @@ impl Hosts {
         host.last = Some((picture.serial, time_ns));
         // only this frame's picture is held (the bridge reuses its buffers once let go)
         v.clear();
-        v.push(Pushed::Buffer(pixels, kept), time_ns);
+        v.push(pushed, time_ns);
         let needs = if fresh { Needs::of(source) } else { Needs::default() };
         if needs.any() {
             // still analysing the last one (`Full`): this picture is skipped
@@ -291,6 +296,22 @@ impl Hosts {
     }
 }
 
+/// The bridge's `picture` as a camera feed takes it: the pixel buffer, kept by the engine too.
+#[cfg(target_os = "macos")]
+fn pushed(picture: &bridge::Picture) -> Option<Pushed> {
+    let pixels = picture.pixel_buffer()?;
+    // SAFETY: the bridge's buffer is a valid CVPixelBuffer
+    let kept = unsafe { Kept::retain(CFRetained::as_ptr(&picture.buffer).as_ptr().cast()) }?;
+    Some(Pushed::Buffer(pixels, kept))
+}
+
+/// Windows: a camera feed takes no Direct3D texture yet.
+#[cfg(windows)]
+fn pushed(_picture: &bridge::Picture) -> Option<Pushed> {
+    crate::buffer_gpu::not_yet("the camera looks in the compositor (feeds of Direct3D textures)");
+    None
+}
+
 // ---------------------------------------------------------------- the analysis thread
 
 /// A camera's analysis: each picture given scaled and handed to the tracker, and what the
@@ -339,13 +360,31 @@ fn analyse(source: Id, feed: &Feed, jobs: &Receiver<Job>, stop: &AtomicBool) {
     crate::stickers::unshare(source);
 }
 
+/// Windows: no face tracker yet, so nothing is handed to one.
+#[cfg(windows)]
+pub(crate) struct Scaler;
+
+#[cfg(windows)]
+impl Scaler {
+    pub(crate) fn new() -> Scaler {
+        Scaler
+    }
+
+    /// Nothing yet: pictures aren't scaled for a tracker on Windows.
+    pub(crate) fn submit(&mut self, _tracker: &FaceTracker, _buffer: &bridge::Buffer, _id: u64, _time_ns: i64) {
+        crate::buffer_gpu::not_yet("face tracking on the compositor's pictures");
+    }
+}
+
 /// Scales pictures to the analysis size on the GPU (VideoToolbox) into a BGRA buffer of its own,
 /// and hands them to a face tracker.
+#[cfg(target_os = "macos")]
 pub(crate) struct Scaler {
     session: Option<CFRetained<VTPixelTransferSession>>,
     small: Option<CFRetained<CVPixelBuffer>>,
 }
 
+#[cfg(target_os = "macos")]
 impl Scaler {
     pub(crate) fn new() -> Scaler {
         let mut session: *mut VTPixelTransferSession = std::ptr::null_mut();

@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 mod own;
 pub use own::Preview;
+#[cfg(windows)]
+pub use own::frame_of_buffer;
 // what Lightair's own compositor feeds
 #[cfg(windows)]
 pub(crate) use own::{SceneView, Shared};
