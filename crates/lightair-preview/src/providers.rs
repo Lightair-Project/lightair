@@ -44,11 +44,11 @@ fn providers() -> &'static [Arc<dyn Provider>] {
 fn builtin() -> Vec<Arc<dyn Provider>> {
     #[allow(unused_mut)]
     let mut all: Vec<Arc<dyn Provider>> = Vec::new();
-    // web pages:
-    // NDI:
-    // Syphon:
-    // SRT from another computer:
-    // the phone camera:
+    all.push(Arc::new(crate::provide_web::Web::default()));
+    all.push(Arc::new(crate::provide_ndi::Ndi::default())); // NDI
+    all.push(Arc::new(crate::provide_syphon::Syphon::default())); // Syphon
+    all.push(Arc::new(crate::provide_srt::Srt::default())); // SRT from another computer
+    all.push(Arc::new(crate::provide_phone::Phone::default())); // the phone camera
     all.push(Arc::new(crate::provide_media::Media)); // media files
     all
 }

@@ -4790,6 +4790,7 @@ dependencies = [
  "libobs-sys",
  "lightair-audio",
  "lightair-avatar",
+ "lightair-capture",
  "lightair-encode",
  "lightair-engine",
  "lightair-feed",
@@ -4893,9 +4894,12 @@ dependencies = [
 name = "lightair-preview"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "bytemuck",
+ "futures",
  "glam",
  "image",
+ "libloading 0.8.9",
  "lightair-avatar",
  "lightair-capture",
  "lightair-engine",
@@ -4903,6 +4907,7 @@ dependencies = [
  "lightair-live",
  "lightair-model",
  "lightair-obs",
+ "lightair-phone-camera",
  "lightair-render",
  "lightair-widgets",
  "objc2 0.6.5",
@@ -4913,6 +4918,9 @@ dependencies = [
  "objc2-video-toolbox",
  "parking_lot",
  "serde_json",
+ "srt-protocol",
+ "srt-tokio",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "tungstenite",
@@ -4986,6 +4994,8 @@ dependencies = [
  "cef",
  "libc",
  "objc2 0.6.5",
+ "objc2-io-surface",
+ "objc2-metal 0.3.2",
  "parking_lot",
  "tracing",
 ]

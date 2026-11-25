@@ -15,6 +15,9 @@
 
 use std::sync::Arc;
 
+#[cfg(target_os = "macos")]
+pub mod copy;
+
 /// Where a page's frames go: premultiplied BGRA rows, `width × 4` bytes each, and the size.
 pub type FrameSink = Arc<dyn Fn(&[u8], u32, u32) + Send + Sync>;
 
@@ -214,6 +217,12 @@ impl Page {
     pub fn restyle(&self, css: String) {
         imp::request(imp::Request::Style { id: self.id, css });
     }
+
+    /// Asks the page to paint its whole view again, changed or not (a still page paints once;
+    /// this gets another frame of it).
+    pub fn repaint(&self) {
+        imp::request(imp::Request::Repaint { id: self.id });
+    }
 }
 
 impl Drop for Page {
@@ -295,6 +304,7 @@ mod imp {
         Reload { id: u64 },
         Style { id: u64, css: String },
         Visible { id: u64, visible: bool },
+        Repaint { id: u64 },
         Close { id: u64 },
     }
 
@@ -1114,6 +1124,11 @@ mod imp {
                         host.was_hidden((!visible) as i32);
                     }
                 }),
+                Request::Repaint { id } => PAGES.with(|pages| {
+                    if let Some(host) = pages.borrow().get(&id).and_then(|l| l.browser.as_ref()).and_then(|b| b.host()) {
+                        host.invalidate(PaintElementType::VIEW);
+                    }
+                }),
                 Request::Close { id } => close(id),
             }
         }
@@ -1181,6 +1196,7 @@ mod imp {
         Reload { id: u64 },
         Style { id: u64, css: String },
         Visible { id: u64, visible: bool },
+        Repaint { id: u64 },
         Close { id: u64 },
     }
 

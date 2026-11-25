@@ -10,6 +10,12 @@
 //! textures, which libobs draws as they are (as OBS's browser source does): no frame is read
 //! back to memory, copied or uploaded again. Elsewhere frames arrive as pixels, given to libobs
 //! like a camera's.
+//!
+//! With Lightair's own compositor (macOS, `LIGHTAIR_ENGINE=own`) the same page gives it its
+//! frames too ([`feed`]): while the compositor wants a page, each frame Chromium paints is also
+//! copied on the GPU into a BGRA IOSurface from a small ring of the source's, and the compositor
+//! takes the newest finished copy. While it takes them, libobs stops drawing the page itself
+//! (its draw would be thrown away); the page's sound still goes to libobs as before.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::Arc;
@@ -172,6 +178,40 @@ unsafe extern "C" fn get_name(_: *mut c_void) -> *const c_char {
     c"Browser".as_ptr()
 }
 
+/// The web page sources' frames for Lightair's own compositor, by libobs source name (the
+/// document source's id), while the switch is on.
+#[cfg(target_os = "macos")]
+static FEEDS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, std::sync::Weak<shared::Frames>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// A web page source's frames, as Lightair's own compositor takes them (macOS).
+#[cfg(target_os = "macos")]
+pub struct Feed(Arc<shared::Frames>);
+
+/// The frames of the web page source named `source` (the document source's id), when there is
+/// one and Lightair's own compositor is on.
+#[cfg(target_os = "macos")]
+pub fn feed(source: &str) -> Option<Feed> {
+    FEEDS.lock().get(source).and_then(std::sync::Weak::upgrade).map(Feed)
+}
+
+#[cfg(target_os = "macos")]
+impl Feed {
+    /// Whether a compositor shows the page: while it does, each frame painted is copied for it
+    /// (and the page is asked to paint once more when there's no copy yet); when it stops, the
+    /// copies go.
+    pub fn want(&self, on: bool) {
+        self.0.want(on);
+    }
+
+    /// The newest finished copy of the page's frame, and a count that changes with each new
+    /// one. `take`: the compositor draws it in libobs's place, so libobs stops drawing the page
+    /// for as long as frames keep being taken.
+    pub fn frame(&self, take: bool) -> Option<(crate::bridge::Buffer, u64)> {
+        self.0.frame(take)
+    }
+}
+
 unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::obs_source_t) -> *mut c_void {
     // a page paints only when it changes, irregularly: its newest frame shows at once (libobs's
     // buffering, made for steady video, would hold it for a second or more)
@@ -187,6 +227,14 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         #[cfg(any(target_os = "macos", windows))]
         shared: Arc::new(shared::Frames::default()),
     };
+    #[cfg(target_os = "macos")]
+    if crate::bridge::own() {
+        let name = unsafe { sys::obs_source_get_name(source) };
+        if !name.is_null() {
+            let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned();
+            FEEDS.lock().insert(name, Arc::downgrade(&web.shared));
+        }
+    }
     Box::into_raw(Box::new(web)) as *mut c_void
 }
 
@@ -194,6 +242,8 @@ unsafe extern "C" fn destroy(data: *mut c_void) {
     let web = unsafe { Box::from_raw(data as *mut Web) };
     // no frame after this
     *web.target.0.lock() = None;
+    #[cfg(target_os = "macos")]
+    FEEDS.lock().retain(|_, f| !std::ptr::eq(f.as_ptr(), Arc::as_ptr(&web.shared)));
     drop(web);
 }
 
@@ -237,6 +287,13 @@ unsafe extern "C" fn hide(data: *mut c_void) {
 /// Closes the page once nothing has shown it for a moment.
 unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
     let web = unsafe { &*(data as *const Web) };
+    // the compositor wants a frame the page hasn't painted since (a still page paints once)
+    #[cfg(target_os = "macos")]
+    if web.shared.repaint_asked()
+        && let Some(page) = web.page.lock().as_ref()
+    {
+        page.repaint();
+    }
     if web.showing.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
@@ -289,14 +346,39 @@ pub fn register() {
 
 /// Chromium's frames as shared IOSurfaces (macOS): the newest one is kept (retained, and marked
 /// in use so Chromium doesn't paint into it again meanwhile) until libobs draws the next.
+///
+/// For Lightair's own compositor, each frame painted while it wants the page is also copied into
+/// a buffer of the source's own ring (Chromium's surface held in use until the GPU has copied
+/// it), so the compositor holds a picture no one paints into.
 #[cfg(target_os = "macos")]
 mod shared {
+    use std::collections::VecDeque;
     use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::LazyLock;
+    use std::time::{Duration, Instant};
 
     use parking_lot::Mutex;
 
     use super::Web;
+    use crate::bridge;
     use crate::sys;
+
+    /// Copy buffers per page at most: the newest copy, one each compositor may still hold until
+    /// its next frame, one being copied into, one free.
+    const RING: usize = 6;
+
+    /// How long after the compositor last took a frame libobs still leaves the page undrawn
+    /// (less than an output's wait before it falls back to libobs's own picture).
+    const TAKEN_FOR: Duration = Duration::from_millis(250);
+
+    /// What [`now`] counts from.
+    static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+    /// Nanoseconds since `EPOCH`, never 0 (0 stands for "never").
+    fn now() -> u64 {
+        EPOCH.elapsed().as_nanos() as u64 + 1
+    }
 
     #[link(name = "IOSurface", kind = "framework")]
     unsafe extern "C" {
@@ -346,12 +428,90 @@ mod shared {
     /// The surface on screen, the texture over it, its size.
     type Shown = (Option<Surface>, Option<Texture>, (u32, u32));
 
+    /// A buffer of the ring, and the GPU's view of it that copies go into.
+    struct Slot {
+        buffer: bridge::Buffer,
+        target: lightair_web::copy::Target,
+    }
+
+    /// A copy the GPU is making: into `buffer`, from Chromium's surface (held until it's done).
+    struct Copying {
+        copy: lightair_web::copy::Copy,
+        buffer: bridge::Buffer,
+        _from: Surface,
+    }
+
+    /// The compositor's copies of the page's frames.
+    #[derive(Default)]
+    struct Copies {
+        ring: Vec<Slot>,
+        /// Oldest first (one queue: they finish in order).
+        copying: VecDeque<Copying>,
+        /// The newest finished copy, and its count.
+        latest: Option<(bridge::Buffer, u64)>,
+        serial: u64,
+    }
+
+    // SAFETY: CoreVideo pixel buffers are reference-counted and usable from any thread; the
+    // targets and copies are Metal objects only read once made; the surfaces IOSurfaces.
+    unsafe impl Send for Copies {}
+
+    impl Copies {
+        /// Hands on the copies the GPU has finished.
+        fn collect(&mut self) {
+            while let Some(done) = self.copying.front().and_then(|c| c.copy.finished()) {
+                let Some(c) = self.copying.pop_front() else { break };
+                if done {
+                    self.serial += 1;
+                    self.latest = Some((c.buffer, self.serial));
+                }
+            }
+        }
+
+        /// Starts copying `surface` (Chromium's, being painted now) into a free buffer of its
+        /// size; `false` when every buffer is still held (the frame is skipped).
+        fn start(&mut self, surface: *mut c_void) -> bool {
+            self.collect();
+            let size = unsafe { (IOSurfaceGetWidth(surface) as u32, IOSurfaceGetHeight(surface) as u32) };
+            // buffers of another size go once nothing holds them (the page was resized)
+            self.ring.retain(|s| s.target.size() == size || s.buffer.retain_count() > 1);
+            let free = self.ring.iter().position(|s| s.target.size() == size && s.buffer.retain_count() == 1);
+            let slot = match free {
+                Some(i) => i,
+                None if self.ring.len() < RING => {
+                    let Some(buffer) = bridge::bgra_buffer(size.0, size.1) else { return true };
+                    let Some(target) = bridge::surface_of(&buffer).and_then(|s| unsafe { lightair_web::copy::Target::new(s) })
+                    else {
+                        return true;
+                    };
+                    self.ring.push(Slot { buffer, target });
+                    self.ring.len() - 1
+                }
+                None => return false,
+            };
+            let slot = &self.ring[slot];
+            // SAFETY: `surface` is Chromium's, live during its paint; it's held below until the
+            // copy has run.
+            if let Some(copy) = unsafe { lightair_web::copy::copy(surface, &slot.target) } {
+                self.copying.push_back(Copying { copy, buffer: slot.buffer.clone(), _from: Surface::hold(surface) });
+            }
+            true
+        }
+    }
+
     #[derive(Default)]
     pub struct Frames {
         /// Painted, not yet drawn.
         next: Mutex<Option<Surface>>,
         /// What the texture shows (kept in use while it does), the texture, its size.
         shown: Mutex<Shown>,
+        /// Copies for Lightair's own compositor, made while it wants the page.
+        copies: Mutex<Copies>,
+        wanted: AtomicBool,
+        /// The page should paint again (the compositor has no copy of what it shows).
+        repaint: AtomicBool,
+        /// When the compositor last took a frame to draw in libobs's place ([`now`]; 0: never).
+        taken: AtomicU64,
     }
 
     impl Frames {
@@ -360,9 +520,57 @@ mod shared {
             if surface.is_null() {
                 return;
             }
+            if self.wanted.load(Ordering::Relaxed) && !self.copies.lock().start(surface) {
+                // every copy is still held: the next paint brings this one's picture
+                self.repaint.store(true, Ordering::Relaxed);
+            }
             let held = Surface::hold(surface);
             // the one it replaces (never drawn) goes back to Chromium
             *self.next.lock() = Some(held);
+        }
+
+        /// Whether a compositor shows the page (see `Feed::want`).
+        pub fn want(&self, on: bool) {
+            let was = self.wanted.swap(on, Ordering::Relaxed);
+            if on && !was {
+                // the newest frame Chromium painted, copied now; and another asked for, in case
+                // the page has repainted that surface since
+                // (one lock at a time: libobs's draw takes `shown`, then `next`)
+                let next = self.next.lock().as_ref().map(|s| Surface::hold(s.0));
+                let newest = next.or_else(|| self.shown.lock().0.as_ref().map(|s| Surface::hold(s.0)));
+                if let Some(s) = newest {
+                    self.copies.lock().start(s.0);
+                }
+                self.repaint.store(true, Ordering::Relaxed);
+            } else if !on && was {
+                let old = std::mem::take(&mut *self.copies.lock());
+                self.taken.store(0, Ordering::Relaxed);
+                drop(old);
+            }
+        }
+
+        /// The newest finished copy (see `Feed::frame`).
+        pub fn frame(&self, take: bool) -> Option<(bridge::Buffer, u64)> {
+            let latest = {
+                let mut copies = self.copies.lock();
+                copies.collect();
+                copies.latest.clone()
+            }?;
+            if take {
+                self.taken.store(now(), Ordering::Relaxed);
+            }
+            Some(latest)
+        }
+
+        /// Whether the page was asked to paint again since last asked (and forgets it).
+        pub fn repaint_asked(&self) -> bool {
+            self.repaint.swap(false, Ordering::Relaxed)
+        }
+
+        /// Whether the compositor draws the page in libobs's place now.
+        fn taken(&self) -> bool {
+            let at = self.taken.load(Ordering::Relaxed);
+            at != 0 && now().saturating_sub(at) < TAKEN_FOR.as_nanos() as u64
         }
     }
 
@@ -384,6 +592,11 @@ mod shared {
 
     pub unsafe extern "C" fn video_render(data: *mut c_void, _effect: *mut sys::gs_effect_t) {
         let f = frames(data);
+        // Lightair's compositor draws the page from its own copies: libobs's draw would go unseen
+        // (the newest frame waits in `next` for when libobs draws it again)
+        if f.taken() {
+            return;
+        }
         let mut shown = f.shown.lock();
         if let Some(next) = f.next.lock().take() {
             let size = next.size();

@@ -14,6 +14,11 @@
 //! - the phone's microphone is passed through as the wrapper's sound (a mixer track).
 //!
 //! The app talks to a source's [`Feed`] by the source's id (its libobs name).
+//!
+//! With `LIGHTAIR_ENGINE=own` (macOS), Lightair's compositor takes a feed's pictures while it
+//! shows the source ([`Feed::take`]): the decoder makes BGRA IOSurfaces and hands each to the
+//! compositor instead of copying it into libobs, and the wrapper draws those same surfaces
+//! (turned upright) where libobs still shows the source. The sound goes the same way either way.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
@@ -26,6 +31,11 @@ use serde_json::json;
 
 use crate::obs::{Data, ObsSource};
 use crate::sys;
+
+/// The decoder phone feeds use (VideoToolbox and AudioToolbox), for other streams of the same
+/// kind (H.264 or HEVC and AAC, as access units).
+#[cfg(target_os = "macos")]
+pub use crate::phone_decode::{Decoder, Pictures};
 
 /// The workspace kind (and libobs id) of a Phone camera source.
 pub const KIND: &str = "lightair_phone_camera";
@@ -154,6 +164,26 @@ fn now_us() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_micros() as u64 + 1
 }
 
+/// What takes a feed's pictures instead of libobs (Lightair's compositor): each decoded picture
+/// (BGRA, IOSurface-backed, borrowed for the call) and the clockwise degrees that turn it
+/// upright. It answers whether it took the picture; one it didn't take goes to libobs.
+#[cfg(target_os = "macos")]
+pub type Taker = Arc<dyn Fn(&objc2_core_video::CVPixelBuffer, u32) -> bool + Send + Sync>;
+
+/// A feed's pictures while the compositor takes them: who takes them, and the newest it took
+/// (as decoded, not yet turned), which the wrapper draws.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct Taken {
+    taker: Option<Taker>,
+    newest: Option<crate::bridge::Buffer>,
+}
+
+// SAFETY: CoreVideo's buffers are reference counted thread-safely, and a decoded picture isn't
+// written again while it's held.
+#[cfg(target_os = "macos")]
+unsafe impl Send for Taken {}
+
 /// One Phone camera source's feed, as the app sees it: where its stream goes, and what the
 /// wrapper should know about it.
 pub struct Feed {
@@ -177,6 +207,9 @@ pub struct Feed {
     undrawn: AtomicU64,
     /// Data came since the decoder was last made.
     streamed: AtomicBool,
+    /// The compositor taking the pictures, if it does.
+    #[cfg(target_os = "macos")]
+    taken: Mutex<Taken>,
 }
 
 impl Feed {
@@ -194,6 +227,8 @@ impl Feed {
             timing: Mutex::new(Timing::default()),
             units: Mutex::new(None),
             undrawn: AtomicU64::new(0),
+            #[cfg(target_os = "macos")]
+            taken: Mutex::new(Taken::default()),
         }
     }
 
@@ -254,6 +289,45 @@ impl Feed {
         if let Some(tx) = self.units.lock().as_ref() {
             let _ = tx.try_send(unit);
         }
+    }
+
+    /// Lightair's compositor takes this feed's pictures (`Some`), or gives them back to libobs
+    /// (`None`). Pictures are BGRA IOSurfaces only with `LIGHTAIR_ENGINE=own`.
+    #[cfg(target_os = "macos")]
+    pub fn take(&self, taker: Option<Taker>) {
+        let mut t = self.taken.lock();
+        if taker.is_none() {
+            t.newest = None;
+        }
+        t.taker = taker;
+    }
+
+    /// A decoded picture, offered to the compositor: whether it took it (else it goes to libobs).
+    #[cfg(target_os = "macos")]
+    pub(crate) fn offer(&self, image: &objc2_core_video::CVPixelBuffer) -> bool {
+        use objc2_core_foundation::Type;
+        let taker = {
+            let mut t = self.taken.lock();
+            match t.taker.clone() {
+                Some(taker) => taker,
+                None => {
+                    t.newest = None;
+                    return false;
+                }
+            }
+        };
+        // (called outside the lock: the taker may turn the picture, or give the feed back)
+        let took = taker(image, self.rotation());
+        let mut t = self.taken.lock();
+        // (kept only while still taken: given back meanwhile, the wrapper draws libobs's again)
+        t.newest = (took && t.taker.is_some()).then(|| image.retain());
+        took
+    }
+
+    /// The newest picture the compositor took, as decoded (not turned).
+    #[cfg(target_os = "macos")]
+    fn newest_taken(&self) -> Option<crate::bridge::Buffer> {
+        self.taken.try_lock()?.newest.clone()
     }
 
     /// The decoder handed a frame to libobs: it's drawn next time the layer draws.
@@ -364,6 +438,19 @@ struct Shared {
     busy: AtomicBool,
     /// The last size shown (width << 32 | height), before turning.
     size: AtomicU64,
+    /// The compositor's picture as the wrapper last drew it.
+    #[cfg(target_os = "macos")]
+    drawn: Mutex<Drawn>,
+}
+
+/// The compositor's picture as the wrapper draws it: a libobs texture over its IOSurface, made
+/// once and rebound to each new surface, and the buffer held while it's drawn. Graphics thread
+/// only (destroyed inside the graphics context).
+#[cfg(target_os = "macos")]
+struct Drawn {
+    buffer: Option<crate::bridge::Buffer>,
+    tex: *mut sys::gs_texture_t,
+    size: (u32, u32),
 }
 
 impl Shared {
@@ -453,6 +540,19 @@ impl Shared {
 
     /// The decoder's picture size, before turning (the last seen while it has none).
     fn picture_size(&self) -> (u32, u32) {
+        #[cfg(target_os = "macos")]
+        if self.feed.live()
+            && let Some(b) = self.feed.newest_taken()
+        {
+            let (w, h) = (
+                objc2_core_video::CVPixelBufferGetWidth(&b) as u64,
+                objc2_core_video::CVPixelBufferGetHeight(&b) as u64,
+            );
+            if w > 0 && h > 0 {
+                self.size.store((w << 32) | h, Ordering::Relaxed);
+                return (w as u32, h as u32);
+            }
+        }
         if let Some(d) = self.decoder.try_lock()
             && let Some(Child(c)) = d.as_ref()
         {
@@ -469,6 +569,51 @@ impl Shared {
     fn shown_size(&self) -> (u32, u32) {
         let (w, h) = self.picture_size();
         if self.feed.rotation() % 180 == 90 { (h, w) } else { (w, h) }
+    }
+
+    /// Draws the compositor's picture `buffer` at its own size (`size`), as decoded: the caller
+    /// turns it. sRGB, as the screen capture draws its frames. Graphics thread.
+    #[cfg(target_os = "macos")]
+    unsafe fn draw_taken(&self, buffer: crate::bridge::Buffer, size: (u32, u32)) {
+        use objc2_core_foundation::CFRetained;
+        // (never waits: a size query may hold it)
+        let Some(mut d) = self.drawn.try_lock() else { return };
+        if size.0 == 0 || size.1 == 0 {
+            return;
+        }
+        let changed = d.buffer.as_ref().is_none_or(|b| CFRetained::as_ptr(b) != CFRetained::as_ptr(&buffer));
+        if changed {
+            let Some(surface) = crate::bridge::surface_of(&buffer) else { return };
+            unsafe {
+                // the texture follows the newest surface: rebound while the size holds, else made again
+                let rebound = !d.tex.is_null() && d.size == size && sys::gs_texture_rebind_iosurface(d.tex, surface);
+                if !rebound {
+                    if !d.tex.is_null() {
+                        sys::gs_texture_destroy(d.tex);
+                    }
+                    d.tex = sys::gs_texture_create_from_iosurface(surface);
+                }
+            }
+            d.size = size;
+            d.buffer = Some(buffer);
+        }
+        if d.tex.is_null() {
+            return;
+        }
+        unsafe {
+            // an IOSurface is a rectangle texture on OpenGL (Metal has none)
+            let rect = sys::gs_get_device_type() as u32 != sys::GS_DEVICE_METAL;
+            let effect =
+                sys::obs_get_base_effect(if rect { sys::OBS_EFFECT_DEFAULT_RECT } else { sys::OBS_EFFECT_DEFAULT });
+            let image = sys::gs_effect_get_param_by_name(effect, c"image".as_ptr());
+            let srgb = sys::gs_framebuffer_srgb_enabled();
+            sys::gs_enable_framebuffer_srgb(true);
+            sys::gs_effect_set_texture_srgb(image, d.tex);
+            while sys::gs_effect_loop(effect, c"Draw".as_ptr()) {
+                sys::gs_draw_sprite(d.tex, 0, size.0, size.1);
+            }
+            sys::gs_enable_framebuffer_srgb(srgb);
+        }
     }
 }
 
@@ -576,6 +721,8 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         seen: AtomicU64::new(u64::MAX),
         busy: AtomicBool::new(false),
         size: AtomicU64::new(0),
+        #[cfg(target_os = "macos")]
+        drawn: Mutex::new(Drawn { buffer: None, tex: std::ptr::null_mut(), size: (0, 0) }),
     });
     unsafe { update(&s as *const Arc<Shared> as *mut c_void, settings) };
     Box::into_raw(Box::new(s)) as *mut c_void
@@ -588,6 +735,19 @@ unsafe extern "C" fn destroy(data: *mut c_void) {
     }
     s.drop_decoder();
     s.text.lock().take();
+    #[cfg(target_os = "macos")]
+    {
+        let mut d = s.drawn.lock();
+        if !d.tex.is_null() {
+            unsafe {
+                sys::obs_enter_graphics();
+                sys::gs_texture_destroy(d.tex);
+                sys::obs_leave_graphics();
+            }
+            d.tex = std::ptr::null_mut();
+        }
+        d.buffer = None;
+    }
     unsafe { sys::obs_weak_source_release(s.weak as *mut sys::obs_weak_source_t) };
 }
 
@@ -634,33 +794,61 @@ unsafe fn fill(w: u32, h: u32, rgba: [f32; 4]) {
     }
 }
 
+/// Pushes a matrix that turns a `w` × `h` picture clockwise by `rotation` degrees, its corner
+/// staying at the origin (the caller pops it).
+unsafe fn push_turn(rotation: u32, w: f32, h: f32) {
+    unsafe {
+        sys::gs_matrix_push();
+        match rotation {
+            90 => {
+                sys::gs_matrix_translate3f(h, 0.0, 0.0);
+                sys::gs_matrix_rotaa4f(0.0, 0.0, 1.0, std::f32::consts::FRAC_PI_2);
+            }
+            180 => {
+                sys::gs_matrix_translate3f(w, h, 0.0);
+                sys::gs_matrix_rotaa4f(0.0, 0.0, 1.0, std::f32::consts::PI);
+            }
+            270 => {
+                sys::gs_matrix_translate3f(0.0, w, 0.0);
+                sys::gs_matrix_rotaa4f(0.0, 0.0, 1.0, 3.0 * std::f32::consts::FRAC_PI_2);
+            }
+            _ => {}
+        }
+    }
+}
+
 unsafe extern "C" fn video_render(data: *mut c_void, _effect: *mut sys::gs_effect_t) {
     let s = shared(data);
     let (pw, ph) = s.picture_size();
     let live = s.feed.live();
+    // the compositor takes the pictures: the same surfaces drawn here, turned upright
+    #[cfg(target_os = "macos")]
+    {
+        let taken = if live { s.feed.newest_taken() } else { None };
+        match taken {
+            Some(buffer) => {
+                unsafe {
+                    push_turn(s.feed.rotation(), pw as f32, ph as f32);
+                    s.draw_taken(buffer, (pw, ph));
+                    sys::gs_matrix_pop();
+                }
+                s.feed.on_draw();
+                return;
+            }
+            None => {
+                if let Some(mut d) = s.drawn.try_lock() {
+                    d.buffer = None;
+                }
+            }
+        }
+    }
     if live
         && let Some(d) = s.decoder.try_lock()
         && let Some(Child(c)) = d.as_ref()
         && c.width() > 0
     {
-        let (fw, fh) = (pw as f32, ph as f32);
         unsafe {
-            sys::gs_matrix_push();
-            match s.feed.rotation() {
-                90 => {
-                    sys::gs_matrix_translate3f(fh, 0.0, 0.0);
-                    sys::gs_matrix_rotaa4f(0.0, 0.0, 1.0, std::f32::consts::FRAC_PI_2);
-                }
-                180 => {
-                    sys::gs_matrix_translate3f(fw, fh, 0.0);
-                    sys::gs_matrix_rotaa4f(0.0, 0.0, 1.0, std::f32::consts::PI);
-                }
-                270 => {
-                    sys::gs_matrix_translate3f(0.0, fw, 0.0);
-                    sys::gs_matrix_rotaa4f(0.0, 0.0, 1.0, 3.0 * std::f32::consts::FRAC_PI_2);
-                }
-                _ => {}
-            }
+            push_turn(s.feed.rotation(), pw as f32, ph as f32);
             sys::obs_source_video_render(c.as_ptr());
             sys::gs_matrix_pop();
         }

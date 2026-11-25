@@ -8,9 +8,20 @@
 //! Parameter sets (H.264 SPS/PPS, HEVC VPS/SPS/PPS) come before every keyframe; a change of them
 //! makes a new decompression session. Annex B is turned into the length-prefixed form
 //! VideoToolbox takes.
+//!
+//! The decoding itself is [`Decoder`], which hands each picture to whoever made it: here, libobs
+//! (or, with `LIGHTAIR_ENGINE=own`, Lightair's compositor while it takes the feed's pictures:
+//! then they're decoded into BGRA IOSurfaces and nothing is copied into libobs); in
+//! `lightair-preview`, the picture of another computer's stream received over SRT.
 
 use std::ffi::c_void;
 use std::sync::Arc;
+
+use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+use objc2_core_video::{
+    CVPixelBuffer, kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
+    kCVPixelBufferPixelFormatTypeKey,
+};
 
 use crate::phone_camera::{Feed, Unit, UnitKind};
 use crate::phone_units::{adts, bt709, nals, parameter_set};
@@ -206,10 +217,13 @@ const FOURCC_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
 const FOURCC_AAC: u32 = u32::from_be_bytes(*b"aac ");
 const FOURCC_LPCM: u32 = u32::from_be_bytes(*b"lpcm");
 
-/// What the output callback needs: where frames go, and what to tell.
+/// Where a decoder's pictures go: each decoded picture (borrowed for the call) and its PTS on
+/// the 90 kHz clock, when it has one. Called on the thread that decodes.
+pub type Pictures = Arc<dyn Fn(&CVPixelBuffer, Option<u64>) + Send + Sync>;
+
+/// What the output callback needs: where pictures go.
 struct Out {
-    frames: *mut sys::obs_source_t,
-    feed: Arc<Feed>,
+    pictures: Pictures,
 }
 
 unsafe extern "C" fn decoded(
@@ -225,7 +239,31 @@ unsafe extern "C" fn decoded(
         return;
     }
     let out = unsafe { &*(refcon as *const Out) };
-    let image = image as *mut c_void;
+    // SAFETY: VideoToolbox hands a live pixel buffer, valid for the call
+    let image = unsafe { &*(image as *const CVPixelBuffer) };
+    let pts = (pts.timescale == 90_000 && pts.flags & 1 != 0).then_some(pts.value as u64);
+    (out.pictures)(image, pts);
+}
+
+/// What a decompression session is asked to make: BGRA in IOSurfaces Metal can use (for
+/// Lightair's compositor), rather than the decoder's own choice (NV12, for libobs).
+fn bgra_attributes() -> CFRetained<CFDictionary<CFString, CFType>> {
+    let empty: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(&[], &[]);
+    let format = CFNumber::new_i32(FOURCC_BGRA as i32);
+    // SAFETY: CoreVideo's constant keys, read only.
+    let keys: [&CFString; 3] = unsafe {
+        [kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey]
+    };
+    let values: [&CFType; 3] = [format.as_ref(), empty.as_ref(), CFBoolean::new(true).as_ref()];
+    CFDictionary::from_slices(&keys, &values)
+}
+
+/// Copies a decoded picture into libobs's async source `frames` (libobs copies it again).
+///
+/// # Safety
+/// `frames` must be a live async video source.
+unsafe fn to_libobs(frames: *mut sys::obs_source_t, image: &CVPixelBuffer) {
+    let image = image as *const CVPixelBuffer as *mut c_void;
     unsafe {
         CVPixelBufferLockBaseAddress(image, 1);
         let format = CVPixelBufferGetPixelFormatType(image);
@@ -257,13 +295,9 @@ unsafe extern "C" fn decoded(
         };
         if ok {
             // (libobs copies the picture)
-            sys::obs_source_output_video(out.frames, &f);
+            sys::obs_source_output_video(frames, &f);
         }
         CVPixelBufferUnlockBaseAddress(image, 1);
-    }
-    if pts.timescale == 90_000 {
-        out.feed.decoded(pts.value as u64);
-        out.feed.shown_next(pts.value as u64);
     }
 }
 
@@ -278,7 +312,7 @@ struct Video {
 }
 
 impl Video {
-    fn new(hevc: bool, params: Vec<Vec<u8>>, out: Box<Out>) -> Option<Video> {
+    fn new(hevc: bool, params: Vec<Vec<u8>>, out: Box<Out>, bgra: bool) -> Option<Video> {
         let pointers: Vec<*const u8> = params.iter().map(|p| p.as_ptr()).collect();
         let sizes: Vec<usize> = params.iter().map(Vec::len).collect();
         let mut format: CFTypeRef = std::ptr::null();
@@ -309,13 +343,16 @@ impl Video {
             return None;
         }
         let record = OutputCallbackRecord { callback: decoded, refcon: &*out as *const Out as *mut c_void };
+        let attributes = bgra.then(bgra_attributes);
+        let image_attributes: CFTypeRef =
+            attributes.as_ref().map_or(std::ptr::null(), |a| CFRetained::as_ptr(a).as_ptr() as CFTypeRef);
         let mut session: CFTypeRef = std::ptr::null();
         let status = unsafe {
             VTDecompressionSessionCreate(
                 std::ptr::null(),
                 format,
                 std::ptr::null(),
-                std::ptr::null(),
+                image_attributes,
                 &record,
                 &mut session,
             )
@@ -329,8 +366,9 @@ impl Video {
         Some(Video { hevc, params, format, session, _out: out })
     }
 
-    /// Decodes one access unit (Annex B, its parameter sets already taken out), synchronously.
-    fn decode(&mut self, nals: &[&[u8]], pts: u64) {
+    /// Decodes one access unit (Annex B, its parameter sets already taken out), synchronously:
+    /// its picture comes out (in decoding order) before this returns.
+    fn decode(&mut self, nals: &[&[u8]], pts: u64, dts: Option<u64>) {
         let mut avcc = Vec::with_capacity(nals.iter().map(|n| n.len() + 4).sum());
         for n in nals {
             avcc.extend_from_slice(&(n.len() as u32).to_be_bytes());
@@ -355,8 +393,11 @@ impl Video {
             if status != 0 || block.is_null() {
                 return;
             }
-            let timing =
-                CMSampleTimingInfo { duration: CMTime::invalid(), pts: CMTime::ticks_90k(pts), dts: CMTime::invalid() };
+            let timing = CMSampleTimingInfo {
+                duration: CMTime::invalid(),
+                pts: CMTime::ticks_90k(pts),
+                dts: dts.map_or(CMTime::invalid(), CMTime::ticks_90k),
+            };
             let size = avcc.len();
             let mut sample: CFTypeRef = std::ptr::null();
             let status =
@@ -501,40 +542,93 @@ impl Drop for Audio {
     }
 }
 
-/// Decodes a feed's units into `frames` (a private async source) until the feed lets go.
+/// Whether a NAL is an access unit delimiter (left out: not every decoder takes them).
+fn delimiter(hevc: bool, nal: &[u8]) -> bool {
+    nal.first().is_some_and(|b| if hevc { (b >> 1) & 0x3F == 35 } else { b & 0x1F == 9 })
+}
+
+/// H.264 or HEVC and AAC decoded by VideoToolbox and AudioToolbox, unit by unit as they come.
+/// Pictures go to the [`Pictures`] it was made with, in decoding order; sound into a libobs
+/// source. Used on one thread (its sessions stay there).
+pub struct Decoder {
+    video: Option<Video>,
+    audio: Option<Audio>,
+    pictures: Pictures,
+    bgra: bool,
+}
+
+impl Decoder {
+    /// `bgra`: pictures as BGRA IOSurface-backed buffers Metal can use (a new buffer for each
+    /// while the last is held); else the decoder's own format (NV12).
+    pub fn new(bgra: bool, pictures: Pictures) -> Decoder {
+        Decoder { video: None, audio: None, pictures, bgra }
+    }
+
+    /// One video access unit (Annex B) and its PTS (and DTS) on the 90 kHz clock, decoded before
+    /// this returns. A new set of parameter sets makes a new session; nothing is decoded before
+    /// the first set.
+    pub fn video(&mut self, hevc: bool, unit: &[u8], pts: u64, dts: Option<u64>) {
+        let all = nals(unit);
+        let mut params: Vec<(u8, Vec<u8>)> =
+            all.iter().filter_map(|n| parameter_set(hevc, n).map(|o| (o, n.to_vec()))).collect();
+        params.sort_by_key(|(o, _)| *o);
+        let params: Vec<Vec<u8>> = params.into_iter().map(|(_, p)| p).collect();
+        let fresh = !params.is_empty() && self.video.as_ref().is_none_or(|v| v.hevc != hevc || v.params != params);
+        if fresh {
+            // (the old session goes before the new one is made)
+            drop(self.video.take());
+            let out = Box::new(Out { pictures: self.pictures.clone() });
+            self.video = Video::new(hevc, params, out, self.bgra);
+        }
+        let Some(v) = self.video.as_mut() else { return };
+        let picture: Vec<&[u8]> =
+            all.into_iter().filter(|n| parameter_set(hevc, n).is_none() && !delimiter(hevc, n)).collect();
+        v.decode(&picture, pts, dts);
+    }
+
+    /// One unit of AAC in ADTS (one or more frames), decoded into the libobs source `into` as
+    /// its sound, timed now. Mono and stereo; other layouts are left out.
+    ///
+    /// # Safety
+    /// `into` must be a live libobs source.
+    pub unsafe fn sound(&mut self, unit: &[u8], into: *mut sys::obs_source_t) {
+        for (rate, channels, raw) in adts(unit) {
+            if channels > 2 {
+                continue;
+            }
+            if self.audio.as_ref().is_none_or(|a| a.rate != rate || a.channels != channels) {
+                self.audio = Audio::new(rate, channels);
+            }
+            if let Some(a) = self.audio.as_mut() {
+                a.decode(raw, into);
+            }
+        }
+    }
+}
+
+/// Decodes a feed's units into `frames` (a private async source) until the feed lets go. With
+/// `LIGHTAIR_ENGINE=own` pictures are BGRA IOSurfaces, and while Lightair's compositor takes the
+/// feed's pictures (`Feed::take`) they go to it instead of being copied into libobs. The sound
+/// goes into `frames` either way.
 pub(crate) fn run(frames: crate::obs::ObsSource, feed: Arc<Feed>, units: crossbeam_channel::Receiver<Unit>) {
-    let mut video: Option<Video> = None;
-    let mut audio: Option<Audio> = None;
+    let target = frames.as_ptr() as usize;
+    let to = feed;
+    let pictures: Pictures = Arc::new(move |image, pts| {
+        if !to.offer(image) {
+            // SAFETY: `frames` outlives the decoder, which holds this
+            unsafe { to_libobs(target as *mut sys::obs_source_t, image) };
+        }
+        if let Some(pts) = pts {
+            to.decoded(pts);
+            to.shown_next(pts);
+        }
+    });
+    let mut decoder = Decoder::new(crate::bridge::own(), pictures);
     for unit in units {
         match unit.kind {
-            UnitKind::H264 | UnitKind::Hevc => {
-                let hevc = unit.kind == UnitKind::Hevc;
-                let all = nals(&unit.data);
-                let mut params: Vec<(u8, Vec<u8>)> =
-                    all.iter().filter_map(|n| parameter_set(hevc, n).map(|o| (o, n.to_vec()))).collect();
-                params.sort_by_key(|(o, _)| *o);
-                let params: Vec<Vec<u8>> = params.into_iter().map(|(_, p)| p).collect();
-                let fresh = !params.is_empty() && video.as_ref().is_none_or(|v| v.hevc != hevc || v.params != params);
-                if fresh {
-                    // (the old session goes before the new one is made)
-                    drop(video.take());
-                    let out = Box::new(Out { frames: frames.as_ptr(), feed: feed.clone() });
-                    video = Video::new(hevc, params, out);
-                }
-                let Some(v) = video.as_mut() else { continue };
-                let picture: Vec<&[u8]> = all.into_iter().filter(|n| parameter_set(hevc, n).is_none()).collect();
-                v.decode(&picture, unit.pts);
-            }
-            UnitKind::Aac => {
-                for (rate, channels, raw) in adts(&unit.data) {
-                    if audio.as_ref().is_none_or(|a| a.rate != rate || a.channels != channels) {
-                        audio = Audio::new(rate, channels);
-                    }
-                    if let Some(a) = audio.as_mut() {
-                        a.decode(raw, frames.as_ptr());
-                    }
-                }
-            }
+            UnitKind::H264 | UnitKind::Hevc => decoder.video(unit.kind == UnitKind::Hevc, &unit.data, unit.pts, None),
+            // SAFETY: `frames` is held for the whole loop
+            UnitKind::Aac => unsafe { decoder.sound(&unit.data, frames.as_ptr()) },
         }
     }
 }

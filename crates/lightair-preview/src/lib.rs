@@ -19,7 +19,17 @@ mod compose;
 #[cfg(target_os = "macos")]
 pub mod providers;
 #[cfg(target_os = "macos")]
+mod provide_web;
+#[cfg(target_os = "macos")]
+mod provide_ndi;
+#[cfg(target_os = "macos")]
+mod provide_syphon;
+#[cfg(target_os = "macos")]
 mod provide_media;
+#[cfg(target_os = "macos")]
+mod provide_srt;
+#[cfg(target_os = "macos")]
+mod provide_phone;
 #[cfg(target_os = "macos")]
 mod looks;
 #[cfg(target_os = "macos")]
