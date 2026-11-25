@@ -93,6 +93,9 @@ pub struct AvatarRenderer {
     targets: Option<Targets>,
     scratch: Option<Scratch>,
     last: Option<Instant>,
+    /// A VRM at rest (its idle pose, nothing tracked) and its anchors by key, for what's pinned
+    /// to it (made when first asked).
+    rest: Option<(Avatar, std::collections::HashMap<String, usize>)>,
 }
 
 /// A model read and on the GPU.
@@ -126,6 +129,7 @@ impl AvatarRenderer {
             targets: None,
             scratch: None,
             last: None,
+            rest: None,
         };
         r.set_settings(settings);
         Ok(r)
@@ -173,6 +177,37 @@ impl AvatarRenderer {
             return None;
         }
         shot
+    }
+
+    /// Where each anchor of `keys` is in the avatar's picture at rest and as it's posed now
+    /// (pixels): (key, at rest, now). A VRM's bones; a flat model's anchors aren't followed yet.
+    pub fn pins(
+        &mut self,
+        keys: &[String],
+    ) -> Vec<(String, lightair_host::avatar_pins::Spot, lightair_host::avatar_pins::Spot)> {
+        use lightair_host::avatar_pins::{best_axis, bone_spot, view_projection, vrm_anchors};
+        let Some(Posable::Vrm(a)) = self.ready.as_ref().map(|r| &r.model) else { return Vec::new() };
+        if self.rest.as_ref().is_none_or(|(r, _)| !std::sync::Arc::ptr_eq(&r.model, &a.model)) {
+            let mut rest = Avatar::new(a.model.clone());
+            rest.update(&lightair_avatar::Controls::default(), 0.0);
+            let anchors = vrm_anchors(&a.model).into_iter().map(|(anchor, n)| (anchor.key, n)).collect();
+            self.rest = Some((rest, anchors));
+        }
+        let Some((rest, anchors)) = &self.rest else { return Vec::new() };
+        let s = &self.settings;
+        let (w, h) = (s.width as f32, s.height as f32);
+        let aspect = w / h.max(1.0);
+        let vp_rest = view_projection(&rest.camera(s.framing, aspect, s.zoom), aspect);
+        let vp_now = view_projection(&a.camera(s.framing, aspect, s.zoom), aspect);
+        keys.iter()
+            .filter_map(|key| {
+                let n = *anchors.get(key)?;
+                let axis = best_axis(rest.world.get(n)?);
+                let at_rest = bone_spot(rest.world.get(n)?, &vp_rest, w, h, axis)?;
+                let now = bone_spot(a.world.get(n)?, &vp_now, w, h, axis)?;
+                Some((key.clone(), at_rest, now))
+            })
+            .collect()
     }
 
     /// Draws the avatar at rest, nothing tracked (a still picture of it).

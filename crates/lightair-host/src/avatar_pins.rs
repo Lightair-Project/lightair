@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use glam::{Mat4, Vec3};
+use lightair_avatar::pose::Camera;
 use lightair_avatar::vrm::Model;
 use lightair_model::Fit;
 
@@ -146,4 +148,37 @@ pub fn vrm_anchors(m: &Model) -> Vec<(Anchor, usize)> {
     let rank = |g: &str| VRM_GROUPS.iter().position(|x| *x == g).unwrap_or(VRM_GROUPS.len());
     out.sort_by_key(|(a, n)| (rank(&a.group), *n));
     out
+}
+
+/// The camera's view and projection, as the avatar is drawn.
+pub fn view_projection(cam: &Camera, aspect: f32) -> Mat4 {
+    Mat4::perspective_rh_gl(cam.fovy.to_radians(), aspect, cam.near, cam.far) * cam.view()
+}
+
+fn project(p: Vec3, vp: &Mat4, w: f32, h: f32) -> Option<(f32, f32, f32)> {
+    let c = *vp * p.extend(1.0);
+    (c.w > 1e-5).then(|| ((c.x / c.w * 0.5 + 0.5) * w, (0.5 - c.y / c.w * 0.5) * h, c.w))
+}
+
+/// Which of a bone's axes lies flattest across the picture at rest (its turn is read from that
+/// one): the one pointing least toward the camera, which always looks along the model's depth, so
+/// the choice doesn't depend on framing.
+pub fn best_axis(rest_world: &Mat4) -> usize {
+    (0..3)
+        .min_by(|a, b| {
+            let z = |i: usize| {
+                [rest_world.x_axis, rest_world.y_axis, rest_world.z_axis][i].truncate().normalize_or_zero().z.abs()
+            };
+            z(*a).total_cmp(&z(*b))
+        })
+        .unwrap_or(1)
+}
+
+/// A bone in the picture.
+pub fn bone_spot(world: &Mat4, vp: &Mat4, w: f32, h: f32, axis: usize) -> Option<Spot> {
+    let o = world.w_axis.truncate();
+    let a = [world.x_axis, world.y_axis, world.z_axis][axis.min(2)].truncate().normalize_or_zero() * 0.1;
+    let (x, y, depth) = project(o, vp, w, h)?;
+    let (x2, y2, _) = project(o + a, vp, w, h)?;
+    Some(Spot { x, y, angle: (y2 - y).atan2(x2 - x), scale: 1.0 / depth })
 }

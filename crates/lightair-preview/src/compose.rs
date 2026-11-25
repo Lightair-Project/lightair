@@ -692,7 +692,10 @@ impl State {
         }
         let ws = self.doc.drawn(kept);
         // objects pinned to avatars, where their anchors are now
-        let ws = self.doc.follow_pins(ws, canvas.id, &scenes);
+        let native = &mut self.native;
+        let ws = self.doc.follow_pins(ws, canvas.id, &scenes, |avatar, keys| {
+            native.as_mut().and_then(|n| n.avatar_pins(avatar, keys))
+        });
         // the object being cropped: the rest of its picture as a ghost around the crop
         let ws = self.crop_ghost(ws, canvas.id, &shots);
         // a stinger switch: the renderer is given the stinger it plays (the scene's own, or the
@@ -1189,7 +1192,15 @@ impl Doc {
     /// rest and now (the avatar's last tick) gives a move, a turn and a change of size, kept
     /// relative to the anchor. A scene with a moved object is given flattened (each picture at
     /// its world layout), the moved ones at their new layouts.
-    fn follow_pins(&mut self, ws: Arc<Workspace>, canvas: Id, scenes: &[Id]) -> Arc<Workspace> {
+    /// (`local`: an avatar's pins as the compositor's own renderer poses it, when whatever poses
+    /// it gives none: the anchors at rest and now, and the picture's size.)
+    fn follow_pins(
+        &mut self,
+        ws: Arc<Workspace>,
+        canvas: Id,
+        scenes: &[Id],
+        mut local: impl FnMut(Id, &[String]) -> Option<(Vec<(String, Spot, Spot)>, (u32, u32))>,
+    ) -> Arc<Workspace> {
         let Some(base) = &self.base else { return ws };
         if self.pins.as_ref().is_none_or(|(c, _)| *c != canvas) {
             self.pins = Some((canvas, pins_of(base, canvas)));
@@ -1198,14 +1209,25 @@ impl Doc {
         if pins.is_empty() {
             return ws;
         }
-        let mut posings: HashMap<Id, Option<Arc<bridge::AvatarPosing>>> = HashMap::new();
+        type Spots = Option<(Vec<(String, Spot, Spot)>, (u32, u32))>;
+        let mut spots: HashMap<Id, Spots> = HashMap::new();
         let mut moved: HashMap<Id, Layout> = HashMap::new();
         for pin in pins {
             // (held where it was last moved while the avatar doesn't tick, as libobs's items are)
-            let posing = posings.entry(pin.avatar).or_insert_with(|| bridge::avatar_posing(pin.avatar).map(|(p, _)| p));
-            let Some(posing) = posing else { continue };
-            let Some((_, rest, now)) = posing.pins.iter().find(|(k, ..)| *k == pin.anchor) else { continue };
-            moved.insert(pin.object, pin.follow(*rest, *now, (posing.size.0 as f32, posing.size.1 as f32)));
+            let avatar_spots = spots.entry(pin.avatar).or_insert_with(|| {
+                let posed = bridge::avatar_posing(pin.avatar)
+                    .map(|(p, _)| p)
+                    .filter(|p| !p.pins.is_empty())
+                    .map(|p| (p.pins.clone(), p.size));
+                posed.or_else(|| {
+                    let keys: Vec<String> =
+                        pins.iter().filter(|p| p.avatar == pin.avatar).map(|p| p.anchor.clone()).collect();
+                    local(pin.avatar, &keys)
+                })
+            });
+            let Some((list, size)) = avatar_spots else { continue };
+            let Some((_, rest, now)) = list.iter().find(|(k, ..)| *k == pin.anchor) else { continue };
+            moved.insert(pin.object, pin.follow(*rest, *now, (size.0 as f32, size.1 as f32)));
         }
         if moved.is_empty() {
             return ws;
@@ -1900,6 +1922,14 @@ impl Native {
     /// An avatar's picture: posed from what its libobs source published last tick (nothing
     /// tracked when it published nothing lately) and drawn on the GPU; `None` while its model
     /// loads or if it can't be drawn (libobs's picture stands in).
+    /// Where `keys` (anchors of avatar `source`) are in its picture at rest and now, as this
+    /// compositor's renderer poses it, and the picture's size.
+    fn avatar_pins(&mut self, source: Id, keys: &[String]) -> Option<(Vec<(String, Spot, Spot)>, (u32, u32))> {
+        let renderer = self.avatars.get_mut(&source)?.renderer.as_mut()?;
+        let pins = renderer.pins(keys);
+        (!pins.is_empty()).then(|| (pins, renderer.size()))
+    }
+
     fn avatar(&mut self, source: &Source) -> Option<Shot> {
         let a = self.avatars.entry(source.id).or_insert_with(|| Avatar {
             renderer: AvatarRenderer::new(&source.settings)
