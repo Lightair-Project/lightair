@@ -194,3 +194,21 @@ pub fn release_capture(source: Id) {
 pub fn captured(source: Id) -> Option<Buffer> {
     TAKEN.lock().0.as_ref()?.get(&source).cloned()
 }
+
+// ---------------------------------------------------------------- faces seen
+
+/// Whether the compositor's face effects (Face blur, Auto-frame) see a face in each source's
+/// picture, and when they last looked.
+static FACES: LazyLock<Mutex<HashMap<Id, (bool, Instant)>>> = LazyLock::new(Default::default);
+
+/// The compositor's face effects looked at `source`'s picture: a face was there or not.
+pub fn set_face_seen(source: Id, seen: bool) {
+    FACES.lock().insert(source, (seen, Instant::now()));
+}
+
+/// Whether a face is seen in `source`'s picture (`None`: nothing has looked lately).
+pub fn face_seen(source: Id) -> Option<bool> {
+    let faces = FACES.lock();
+    let (seen, at) = faces.get(&source)?;
+    (at.elapsed() < std::time::Duration::from_secs(2)).then_some(*seen)
+}

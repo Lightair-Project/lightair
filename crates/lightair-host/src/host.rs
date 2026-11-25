@@ -1186,10 +1186,15 @@ impl Host {
         None
     }
 
-    /// Whether the source's face effects see a face right now (`None`: not known here yet).
-    pub fn face_present(&self, _source: Id) -> Option<bool> {
-        not_yet("face_present");
-        None
+    /// Whether the source's face effects see a face right now (`None`: none looking).
+    pub fn face_present(&self, source: Id) -> Option<bool> {
+        #[cfg(target_os = "macos")]
+        return crate::bridge::face_seen(source);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = source;
+            None
+        }
     }
 
     /// Whether the source's effects see a person (`None`: not known here yet).

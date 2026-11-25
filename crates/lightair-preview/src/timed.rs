@@ -581,6 +581,7 @@ impl Timed {
                         watch.look(b);
                     }
                     let faces = watch.faces();
+                    bridge::set_face_seen(source.id, !faces.is_empty());
                     if e.kind == FACE_BLUR {
                         // each face's box, grown (hair, ears, chin)
                         let g = 1.0 + num("grow", 0.3).clamp(0.0, 1.0) as f32;
