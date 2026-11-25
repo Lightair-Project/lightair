@@ -50,6 +50,7 @@ fn builtin() -> Vec<Arc<dyn Provider>> {
     all.push(Arc::new(crate::provide_srt::Srt::default())); // SRT from another computer
     all.push(Arc::new(crate::provide_phone::Phone::default())); // the phone camera
     all.push(Arc::new(crate::provide_media::Media)); // media files
+    all.push(Arc::new(crate::provide_frames::Frames)); // what lightair-host's runtimes make
     all
 }
 

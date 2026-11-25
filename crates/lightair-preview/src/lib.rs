@@ -32,6 +32,8 @@ mod provide_ndi;
 #[cfg(target_os = "macos")]
 mod provide_syphon;
 #[cfg(target_os = "macos")]
+mod provide_frames;
+#[cfg(target_os = "macos")]
 mod provide_media;
 #[cfg(target_os = "macos")]
 mod provide_srt;

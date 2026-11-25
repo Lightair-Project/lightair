@@ -46,3 +46,32 @@ pub fn surface_of(buffer: &Buffer) -> Option<*mut c_void> {
     // the buffer keeps its surface alive; the pointer is used while the buffer is held
     Some(CFRetained::as_ptr(&surface).as_ptr().cast())
 }
+
+/// A new buffer holding `rgba` (`width` × `height`, rows packed), its colours as they are
+/// (opaque pictures, or premultiplied ones).
+pub fn from_rgba(rgba: &[u8], width: u32, height: u32) -> Option<Buffer> {
+    use objc2_core_video::{
+        CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+        CVPixelBufferUnlockBaseAddress,
+    };
+    let (w, h) = (width as usize, height as usize);
+    if rgba.len() < w * h * 4 {
+        return None;
+    }
+    let buffer = bgra_buffer(width, height)?;
+    // SAFETY: the buffer is locked while its bytes are written, `h` rows of `stride` bytes
+    unsafe { CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags(0)) };
+    let stride = CVPixelBufferGetBytesPerRow(&buffer);
+    let base = CVPixelBufferGetBaseAddress(&buffer) as *mut u8;
+    if !base.is_null() {
+        for y in 0..h {
+            let row = unsafe { std::slice::from_raw_parts_mut(base.add(y * stride), w * 4) };
+            let from = &rgba[y * w * 4..(y + 1) * w * 4];
+            for (out, px) in row.as_chunks_mut::<4>().0.iter_mut().zip(from.as_chunks::<4>().0) {
+                *out = [px[2], px[1], px[0], px[3]];
+            }
+        }
+    }
+    unsafe { CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags(0)) };
+    (!base.is_null()).then_some(buffer)
+}

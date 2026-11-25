@@ -64,6 +64,8 @@ enum Need {
     Phone,
     /// An avatar: its camera tracked and its posing published (macOS).
     Avatar,
+    /// A camera over USB (libgphoto2's live view, macOS).
+    Dslr,
     /// An audio input the mixer opens itself: its device setting ("" or "default": the system's).
     Device(String),
     /// Something that has no runtime without libobs yet (what it is, for the log).
@@ -121,7 +123,8 @@ fn need(source: &Source) -> Need {
         crate::phone_camera::KIND => Need::Missing("phone camera"),
         crate::avatar::KIND if mac => Need::Avatar,
         crate::avatar::KIND => Need::Missing("avatar"),
-        "lightair_dslr" => Need::Missing("camera by USB"),
+        crate::dslr::KIND if mac => Need::Dslr,
+        crate::dslr::KIND => Need::Missing("camera by USB"),
         _ => Need::Nothing,
     }
 }
@@ -190,6 +193,11 @@ enum Runtime {
     Phone(crate::phone_run::PhoneCamera),
     #[cfg(target_os = "macos")]
     Avatar(crate::avatar_run::AvatarRuntime),
+    /// Held for its thread (it stops as it drops).
+    #[cfg(target_os = "macos")]
+    Dslr {
+        _live: crate::dslr::LiveView,
+    },
 }
 
 /// A media source's playlist: its order and place, and when its file last started (a new file
@@ -679,6 +687,8 @@ impl Host {
             Need::Phone => Runtime::Phone(crate::phone_run::PhoneCamera::new(id)),
             #[cfg(target_os = "macos")]
             Need::Avatar => Runtime::Avatar(crate::avatar_run::AvatarRuntime::new(id, s)),
+            #[cfg(target_os = "macos")]
+            Need::Dslr => Runtime::Dslr { _live: crate::dslr::LiveView::start(id) },
             #[allow(unreachable_patterns)]
             _ => return,
         };

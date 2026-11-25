@@ -20,6 +20,8 @@ pub mod displays;
 pub mod dslr;
 pub mod engine;
 pub mod face_drive;
+#[cfg(target_os = "macos")]
+pub mod frames;
 pub mod gpu;
 pub mod host;
 pub mod kinds;

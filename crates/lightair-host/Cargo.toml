@@ -19,6 +19,8 @@ thiserror.workspace = true
 uuid.workspace = true
 rtrb = "0.3"
 hound = "3"
+# a camera over USB's previews (JPEG)
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 crossbeam-channel.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 libc = "0.2"
