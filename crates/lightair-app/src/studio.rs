@@ -295,6 +295,11 @@ impl Studio {
         if let Some(w) = &widgets {
             crate::widget_feeds::start(w.clone(), engine.clone());
         }
+        // Lightair's own compositor draws the built-in widgets from the same chat and widget server
+        #[cfg(target_os = "macos")]
+        if lightair_obs::bridge::own() {
+            lightair_preview::feed_widgets(&chat, widgets.as_ref());
+        }
         let mut studio = Self {
             chat,
             services: Vec::new(),

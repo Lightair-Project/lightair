@@ -4836,9 +4836,12 @@ version = "0.1.0"
 dependencies = [
  "image",
  "lightair-engine",
+ "lightair-fonts",
+ "lightair-live",
  "lightair-model",
  "lightair-obs",
  "lightair-render",
+ "lightair-widgets",
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-core-video",
@@ -4849,6 +4852,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "tungstenite",
  "wgpu",
  "windows 0.62.2",
 ]

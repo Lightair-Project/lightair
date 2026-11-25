@@ -820,6 +820,84 @@ fn ptr_null() -> *const u8 {
     std::ptr::null()
 }
 
+// ------------------------------------------------------------------ a file's frames, for the compositor
+
+/// A video file's frames in time order, as the decoder writes them: BGRA IOSurface-backed pixel
+/// buffers that keep the file's alpha (ProRes 4444, HEVC with alpha), with no conversion. Lightair's
+/// own compositor plays stinger videos with it. Made and read on one thread.
+pub struct Frames {
+    _asset: Retained<AnyObject>,
+    reader: Retained<AnyObject>,
+    output: Retained<AnyObject>,
+    /// The file's length.
+    pub duration_ms: u32,
+}
+
+impl Frames {
+    /// The video of the file at `path`, from its start; `None` when AVFoundation can't read it
+    /// (a container or codec it doesn't know, or no video).
+    pub fn open(path: &str) -> Option<Frames> {
+        autoreleasepool(|_| unsafe {
+            let asset = open_asset(path)?;
+            let track = asset.video.clone()?;
+            let duration: CMTime = msg_send![&*asset.asset, duration];
+            let mut error: *mut AnyObject = std::ptr::null_mut();
+            let reader: *mut AnyObject =
+                msg_send![class(c"AVAssetReader"), assetReaderWithAsset: &*asset.asset, error: &mut error];
+            let reader = keep(reader)?;
+            let settings = dictionary(&[
+                (kCVPixelBufferPixelFormatTypeKey, number_u32(BGRA)),
+                (kCVPixelBufferIOSurfacePropertiesKey, dictionary(&[])),
+                (kCVPixelBufferMetalCompatibilityKey, number_bool(true)),
+            ]);
+            let output: *mut AnyObject = msg_send![
+                class(c"AVAssetReaderTrackOutput"),
+                assetReaderTrackOutputWithTrack: &*track,
+                outputSettings: settings
+            ];
+            let output = keep(output)?;
+            let _: () = msg_send![&*output, setAlwaysCopiesSampleData: false];
+            let ok: bool = msg_send![&*reader, canAddOutput: &*output];
+            if !ok {
+                return None;
+            }
+            let _: () = msg_send![&*reader, addOutput: &*output];
+            let started: bool = msg_send![&*reader, startReading];
+            if !started {
+                return None;
+            }
+            let duration_ms = (duration.ns().unwrap_or(0).max(0) / 1_000_000).min(u32::MAX as i64) as u32;
+            Some(Frames { _asset: asset.asset, reader, output, duration_ms })
+        })
+    }
+
+    /// The next frame and its time (ms from the file's start); `None` at the end.
+    pub fn next(&mut self) -> Option<(u32, lightair_render::texture::PixelBuffer)> {
+        loop {
+            let decoded = read_video(&self.output, 0)?;
+            let Some(decoded) = decoded else { continue };
+            let at = (decoded.at.max(0) / 1_000_000).min(u32::MAX as i64) as u32;
+            // the decoder's reference is handed to the pixel buffer, which releases it
+            let decoded = std::mem::ManuallyDrop::new(decoded);
+            // SAFETY: `buffer` is a retained `CVPixelBufferRef` whose reference is given up here.
+            if let Some(buffer) = unsafe { lightair_render::texture::PixelBuffer::from_raw(decoded.buffer) } {
+                return Some((at, buffer));
+            }
+        }
+    }
+}
+
+impl Drop for Frames {
+    fn drop(&mut self) {
+        unsafe {
+            let status: isize = msg_send![&*self.reader, status];
+            if status == READER_READING {
+                let _: () = msg_send![&*self.reader, cancelReading];
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------ the libobs source
 
 struct Media {

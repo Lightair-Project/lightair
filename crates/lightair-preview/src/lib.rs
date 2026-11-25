@@ -14,6 +14,12 @@ mod render;
 mod compose;
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(target_os = "macos")]
+mod stinger;
+#[cfg(target_os = "macos")]
+mod text;
+#[cfg(target_os = "macos")]
+mod widget_feed;
 #[cfg(not(target_os = "macos"))]
 mod readback;
 #[cfg(windows)]
@@ -23,5 +29,7 @@ pub use layer::Layer;
 
 #[cfg(target_os = "macos")]
 pub use mac::{Frame, Preview, frame_is_nv12, frame_rgba, frame_size, nv12, sample_ycbcr};
+#[cfg(target_os = "macos")]
+pub use widget_feed::feed_widgets;
 #[cfg(not(target_os = "macos"))]
 pub use readback::{CpuFrame, Frame, Preview, frame_rgba, frame_size, sample_ycbcr};

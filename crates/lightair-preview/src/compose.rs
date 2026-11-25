@@ -19,11 +19,14 @@
 //! The pictures ([`Native`]):
 //!
 //! - **Made here**, with `lightair-engine`'s pictures: images (GIFs animated), colours (and so
-//!   the shapes, which are colours cut by their layout), text, timers (their text from the
-//!   engine's timers) and the native widgets that need no live data (labels). Until one is ready
-//!   (an image decoding, a timer before its first tick) libobs's picture stands in.
+//!   the shapes, which are colours cut by their layout); text and timers (their text from the
+//!   engine's timers) as libobs's text source draws them, in the faces it finds (`text`); and
+//!   the built-in widgets the native widgets draw (chat box, alert box, event list, goal,
+//!   label, counter, subathon timer), from the app's chat hub, the widget server's storage and
+//!   its alert queue (`widget_feed`). Until one is ready (an image decoding, a timer before its
+//!   first tick) libobs's picture stands in.
 //! - **From libobs** (`bridge`), for everything else: captures, cameras, media files, web pages,
-//!   avatars, devices, NDI…
+//!   other widgets, avatars, devices, NDI…
 //!
 //! Effects: the compositor draws a source's effects when it can draw all of them: the
 //! renderer's (shader effects, the colour filter, a `.cube` LUT) and the engine's sharpen and
@@ -34,6 +37,11 @@
 //! is drawn by libobs through all its filters, and the renderer is given it without its effects
 //! so nothing is drawn twice. The renderer does the rest: position, fit, crop, turn, flip,
 //! tilt, shape, opacity, and the switch between scenes.
+//!
+//! Switches are drawn as libobs draws them: a stinger plays its video (`stinger`, decoded here)
+//! for the video's length, cutting at its cut point; a stinger with no video, and a Scene
+//! transition with no scene to play, are crossfades. A stinger video the compositor can't read
+//! is drawn by libobs: the compositor steps aside for that switch.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -43,7 +51,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use lightair_obs::{bridge, program_source};
-use lightair_model::{Canvas, Id, Scene, Source, TransitionKind, Workspace};
+use lightair_model::{Canvas, Id, Scene, Source, Stinger, TransitionKind, TransitionSettings, Workspace};
 use lightair_render::SharedGpu;
 use lightair_render::media::Picture;
 use lightair_render::scene::{Pictures, SceneRenderer, Shot};
@@ -57,6 +65,8 @@ use objc2_metal::{MTLDevice, MTLPixelFormat, MTLTexture, MTLTextureDescriptor, M
 use parking_lot::Mutex;
 
 use crate::mac::{Frame, Shared, pixel_buffer};
+use crate::stinger::Player;
+use crate::widget_feed;
 
 /// Output buffers at most: the newest (the previews' and libobs's), the one before it (a window
 /// may still be showing it), one being drawn, and spares while something holds on to older ones.
@@ -70,6 +80,11 @@ const GPU_WAIT: Duration = Duration::from_secs(1);
 const HUB_PERIOD: Duration = Duration::from_millis(100);
 /// Overlay scenes drawn at most, bottom first (as many as libobs has overlay channels for).
 const OVERLAYS: usize = 8;
+/// A widget's picture is made again at most this often (a busy chat changes it many times a
+/// second).
+const WIDGET_PERIOD: Duration = Duration::from_millis(100);
+/// How long a stinger switch is drawn while its video's length isn't known yet.
+const UNKNOWN_LENGTH_MS: u32 = 3_600_000;
 
 // ---------------------------------------------------------------- the hub
 
@@ -144,6 +159,8 @@ fn viewers(canvas: Id, name: &str, primary: bool) -> (Vec<Arc<Shared>>, bool) {
 
 /// The hub's thread: a compositor for each canvas of the document, and which are in use.
 fn run_hub() {
+    // the faces libobs's text finds, before any compositor draws text
+    crate::text::install_fonts();
     let mut running: HashMap<Id, Compositor> = HashMap::new();
     loop {
         let canvases: Vec<Id> =
@@ -224,6 +241,9 @@ fn run(canvas: Id, stop: &AtomicBool) {
         wanted: None,
         fed: Vec::new(),
         clock: Instant::now(),
+        stingers: HashMap::new(),
+        stingers_of: 0,
+        playing: None,
     };
     let mut next = Instant::now();
     while !stop.load(Ordering::Acquire) {
@@ -264,6 +284,12 @@ struct State {
     fed: Vec<Weak<Shared>>,
     /// The clock moving effects run on.
     clock: Instant,
+    /// The stinger videos the workspace's switches may play, by path, read ahead.
+    stingers: HashMap<String, Player>,
+    /// The workspace they were last kept for.
+    stingers_of: usize,
+    /// The stinger switch being drawn: when it started, and its video's path.
+    playing: Option<(Instant, String)>,
 }
 
 impl State {
@@ -289,15 +315,18 @@ impl State {
         }
         let base = self.doc.update(&snapshot.workspace);
         let now = Instant::now();
-        // the switch to what's on air, while it runs
-        let switch = snapshot.switch.filter(|s| base.program == Some(s.to) && s.progress(now) < 1.0);
-        let mut scenes: Vec<Id> = match switch {
-            Some(s) => {
-                let over = (s.settings.kind == TransitionKind::Scene)
-                    .then(|| base.scene(s.to).and_then(|sc| sc.transition_scene).or(base.show.transition_scene))
-                    .flatten();
-                [Some(s.from), Some(s.to), over].into_iter().flatten().collect()
-            }
+        self.keep_stingers(&base);
+        // the switch to what's on air, while it runs, as libobs draws it
+        let switch = snapshot.switch.filter(|s| base.program == Some(s.to)).and_then(|s| self.plan(&base, s, now));
+        self.played(switch.as_ref().and_then(|p| p.stinger.as_ref().map(|(st, _)| (p.started, st.path.as_str()))));
+        if switch.as_ref().is_some_and(|p| p.stand_in) {
+            // libobs draws this switch (a stinger video the compositor can't read)
+            self.idle();
+            self.unfeed(&[]);
+            return period;
+        }
+        let mut scenes: Vec<Id> = match &switch {
+            Some(p) => [Some(p.from), Some(p.to), p.over].into_iter().flatten().collect(),
             None => base.program.into_iter().collect(),
         };
         let overlays = self.doc.overlays;
@@ -391,16 +420,30 @@ impl State {
             native.end_frame();
         }
         let ws = self.doc.drawn(kept);
-        let mut pictures = Ready(&shots);
-        match (switch, ws.program) {
-            (Some(s), _) => {
+        // a stinger switch: the renderer is given the stinger it plays (the scene's own, or the
+        // workspace's) and its frame now, held until the GPU is done with it
+        let playing = switch.as_ref().and_then(|p| p.stinger.as_ref());
+        let ws = match playing {
+            Some((st, _)) if ws.stinger.as_ref() != Some(st) => {
+                let mut with = Workspace::clone(&ws);
+                with.stinger = Some(st.clone());
+                Arc::new(with)
+            }
+            _ => ws,
+        };
+        let stinger = playing
+            .and_then(|(st, at)| self.stingers.get(&st.path)?.frame(*at))
+            .map(|b| Shot { size: b.size(), picture: Picture::Buffer(b), premultiplied: false });
+        let mut pictures = Ready { shots: &shots, stinger: stinger.clone() };
+        match (&switch, ws.program) {
+            (Some(p), _) => {
                 let _ = drawer.renderer.transition(
                     &ws,
-                    s.from,
-                    s.to,
+                    p.from,
+                    p.to,
                     canvas.id,
-                    &s.settings,
-                    s.progress(now),
+                    &p.settings,
+                    p.progress,
                     &mut pictures,
                     time,
                 );
@@ -428,8 +471,9 @@ impl State {
             return period;
         }
         drawer.ring.handed(i);
-        // the GPU is done with the sources' buffers
+        // the GPU is done with the sources' buffers and the stinger's frame
         drop(held);
+        drop(stinger);
         let frame = &drawer.ring.slots[i].buffer;
         for preview in showing {
             preview.feed(frame);
@@ -460,6 +504,138 @@ impl State {
             keep
         });
     }
+
+    /// The switch `s` as it's drawn at `now`, as libobs plays it: `None` once it's over.
+    fn plan(&mut self, ws: &Workspace, s: bridge::Switch, now: Instant) -> Option<Planned> {
+        let elapsed = now.saturating_duration_since(s.started).as_millis().min(u32::MAX as u128) as u32;
+        let mut settings = s.settings;
+        let mut length = settings.duration_ms.max(1);
+        let mut over = None;
+        let mut stinger = None;
+        let mut stand_in = false;
+        match settings.kind {
+            TransitionKind::Stinger => match stinger_for(ws, s.to) {
+                // no video: libobs crossfades
+                None => settings.kind = TransitionKind::Fade,
+                Some(st) => {
+                    let player = self.stingers.entry(st.path.clone()).or_insert_with(|| Player::new(&st.path));
+                    // it lasts the video's length, as libobs's stinger does
+                    let duration = player.duration_ms();
+                    if player.failed() {
+                        stand_in = true;
+                        length = duration.unwrap_or(length).max(1);
+                    } else {
+                        length = duration.unwrap_or(UNKNOWN_LENGTH_MS).max(1);
+                        stinger = Some((st, elapsed));
+                    }
+                }
+            },
+            TransitionKind::Scene => {
+                over = ws
+                    .scene(s.to)
+                    .and_then(|sc| sc.transition_scene)
+                    .or(ws.show.transition_scene)
+                    .filter(|o| *o != s.from && *o != s.to && ws.scene(*o).is_some());
+                // no scene to play: libobs crossfades
+                if over.is_none() {
+                    settings.kind = TransitionKind::Fade;
+                }
+            }
+            _ => {}
+        }
+        if elapsed >= length {
+            return None;
+        }
+        settings.duration_ms = length;
+        Some(Planned {
+            from: s.from,
+            to: s.to,
+            settings,
+            progress: elapsed as f32 / length as f32,
+            over,
+            stinger,
+            started: s.started,
+            stand_in,
+        })
+    }
+
+    /// The stinger drawn now (its switch's start and its path): one whose switch is over is
+    /// read from its start again, ready for the next.
+    fn played(&mut self, now: Option<(Instant, &str)>) {
+        if let Some((started, path)) = &self.playing
+            && now.is_none_or(|(t, p)| t != *started || p != path)
+        {
+            if let Some(player) = self.stingers.get(path) {
+                player.rewind();
+            }
+            self.playing = None;
+        }
+        if let Some((started, path)) = now {
+            self.playing = Some((started, path.to_string()));
+        }
+    }
+
+    /// Reads ahead the stinger videos `ws`'s switches may play, and lets go of the others
+    /// (checked when the workspace changes).
+    fn keep_stingers(&mut self, ws: &Arc<Workspace>) {
+        let at = Arc::as_ptr(ws) as usize;
+        if at == self.stingers_of {
+            return;
+        }
+        self.stingers_of = at;
+        let wanted = stingers_in_use(ws);
+        let playing = self.playing.as_ref().map(|(_, p)| p.clone());
+        self.stingers.retain(|path, _| wanted.contains(path) || playing.as_ref() == Some(path));
+        for path in wanted {
+            self.stingers.entry(path.clone()).or_insert_with(|| Player::new(&path));
+        }
+    }
+}
+
+/// A switch as the compositor draws it.
+struct Planned {
+    from: Id,
+    to: Id,
+    /// What's drawn: the kind libobs falls back to when it can't play the one asked for, and a
+    /// stinger's length as its video's.
+    settings: TransitionSettings,
+    progress: f32,
+    /// The transition scene drawn over a Scene transition.
+    over: Option<Id>,
+    /// A stinger switch: its video, and how far into it (ms).
+    stinger: Option<(Stinger, u32)>,
+    started: Instant,
+    /// libobs draws it (a stinger video the compositor can't read).
+    stand_in: bool,
+}
+
+/// The stinger a switch to `to` plays, as libobs's is chosen: the scene's own when it has its
+/// own transition, else the workspace's.
+fn stinger_for(ws: &Workspace, to: Id) -> Option<Stinger> {
+    ws.scene(to)
+        .filter(|s| s.transition.is_some())
+        .and_then(|s| s.stinger.clone())
+        .or_else(|| ws.stinger.clone())
+        .filter(|s| !s.path.is_empty())
+}
+
+/// The stinger videos `ws`'s switches may play: the workspace's when its transition is a
+/// stinger, and each scene's (or the workspace's) when the scene switches in with one.
+fn stingers_in_use(ws: &Workspace) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if ws.transition.kind == TransitionKind::Stinger
+        && let Some(st) = &ws.stinger
+    {
+        out.insert(st.path.clone());
+    }
+    for scene in &ws.scenes {
+        let stinger = scene.transition.is_some_and(|t| t.kind == TransitionKind::Stinger)
+            || scene.transitions_from.values().any(|t| t.kind == TransitionKind::Stinger);
+        if stinger && let Some(st) = stinger_for(ws, scene.id) {
+            out.insert(st.path);
+        }
+    }
+    out
 }
 
 /// The canvas's frame interval (60 a second without one).
@@ -587,20 +763,23 @@ fn without_effects(ws: &Workspace, kept: &BTreeSet<Id>) -> Workspace {
     out
 }
 
-/// The frame's pictures, made before it's drawn.
-struct Ready<'a>(&'a HashMap<Id, Shot>);
+/// The frame's pictures, made before it's drawn, and the stinger's frame during a stinger.
+struct Ready<'a> {
+    shots: &'a HashMap<Id, Shot>,
+    stinger: Option<Shot>,
+}
 
 impl Pictures for Ready<'_> {
     fn picture(&mut self, source: &Source) -> Option<Shot> {
-        self.0.get(&source.id).cloned()
+        self.shots.get(&source.id).cloned()
+    }
+
+    fn stinger(&mut self, _path: &str, _at_ms: u32) -> Option<Shot> {
+        self.stinger.clone()
     }
 }
 
 // ---------------------------------------------------------------- pictures made here
-
-/// The native widgets drawn here: the ones whose picture is their settings alone (the others
-/// show chat, alerts or what the widget server stores, which the compositor isn't given yet).
-const NATIVE_WIDGETS: &[&str] = &["label"];
 
 /// Whether the compositor makes `source`'s picture itself (when it draws all its effects).
 fn made_here(source: &Source) -> bool {
@@ -610,7 +789,8 @@ fn made_here(source: &Source) -> bool {
         templates::COLOUR | templates::TIMER => true,
         // text read from a file stays libobs's
         templates::TEXT => !s["from_file"].as_bool().unwrap_or(false),
-        widgets::KIND => widgets::instance(s).is_some_and(|i| NATIVE_WIDGETS.contains(&i.kind.as_str())),
+        // the built-in widgets the native widgets draw, once the app has given what they show
+        widgets::KIND => widgets::instance(s).is_some_and(|i| widget_feed::drawn_here(&i)),
         _ => false,
     }
 }
@@ -644,9 +824,9 @@ fn renderer_draws(e: &lightair_model::Effect) -> bool {
     e.kind.starts_with("fx.") || e.kind == "color_filter_v2" || (e.kind == "clut_filter" && cube())
 }
 
-/// The pictures made here, with `lightair-engine`'s pictures (decoded images and GIFs, text,
-/// colours and widgets kept as textures while they're the same), and the keyers for libobs's
-/// bare pictures, on the renderer's GPU.
+/// The pictures made here, with `lightair-engine`'s pictures (decoded images and GIFs, colours),
+/// text as libobs's text source draws it and the native widgets (kept as textures while they're
+/// the same), and the keyers for libobs's bare pictures, on the renderer's GPU.
 struct Native {
     gpu: Gpu,
     cache: lightair_engine::pictures::Cache,
@@ -660,6 +840,21 @@ struct Native {
     /// Each image file's own size (a GIF's frames are kept smaller; the layout's crop is in the
     /// file's pixels, as libobs has it).
     sizes: HashMap<PathBuf, Option<(u32, u32)>>,
+    /// Text and timers drawn here, by what decides their picture (`text::key`), and the ones
+    /// this frame used.
+    texts: HashMap<String, (wgpu::Texture, (u32, u32))>,
+    texts_used: HashSet<String>,
+    /// The widgets drawn here, by source.
+    widgets: HashMap<Id, Widget>,
+}
+
+/// A widget's picture and what it was made from.
+struct Widget {
+    /// What decided it (`widget_feed::probe`): made again when that changes.
+    probe: String,
+    texture: wgpu::Texture,
+    size: (u32, u32),
+    made: Instant,
 }
 
 impl Native {
@@ -688,6 +883,9 @@ impl Native {
             keyed: Default::default(),
             sources_of: 0,
             sizes: HashMap::new(),
+            texts: HashMap::new(),
+            texts_used: HashSet::new(),
+            widgets: HashMap::new(),
         })
     }
 
@@ -699,6 +897,7 @@ impl Native {
             self.sources_of = at;
             let keep: Vec<Id> = ws.sources.keys().copied().collect();
             self.keyed.forget_others(&keep);
+            self.widgets.retain(|id, _| ws.sources.contains_key(id));
             self.sizes.retain(|path, _| {
                 ws.sources.values().any(|s| s.settings["file"].as_str().is_some_and(|f| Path::new(f) == path))
             });
@@ -707,22 +906,26 @@ impl Native {
 
     /// `source`'s picture made here, keyed if it has keys; `None` while it isn't ready.
     fn picture(&mut self, source: &Source, pts_ns: i64) -> Option<Shot> {
-        // a timer: its text as the engine's timers have it now, drawn as text in its style
-        let timer;
-        let source = if source.kind == templates::TIMER {
-            let text = bridge::timer_text(source.id)?;
-            let mut s = Source::clone(source);
-            s.kind = templates::TEXT.into();
-            if let serde_json::Value::Object(m) = &mut s.settings {
-                m.insert("text".into(), text.into());
-            } else {
-                s.settings = serde_json::json!({ "text": text });
+        let made = match source.kind.as_str() {
+            // a timer: its text as the engine's timers have it now, drawn as its text source does
+            templates::TIMER => {
+                let text = bridge::timer_text(source.id)?;
+                Some(self.text(&source.settings, &text)?)
             }
-            timer = s;
-            &timer
-        } else {
-            source
+            templates::TEXT => Some(self.text(&source.settings, source.settings["text"].as_str().unwrap_or(""))?),
+            widgets::KIND => Some(self.widget(source)?),
+            _ => None,
         };
+        if let Some(shot) = made {
+            let steps = keying::steps(source);
+            if steps.is_empty() {
+                return Some(shot);
+            }
+            let Picture::Texture(texture) = &shot.picture else { return Some(shot) };
+            let out =
+                keying::draw(&self.gpu, &self.keying, &mut self.keyed, source.id, texture, shot.premultiplied, &steps, None);
+            return Some(Shot { picture: Picture::Texture(out), size: shot.size, premultiplied: false });
+        }
         let mut frame = lightair_engine::pictures::Frame {
             gpu: &self.gpu,
             cache: &mut self.cache,
@@ -755,9 +958,54 @@ impl Native {
         Some(Shot { picture: Picture::Texture(out), size, premultiplied: false })
     }
 
+    /// A text object's picture (`settings` showing `text`), drawn as libobs's text source draws
+    /// it; `None` when it draws nothing.
+    fn text(&mut self, settings: &serde_json::Value, text: &str) -> Option<Shot> {
+        let key = crate::text::key(settings, text);
+        if !self.texts.contains_key(&key) {
+            let (rgba, size) = crate::text::draw(settings, text);
+            if size.0 == 0 || size.1 == 0 {
+                return None;
+            }
+            let texture = self.gpu.texture(&rgba, size);
+            self.texts.insert(key.clone(), (texture, size));
+        }
+        let (texture, size) = self.texts.get(&key)?;
+        let shot = Shot { picture: Picture::Texture(texture.clone()), size: *size, premultiplied: true };
+        self.texts_used.insert(key);
+        Some(shot)
+    }
+
+    /// A built-in widget's picture, drawn by the native widgets from what its page would show;
+    /// made again when that changes (at most every [`WIDGET_PERIOD`]).
+    fn widget(&mut self, source: &Source) -> Option<Shot> {
+        let live = widget_feed::live()?;
+        let instance = widgets::instance(&source.settings)?;
+        let s = &source.settings;
+        let size = (s["width"].as_u64().unwrap_or(800) as u32, s["height"].as_u64().unwrap_or(600) as u32);
+        live.refresh();
+        let probe = widget_feed::probe(&live, &instance, size);
+        let old = self.widgets.get(&source.id);
+        let same = old.is_some_and(|w| w.probe == probe);
+        let recent = old.is_some_and(|w| w.made.elapsed() < WIDGET_PERIOD);
+        if !same && !recent {
+            let (rgba, size) = widget_feed::prepare(&live, &instance, size).draw();
+            let texture = self.gpu.texture(&rgba, size);
+            self.widgets.insert(source.id, Widget { probe, texture, size, made: Instant::now() });
+        }
+        let w = self.widgets.get(&source.id)?;
+        Some(Shot { picture: Picture::Texture(w.texture.clone()), size: w.size, premultiplied: true })
+    }
+
     /// Drops the made pictures no frame used lately.
     fn end_frame(&mut self) {
         self.cache.end_frame();
+        if self.texts.len() > 32 {
+            let used = std::mem::take(&mut self.texts_used);
+            self.texts.retain(|k, _| used.contains(k));
+        } else {
+            self.texts_used.clear();
+        }
     }
 }
 
