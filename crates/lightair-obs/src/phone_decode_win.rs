@@ -15,7 +15,7 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMe
 use windows::core::{GUID, Interface};
 
 use crate::phone_camera::{Feed, Unit, UnitKind};
-use crate::phone_units::{RATES, adts, bt709};
+use lightair_host::phone_units::{RATES, adts, bt709};
 use crate::sys;
 
 /// The first synchronous decoder Media Foundation has for `subtype` (hardware-backed ones

@@ -11,6 +11,10 @@ pub mod gpu;
 pub mod meters;
 pub mod ndi;
 pub mod outputs;
+pub mod phone_camera;
+#[cfg(target_os = "macos")]
+pub mod phone_decode;
+pub mod phone_units;
 #[cfg(target_os = "macos")]
 pub mod own_outputs;
 pub mod program;

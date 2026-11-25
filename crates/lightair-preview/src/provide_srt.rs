@@ -332,7 +332,7 @@ fn decode(source: SourceRef, slot: Arc<Slot>, units: mpsc::Receiver<Unit>) {
             Ok(unit) => match unit.kind {
                 Kind::Video(codec) => decoder.video(codec == Codec::Hevc, &unit.data, unit.pts, unit.dts),
                 // SAFETY: the source is held for the whole loop
-                Kind::Audio => unsafe { decoder.sound(&unit.data, source.as_ptr()) },
+                Kind::Audio => unsafe { lightair_obs::phone_camera::sound_into(&mut decoder, &unit.data, source.as_ptr()) },
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,

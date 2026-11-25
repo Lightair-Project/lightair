@@ -1,0 +1,537 @@
+//! A phone camera's stream decoded the moment it arrives (macOS): each video frame through
+//! VideoToolbox and each AAC frame through AudioToolbox, handed to whoever takes them. No demuxer probing, no pacing by
+//! timestamps, no queues: a frame is on screen as soon as it's decoded (the media player this
+//! replaces held phone pictures about 1.5 s behind).
+//!
+//! Units come from the app (`Feed::push`), split out of the phone's MPEG-TS as they arrived.
+//! Parameter sets (H.264 SPS/PPS, HEVC VPS/SPS/PPS) come before every keyframe; a change of them
+//! makes a new decompression session. Annex B is turned into the length-prefixed form
+//! VideoToolbox takes.
+//!
+//! The decoding is [`Decoder`], which hands each picture to whoever made it (Lightair's
+//! compositor, as BGRA IOSurfaces, or libobs's phone wrapper in lightair-obs) and each block of
+//! sound to a function of the caller's (a track's feed in the mixer, or libobs); in
+//! `lightair-preview` it also decodes another computer's stream received over SRT.
+
+use std::ffi::c_void;
+use std::sync::Arc;
+
+use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+use objc2_core_video::{
+    CVPixelBuffer, kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
+    kCVPixelBufferPixelFormatTypeKey,
+};
+
+use crate::phone_units::{adts, nals, parameter_set};
+
+type OSStatus = i32;
+type CFTypeRef = *const c_void;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CMTime {
+    value: i64,
+    timescale: i32,
+    flags: u32,
+    epoch: i64,
+}
+
+impl CMTime {
+    fn ticks_90k(t: u64) -> CMTime {
+        CMTime { value: t as i64, timescale: 90_000, flags: 1, epoch: 0 }
+    }
+    fn invalid() -> CMTime {
+        CMTime::default()
+    }
+}
+
+#[repr(C)]
+struct CMSampleTimingInfo {
+    duration: CMTime,
+    pts: CMTime,
+    dts: CMTime,
+}
+
+type OutputCallback = unsafe extern "C" fn(*mut c_void, *mut c_void, OSStatus, u32, CFTypeRef, CMTime, CMTime);
+
+#[repr(C)]
+struct OutputCallbackRecord {
+    callback: OutputCallback,
+    refcon: *mut c_void,
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(cf: CFTypeRef);
+    static kCFBooleanTrue: CFTypeRef;
+    static kCFAllocatorNull: CFTypeRef;
+}
+
+#[link(name = "CoreMedia", kind = "framework")]
+unsafe extern "C" {
+    fn CMVideoFormatDescriptionCreateFromH264ParameterSets(
+        alloc: CFTypeRef,
+        count: usize,
+        pointers: *const *const u8,
+        sizes: *const usize,
+        nal_header_length: i32,
+        out: *mut CFTypeRef,
+    ) -> OSStatus;
+    fn CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+        alloc: CFTypeRef,
+        count: usize,
+        pointers: *const *const u8,
+        sizes: *const usize,
+        nal_header_length: i32,
+        extensions: CFTypeRef,
+        out: *mut CFTypeRef,
+    ) -> OSStatus;
+    fn CMBlockBufferCreateWithMemoryBlock(
+        alloc: CFTypeRef,
+        memory: *mut c_void,
+        length: usize,
+        block_allocator: CFTypeRef,
+        custom_source: *const c_void,
+        offset: usize,
+        data_length: usize,
+        flags: u32,
+        out: *mut CFTypeRef,
+    ) -> OSStatus;
+    fn CMSampleBufferCreateReady(
+        alloc: CFTypeRef,
+        data: CFTypeRef,
+        format: CFTypeRef,
+        samples: isize,
+        timings: isize,
+        timing: *const CMSampleTimingInfo,
+        sizes: isize,
+        size: *const usize,
+        out: *mut CFTypeRef,
+    ) -> OSStatus;
+}
+
+#[link(name = "VideoToolbox", kind = "framework")]
+unsafe extern "C" {
+    fn VTDecompressionSessionCreate(
+        alloc: CFTypeRef,
+        format: CFTypeRef,
+        decoder_spec: CFTypeRef,
+        image_attributes: CFTypeRef,
+        callback: *const OutputCallbackRecord,
+        out: *mut CFTypeRef,
+    ) -> OSStatus;
+    fn VTDecompressionSessionDecodeFrame(
+        session: CFTypeRef,
+        sample: CFTypeRef,
+        flags: u32,
+        refcon: *mut c_void,
+        info: *mut u32,
+    ) -> OSStatus;
+    fn VTDecompressionSessionInvalidate(session: CFTypeRef);
+    fn VTSessionSetProperty(session: CFTypeRef, key: CFTypeRef, value: CFTypeRef) -> OSStatus;
+    static kVTDecompressionPropertyKey_RealTime: CFTypeRef;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct AudioStreamBasicDescription {
+    sample_rate: f64,
+    format_id: u32,
+    format_flags: u32,
+    bytes_per_packet: u32,
+    frames_per_packet: u32,
+    bytes_per_frame: u32,
+    channels_per_frame: u32,
+    bits_per_channel: u32,
+    reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AudioBuffer {
+    channels: u32,
+    size: u32,
+    data: *mut c_void,
+}
+
+/// An AudioBufferList with room for two buffers (mono or stereo).
+#[repr(C)]
+struct AudioBufferList2 {
+    count: u32,
+    buffers: [AudioBuffer; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct AudioStreamPacketDescription {
+    start_offset: i64,
+    variable_frames: u32,
+    data_size: u32,
+}
+
+type InputProc = unsafe extern "C" fn(
+    *mut c_void,
+    *mut u32,
+    *mut AudioBufferList2,
+    *mut *mut AudioStreamPacketDescription,
+    *mut c_void,
+) -> OSStatus;
+
+#[link(name = "AudioToolbox", kind = "framework")]
+unsafe extern "C" {
+    fn AudioConverterNew(
+        from: *const AudioStreamBasicDescription,
+        to: *const AudioStreamBasicDescription,
+        out: *mut *mut c_void,
+    ) -> OSStatus;
+    fn AudioConverterFillComplexBuffer(
+        converter: *mut c_void,
+        input: InputProc,
+        user: *mut c_void,
+        packets: *mut u32,
+        output: *mut AudioBufferList2,
+        descriptions: *mut AudioStreamPacketDescription,
+    ) -> OSStatus;
+    fn AudioConverterDispose(converter: *mut c_void) -> OSStatus;
+}
+
+pub const FOURCC_420V: u32 = u32::from_be_bytes(*b"420v");
+pub const FOURCC_420F: u32 = u32::from_be_bytes(*b"420f");
+pub const FOURCC_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
+const FOURCC_AAC: u32 = u32::from_be_bytes(*b"aac ");
+const FOURCC_LPCM: u32 = u32::from_be_bytes(*b"lpcm");
+
+/// Where a decoder's pictures go: each decoded picture (borrowed for the call) and its PTS on
+/// the 90 kHz clock, when it has one. Called on the thread that decodes.
+pub type Pictures = Arc<dyn Fn(&CVPixelBuffer, Option<u64>) + Send + Sync>;
+
+/// What the output callback needs: where pictures go.
+struct Out {
+    pictures: Pictures,
+}
+
+unsafe extern "C" fn decoded(
+    refcon: *mut c_void,
+    _frame: *mut c_void,
+    status: OSStatus,
+    _info: u32,
+    image: CFTypeRef,
+    pts: CMTime,
+    _duration: CMTime,
+) {
+    if status != 0 || image.is_null() {
+        return;
+    }
+    let out = unsafe { &*(refcon as *const Out) };
+    // SAFETY: VideoToolbox hands a live pixel buffer, valid for the call
+    let image = unsafe { &*(image as *const CVPixelBuffer) };
+    let pts = (pts.timescale == 90_000 && pts.flags & 1 != 0).then_some(pts.value as u64);
+    (out.pictures)(image, pts);
+}
+
+/// What a decompression session is asked to make: BGRA in IOSurfaces Metal can use (for
+/// Lightair's compositor), rather than the decoder's own choice (NV12, for libobs).
+fn bgra_attributes() -> CFRetained<CFDictionary<CFString, CFType>> {
+    let empty: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(&[], &[]);
+    let format = CFNumber::new_i32(FOURCC_BGRA as i32);
+    // SAFETY: CoreVideo's constant keys, read only.
+    let keys: [&CFString; 3] = unsafe {
+        [kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey]
+    };
+    let values: [&CFType; 3] = [format.as_ref(), empty.as_ref(), CFBoolean::new(true).as_ref()];
+    CFDictionary::from_slices(&keys, &values)
+}
+
+
+/// A VideoToolbox session for one set of parameter sets.
+struct Video {
+    hevc: bool,
+    params: Vec<Vec<u8>>,
+    format: CFTypeRef,
+    session: CFTypeRef,
+    /// Kept while the session may call back with it.
+    _out: Box<Out>,
+}
+
+impl Video {
+    fn new(hevc: bool, params: Vec<Vec<u8>>, out: Box<Out>, bgra: bool) -> Option<Video> {
+        let pointers: Vec<*const u8> = params.iter().map(|p| p.as_ptr()).collect();
+        let sizes: Vec<usize> = params.iter().map(Vec::len).collect();
+        let mut format: CFTypeRef = std::ptr::null();
+        let status = unsafe {
+            if hevc {
+                CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                    std::ptr::null(),
+                    params.len(),
+                    pointers.as_ptr(),
+                    sizes.as_ptr(),
+                    4,
+                    std::ptr::null(),
+                    &mut format,
+                )
+            } else {
+                CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                    std::ptr::null(),
+                    params.len(),
+                    pointers.as_ptr(),
+                    sizes.as_ptr(),
+                    4,
+                    &mut format,
+                )
+            }
+        };
+        if status != 0 || format.is_null() {
+            tracing::warn!(status, hevc, "phone camera: the stream's parameter sets didn't read");
+            return None;
+        }
+        let record = OutputCallbackRecord { callback: decoded, refcon: &*out as *const Out as *mut c_void };
+        let attributes = bgra.then(bgra_attributes);
+        let image_attributes: CFTypeRef =
+            attributes.as_ref().map_or(std::ptr::null(), |a| CFRetained::as_ptr(a).as_ptr() as CFTypeRef);
+        let mut session: CFTypeRef = std::ptr::null();
+        let status = unsafe {
+            VTDecompressionSessionCreate(
+                std::ptr::null(),
+                format,
+                std::ptr::null(),
+                image_attributes,
+                &record,
+                &mut session,
+            )
+        };
+        if status != 0 || session.is_null() {
+            tracing::warn!(status, hevc, "phone camera: no decoder for the stream");
+            unsafe { CFRelease(format) };
+            return None;
+        }
+        unsafe { VTSessionSetProperty(session, kVTDecompressionPropertyKey_RealTime, kCFBooleanTrue) };
+        Some(Video { hevc, params, format, session, _out: out })
+    }
+
+    /// Decodes one access unit (Annex B, its parameter sets already taken out), synchronously:
+    /// its picture comes out (in decoding order) before this returns.
+    fn decode(&mut self, nals: &[&[u8]], pts: u64, dts: Option<u64>) {
+        let mut avcc = Vec::with_capacity(nals.iter().map(|n| n.len() + 4).sum());
+        for n in nals {
+            avcc.extend_from_slice(&(n.len() as u32).to_be_bytes());
+            avcc.extend_from_slice(n);
+        }
+        if avcc.is_empty() {
+            return;
+        }
+        unsafe {
+            let mut block: CFTypeRef = std::ptr::null();
+            let status = CMBlockBufferCreateWithMemoryBlock(
+                std::ptr::null(),
+                avcc.as_mut_ptr() as *mut c_void,
+                avcc.len(),
+                kCFAllocatorNull,
+                std::ptr::null(),
+                0,
+                avcc.len(),
+                0,
+                &mut block,
+            );
+            if status != 0 || block.is_null() {
+                return;
+            }
+            let timing = CMSampleTimingInfo {
+                duration: CMTime::invalid(),
+                pts: CMTime::ticks_90k(pts),
+                dts: dts.map_or(CMTime::invalid(), CMTime::ticks_90k),
+            };
+            let size = avcc.len();
+            let mut sample: CFTypeRef = std::ptr::null();
+            let status =
+                CMSampleBufferCreateReady(std::ptr::null(), block, self.format, 1, 1, &timing, 1, &size, &mut sample);
+            if status == 0 && !sample.is_null() {
+                // (no asynchronous flag: the frame is out before this returns, `avcc` with it)
+                let mut info = 0u32;
+                VTDecompressionSessionDecodeFrame(self.session, sample, 0, std::ptr::null_mut(), &mut info);
+                CFRelease(sample);
+            }
+            CFRelease(block);
+        }
+    }
+}
+
+impl Drop for Video {
+    fn drop(&mut self) {
+        unsafe {
+            VTDecompressionSessionInvalidate(self.session);
+            CFRelease(self.session);
+            CFRelease(self.format);
+        }
+    }
+}
+
+/// An AudioToolbox converter from AAC to float, for one format.
+struct Audio {
+    converter: *mut c_void,
+    rate: u32,
+    channels: u32,
+}
+
+/// What the converter's input callback hands out: one AAC packet.
+struct Packet<'a> {
+    data: &'a [u8],
+    given: bool,
+    description: AudioStreamPacketDescription,
+}
+
+unsafe extern "C" fn feed_packet(
+    _converter: *mut c_void,
+    packets: *mut u32,
+    list: *mut AudioBufferList2,
+    descriptions: *mut *mut AudioStreamPacketDescription,
+    user: *mut c_void,
+) -> OSStatus {
+    let p = unsafe { &mut *(user as *mut Packet) };
+    if p.given {
+        unsafe { *packets = 0 };
+        // (no more for now: any status but 0 stops the converter here)
+        return 1;
+    }
+    p.given = true;
+    p.description =
+        AudioStreamPacketDescription { start_offset: 0, variable_frames: 0, data_size: p.data.len() as u32 };
+    unsafe {
+        *packets = 1;
+        (*list).count = 1;
+        (*list).buffers[0] =
+            AudioBuffer { channels: 0, size: p.data.len() as u32, data: p.data.as_ptr() as *mut c_void };
+        if !descriptions.is_null() {
+            *descriptions = &mut p.description;
+        }
+    }
+    0
+}
+
+impl Audio {
+    fn new(rate: u32, channels: u32) -> Option<Audio> {
+        let from = AudioStreamBasicDescription {
+            sample_rate: rate as f64,
+            format_id: FOURCC_AAC,
+            frames_per_packet: 1024,
+            channels_per_frame: channels,
+            ..Default::default()
+        };
+        // float, planar
+        let to = AudioStreamBasicDescription {
+            sample_rate: rate as f64,
+            format_id: FOURCC_LPCM,
+            format_flags: 1 | 8 | 32,
+            bytes_per_packet: 4,
+            frames_per_packet: 1,
+            bytes_per_frame: 4,
+            channels_per_frame: channels,
+            bits_per_channel: 32,
+            reserved: 0,
+        };
+        let mut converter = std::ptr::null_mut();
+        let status = unsafe { AudioConverterNew(&from, &to, &mut converter) };
+        if status != 0 || converter.is_null() {
+            tracing::warn!(status, rate, channels, "phone camera: no AAC decoder");
+            return None;
+        }
+        Some(Audio { converter, rate, channels })
+    }
+
+    /// Decodes one raw AAC frame (no ADTS header) and hands its planes (`channels` of them,
+    /// mono or stereo) and rate to `out`.
+    fn decode(&mut self, raw: &[u8], out: &mut dyn FnMut(&[&[f32]], u32)) {
+        let mut planes = vec![vec![0f32; 1024]; self.channels as usize];
+        let mut list = AudioBufferList2 {
+            count: self.channels,
+            buffers: [AudioBuffer { channels: 1, size: 0, data: std::ptr::null_mut() }; 2],
+        };
+        for (i, p) in planes.iter_mut().enumerate().take(2) {
+            list.buffers[i] =
+                AudioBuffer { channels: 1, size: (p.len() * 4) as u32, data: p.as_mut_ptr() as *mut c_void };
+        }
+        let mut packet = Packet { data: raw, given: false, description: AudioStreamPacketDescription::default() };
+        let mut count = 1024u32;
+        unsafe {
+            AudioConverterFillComplexBuffer(
+                self.converter,
+                feed_packet,
+                &mut packet as *mut Packet as *mut c_void,
+                &mut count,
+                &mut list,
+                std::ptr::null_mut(),
+            );
+        }
+        if count == 0 {
+            return;
+        }
+        let parts: Vec<&[f32]> = planes.iter().map(|p| &p[..(count as usize).min(p.len())]).collect();
+        out(&parts, self.rate);
+    }
+}
+
+impl Drop for Audio {
+    fn drop(&mut self) {
+        unsafe { AudioConverterDispose(self.converter) };
+    }
+}
+
+/// Whether a NAL is an access unit delimiter (left out: not every decoder takes them).
+fn delimiter(hevc: bool, nal: &[u8]) -> bool {
+    nal.first().is_some_and(|b| if hevc { (b >> 1) & 0x3F == 35 } else { b & 0x1F == 9 })
+}
+
+/// H.264 or HEVC and AAC decoded by VideoToolbox and AudioToolbox, unit by unit as they come.
+/// Pictures go to the [`Pictures`] it was made with, in decoding order; sound into a libobs
+/// source. Used on one thread (its sessions stay there).
+pub struct Decoder {
+    video: Option<Video>,
+    audio: Option<Audio>,
+    pictures: Pictures,
+    bgra: bool,
+}
+
+impl Decoder {
+    /// `bgra`: pictures as BGRA IOSurface-backed buffers Metal can use (a new buffer for each
+    /// while the last is held); else the decoder's own format (NV12).
+    pub fn new(bgra: bool, pictures: Pictures) -> Decoder {
+        Decoder { video: None, audio: None, pictures, bgra }
+    }
+
+    /// One video access unit (Annex B) and its PTS (and DTS) on the 90 kHz clock, decoded before
+    /// this returns. A new set of parameter sets makes a new session; nothing is decoded before
+    /// the first set.
+    pub fn video(&mut self, hevc: bool, unit: &[u8], pts: u64, dts: Option<u64>) {
+        let all = nals(unit);
+        let mut params: Vec<(u8, Vec<u8>)> =
+            all.iter().filter_map(|n| parameter_set(hevc, n).map(|o| (o, n.to_vec()))).collect();
+        params.sort_by_key(|(o, _)| *o);
+        let params: Vec<Vec<u8>> = params.into_iter().map(|(_, p)| p).collect();
+        let fresh = !params.is_empty() && self.video.as_ref().is_none_or(|v| v.hevc != hevc || v.params != params);
+        if fresh {
+            // (the old session goes before the new one is made)
+            drop(self.video.take());
+            let out = Box::new(Out { pictures: self.pictures.clone() });
+            self.video = Video::new(hevc, params, out, self.bgra);
+        }
+        let Some(v) = self.video.as_mut() else { return };
+        let picture: Vec<&[u8]> =
+            all.into_iter().filter(|n| parameter_set(hevc, n).is_none() && !delimiter(hevc, n)).collect();
+        v.decode(&picture, pts, dts);
+    }
+
+    /// One unit of AAC in ADTS (one or more frames), decoded, each frame's planes and rate
+    /// handed to `out` as it's decoded. Mono and stereo; other layouts are left out.
+    pub fn sound(&mut self, unit: &[u8], out: &mut dyn FnMut(&[&[f32]], u32)) {
+        for (rate, channels, raw) in adts(unit) {
+            if channels > 2 {
+                continue;
+            }
+            if self.audio.as_ref().is_none_or(|a| a.rate != rate || a.channels != channels) {
+                self.audio = Audio::new(rate, channels);
+            }
+            if let Some(a) = self.audio.as_mut() {
+                a.decode(raw, out);
+            }
+        }
+    }
+}
