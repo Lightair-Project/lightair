@@ -74,14 +74,19 @@ fn text(settings: &serde_json::Value, key: &str) -> String {
     settings[key].as_str().unwrap_or_default().to_string()
 }
 
-/// Whether a media source's file plays through AVFoundation: a local MP4 or QuickTime file at
-/// normal speed (as the libobs engine decides it).
+/// Whether a media source's file plays through AVFoundation: a local MP4 or QuickTime file, or a
+/// sound file AVFoundation reads (MP3, AAC, WAV, AIFF, CAF, FLAC), at normal speed.
 fn native_media(settings: &serde_json::Value) -> bool {
     let local = settings.get("is_local_file").and_then(serde_json::Value::as_bool) != Some(false);
     let speed = settings.get("speed_percent").and_then(serde_json::Value::as_i64).unwrap_or(100);
     let file = settings.get("local_file").and_then(serde_json::Value::as_str).unwrap_or("");
     let ext = std::path::Path::new(file).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
-    local && speed == 100 && matches!(ext.as_deref(), Some("mp4" | "m4v" | "mov"))
+    local
+        && speed == 100
+        && matches!(
+            ext.as_deref(),
+            Some("mp4" | "m4v" | "mov" | "mp3" | "m4a" | "aac" | "wav" | "aif" | "aiff" | "caf" | "flac")
+        )
 }
 
 /// Whether a media source plays a playlist (several files one after another).

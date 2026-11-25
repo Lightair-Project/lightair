@@ -973,7 +973,11 @@ impl Library {
         let fraction =
             if status.duration_ms > 0 { (status.time_ms as f32 / status.duration_ms as f32).clamp(0.0, 1.0) } else { 0.0 };
         let bar = p.bar.clone();
+        #[cfg(feature = "libobs")]
         let frame = p.preview.latest_frame();
+        // (without libobs, straight from the player)
+        #[cfg(not(feature = "libobs"))]
+        let frame = p.player.frame();
         let sound_only = w == 0 || h == 0;
         Some(
             div()

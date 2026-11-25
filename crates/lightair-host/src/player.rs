@@ -1,8 +1,8 @@
 //! A media file played on its own (the Library's player): a private [`MediaPlayer`], not in any
 //! scene. Media calls are safe from any thread.
 //!
-//! Not yet without libobs: a preview showing its picture (`source_ref` gives none) and its sound
-//! in the headphones.
+//! Its picture is read straight from the player ([`Player::frame`]); a preview shows none
+//! (`source_ref` gives none). Not yet: its sound in the headphones.
 
 use std::path::Path;
 
@@ -13,6 +13,7 @@ use crate::media_player::{MediaPlayer, Settings};
 
 pub struct Player {
     player: MediaPlayer,
+    id: Id,
 }
 
 impl Player {
@@ -25,12 +26,19 @@ impl Player {
             clear_on_end: false,
         };
         let rate = crate::audio_host::engine_rate();
-        Some(Player { player: MediaPlayer::new(Some(Id::new()), settings, rate, true, None) })
+        let id = Id::new();
+        Some(Player { player: MediaPlayer::new(Some(id), settings, rate, true, None), id })
     }
 
     /// What a preview shows it as: nothing yet without libobs.
     pub fn source_ref(&self) -> Option<(Id, Id)> {
         None
+    }
+
+    /// The frame due now (BGRA, IOSurface-backed); `None` before the first, and for a file with
+    /// a rotation.
+    pub fn frame(&self) -> Option<crate::buffers::Buffer> {
+        crate::media_player::picture(self.id).map(|p| p.buffer)
     }
 
     /// The picture's size (0×0 until the file has opened, and for sound only), turned as shown.
