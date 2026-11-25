@@ -1,19 +1,18 @@
 //! Build orchestration (docs/15-platform-distribution-licensing.md, "Building").
 //!
-//!   cargo xtask modules    configure and build every in-tree libobs module (modules/*)
+//!   cargo xtask modules    configure and build every in-tree native module (modules/*: the
+//!                              Effect Stack's trackers)
 //!   cargo xtask bundle     assemble target/debug/Lightair.app for development (macOS)
 //!   cargo xtask bundle --release   the same from an optimised build: target/release/Lightair.app
 //!                              (for measuring performance)
 //!   cargo xtask dist       the app to ship: target/dist/Lightair.app and Lightair-<version>.dmg,
 //!                              everything it runs inside it, signed with a Developer ID and
 //!                              notarized (LIGHTAIR_NOTARY_PROFILE) (macOS)
-//!   cargo xtask dev        link OBS's helper programs next to target/debug for `cargo run`
+//!   cargo xtask dev        Windows: Chromium's runtime next to target/debug for `cargo run`
 //!   cargo xtask virtual-camera [--uninstall]  build "Lightair Virtual Camera" (the camera
 //!                          extension and its installer, modules/lightair-virtual-camera),
 //!                          put the installer in /Applications and open it (macOS)
 //!
-//! On Windows, OBS_DIR names the OBS build or install whose libobs Lightair links and runs
-//! (docs/plans/windows.md); the tests run with its `bin/64bit` on PATH.
 //!   cargo xtask test [--machine] [filter]  build every test program, then run them all at once
 //!
 //! The edit loop (docs/build-speed.md):
@@ -47,21 +46,6 @@ fn link_file(to: &Path, link: &Path) -> std::io::Result<()> {
     return std::fs::copy(to, link).map(|_| ());
 }
 
-/// OBS's mux helper (clips and MKV recordings), from the OBS Lightair runs with.
-fn obs_mux() -> PathBuf {
-    if cfg!(windows) {
-        obs_bin().join("obs-ffmpeg-mux.exe")
-    } else {
-        PathBuf::from(std::env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into()))
-            .join("Contents/MacOS/obs-ffmpeg-mux")
-    }
-}
-
-/// Windows: the folder holding obs.dll (OBS_DIR's `bin/64bit`).
-fn obs_bin() -> PathBuf {
-    let dir = std::env::var("OBS_DIR").unwrap_or_else(|_| r"C:\Program Files\obs-studio".into());
-    PathBuf::from(dir).join("bin").join("64bit")
-}
 
 /// Lower priority for this process and its children, so the machine stays responsive.
 fn be_polite() {
@@ -184,9 +168,8 @@ fn modules() -> anyhow::Result<()> {
         let build = root.join("target/modules").join(&name);
         let mut configure = Command::new("cmake");
         configure.arg("-S").arg(&dir).arg("-B").arg(&build);
-        // the app without libobs: the modules' libobs parts aren't built (the trackers alone)
-        #[cfg(target_os = "macos")]
-        configure.arg(format!("-DLIGHTAIR_WITH_LIBOBS={}", if dist::host() { "OFF" } else { "ON" }));
+        // the trackers alone: nothing of the Effect Stack's old libobs module
+        configure.arg("-DLIGHTAIR_WITH_LIBOBS=OFF");
         if cfg!(windows) {
             // Visual Studio's generator (Ninja needs a developer prompt for MSVC)
             configure.args(["-A", "x64"]);
@@ -228,8 +211,8 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 "#;
 
 /// Development bundle: the debug binary inside a real .app (so macOS asks Lightair, not the
-/// terminal, for camera and microphone access), with OBS's frameworks and plugins linked in
-/// from an installed OBS 33 (docs/15-platform-distribution-licensing.md, "Building").
+/// terminal, for camera and microphone access), with Chromium linked in
+/// (docs/15-platform-distribution-licensing.md, "Building").
 fn bundle(release: bool) -> anyhow::Result<()> {
     anyhow::ensure!(cfg!(target_os = "macos"), "the .app bundle is for macOS; on Windows, `cargo xtask dev`");
     let root = root();
@@ -240,15 +223,12 @@ fn bundle(release: bool) -> anyhow::Result<()> {
         build.arg("--release");
     }
     run(&mut build)?;
-    let obs = PathBuf::from(std::env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into()));
     let app = root.join(format!("target/{profile}/Lightair.app/Contents"));
     let _ = std::fs::remove_dir_all(app.parent().unwrap());
     for dir in ["MacOS", "Frameworks", "PlugIns", "Resources"] {
         std::fs::create_dir_all(app.join(dir))?;
     }
     std::fs::copy(root.join(format!("target/{profile}/lightair")), app.join("MacOS/lightair"))?;
-    // libobs runs this helper (from next to the executable) to write clips and MKV recordings.
-    link_file(&obs.join("Contents/MacOS/obs-ffmpeg-mux"), &app.join("MacOS/obs-ffmpeg-mux"))?;
     std::fs::write(app.join("Info.plist"), INFO_PLIST)?;
     let icns = root.join("branding/final/icon/Lightair.icns");
     if icns.exists() {
@@ -257,23 +237,9 @@ fn bundle(release: bool) -> anyhow::Result<()> {
     stream_deck_plugin(&app.join("Resources/Lightair.streamDeckPlugin"))?;
     speech_helper(&app.join("MacOS/lightair-speech"))?;
     piair_binary(&app.join("MacOS/piair"))?;
-    for (from, to) in
-        [(obs.join("Contents/Frameworks"), app.join("Frameworks")), (obs.join("Contents/PlugIns"), app.join("PlugIns"))]
-    {
-        for entry in std::fs::read_dir(&from)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            // OBS's Chromium (CEF) and its helpers: Lightair bundles its own, below.
-            if name_str.starts_with("OBS Helper") || name_str == "Chromium Embedded Framework.framework" {
-                continue;
-            }
-            link_file(&entry.path(), &to.join(&name))?;
-        }
-    }
     bundle_chromium(&root, &app, profile, false, "app.lightair.dev")?;
-    // Sign the bundle itself so macOS privacy settings identify Lightair. Nested OBS code keeps
-    // OBS's own signatures; nothing outside target/ is modified.
+    // Sign the bundle itself so macOS privacy settings identify Lightair. Nested code keeps its
+    // own signatures; nothing outside target/ is modified.
     //
     // Ad hoc signatures change with every build, so macOS asks for camera, microphone and screen
     // permission again after each rebuild. A real identity keeps them: the first "Apple
@@ -351,151 +317,34 @@ fn bundle_chromium(root: &Path, app: &Path, profile: &str, copy: bool, id: &str)
     Ok(())
 }
 
-/// Links OBS's helper programs next to the debug binary (development without the bundle).
-/// Windows: Chromium's runtime too (lightair.exe loads libcef.dll as it starts, and Chromium
-/// finds its resources beside it), for `target/debug`, or `target/release` with `--release`.
+/// Windows: Chromium's runtime next to the debug binary (lightair.exe loads libcef.dll as it
+/// starts, and Chromium finds its resources beside it), for `target/debug`, or `target/release`
+/// with `--release`. macOS needs nothing beside it.
 fn dev(release: bool) -> anyhow::Result<()> {
-    let mux = obs_mux();
+    if !cfg!(windows) {
+        eprintln!("nothing to put beside the binary on macOS (`cargo xtask bundle` makes the app)");
+        return Ok(());
+    }
     let profile = if release { "release" } else { "debug" };
     let out = root().join("target").join(profile);
-    // Windows: the encoders' test programs too (NVENC, Quick Sync and AMF register only once
-    // theirs, run from beside the executable, says the hardware works)
-    let mut helpers = vec![mux];
-    if cfg!(windows) {
-        helpers.extend(["obs-nvenc-test.exe", "obs-qsv-test.exe", "obs-amf-test.exe"].map(|h| obs_bin().join(h)));
-    }
     for dir in [out.clone(), out.join("deps")] {
         std::fs::create_dir_all(&dir)?;
-        for helper in helpers.iter().filter(|h| h.exists()) {
-            let link = dir.join(helper.file_name().unwrap());
-            if !link.exists() {
-                link_file(helper, &link)?;
-            }
-        }
-        if cfg!(windows) {
-            chromium_runtime(&dir)?;
-        }
+        chromium_runtime(&dir)?;
     }
     Ok(())
 }
 
-/// The OBS modules the Windows app ships (lightair-obs's DEFAULT_MODULES for Windows, but
-/// Lightair's own Lightair Effect Stack, built here): keep the two lists alike.
-#[cfg(windows)]
-const WINDOWS_MODULES: &[&str] = &[
-    "aja", "decklink", "image-source", "obs-ffmpeg", "obs-filters", "obs-nvenc", "obs-outputs", "obs-qsv11",
-    "obs-transitions", "obs-webrtc", "obs-x264", "rtmp-services", "text-freetype2", "vlc-video", "win-capture",
-    "win-dshow", "win-wasapi",
-];
-
-/// Windows: the app to ship, `target\dist\Lightair` and `Lightair-<version>-windows-x64.zip`,
-/// self-contained, laid out as OBS lays itself out (what libobs and its modules expect):
-///
-/// ```text
-/// Lightair\bin\64bit\    lightair.exe, Chromium's helper and runtime, libobs and its DLLs,
-///                        OBS's helper programs, the MSVC runtime
-/// Lightair\core\<m>\     OBS's modules Lightair uses, each with its data
-/// Lightair\data\libobs\  libobs's effects
-/// Lightair\obs-plugins\64bit\, Lightair\data\obs-plugins\   Lightair Effect Stack
-/// ```
-///
-/// libobs and its modules come from the OBS install it's built against (OBS_DIR). Not signed:
-/// Authenticode needs a certificate (docs/15).
+/// Windows: the app to ship. Not yet: the Windows app is being moved off libobs (its
+/// compositor, captures and outputs), and nothing of libobs or OBS ships any more.
 #[cfg(windows)]
 fn dist_windows() -> anyhow::Result<()> {
-    release_env();
-    let root = root();
-    run(cargo().current_dir(&root).args(["build", "--release", "-p", "lightair-app", "-p", "lightair-web-helper", "-p", "lightair-camera-win"]))?;
-    modules()?;
-    let obs = PathBuf::from(std::env::var("OBS_DIR").unwrap_or_else(|_| r"C:\Program Files\obs-studio".into()));
-    anyhow::ensure!(obs.join(r"bin\64bit\obs.dll").exists(), "no OBS at {} (set OBS_DIR)", obs.display());
-    let out = root.join(r"target\dist\Lightair");
-    let _ = std::fs::remove_dir_all(&out);
-    let bin = out.join(r"bin\64bit");
-    std::fs::create_dir_all(&bin)?;
-    let release = root.join(r"target\release");
-    // (and Lightair Virtual Camera's media source: the Frame Server loads it from here once
-    // it's registered, crates/lightair-camera-win)
-    for exe in ["lightair.exe", "lightair-web-helper.exe", "lightair_camera.dll"] {
-        std::fs::copy(release.join(exe), bin.join(exe))?;
-    }
-    piair_binary(&bin.join("piair.exe"))?;
-    // libobs, its graphics backend, its DLLs and helper programs (not OBS's own UI: Qt, scripting)
-    let skip = |name: &str| {
-        let n = name.to_ascii_lowercase();
-        n.starts_with("qt6") || n.ends_with(".pdb") || n == "obs64.exe" || n == "obs-frontend-api.dll"
-            || n == "obs-scripting.dll" || n == "lua51.dll" || n == "libobs-opengl.dll"
-    };
-    for entry in std::fs::read_dir(obs.join(r"bin\64bit"))? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if entry.file_type()?.is_file() && !skip(&name) {
-            std::fs::copy(entry.path(), bin.join(&name))?;
-        }
-    }
-    chromium_runtime(&bin)?;
-    // the Stream Deck plugin, as the file Stream Deck installs when opened (a zip of the
-    // `.sdPlugin` folder; PowerShell makes only `.zip`s, so renamed)
-    let deck_zip = bin.join("Lightair.streamDeckPlugin.zip");
-    run(Command::new("powershell").args(["-NoProfile", "-Command"]).arg(format!(
-        "Compress-Archive -Path '{}' -DestinationPath '{}'",
-        root.join(r"streamdeck\app.lightair.sdPlugin").display(),
-        deck_zip.display()
-    )))?;
-    std::fs::rename(&deck_zip, bin.join("Lightair.streamDeckPlugin"))?;
-    // the MSVC runtime, beside the programs (Microsoft's redistributable files)
-    match msvc_runtime() {
-        Some(crt) => {
-            for entry in std::fs::read_dir(&crt)? {
-                let entry = entry?;
-                std::fs::copy(entry.path(), bin.join(entry.file_name()))?;
-            }
-        }
-        None => eprintln!("no MSVC redistributable found: the app needs the Visual C++ runtime installed"),
-    }
-    // OBS's modules, each with its data
-    fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(to)?;
-        for entry in std::fs::read_dir(from)? {
-            let entry = entry?;
-            let (src, dst) = (entry.path(), to.join(entry.file_name()));
-            if entry.file_type()?.is_dir() {
-                copy_tree(&src, &dst)?;
-            } else if !src.extension().is_some_and(|e| e == "pdb") {
-                std::fs::copy(&src, &dst)?;
-            }
-        }
-        Ok(())
-    }
-    for m in WINDOWS_MODULES {
-        let dir = obs.join("core").join(m);
-        if dir.exists() {
-            copy_tree(&dir, &out.join("core").join(m))?;
-        }
-    }
-    copy_tree(&obs.join(r"data\libobs"), &out.join(r"data\libobs"))?;
-    // Lightair Effect Stack (cargo xtask modules)
-    let fx = root.join(r"target\modules\lightair-effect-stack");
-    if fx.join(r"obs-plugins\64bit\lightair-effect-stack.dll").exists() {
-        std::fs::create_dir_all(out.join(r"obs-plugins\64bit"))?;
-        std::fs::copy(fx.join(r"obs-plugins\64bit\lightair-effect-stack.dll"), out.join(r"obs-plugins\64bit\lightair-effect-stack.dll"))?;
-        copy_tree(&fx.join(r"data\obs-plugins\lightair-effect-stack"), &out.join(r"data\obs-plugins\lightair-effect-stack"))?;
-    } else {
-        eprintln!("Lightair Effect Stack isn't built (cargo xtask modules): left out");
-    }
-    let version = env!("CARGO_PKG_VERSION");
-    let zip = root.join(format!(r"target\dist\Lightair-{version}-windows-x64.zip"));
-    let _ = std::fs::remove_file(&zip);
-    run(Command::new("powershell")
-        .args(["-NoProfile", "-Command"])
-        .arg(format!("Compress-Archive -Path '{}' -DestinationPath '{}' -CompressionLevel Optimal", out.display(), zip.display())))?;
-    eprintln!("built {} and {}", out.display(), zip.display());
-    Ok(())
+    anyhow::bail!("the Windows app is being moved off libobs: `cargo xtask dist` doesn't build it yet")
 }
 
 /// The MSVC runtime's redistributable folder (`Microsoft.VC143.CRT`, x64) of an installed
 /// Visual Studio or its Build Tools.
 #[cfg(windows)]
+#[allow(dead_code, reason = "the Windows app's dist, once it's off libobs")]
 fn msvc_runtime() -> Option<PathBuf> {
     let vs = PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio");
     let alt = PathBuf::from(r"C:\Program Files\Microsoft Visual Studio");
@@ -1037,25 +886,19 @@ fn apple_development_identity() -> Option<String> {
         .map(str::to_string)
 }
 
-/// A test program to run: its name, path, package directory (cargo runs tests from there), and
-/// arguments of its own (one test of a program whose tests each run in a process of their own).
+/// A test program to run: its name, path, and package directory (cargo runs tests from there).
 struct TestBin {
     name: String,
     exe: PathBuf,
     dir: PathBuf,
-    args: Vec<String>,
 }
 
 /// Ignored tests that measure rather than test (run by hand, optimised): `--machine` leaves
 /// them out.
 const MEASUREMENTS: &[&str] = &["podcast_graph_cost", "frames_per_second", "swizzle_cost"];
 
-/// Test programs whose tests start libobs (process-global): each test runs as a process of its
-/// own (lightair_obs::testing).
-const OWN_PROCESS: &[&str] = &["lightair-obs/engine", "lightair-preview/preview"];
-
-/// `cargo test` runs test programs one after another, and most of ours start libobs and record
-/// real seconds of video, so they spend their time waiting. This builds them all, then runs them
+/// `cargo test` runs test programs one after another, and some of ours play real-time audio or
+/// wait on real seconds, so they spend their time waiting. This builds them all, then runs them
 /// side by side, slowest first (timings from the last run), so the whole suite takes about as
 /// long as its slowest program. Arguments after `test` are passed to every program (a filter,
 /// `--nocapture`, ...). `--machine` also runs the tests that depend on this Mac (its audio
@@ -1077,8 +920,7 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
             args.extend(["--skip".into(), m.to_string()]);
         }
     }
-    let flags = args.clone();
-    args.extend(filter.clone());
+    args.extend(filter);
     // Polite: the build and the tests run at a lower priority, so the Mac stays responsive
     // (typing elsewhere keeps up) while they run.
     be_polite();
@@ -1101,48 +943,12 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
             "test" => format!("{}/{target}", package.unwrap_or_default()),
             _ => format!("{} ({kind})", package.unwrap_or_default()),
         };
-        bins.push(TestBin { name, exe: exe.into(), dir: manifest.parent().unwrap().to_path_buf(), args: Vec::new() });
+        bins.push(TestBin { name, exe: exe.into(), dir: manifest.parent().unwrap().to_path_buf() });
     }
     anyhow::ensure!(build.wait()?.success(), "build failed");
     let built = started.elapsed();
     let built_programs: Vec<PathBuf> = bins.iter().map(|b| b.exe.clone()).collect();
     let pruning = std::thread::spawn(move || prune(Some(&built_programs)));
-
-    // One test per process where libobs starts: the filter picks tests here, as the program
-    // would.
-    let mut expanded = Vec::new();
-    for bin in bins {
-        if !OWN_PROCESS.contains(&bin.name.as_str()) {
-            expanded.push(bin);
-            continue;
-        }
-        let mut list = Command::new(&bin.exe);
-        // (Windows: obs.dll through PATH, as when the tests run below)
-        if cfg!(windows) {
-            let path = std::env::var_os("PATH").unwrap_or_default();
-            let mut dirs = vec![obs_bin()];
-            dirs.extend(std::env::split_paths(&path));
-            if let Ok(joined) = std::env::join_paths(dirs) {
-                list.env("PATH", joined);
-            }
-        }
-        let out = list.args(["--list", "--format", "terse"]).current_dir(&bin.dir).output()?;
-        anyhow::ensure!(out.status.success(), "{} --list failed: {}", bin.name, String::from_utf8_lossy(&out.stderr).trim());
-        for test in String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.strip_suffix(": test")) {
-            if filter.as_deref().is_some_and(|f| !test.contains(f)) {
-                continue;
-            }
-            let mut args = vec![test.to_string(), "--exact".into()];
-            args.extend(flags.iter().cloned());
-            expanded.push(TestBin {
-                name: format!("{}/{test}", bin.name.split('/').next().unwrap_or_default()),
-                exe: bin.exe.clone(),
-                dir: bin.dir.clone(),
-                args,
-            });
-        }
-    }
-    let mut bins = expanded;
 
     // Slowest first, so the long ones aren't left starting last.
     let times_path = root().join("target/test-times.json");
@@ -1153,12 +959,10 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
         t(&b.name).total_cmp(&t(&a.name))
     });
 
-    // Each program runs from a folder of its own (a hard link, no copy). macOS treats a bare
-    // program's folder as its bundle and lists it while libobs starts, and target/debug/deps
-    // holds thousands of files (more when builds' leftovers pile up), which costs seconds per
-    // program. The recording tests need OBS's mux helper next to the program.
+    // Each program runs from a folder of its own (a hard link, no copy): macOS treats a bare
+    // program's folder as its bundle and may list it, and target/debug/deps holds thousands of
+    // files (more when builds' leftovers pile up), which costs seconds per program.
     let run_dir = root().join("target/test-run");
-    let mux = obs_mux();
     let mut linked_to = std::collections::HashMap::new();
     for bin in &mut bins {
         if let Some(linked) = linked_to.get(&bin.exe) {
@@ -1173,14 +977,10 @@ fn test(args: Vec<String>) -> anyhow::Result<()> {
         if std::fs::hard_link(&bin.exe, &linked).is_err() {
             std::fs::copy(&bin.exe, &linked)?;
         }
-        let helper = dir.join(mux.file_name().unwrap());
-        if !helper.exists() && mux.exists() {
-            let _ = link_file(&mux, &helper);
-        }
         linked_to.insert(std::mem::replace(&mut bin.exe, linked.clone()), linked);
     }
 
-    // half the cores: each program runs libobs and real-time audio threads of its own
+    // half the cores: some programs run real-time audio threads of their own
     let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8).div_ceil(2).max(2);
     let results = Arc::new(Mutex::new(Vec::new()));
     run_tests(bins, jobs, &args, &results);
@@ -1235,32 +1035,12 @@ fn run_tests(
                     let next = queue.lock().unwrap().pop_front();
                     let Some(bin) = next else { break };
                     let t = Instant::now();
-                    let mut cmd = Command::new(&bin.exe);
-                    // Windows finds obs.dll (and libobs its data) through PATH
-                    if cfg!(windows) {
-                        let path = std::env::var_os("PATH").unwrap_or_default();
-                        let mut dirs = vec![obs_bin()];
-                        dirs.extend(std::env::split_paths(&path));
-                        if let Ok(joined) = std::env::join_paths(dirs) {
-                            cmd.env("PATH", joined);
-                        }
-                    }
-                    let own_process = !bin.args.is_empty();
-                    let out = cmd
-                        .args(if own_process { &bin.args } else { &args })
-                        .envs(own_process.then_some(("LIGHTAIR_TEST_OWN_PROCESS", "1")))
+                    let out = Command::new(&bin.exe)
+                        .args(&args)
                         .current_dir(&bin.dir)
                         .env("CARGO_MANIFEST_DIR", &bin.dir)
                         // Tests that measure frame timing skip that when sharing the GPU.
                         .envs((jobs > 1).then_some(("LIGHTAIR_TESTS_SHARE_GPU", "1")))
-                        // Camera and capture-card modules wait seconds on system services as
-                        // they load; tests don't use them (the smoke test asks for every module).
-                        .env(
-                            "LIGHTAIR_SKIP_MODULES",
-                            std::env::var("LIGHTAIR_SKIP_MODULES").unwrap_or_else(|_| {
-                                "mac-avcapture,mac-avcapture-legacy,mac-syphon,aja,decklink,vlc-video".into()
-                            }),
-                        )
                         .output();
                     let took = t.elapsed();
                     let (ok, log) = match out {
@@ -1275,8 +1055,7 @@ fn run_tests(
                         .filter_map(|l| l.strip_prefix("test result: "))
                         .filter_map(|l| l.split("; ").next()?.split_whitespace().nth(1)?.parse::<usize>().ok())
                         .sum();
-                    // a test of its own that didn't run (a name that no longer matches) isn't a pass
-                    let ok = ok && (!own_process || passed == 1 || log.contains(" 1 ignored"));
+
                     eprintln!(
                         "{} {:>6.1}s  {} ({passed})",
                         if ok { "ok  " } else { "FAIL" },

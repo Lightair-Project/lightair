@@ -1,13 +1,9 @@
 //! The app to ship (macOS): `target/dist/Lightair.app`, standalone, and `Lightair-<version>.dmg`.
 //!
-//! Everything Lightair runs is copied into the app: libobs and the OBS modules it loads (with the
-//! frameworks and libraries they link, from the OBS 33 it builds against), Lightair's own modules
-//! (Lightair Effect Stack), Chromium for web sources, and the command-line tools some features run
-//! (FFmpeg, whisper.cpp) with their libraries. Nothing in it points outside it.
-//!
-//! With `--host` (or `LIGHTAIR_DIST_HOST=1`): the app on Lightair's own engine (lightair-host, the
-//! `host` feature), with nothing of libobs or OBS in it: no libobs, no OBS modules, no Effect
-//! Stack plugin; the trackers alone (`liblightair-tracker.dylib`) and their models.
+//! Everything Lightair runs is copied into the app: the Effect Stack's trackers
+//! (`liblightair-tracker.dylib`) and their models, Chromium for web sources, and the
+//! command-line tools some features run (FFmpeg, whisper.cpp) with their libraries. Nothing in it
+//! points outside it, and nothing of libobs or OBS is in it.
 //!
 //! Then every piece is signed with a Developer ID (hardened runtime, secure timestamp), inside
 //! out, and the disk image is notarized and stapled when `LIGHTAIR_NOTARY_PROFILE` names a
@@ -24,8 +20,8 @@ use super::{INFO_PLIST, bundle_chromium, modules, root, run};
 /// The shipped app's bundle identifier.
 const ID: &str = "app.lightair";
 
-/// The main app: camera and microphone; code it didn't sign (Audio Unit and VST3 plugins, OBS
-/// plugins users add); JIT and unsigned executable memory (Chromium, some audio plugins).
+/// The main app: camera and microphone; code it didn't sign (Audio Unit and VST3 plugins); JIT
+/// and unsigned executable memory (Chromium, some audio plugins).
 const APP_ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -77,24 +73,12 @@ pub fn dist() -> anyhow::Result<()> {
     result
 }
 
-/// Whether the app to ship runs on Lightair's own engine, without libobs.
-pub fn host() -> bool {
-    std::env::args().any(|a| a == "--host") || std::env::var("LIGHTAIR_DIST_HOST").is_ok_and(|v| v == "1")
-}
-
 fn build() -> anyhow::Result<()> {
     anyhow::ensure!(cfg!(target_os = "macos"), "the shipped app is built on macOS");
     let root = root();
     let version = env!("CARGO_PKG_VERSION");
-    let host = host();
-    let mut cargo = Command::new("cargo");
-    cargo.current_dir(&root).args(["build", "--release", "-p", "lightair-app", "-p", "lightair-web-helper"]);
-    if host {
-        cargo.args(["--no-default-features", "--features", "lightair-app/host"]);
-    }
-    run(&mut cargo)?;
+    run(Command::new("cargo").current_dir(&root).args(["build", "--release", "-p", "lightair-app", "-p", "lightair-web-helper"]))?;
     modules()?;
-    let obs = PathBuf::from(std::env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into()));
     let out = root.join("target/dist");
     let _ = std::fs::remove_dir_all(&out);
     let app = out.join("Lightair.app");
@@ -112,26 +96,7 @@ fn build() -> anyhow::Result<()> {
     crate::speech_helper(&c.join("MacOS/lightair-speech"))?;
     crate::piair_binary(&c.join("MacOS/piair"))?;
 
-    // libobs, its graphics backends and mux helper, the modules Lightair loads
-    let obs_frameworks = obs.join("Contents/Frameworks");
-    if !host {
-        ditto(&obs_frameworks.join("libobs.framework"), &c.join("Frameworks/libobs.framework"))?;
-        for lib in ["libobs-opengl.dylib", "libobs-metal.dylib"] {
-            std::fs::copy(obs_frameworks.join(lib), c.join("Frameworks").join(lib))?;
-        }
-        std::fs::copy(obs.join("Contents/MacOS/obs-ffmpeg-mux"), c.join("MacOS/obs-ffmpeg-mux"))?;
-        for module in default_modules(&root)? {
-            let plugin = obs.join("Contents/PlugIns").join(format!("{module}.plugin"));
-            if plugin.exists() {
-                ditto(&plugin, &c.join("PlugIns").join(format!("{module}.plugin")))?;
-            }
-        }
-        ditto(
-            &root.join("target/modules/lightair-effect-stack/lightair-effect-stack.plugin"),
-            &c.join("PlugIns/lightair-effect-stack.plugin"),
-        )?;
-    }
-    // the trackers alone (no libobs), which Lightair's own engine calls, and their models
+    // the trackers, which Lightair's engine calls, and their models
     let modules = root.join("target/modules/lightair-effect-stack");
     std::fs::copy(modules.join("liblightair-tracker.dylib"), c.join("Frameworks/liblightair-tracker.dylib"))?;
     ditto(&modules.join("tracker-models"), &c.join("Resources/tracker-models"))?;
@@ -149,14 +114,12 @@ fn build() -> anyhow::Result<()> {
         run(Command::new("install_name_tool").args(["-add_rpath", "@executable_path/../Frameworks"]).arg(c.join("MacOS").join(tool)))?;
     }
 
-    gather_libraries(&c, &obs_frameworks, &mut origins)?;
-    if host {
-        // nothing of libobs's came in with anything
-        let obs_in = files(&c).into_iter().find(|p| p.to_string_lossy().contains("libobs"));
-        anyhow::ensure!(obs_in.is_none(), "libobs is in the app built without it: {}", obs_in.unwrap().display());
-    }
+    gather_libraries(&c, &mut origins)?;
+    // nothing of libobs's came in with anything
+    let obs_in = files(&c).into_iter().find(|p| p.to_string_lossy().contains("libobs"));
+    anyhow::ensure!(obs_in.is_none(), "libobs is in the app: {}", obs_in.unwrap().display());
 
-    // only the app's own Frameworks: no falling back to an installed OBS or Homebrew
+    // only the app's own Frameworks: no falling back to Homebrew
     drop_outside_rpaths(&app)?;
     check_self_contained(&app)?;
 
@@ -198,14 +161,6 @@ fn ditto(from: &Path, to: &Path) -> anyhow::Result<()> {
     run(Command::new("ditto").arg(from).arg(to))
 }
 
-/// The OBS modules Lightair loads on macOS: `lightair_obs::DEFAULT_MODULES` (its first list).
-fn default_modules(root: &Path) -> anyhow::Result<Vec<String>> {
-    let lib = std::fs::read_to_string(root.join("crates/lightair-obs/src/lib.rs"))?;
-    let start = lib.find("pub const DEFAULT_MODULES").ok_or_else(|| anyhow::anyhow!("no DEFAULT_MODULES"))?;
-    let list = &lib[start..];
-    let list = &list[list.find("&[").unwrap() + 2..list.find("];").unwrap()];
-    Ok(list.split(',').map(|s| s.trim().trim_matches('"').to_string()).filter(|s| !s.is_empty()).collect())
-}
 
 fn which(tool: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
@@ -255,11 +210,10 @@ fn linked(binary: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Copies in every library the app's code links that isn't in it yet (OBS's frameworks and
-/// libraries, or installed ones), and points installed ones (absolute paths) at the copies.
-/// `origins`: where copied-in installed binaries came from (their `@loader_path` search paths
-/// are relative to it).
-fn gather_libraries(c: &Path, obs_frameworks: &Path, origins: &mut std::collections::HashMap<PathBuf, PathBuf>) -> anyhow::Result<()> {
+/// Copies in every library the app's code links that isn't in it yet (installed ones), and
+/// points installed ones (absolute paths) at the copies. `origins`: where copied-in installed
+/// binaries came from (their `@loader_path` search paths are relative to it).
+fn gather_libraries(c: &Path, origins: &mut std::collections::HashMap<PathBuf, PathBuf>) -> anyhow::Result<()> {
     let frameworks = c.join("Frameworks");
     let mut todo: VecDeque<PathBuf> = files(c).into_iter().filter(|p| is_macho(p)).collect();
     let mut done = BTreeSet::new();
@@ -276,35 +230,22 @@ fn gather_libraries(c: &Path, obs_frameworks: &Path, origins: &mut std::collecti
                 if inside.exists() {
                     continue;
                 }
-                // OBS's: a framework (copy all of it) or a library
-                let top = rel.split('/').next().unwrap();
-                let from = obs_frameworks.join(top);
-                if !from.exists() {
-                    // an installed library linked through its own search paths (Homebrew)
-                    let origin = origins.get(&binary).cloned();
-                    let found = rpaths(&binary)
-                        .into_iter()
-                        .filter_map(|r| match (r.strip_prefix("@loader_path/"), &origin) {
-                            (Some(sub), Some(o)) => Some(o.parent()?.join(sub)),
-                            (None, _) if r.starts_with('/') => Some(PathBuf::from(r)),
-                            _ => None,
-                        })
-                        .map(|dir| dir.join(rel))
-                        .find(|p| p.exists());
-                    let found = found.ok_or_else(|| anyhow::anyhow!("{} links {dep}, which isn't in the app, OBS or its search paths", binary.display()))?;
-                    let copy = frameworks.join(rel);
-                    copy_library(&found, &copy)?;
-                    origins.insert(copy.clone(), std::fs::canonicalize(&found)?);
-                    todo.push_back(copy);
-                    continue;
-                }
-                if top.ends_with(".framework") {
-                    ditto(&from, &frameworks.join(top))?;
-                    todo.extend(files(&frameworks.join(top)).into_iter().filter(|p| is_macho(p)));
-                } else {
-                    std::fs::copy(&from, frameworks.join(top)).with_context(|| format!("{}", from.display()))?;
-                    todo.push_back(frameworks.join(top));
-                }
+                // an installed library linked through its own search paths (Homebrew)
+                let origin = origins.get(&binary).cloned();
+                let found = rpaths(&binary)
+                    .into_iter()
+                    .filter_map(|r| match (r.strip_prefix("@loader_path/"), &origin) {
+                        (Some(sub), Some(o)) => Some(o.parent()?.join(sub)),
+                        (None, _) if r.starts_with('/') => Some(PathBuf::from(r)),
+                        _ => None,
+                    })
+                    .map(|dir| dir.join(rel))
+                    .find(|p| p.exists());
+                let found = found.ok_or_else(|| anyhow::anyhow!("{} links {dep}, which isn't in the app or its search paths", binary.display()))?;
+                let copy = frameworks.join(rel);
+                copy_library(&found, &copy)?;
+                origins.insert(copy.clone(), std::fs::canonicalize(&found)?);
+                todo.push_back(copy);
                 continue;
             }
             if dep.starts_with('@') {
@@ -352,7 +293,7 @@ fn rpaths(binary: &Path) -> Vec<String> {
     found
 }
 
-/// Drops search paths outside the app (an installed OBS, Homebrew's folders) from all its code.
+/// Drops search paths outside the app (Homebrew's folders) from all its code.
 fn drop_outside_rpaths(app: &Path) -> anyhow::Result<()> {
     for f in files(app).into_iter().filter(|p| is_macho(p)) {
         for r in rpaths(&f).into_iter().filter(|r| r.starts_with('/') && !r.starts_with("/usr/lib/") && !r.starts_with("/System/")) {

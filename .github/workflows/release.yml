@@ -1,6 +1,7 @@
 # A release: push a tag like v0.2.0 (the version in Cargo.toml) and this builds the signed,
-# notarized macOS app and the Windows app, signs the update manifest Lightair's updater reads,
-# and publishes them as a GitHub Release (docs/releasing.md).
+# notarized macOS app, signs the update manifest Lightair's updater reads, and publishes them as
+# a GitHub Release (docs/releasing.md). The Windows app joins once it's moved off libobs (its
+# compositor, captures and outputs): `cargo xtask dist` doesn't build it until then.
 name: Release
 
 on:
@@ -56,17 +57,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # libobs as Lightair is built against it: OBS 33.0.0's own app (its frameworks, plugins and
-      # mux helper go into Lightair.app), plus the tools dist bundles
-      - name: OBS 33.0.0 and tools
-        run: |
-          gh release download 33.0.0 --repo obsproject/obs-studio --pattern 'OBS-Studio-33.0.0-macOS-Apple.dmg' --dir "$RUNNER_TEMP"
-          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/obs" "$RUNNER_TEMP/OBS-Studio-33.0.0-macOS-Apple.dmg"
-          ditto "$RUNNER_TEMP/obs/OBS.app" /Applications/OBS.app
-          hdiutil detach "$RUNNER_TEMP/obs"
-          brew install ffmpeg whisper-cpp
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # the tools dist bundles, and the Effect Stack's trackers' build tools
+      - name: Tools
+        run: brew install ffmpeg whisper-cpp ninja
 
       # the Developer ID certificate into a keychain of this run's own, and the notary's login
       - name: Signing and notarization
@@ -101,62 +94,8 @@ jobs:
           path: target/dist/Lightair-${{ needs.version.outputs.version }}.dmg
           if-no-files-found: error
 
-  windows:
-    needs: version
-    runs-on: windows-latest
-    timeout-minutes: 150
-    env:
-      CEF_PATH: ${{ github.workspace }}/cef
-      LIGHTAIR_TWITCH_CLIENT_ID: ${{ secrets.LIGHTAIR_TWITCH_CLIENT_ID }}
-      LIGHTAIR_YOUTUBE_CLIENT_ID: ${{ secrets.LIGHTAIR_YOUTUBE_CLIENT_ID }}
-      LIGHTAIR_YOUTUBE_CLIENT_SECRET: ${{ secrets.LIGHTAIR_YOUTUBE_CLIENT_SECRET }}
-      LIGHTAIR_X_CLIENT_ID: ${{ secrets.LIGHTAIR_X_CLIENT_ID }}
-      LIGHTAIR_X_CLIENT_SECRET: ${{ secrets.LIGHTAIR_X_CLIENT_SECRET }}
-      LIGHTAIR_SPOTIFY_CLIENT_ID: ${{ secrets.LIGHTAIR_SPOTIFY_CLIENT_ID }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      # Chromium (CEF), outside target/ so the Rust cache can't leave half of it behind
-      - name: CEF cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/cef
-          key: cef-156.0.28-${{ runner.os }}
-
-      # libobs as OBS releases it: OBS 33.0.0's official Windows build, the version the bindings
-      # come from (third_party/obs-studio, unmodified), installed on this build machine only.
-      # Lightair imports obs.dll by name and bundles it; its users never need OBS.
-      - name: OBS 33.0.0
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download 33.0.0 --repo obsproject/obs-studio --pattern 'OBS-Studio-33.0.0-Windows-x64-Installer.exe' --dir $env:RUNNER_TEMP
-          Start-Process -Wait -FilePath "$env:RUNNER_TEMP\OBS-Studio-33.0.0-Windows-x64-Installer.exe" -ArgumentList '/S', '/D=C:\obs'
-          if (!(Test-Path 'C:\obs\bin\64bit\obs.dll')) { throw "OBS 33.0.0 didn't install" }
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: ffmpeg
-        run: choco install ffmpeg -y --no-progress
-
-      - name: Lightair Effect Stack module
-        env:
-          OBS_DIR: C:\obs
-        run: cargo xtask modules
-      - name: Build
-        env:
-          OBS_DIR: C:\obs
-        run: cargo xtask dist
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: target/dist/Lightair-${{ needs.version.outputs.version }}-windows-x64.zip
-          if-no-files-found: error
-
   publish:
-    needs: [version, macos, windows]
+    needs: [version, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

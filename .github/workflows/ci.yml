@@ -25,18 +25,6 @@ jobs:
           path: ${{ github.workspace }}/cef
           key: cef-156.0.28-${{ runner.os }}
 
-      # libobs as OBS releases it: OBS 33.0.0's official Windows build, the version the bindings
-      # come from (third_party/obs-studio, unmodified), installed on this build machine only.
-      # Lightair imports obs.dll by name and bundles it; its users never need OBS.
-      - name: OBS 33.0.0
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download 33.0.0 --repo obsproject/obs-studio --pattern 'OBS-Studio-33.0.0-Windows-x64-Installer.exe' --dir $env:RUNNER_TEMP
-          Start-Process -Wait -FilePath "$env:RUNNER_TEMP\OBS-Studio-33.0.0-Windows-x64-Installer.exe" -ArgumentList '/S', '/D=C:\obs'
-          if (!(Test-Path 'C:\obs\bin\64bit\obs.dll')) { throw "OBS 33.0.0 didn't install" }
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -46,19 +34,9 @@ jobs:
         run: choco install ffmpeg -y --no-progress
 
       - name: Clippy
-        env:
-          OBS_DIR: C:\obs
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Lightair Effect Stack on ONNX Runtime + DirectML (its test is skipped when it isn't built)
-      - name: Lightair Effect Stack module
-        env:
-          OBS_DIR: C:\obs
-        run: cargo xtask modules
-
       - name: Tests
-        env:
-          OBS_DIR: C:\obs
         run: cargo xtask test
 
   macos:
@@ -80,7 +58,5 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # Checking needs only libobs's headers (the submodule); running needs an OBS.app, which
-      # the macOS tests run against on a development Mac.
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
