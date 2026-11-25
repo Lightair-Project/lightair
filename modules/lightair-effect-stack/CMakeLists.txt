@@ -1,12 +1,25 @@
-# Lightair Effect Stack (docs/09-effect-stack.md): a libobs module built in-tree.
-# macOS: lightair-effect-stack.plugin, tracking and segmentation on Core ML, linked against an
-# installed OBS 33's libobs.framework (OBS_APP), like the rest of Lightair (IMPLEMENTATION.md).
-# Windows: lightair-effect-stack.dll, the same on ONNX Runtime with DirectML, linked against
-# OBS_DIR's obs.lib, laid out as OBS lays out its modules (windows.cmake).
+# Lightair Effect Stack (docs/09-effect-stack.md): the face trackers Lightair's engine calls.
+# macOS: liblightair-tracker.dylib (tracking and segmentation on Core ML and Vision) and its
+# compiled models in tracker-models. The presets, sticker art and shaders in data/ are built into
+# the app (lightair-preview, lightair-app).
+#
+# The old libobs module (lightair-effect-stack.plugin on macOS, lightair-effect-stack.dll on
+# Windows on ONNX Runtime with DirectML, windows.cmake) is no longer built: Lightair has no libobs.
+# Its sources stay for reference; building it (LIGHTAIR_WITH_LIBOBS=ON) needs libobs's headers
+# and an OBS to link, which this repository no longer has.
 cmake_minimum_required(VERSION 3.24)
+
+# Off: the trackers alone (lightair-tracker, for Lightair's engine), with nothing of libobs's or
+# OBS's.
+option(LIGHTAIR_WITH_LIBOBS "Build the old libobs module too" OFF)
+
 # (WIN32 is only known after project(); the host is: Lightair builds natively on Windows)
 if(CMAKE_HOST_WIN32)
   project(lightair-effect-stack VERSION 0.1.0 LANGUAGES C CXX)
+  if(NOT LIGHTAIR_WITH_LIBOBS)
+    message(STATUS "Lightair Effect Stack: nothing to build on Windows yet (the trackers alone are macOS's)")
+    return()
+  endif()
   include(cmake/windows.cmake)
   return()
 endif()
@@ -26,10 +39,6 @@ set(DEPS "${CMAKE_SOURCE_DIR}/.deps")
 # Face tracking and segmentation run on Core ML: MediaPipe's face landmarker (478-point mesh),
 # YuNet detection and the multiclass selfie segmenter, converted to .mlpackage
 # (data/models/coreml, made by tools/convert-coreml.py) and compiled into the bundle below.
-
-# Off: the trackers alone (lightair-tracker, for Lightair's own engine), with nothing of
-# libobs's or OBS's.
-option(LIGHTAIR_WITH_LIBOBS "Build the libobs module too" ON)
 
 if(LIGHTAIR_WITH_LIBOBS)
 set(GEN "${CMAKE_BINARY_DIR}/generated")
@@ -112,9 +121,9 @@ set_target_properties(lightair-effect-stack PROPERTIES
   MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
 endif()
 
-# The trackers alone, without libobs (faces, segmentation, people, bodies through Core ML and
-# Vision): Lightair's own engine calls their C API directly (lightair-host's tracker.rs). The
-# compiled models sit beside the library, in tracker-models.
+# The trackers alone (faces, segmentation, people, bodies through Core ML and Vision):
+# Lightair's engine calls their C API directly (lightair-host's tracker.rs). The compiled models
+# sit beside the library, in tracker-models.
 add_library(lightair-tracker SHARED
   src/tracker/tracker-core.cpp
   src/tracker/tracker-util.cpp
