@@ -35,7 +35,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -182,6 +182,9 @@ struct VideoPipe {
     fed: AtomicU64,
     /// A track of a multitrack stream: the stream's keyframe beat and this canvas's place in it.
     gop: Option<(Arc<Gop>, usize)>,
+    /// Otherwise its own beat: the next keyframe is due at this time, a whole number of keyframe
+    /// intervals on the program clock.
+    next_key_ns: AtomicI64,
 }
 
 /// Where a multitrack stream's pictures stand on a canvas frame: not yet sent, a keyframe, or
@@ -208,12 +211,22 @@ struct GopCanvas {
     answered: u64,
 }
 
+/// How far ahead of the frame it's seen at a multitrack stream's asked-for keyframe comes.
+const ASK_AHEAD_NS: i64 = 50_000_000;
+
 /// The keyframes of a multitrack stream's tracks: every track of a canvas makes its keyframes
 /// on the same canvas frames (the same times), every keyframe interval on the program clock and
 /// when the connection asks for one, so the renditions switch cleanly. Its tracks wait for
 /// the first keyframe once the stream is set up.
 struct Gop {
     every_ns: i64,
+    /// When the stream's first keyframe is: every canvas starts there, not at its own first frame.
+    start_ns: AtomicI64,
+    /// When the newest keyframe request (`asked_for`, a count of `asked`) is answered on every
+    /// canvas: set by the first canvas to see it, a few frames ahead so every canvas still has
+    /// that frame to come.
+    asked_at: AtomicI64,
+    asked_for: AtomicU64,
     ready: AtomicBool,
     asked: AtomicU64,
     canvases: Mutex<Vec<GopCanvas>>,
@@ -234,6 +247,9 @@ impl Gop {
             .collect();
         Gop {
             every_ns: keyint_s.max(1) as i64 * 1_000_000_000,
+            start_ns: AtomicI64::new(i64::MIN),
+            asked_at: AtomicI64::new(i64::MIN),
+            asked_for: AtomicU64::new(0),
             ready: AtomicBool::new(false),
             asked: AtomicU64::new(0),
             canvases: Mutex::new(canvases),
@@ -249,11 +265,25 @@ impl Gop {
             return c.beat;
         }
         let asked = self.asked.load(Ordering::Acquire);
+        // a keyframe asked for: due at one time on every canvas (all under the canvases' lock)
+        let ask_due = asked != c.answered && {
+            if self.asked_for.load(Ordering::Relaxed) != asked {
+                self.asked_for.store(asked, Ordering::Relaxed);
+                self.asked_at.store(pts + ASK_AHEAD_NS, Ordering::Relaxed);
+            }
+            pts >= self.asked_at.load(Ordering::Relaxed)
+        };
         let beat = if !self.ready.load(Ordering::Acquire) {
             Beat::Wait
         } else if slot.rem_euclid(c.step) != 0 {
             if c.started { Beat::Frame } else { Beat::Wait }
-        } else if !c.started || pts >= c.next_ns || asked != c.answered {
+        } else if !c.started && pts < self.start_ns.load(Ordering::Acquire) {
+            // another canvas started the stream later than this frame: start with it
+            Beat::Wait
+        } else if !c.started || pts >= c.next_ns || ask_due {
+            if !c.started {
+                let _ = self.start_ns.compare_exchange(i64::MIN, pts, Ordering::AcqRel, Ordering::Acquire);
+            }
             c.started = true;
             c.answered = asked;
             c.next_ns = (pts.div_euclid(self.every_ns) + 1) * self.every_ns;
@@ -314,6 +344,7 @@ impl VideoPipe {
             skipped,
             fed: AtomicU64::new(0),
             gop,
+            next_key_ns: AtomicI64::new(i64::MIN),
         }))
     }
 
@@ -329,7 +360,15 @@ impl VideoPipe {
                 Beat::Key => true,
                 Beat::Frame => false,
             },
-            None => false,
+            // every keyframe interval on the program clock, not the encoder's own count
+            None => {
+                let every = self.key.keyint.max(1) as i64 * 1_000_000_000;
+                let due = pts >= self.next_key_ns.load(Ordering::Acquire);
+                if due {
+                    self.next_key_ns.store((pts.div_euclid(every) + 1) * every, Ordering::Release);
+                }
+                due
+            }
         };
         match self.transfer.lock().feed(&self.encoder, frame, pts, key) {
             pictures::Fed::NotCopied => {
@@ -363,7 +402,7 @@ impl VideoPipe {
     /// [`VideoPipe::subscribe`] under the output's id `id` (an output on several encoders).
     fn subscribe_as(&self, id: u64, sink: Arc<dyn Sink>) {
         self.subs.lock().push((id, sink));
-        self.encoder.request_keyframe();
+        self.ask_keyframe();
     }
 
     fn unsubscribe(&self, id: u64) {
@@ -452,13 +491,14 @@ fn add_to_feed(canvas: Id, consumer: Arc<dyn Consumer>, fps: (u32, u32)) {
     }
     let (tx, rx) = bounded(QUEUED_FRAMES);
     let pipes: Consumers = Arc::new(Mutex::new(vec![consumer]));
-    let p = pipes.clone();
+    let dropped = Arc::new(AtomicU32::new(0));
+    let (p, d) = (pipes.clone(), dropped.clone());
     let thread = std::thread::Builder::new()
         .name("lightair-encode".into())
-        .spawn(move || run_canvas(rx, p, fps))
+        .spawn(move || run_canvas(rx, p, fps, d))
         .map_err(|e| tracing::error!(%e, "own outputs: no encoding thread"))
         .ok();
-    feeds.insert(canvas, CanvasFeed { tx, pipes, dropped: Arc::new(AtomicU32::new(0)), thread });
+    feeds.insert(canvas, CanvasFeed { tx, pipes, dropped, thread });
 }
 
 /// Takes `consumer` off whichever canvas it's on; the canvas's thread stops with its last one.
@@ -521,19 +561,23 @@ pub fn canvas_moved(from: Id, to: Id) {
 
 /// A canvas's thread: each frame placed on the canvas's frame grid (from the first frame's
 /// time, at the canvas's rate) and encoded; the last frame repeated while none comes.
-fn run_canvas(rx: Receiver<(Frame, i64)>, pipes: Consumers, fps: (u32, u32)) {
+fn run_canvas(rx: Receiver<(Frame, i64)>, pipes: Consumers, fps: (u32, u32), dropped: Arc<AtomicU32>) {
     let (num, den) = (fps.0.max(1) as i128, fps.1.max(1) as i128);
     let frame_ns = (den * 1_000_000_000 / num) as i64;
-    let grid = |origin: i64, slot: i64| origin + (slot as i128 * den * 1_000_000_000 / num) as i64;
-    let slot_of = |origin: i64, t: i64| ((t - origin) as f64 / frame_ns as f64).round() as i64;
+    // a frame's time from its place on the clock's own frame grid (`origin` the first frame's
+    // place there), so canvases of one rate give the frames of one moment the very same time
+    let grid = |origin: i128, slot: i64| ((origin + slot as i128) * den * 1_000_000_000 / num) as i64;
+    let slot_of = |origin: i128, t: i64| ((t - grid(origin, 0)) as f64 / frame_ns as f64).round() as i64;
     let period = Duration::from_nanos(frame_ns.max(1) as u64);
-    let mut origin: Option<i64> = None;
+    let mut origin: Option<i128> = None;
     let mut last = -1i64;
     let mut fresh = Instant::now();
+    // frames that took the encoders longer than a frame, said every few seconds
+    let (mut slow, mut slowest, mut said, mut said_dropped) = (0u32, Duration::ZERO, Instant::now(), 0u32);
     loop {
         match rx.recv_timeout(period) {
             Ok((frame, t)) => {
-                let o = *origin.get_or_insert(t);
+                let o = *origin.get_or_insert_with(|| (t as i128 * num).div_euclid(den * 1_000_000_000));
                 let mut slot = slot_of(o, t);
                 if slot <= last {
                     // two frames from one libobs frame (a faster canvas): the next slot, unless
@@ -547,8 +591,29 @@ fn run_canvas(rx: Receiver<(Frame, i64)>, pipes: Consumers, fps: (u32, u32)) {
                 fresh = Instant::now();
                 let pts = grid(o, slot);
                 let pipes = pipes.lock().clone();
+                let began = Instant::now();
+                // the place on the clock's grid: tracks taking every nth frame take the same ones
+                let place = (o + slot as i128) as i64;
                 for p in &pipes {
-                    p.push(Some(&frame.0), slot, pts);
+                    p.push(Some(&frame.0), place, pts);
+                }
+                let took = began.elapsed();
+                if took > period {
+                    slow += 1;
+                    slowest = slowest.max(took);
+                }
+                if said.elapsed() >= Duration::from_secs(5) {
+                    let d = dropped.load(Ordering::Relaxed);
+                    if slow > 0 || d != said_dropped {
+                        tracing::info!(
+                            slow,
+                            slowest_ms = slowest.as_secs_f64() * 1000.0,
+                            dropped = d - said_dropped,
+                            encoders = pipes.len(),
+                            "own outputs: a canvas's encoders fell behind"
+                        );
+                    }
+                    (slow, slowest, said, said_dropped) = (0, Duration::ZERO, Instant::now(), d);
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
@@ -563,8 +628,9 @@ fn run_canvas(rx: Receiver<(Frame, i64)>, pipes: Consumers, fps: (u32, u32)) {
                 last = slot;
                 let pts = grid(o, slot);
                 let pipes = pipes.lock().clone();
+                let place = (o + slot as i128) as i64;
                 for p in &pipes {
-                    p.push(None, slot, pts);
+                    p.push(None, place, pts);
                 }
             }
             Err(RecvTimeoutError::Disconnected) => break,
@@ -1910,8 +1976,8 @@ impl State {
         if let Some(p) = self.videos.iter().find(|p| p.key == key && *p.canvas.lock() == canvas) {
             return Ok(p.clone());
         }
-        // on the stream's beat, the encoder's own keyframes never come first
-        let keyframe_interval_s = if track.is_some() { key.keyint as f32 * 2.0 + 1.0 } else { key.keyint as f32 };
+        // keyframes come on the program clock (`VideoPipe::push`): the encoder's own never first
+        let keyframe_interval_s = key.keyint as f32 * 2.0 + 1.0;
         let settings = VideoSettings {
             codec,
             width: key.width,
