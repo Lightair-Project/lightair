@@ -9,7 +9,7 @@
 
 use std::ffi::{CStr, c_char, c_void};
 
-use crate::avatar::{FT_MESH, FtFace, free_cd, get_bool, get_ptr, set_int, set_ptr, tracker_call};
+use crate::avatar::{FT_MESH, FtFace, face_free, face_get, face_new, face_submit};
 use crate::sys;
 
 /// The picture copied for the tracker is at most this wide.
@@ -120,13 +120,7 @@ struct Watch {
 
 impl Watch {
     fn new() -> Self {
-        let tracker = tracker_call(c"lightair_face_tracker_new", |_| {})
-            .map(|mut cd| {
-                let t = get_ptr(&mut cd, c"tracker");
-                free_cd(&mut cd);
-                t
-            })
-            .unwrap_or(std::ptr::null_mut());
+        let tracker = face_new();
         Watch {
             tracker,
             texrender: std::ptr::null_mut(),
@@ -212,17 +206,8 @@ impl Watch {
                     }
                     self.frame_id += 1;
                     let (tracker, id) = (self.tracker, self.frame_id);
-                    if !tracker.is_null()
-                        && let Some(mut cd) = tracker_call(c"lightair_face_tracker_submit", |cd| {
-                        set_ptr(cd, c"tracker", tracker);
-                        set_ptr(cd, c"data", data as *mut c_void);
-                        set_int(cd, c"linesize", linesize as i64);
-                        set_int(cd, c"width", tw as i64);
-                        set_int(cd, c"height", th as i64);
-                        set_int(cd, c"frame_id", id as i64);
-                        set_int(cd, c"timestamp_ns", crate::clock::now_ns() as i64);
-                    }) {
-                        free_cd(&mut cd);
+                    if !tracker.is_null() {
+                        face_submit(tracker, data, linesize, tw, th, id, crate::clock::now_ns());
                     }
                     sys::gs_stagesurface_unmap(self.stage);
                 }
@@ -254,17 +239,8 @@ impl Watch {
     /// The tracker's latest face as a box in the picture.
     fn read_face(&mut self, tw: u32, th: u32) {
         let mut face: Box<FtFace> = unsafe { Box::new(std::mem::zeroed()) };
-        let fp = &mut *face as *mut FtFace as *mut c_void;
         let (tracker, id) = (self.tracker, self.frame_id);
-        let Some(mut cd) = tracker_call(c"lightair_face_tracker_get", |cd| {
-            set_ptr(cd, c"tracker", tracker);
-            set_int(cd, c"frame_id", id.saturating_sub(1) as i64);
-            set_ptr(cd, c"face", fp);
-        }) else {
-            return;
-        };
-        let ok = get_bool(&mut cd, c"ok");
-        free_cd(&mut cd);
+        let ok = face_get(tracker, id.saturating_sub(1), &mut face);
         let (s, n) = (face.region_start[FT_MESH].max(0) as usize, face.region_count[FT_MESH].max(0) as usize);
         let mesh = face.pts.get(s..s + n).unwrap_or(&[]);
         if !ok || !face.valid || !face.present || mesh.is_empty() {
@@ -296,10 +272,7 @@ impl Watch {
             }
         }
         if !self.tracker.is_null() {
-            let t = self.tracker;
-            if let Some(mut cd) = tracker_call(c"lightair_face_tracker_free", |cd| set_ptr(cd, c"tracker", t)) {
-                free_cd(&mut cd);
-            }
+            face_free(self.tracker);
         }
     }
 }

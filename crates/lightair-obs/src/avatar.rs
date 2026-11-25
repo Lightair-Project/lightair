@@ -141,7 +141,139 @@ const FT_LEFT_PUPIL: usize = 10;
 const FT_RIGHT_PUPIL: usize = 11;
 pub(crate) const FT_MESH: usize = 12;
 
+// ---------------------------------------------------------------- the trackers
+// macOS: Lightair's tracker library, called directly (`lightair_host::tracker::raw`); elsewhere
+// the Effect Stack module's libobs procs.
+
+/// A new face tracker (null when there's none).
+pub(crate) fn face_new() -> *mut c_void {
+    #[cfg(target_os = "macos")]
+    return lightair_host::tracker::raw::face_new();
+    #[cfg(not(target_os = "macos"))]
+    tracker_call(c"lightair_face_tracker_new", |_| {}).map_or(std::ptr::null_mut(), |mut cd| {
+        let t = get_ptr(&mut cd, c"tracker");
+        free_cd(&mut cd);
+        t
+    })
+}
+
+pub(crate) fn face_free(t: *mut c_void) {
+    if t.is_null() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    unsafe { lightair_host::tracker::raw::face_free(t) };
+    #[cfg(not(target_os = "macos"))]
+    if let Some(mut cd) = tracker_call(c"lightair_face_tracker_free", |cd| set_ptr(cd, c"tracker", t)) {
+        free_cd(&mut cd);
+    }
+}
+
+/// Gives a BGRA frame to the face tracker (copied before this returns).
+pub(crate) fn face_submit(t: *mut c_void, data: *const u8, linesize: u32, width: u32, height: u32, frame_id: u64, time_ns: u64) -> bool {
+    #[cfg(target_os = "macos")]
+    return unsafe { lightair_host::tracker::raw::face_submit(t, data, linesize, width, height, frame_id, time_ns) };
+    #[cfg(not(target_os = "macos"))]
+    tracker_call(c"lightair_face_tracker_submit", |cd| {
+        set_ptr(cd, c"tracker", t);
+        set_ptr(cd, c"data", data as *mut c_void);
+        set_int(cd, c"linesize", linesize as i64);
+        set_int(cd, c"width", width as i64);
+        set_int(cd, c"height", height as i64);
+        set_int(cd, c"frame_id", frame_id as i64);
+        set_int(cd, c"timestamp_ns", time_ns as i64);
+    })
+    .is_some_and(|mut cd| {
+        let sent = get_bool(&mut cd, c"sent");
+        free_cd(&mut cd);
+        sent
+    })
+}
+
+/// The face tracker's landmarks for frame `frame_id`.
+pub(crate) fn face_get(t: *mut c_void, frame_id: u64, face: &mut FtFace) -> bool {
+    #[cfg(target_os = "macos")]
+    // SAFETY: the same `ft_face` layout
+    return unsafe {
+        lightair_host::tracker::raw::face_get(t, frame_id, &mut *(face as *mut FtFace as *mut lightair_host::tracker::FtFace))
+    };
+    #[cfg(not(target_os = "macos"))]
+    {
+        let fp = face as *mut FtFace as *mut c_void;
+        tracker_call(c"lightair_face_tracker_get", |cd| {
+            set_ptr(cd, c"tracker", t);
+            set_int(cd, c"frame_id", frame_id as i64);
+            set_ptr(cd, c"face", fp);
+        })
+        .is_some_and(|mut cd| {
+            let ok = get_bool(&mut cd, c"ok");
+            free_cd(&mut cd);
+            ok
+        })
+    }
+}
+
+/// A new body tracker (null when there's none).
+fn body_new() -> *mut c_void {
+    #[cfg(target_os = "macos")]
+    return lightair_host::tracker::raw::body_new();
+    #[cfg(not(target_os = "macos"))]
+    tracker_call(c"lightair_body_tracker_new", |_| {}).map_or(std::ptr::null_mut(), |mut cd| {
+        let t = get_ptr(&mut cd, c"tracker");
+        free_cd(&mut cd);
+        t
+    })
+}
+
+fn body_free(t: *mut c_void) {
+    if t.is_null() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    unsafe { lightair_host::tracker::raw::body_free(t) };
+    #[cfg(not(target_os = "macos"))]
+    if let Some(mut cd) = tracker_call(c"lightair_body_tracker_free", |cd| set_ptr(cd, c"tracker", t)) {
+        free_cd(&mut cd);
+    }
+}
+
+fn body_submit(t: *mut c_void, data: *const u8, linesize: u32, width: u32, height: u32, frame_id: u64) -> bool {
+    #[cfg(target_os = "macos")]
+    return unsafe { lightair_host::tracker::raw::body_submit(t, data, linesize, width, height, frame_id) };
+    #[cfg(not(target_os = "macos"))]
+    tracker_call(c"lightair_body_tracker_submit", |cd| {
+        set_ptr(cd, c"tracker", t);
+        set_ptr(cd, c"data", data as *mut c_void);
+        set_int(cd, c"linesize", linesize as i64);
+        set_int(cd, c"width", width as i64);
+        set_int(cd, c"height", height as i64);
+        set_int(cd, c"frame_id", frame_id as i64);
+    })
+    .is_some_and(|mut cd| {
+        let sent = get_bool(&mut cd, c"sent");
+        free_cd(&mut cd);
+        sent
+    })
+}
+
+fn body_get(t: *mut c_void, body: &mut BtBody) -> bool {
+    let bp = body as *mut BtBody as *mut c_void;
+    #[cfg(target_os = "macos")]
+    return unsafe { lightair_host::tracker::raw::body_get(t, bp) };
+    #[cfg(not(target_os = "macos"))]
+    tracker_call(c"lightair_body_tracker_get", |cd| {
+        set_ptr(cd, c"tracker", t);
+        set_ptr(cd, c"body", bp);
+    })
+    .is_some_and(|mut cd| {
+        let ok = get_bool(&mut cd, c"ok");
+        free_cd(&mut cd);
+        ok
+    })
+}
+
 /// Calls one of the face tracker's global procs.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // (macOS calls the tracker library)
 pub(crate) fn tracker_call(name: &CStr, fill: impl FnOnce(*mut sys::calldata_t)) -> Option<sys::calldata_t> {
     unsafe {
         let ph = sys::obs_get_proc_handler();
@@ -176,16 +308,19 @@ fn set_string(cd: *mut sys::calldata_t, name: &CStr, v: &CStr) {
     unsafe { sys::calldata_set_data(cd, name.as_ptr(), b.as_ptr() as *const c_void, b.len()) };
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))] // (macOS calls the tracker library)
 pub(crate) fn set_ptr(cd: *mut sys::calldata_t, name: &CStr, p: *mut c_void) {
     unsafe {
         sys::calldata_set_data(cd, name.as_ptr(), &p as *const _ as *const c_void, std::mem::size_of::<*mut c_void>())
     };
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))] // (macOS calls the tracker library)
 pub(crate) fn set_int(cd: *mut sys::calldata_t, name: &CStr, v: i64) {
     unsafe { sys::calldata_set_data(cd, name.as_ptr(), &v as *const _ as *const c_void, std::mem::size_of::<i64>()) };
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))] // (macOS calls the tracker library)
 pub(crate) fn get_ptr(cd: &mut sys::calldata_t, name: &CStr) -> *mut c_void {
     let mut p: *mut c_void = std::ptr::null_mut();
     unsafe {
@@ -577,22 +712,16 @@ impl Shared {
 
     fn tracker(&self) -> *mut c_void {
         let mut t = self.tracker.lock();
-        if *t == 0
-            && let Some(mut cd) = tracker_call(c"lightair_face_tracker_new", |_| {})
-        {
-            *t = get_ptr(&mut cd, c"tracker") as usize;
-            free_cd(&mut cd);
+        if *t == 0 {
+            *t = face_new() as usize;
         }
         *t as *mut c_void
     }
 
     fn body_tracker(&self) -> *mut c_void {
         let mut t = self.body_tracker.lock();
-        if *t == 0
-            && let Some(mut cd) = tracker_call(c"lightair_body_tracker_new", |_| {})
-        {
-            *t = get_ptr(&mut cd, c"tracker") as usize;
-            free_cd(&mut cd);
+        if *t == 0 {
+            *t = body_new() as usize;
         }
         *t as *mut c_void
     }
@@ -604,13 +733,7 @@ impl Shared {
             return None;
         }
         let mut b: Box<BtBody> = unsafe { Box::new(std::mem::zeroed()) };
-        let bp = &mut *b as *mut BtBody as *mut c_void;
-        let mut cd = tracker_call(c"lightair_body_tracker_get", |cd| {
-            set_ptr(cd, c"tracker", tracker);
-            set_ptr(cd, c"body", bp);
-        })?;
-        let ok = get_bool(&mut cd, c"ok");
-        free_cd(&mut cd);
+        let ok = body_get(tracker, &mut b);
         if !ok || !b.present {
             return None;
         }
@@ -645,14 +768,7 @@ impl Shared {
             return None;
         }
         let mut face: Box<FtFace> = unsafe { Box::new(std::mem::zeroed()) };
-        let fp = &mut *face as *mut FtFace as *mut c_void;
-        let mut cd = tracker_call(c"lightair_face_tracker_get", |cd| {
-            set_ptr(cd, c"tracker", tracker);
-            set_int(cd, c"frame_id", frame_id as i64);
-            set_ptr(cd, c"face", fp);
-        })?;
-        let ok = get_bool(&mut cd, c"ok");
-        free_cd(&mut cd);
+        let ok = face_get(tracker, frame_id, &mut face);
         if !ok || !face.valid || !face.present {
             return None;
         }
@@ -1011,28 +1127,9 @@ impl Render {
                     g.frame_id += 1;
                     let id = g.frame_id;
                     let now = crate::clock::now_ns();
-                    if let Some(mut cd) = tracker_call(c"lightair_face_tracker_submit", |cd| {
-                        set_ptr(cd, c"tracker", tracker);
-                        set_ptr(cd, c"data", data as *mut c_void);
-                        set_int(cd, c"linesize", linesize as i64);
-                        set_int(cd, c"width", tw as i64);
-                        set_int(cd, c"height", th as i64);
-                        set_int(cd, c"frame_id", id as i64);
-                        set_int(cd, c"timestamp_ns", now as i64);
-                    }) {
-                        free_cd(&mut cd);
-                    }
-                    if !body.is_null()
-                        && let Some(mut cd) = tracker_call(c"lightair_body_tracker_submit", |cd| {
-                            set_ptr(cd, c"tracker", body);
-                            set_ptr(cd, c"data", data as *mut c_void);
-                            set_int(cd, c"linesize", linesize as i64);
-                            set_int(cd, c"width", tw as i64);
-                            set_int(cd, c"height", th as i64);
-                            set_int(cd, c"frame_id", id as i64);
-                        })
-                    {
-                        free_cd(&mut cd);
+                    face_submit(tracker, data, linesize, tw, th, id, now);
+                    if !body.is_null() {
+                        body_submit(body, data, linesize, tw, th, id);
                     }
                     if keep {
                         let row = tw as usize * 4;
@@ -1405,20 +1502,8 @@ unsafe extern "C" fn destroy(data: *mut c_void) {
         s.render.lock().destroy();
         sys::obs_leave_graphics();
     }
-    let body = std::mem::take(&mut *s.body_tracker.lock());
-    if body != 0
-        && let Some(mut cd) =
-            tracker_call(c"lightair_body_tracker_free", |cd| set_ptr(cd, c"tracker", body as *mut c_void))
-    {
-        free_cd(&mut cd);
-    }
-    let tracker = std::mem::take(&mut *s.tracker.lock());
-    if tracker != 0
-        && let Some(mut cd) =
-            tracker_call(c"lightair_face_tracker_free", |cd| set_ptr(cd, c"tracker", tracker as *mut c_void))
-    {
-        free_cd(&mut cd);
-    }
+    body_free(std::mem::take(&mut *s.body_tracker.lock()) as *mut c_void);
+    face_free(std::mem::take(&mut *s.tracker.lock()) as *mut c_void);
 }
 
 unsafe extern "C" fn update(data: *mut c_void, settings: *mut sys::obs_data_t) {
@@ -1824,9 +1909,7 @@ pub fn calibrate(source: *mut sys::obs_source_t) -> Option<String> {
 /// Runs the body tracker (Lightair Effect Stack, loaded) on one BGRA picture and waits for it:
 /// for tests and diagnostics. `None` without the tracker or without a body.
 pub fn track_body_once(bgra: &[u8], width: u32, height: u32) -> Option<BodyFrame> {
-    let mut cd = tracker_call(c"lightair_body_tracker_new", |_| {})?;
-    let tracker = get_ptr(&mut cd, c"tracker");
-    free_cd(&mut cd);
+    let tracker = body_new();
     if tracker.is_null() {
         return None;
     }
@@ -1874,16 +1957,7 @@ pub fn track_body_once(bgra: &[u8], width: u32, height: u32) -> Option<BodyFrame
             gpu2d_stale: false,
         }),
     };
-    if let Some(mut cd) = tracker_call(c"lightair_body_tracker_submit", |cd| {
-        set_ptr(cd, c"tracker", tracker);
-        set_ptr(cd, c"data", bgra.as_ptr() as *mut c_void);
-        set_int(cd, c"linesize", width as i64 * 4);
-        set_int(cd, c"width", width as i64);
-        set_int(cd, c"height", height as i64);
-        set_int(cd, c"frame_id", 1);
-    }) {
-        free_cd(&mut cd);
-    }
+    body_submit(tracker, bgra.as_ptr(), width * 4, width, height, 1);
     let mut found = None;
     for _ in 0..100 {
         std::thread::sleep(Duration::from_millis(50));
@@ -1892,9 +1966,7 @@ pub fn track_body_once(bgra: &[u8], width: u32, height: u32) -> Option<BodyFrame
             break;
         }
     }
-    if let Some(mut cd) = tracker_call(c"lightair_body_tracker_free", |cd| set_ptr(cd, c"tracker", tracker)) {
-        free_cd(&mut cd);
-    }
+    body_free(tracker);
     found
 }
 

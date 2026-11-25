@@ -49,6 +49,11 @@ struct Lib {
     set_person: unsafe extern "C" fn(Tracker, bool, i32),
     get_raw: unsafe extern "C" fn(Tracker, *mut u64, *mut FtFace, *mut bool, *mut u64, *mut u32, *mut u32) -> bool,
     copy_mask: unsafe extern "C" fn(Tracker, bool, *mut u64, *mut u8, u64, *mut u32, *mut u32, *mut u64) -> bool,
+    get_at: unsafe extern "C" fn(Tracker, u64, *mut FtFace) -> bool,
+    body_create: unsafe extern "C" fn(*const c_char) -> Tracker,
+    body_destroy: unsafe extern "C" fn(Tracker),
+    body_submit_bgra: unsafe extern "C" fn(Tracker, *const u8, u32, u32, u32, u64) -> bool,
+    body_get: unsafe extern "C" fn(Tracker, *mut c_void) -> bool,
 }
 
 // SAFETY: the library's functions may be called from any thread (they lock what they share).
@@ -107,6 +112,11 @@ fn lib() -> Option<&'static Lib> {
                     set_person: sym!(b"face_tracker_set_person\0"),
                     get_raw: sym!(b"face_tracker_get_raw\0"),
                     copy_mask: sym!(b"face_tracker_copy_mask\0"),
+                    get_at: sym!(b"face_tracker_get_at\0"),
+                    body_create: sym!(b"body_tracker_create\0"),
+                    body_destroy: sym!(b"body_tracker_destroy\0"),
+                    body_submit_bgra: sym!(b"body_tracker_submit_bgra\0"),
+                    body_get: sym!(b"body_tracker_get\0"),
                     _lib: l,
                 }
             };
@@ -265,4 +275,69 @@ pub fn landmark_order(face: &FtFace) -> Option<Vec<[f32; 2]>> {
     points.extend(std::iter::repeat_n(right[0], 5));
     points.extend(std::iter::repeat_n(left[0], 5));
     Some(points)
+}
+
+/// The trackers' C API as it is, for hosts that keep the trackers themselves (an avatar source,
+/// Auto-frame): each tracker an opaque pointer, null when the library isn't there.
+pub mod raw {
+    use super::{FtFace, lib};
+    use std::ffi::c_void;
+
+    /// A new face tracker (null without the library).
+    pub fn face_new() -> *mut c_void {
+        // SAFETY: the models path is a valid C string for the call.
+        lib().map_or(std::ptr::null_mut(), |l| unsafe { (l.create)(l.models.as_ptr()) })
+    }
+
+    /// # Safety
+    /// `t` from [`face_new`], freed once.
+    pub unsafe fn face_free(t: *mut c_void) {
+        if let Some(l) = lib().filter(|_| !t.is_null()) {
+            unsafe { (l.destroy)(t) };
+        }
+    }
+
+    /// A BGRA frame to analyse (copied before this returns); false when busy (dropped).
+    ///
+    /// # Safety
+    /// `t` a live face tracker; `data` holds `height` rows of `linesize` bytes.
+    pub unsafe fn face_submit(t: *mut c_void, data: *const u8, linesize: u32, width: u32, height: u32, frame_id: u64, time_ns: u64) -> bool {
+        lib().filter(|_| !t.is_null()).is_some_and(|l| unsafe { (l.submit_bgra)(t, data, linesize, width, height, frame_id, time_ns) })
+    }
+
+    /// The landmarks for frame `frame_id` (exact, or interpolated between neighbours).
+    ///
+    /// # Safety
+    /// `t` a live face tracker.
+    pub unsafe fn face_get(t: *mut c_void, frame_id: u64, out: &mut FtFace) -> bool {
+        lib().filter(|_| !t.is_null()).is_some_and(|l| unsafe { (l.get_at)(t, frame_id, out) })
+    }
+
+    /// A new body tracker (null without the library).
+    pub fn body_new() -> *mut c_void {
+        // SAFETY: the models path is a valid C string for the call.
+        lib().map_or(std::ptr::null_mut(), |l| unsafe { (l.body_create)(l.models.as_ptr()) })
+    }
+
+    /// # Safety
+    /// `t` from [`body_new`], freed once.
+    pub unsafe fn body_free(t: *mut c_void) {
+        if let Some(l) = lib().filter(|_| !t.is_null()) {
+            unsafe { (l.body_destroy)(t) };
+        }
+    }
+
+    /// # Safety
+    /// `t` a live body tracker; `data` holds `height` rows of `linesize` bytes.
+    pub unsafe fn body_submit(t: *mut c_void, data: *const u8, linesize: u32, width: u32, height: u32, frame_id: u64) -> bool {
+        lib().filter(|_| !t.is_null()).is_some_and(|l| unsafe { (l.body_submit_bgra)(t, data, linesize, width, height, frame_id) })
+    }
+
+    /// The latest body (`out` a `bt_body`, body-tracker.h).
+    ///
+    /// # Safety
+    /// `t` a live body tracker; `out` points to a `bt_body`.
+    pub unsafe fn body_get(t: *mut c_void, out: *mut c_void) -> bool {
+        lib().filter(|_| !t.is_null()).is_some_and(|l| unsafe { (l.body_get)(t, out) })
+    }
 }
