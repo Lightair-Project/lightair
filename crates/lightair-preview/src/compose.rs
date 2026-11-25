@@ -23,10 +23,17 @@
 //!   engine's timers) as libobs's text source draws them, in the faces it finds (`text`); and
 //!   the built-in widgets the native widgets draw (chat box, alert box, event list, goal,
 //!   label, counter, subathon timer), from the app's chat hub, the widget server's storage and
-//!   its alert queue (`widget_feed`). Until one is ready (an image decoding, a timer before its
-//!   first tick) libobs's picture stands in.
+//!   its alert queue (`widget_feed`); and avatars (`avatars::AvatarRenderer`), posed from what
+//!   their libobs sources publish each tick (the face, body, co-host mood, mic and push to talk
+//!   their camera, trackers and calibration give: `bridge::avatar_posing`). Until one is ready
+//!   (an image decoding, a timer before its first tick, an avatar's model loading) libobs's
+//!   picture stands in.
 //! - **From libobs** (`bridge`), for everything else: captures, cameras, media files, web pages,
-//!   other widgets, avatars, devices, NDI…
+//!   other widgets, devices, NDI…
+//!
+//! Objects pinned to an avatar's anchors follow them as libobs's pinned items do: each frame the
+//! anchors' places the avatar's libobs source published move the pinned objects' layouts in the
+//! document the renderer is given (`Doc::follow_pins`).
 //!
 //! Effects: the compositor draws a source's effects when it can draw all of them: the
 //! renderer's (shader effects, the colour filter, a `.cube` LUT), the engine's sharpen and
@@ -52,8 +59,10 @@ use std::sync::{Arc, LazyLock, OnceLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use lightair_obs::{bridge, program_source};
-use lightair_model::{Canvas, Id, Scene, Source, Stinger, TransitionKind, TransitionSettings, Workspace};
+use lightair_avatar::source::Input;
+use lightair_model::{Canvas, Fit, Id, Layout, Scene, Source, Stinger, TransitionKind, TransitionSettings, Workspace};
+use lightair_obs::avatar_pins::{Placement, Spot, on_canvas};
+use lightair_obs::{avatar, bridge, program_source};
 use lightair_render::SharedGpu;
 use lightair_render::media::Picture;
 use lightair_render::scene::{Pictures, SceneRenderer, Shot};
@@ -66,6 +75,7 @@ use objc2_core_video::{CVPixelBufferGetIOSurface, kCVPixelFormatType_32BGRA};
 use objc2_metal::{MTLDevice, MTLPixelFormat, MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage};
 use parking_lot::Mutex;
 
+use crate::avatars::{AvatarRenderer, TrackingView};
 use crate::looks;
 use crate::mac::{Frame, Shared, pixel_buffer};
 use crate::stinger::Player;
@@ -88,6 +98,9 @@ const OVERLAYS: usize = 8;
 const WIDGET_PERIOD: Duration = Duration::from_millis(100);
 /// How long a stinger switch is drawn while its video's length isn't known yet.
 const UNKNOWN_LENGTH_MS: u32 = 3_600_000;
+/// An avatar's posing older than this is stale (its libobs source stopped ticking): the
+/// avatar is drawn as with nothing tracked.
+const POSING_STALE: Duration = Duration::from_millis(500);
 
 // ---------------------------------------------------------------- the hub
 
@@ -428,6 +441,8 @@ impl State {
             native.end_frame();
         }
         let ws = self.doc.drawn(kept);
+        // objects pinned to avatars, where their anchors are now
+        let ws = self.doc.follow_pins(ws, canvas.id, &scenes);
         // a stinger switch: the renderer is given the stinger it plays (the scene's own, or the
         // workspace's) and its frame now, held until the GPU is done with it
         let playing = switch.as_ref().and_then(|p| p.stinger.as_ref());
@@ -676,11 +691,13 @@ struct Doc {
     overlays_id: Id,
     /// The sources the last scenes asked about show: (canvas, scenes) → sources.
     shown: Option<(Id, Vec<Id>, HashSet<Id>)>,
+    /// The objects pinned to avatars' anchors in a canvas: (canvas, pins).
+    pins: Option<(Id, Vec<Pinned>)>,
 }
 
 impl Default for Doc {
     fn default() -> Doc {
-        Doc { from: None, base: None, drawn: None, overlays: None, overlays_id: Id::new(), shown: None }
+        Doc { from: None, base: None, drawn: None, overlays: None, overlays_id: Id::new(), shown: None, pins: None }
     }
 }
 
@@ -700,6 +717,7 @@ impl Doc {
                 self.base = Some(base.clone());
                 self.drawn = None;
                 self.shown = None;
+                self.pins = None;
                 base
             }
         }
@@ -722,6 +740,55 @@ impl Doc {
         }
     }
 
+    /// `ws` with the objects pinned to avatars' anchors in `scenes` moved to where the anchors are
+    /// now, as the avatars' libobs sources move their pinned scene items: each anchor's place at
+    /// rest and now (the avatar's last tick) gives a move, a turn and a change of size, kept
+    /// relative to the anchor. A scene with a moved object is given flattened (each picture at
+    /// its world layout), the moved ones at their new layouts.
+    fn follow_pins(&mut self, ws: Arc<Workspace>, canvas: Id, scenes: &[Id]) -> Arc<Workspace> {
+        let Some(base) = &self.base else { return ws };
+        if self.pins.as_ref().is_none_or(|(c, _)| *c != canvas) {
+            self.pins = Some((canvas, pins_of(base, canvas)));
+        }
+        let Some((_, pins)) = &self.pins else { return ws };
+        if pins.is_empty() {
+            return ws;
+        }
+        let mut posings: HashMap<Id, Option<Arc<bridge::AvatarPosing>>> = HashMap::new();
+        let mut moved: HashMap<Id, Layout> = HashMap::new();
+        for pin in pins {
+            // (held where it was last moved while the avatar doesn't tick, as libobs's items are)
+            let posing = posings.entry(pin.avatar).or_insert_with(|| bridge::avatar_posing(pin.avatar).map(|(p, _)| p));
+            let Some(posing) = posing else { continue };
+            let Some((_, rest, now)) = posing.pins.iter().find(|(k, ..)| *k == pin.anchor) else { continue };
+            moved.insert(pin.object, pin.follow(*rest, *now, (posing.size.0 as f32, posing.size.1 as f32)));
+        }
+        if moved.is_empty() {
+            return ws;
+        }
+        let mut out = Workspace::clone(&ws);
+        for scene in out.scenes.iter_mut() {
+            if !scenes.contains(&scene.id) || !scene.objects.iter().any(|o| moved.contains_key(&o.id)) {
+                continue;
+            }
+            let mut flat = scene.flatten();
+            for o in &mut flat.objects {
+                if let Some(to) = moved.get(&o.id)
+                    && let Some(l) = o.layouts.get_mut(&canvas)
+                {
+                    // (visibility and opacity as flattened)
+                    l.x = to.x;
+                    l.y = to.y;
+                    l.width = to.width;
+                    l.height = to.height;
+                    l.rotation = to.rotation;
+                }
+            }
+            *scene = Arc::new(flat);
+        }
+        Arc::new(out)
+    }
+
     /// The sources `scenes` show in `canvas` (visible, not see-through).
     fn shown(&mut self, ws: &Workspace, canvas: Id, scenes: &[Id]) -> HashSet<Id> {
         if let Some((c, s, shown)) = &self.shown
@@ -740,6 +807,92 @@ impl Doc {
         self.shown = Some((canvas, scenes.to_vec(), shown.clone()));
         shown
     }
+}
+
+/// An object pinned to an avatar's anchor, or under one that is, in one canvas.
+struct Pinned {
+    /// The avatar's source.
+    avatar: Id,
+    /// The anchor's key.
+    anchor: String,
+    /// Where the anchor was at rest in the avatar's picture when the object was pinned (`None`:
+    /// where it's at rest now).
+    pinned_at: Option<Spot>,
+    /// The avatar's object, in canvas terms.
+    host: Placement,
+    /// The object, and its layout in canvas terms with the avatar at rest.
+    object: Id,
+    base: Layout,
+}
+
+impl Pinned {
+    /// The object's layout in canvas terms with the anchor at `now` (`rest`: at rest), in the
+    /// avatar's picture of `size`: moved and turned with the anchor, its size changed with the
+    /// anchor's (an Original-sized picture isn't resized).
+    fn follow(&self, rest: Spot, now: Spot, (w, h): (f32, f32)) -> Layout {
+        let rest = self.pinned_at.unwrap_or(rest);
+        let p0 = on_canvas(&self.host, w, h, rest.x, rest.y);
+        let p1 = on_canvas(&self.host, w, h, now.x, now.y);
+        let turn = now.angle - rest.angle;
+        let ratio = (now.scale / rest.scale).clamp(0.2, 5.0);
+        let (s, c) = turn.sin_cos();
+        let base = Placement::of(&self.base);
+        let (dx, dy) = ((base.cx - p0.0) * ratio, (base.cy - p0.1) * ratio);
+        let (x, y) = (p1.0 + dx * c - dy * s, p1.1 + dx * s + dy * c);
+        let mut l = self.base;
+        if l.fit != Fit::Original {
+            l.width *= ratio;
+            l.height *= ratio;
+        }
+        l.x = x - l.width / 2.0;
+        l.y = y - l.height / 2.0;
+        l.rotation = self.base.rotation + turn.to_degrees();
+        l
+    }
+}
+
+/// The objects pinned to avatars in `ws`'s scenes, for `canvas`: an object under an avatar that
+/// the avatar's `pins` setting names ({object id: anchor, or {"anchor", "at"}}), and everything
+/// under that object.
+fn pins_of(ws: &Workspace, canvas: Id) -> Vec<Pinned> {
+    let mut out = Vec::new();
+    for scene in &ws.scenes {
+        for o in &scene.objects {
+            let Some(parent) = o.parent.and_then(|p| scene.object(p)) else { continue };
+            let Some(host) = parent.source.and_then(|i| ws.sources.get(&i)).filter(|s| s.kind == avatar::KIND) else {
+                continue;
+            };
+            let pin = &host.settings["pins"][o.id.to_string()];
+            let Some(anchor) = pin.as_str().or_else(|| pin["anchor"].as_str()).filter(|a| !a.is_empty()) else {
+                continue;
+            };
+            let pinned_at = pin["at"].as_array().filter(|a| a.len() == 4).map(|a| {
+                let f = |i: usize| a[i].as_f64().unwrap_or(0.0) as f32;
+                Spot { x: f(0), y: f(1), angle: f(2), scale: f(3).max(1e-6) }
+            });
+            let Some(at) = scene.world(parent.id, canvas) else { continue };
+            // it and what's under it
+            let mut ids = vec![o.id];
+            let mut i = 0;
+            while i < ids.len() {
+                let under: Vec<Id> = scene.children(Some(ids[i])).map(|c| c.id).collect();
+                ids.extend(under);
+                i += 1;
+            }
+            for id in ids {
+                let Some(base) = scene.world(id, canvas) else { continue };
+                out.push(Pinned {
+                    avatar: host.id,
+                    anchor: anchor.to_string(),
+                    pinned_at,
+                    host: Placement::of(&at),
+                    object: id,
+                    base,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// One scene (`id`) holding the objects of every overlay scene of the show, bottom first (a
@@ -810,6 +963,7 @@ fn made_here(source: &Source) -> bool {
         templates::TEXT => !s["from_file"].as_bool().unwrap_or(false),
         // the built-in widgets the native widgets draw, once the app has given what they show
         widgets::KIND => widgets::instance(s).is_some_and(|i| widget_feed::drawn_here(&i)),
+        avatar::KIND => s["file"].as_str().is_some_and(|f| !f.is_empty()),
         _ => false,
     }
 }
@@ -875,6 +1029,15 @@ struct Native {
     widgets: HashMap<Id, Widget>,
     /// The cameras drawn with looks: their feeds (in `hot`, mapped in `program`) and analysis.
     looks: looks::Hosts,
+    /// The avatars drawn here, by source.
+    avatars: HashMap<Id, Avatar>,
+}
+
+/// An avatar source drawn here: its renderer (`None`: none could be made, libobs's picture
+/// stands in) and the settings it was last given.
+struct Avatar {
+    renderer: Option<AvatarRenderer>,
+    settings: serde_json::Value,
 }
 
 /// A widget's picture and what it was made from.
@@ -916,6 +1079,7 @@ impl Native {
             texts_used: HashSet::new(),
             widgets: HashMap::new(),
             looks: looks::Hosts::default(),
+            avatars: HashMap::new(),
         })
     }
 
@@ -928,6 +1092,7 @@ impl Native {
             let keep: Vec<Id> = ws.sources.keys().copied().collect();
             self.keyed.forget_others(&keep);
             self.widgets.retain(|id, _| ws.sources.contains_key(id));
+            self.avatars.retain(|id, _| ws.sources.get(id).is_some_and(|s| s.kind == avatar::KIND));
             let gone = self.looks.sweep(|id| ws.sources.contains_key(&id), &self.hot, &mut self.program.feeds);
             for feed in gone {
                 self.cache.forget_feed(feed);
@@ -948,6 +1113,7 @@ impl Native {
             }
             templates::TEXT => Some(self.text(&source.settings, source.settings["text"].as_str().unwrap_or(""))?),
             widgets::KIND => Some(self.widget(source)?),
+            avatar::KIND => Some(self.avatar(source)?),
             _ => None,
         };
         if let Some(shot) = made {
@@ -1068,6 +1234,40 @@ impl Native {
         }
         let w = self.widgets.get(&source.id)?;
         Some(Shot { picture: Picture::Texture(w.texture.clone()), size: w.size, premultiplied: true })
+    }
+
+    /// An avatar's picture: posed from what its libobs source published last tick (nothing
+    /// tracked when it published nothing lately) and drawn on the GPU; `None` while its model
+    /// loads or if it can't be drawn (libobs's picture stands in).
+    fn avatar(&mut self, source: &Source) -> Option<Shot> {
+        let a = self.avatars.entry(source.id).or_insert_with(|| Avatar {
+            renderer: AvatarRenderer::new(&source.settings)
+                .map_err(|e| tracing::error!(%e, "compositor: no avatar renderer; libobs draws the avatar"))
+                .ok(),
+            settings: source.settings.clone(),
+        });
+        let renderer = a.renderer.as_mut()?;
+        if a.settings != source.settings {
+            renderer.set_settings(&source.settings);
+            a.settings = source.settings.clone();
+        }
+        let fed = bridge::avatar_posing(source.id).filter(|(p, _)| p.at.elapsed() < POSING_STALE);
+        let Some((posing, picture)) = &fed else { return renderer.draw(&Input::default(), None) };
+        let input = Input {
+            face: posing.face,
+            body: posing.body.as_ref(),
+            expression: posing.mood,
+            mic_db: posing.mic_db,
+            push_to_talk_held: posing.push_to_talk_held,
+        };
+        let view = picture.as_ref().map(|p| TrackingView {
+            bgra: &p.bgra,
+            width: p.width,
+            height: p.height,
+            face: &posing.view_face,
+            body: posing.body.as_ref(),
+        });
+        renderer.draw(&input, view.as_ref())
     }
 
     /// Drops the made pictures no frame used lately, and the looks' hosts of cameras not drawn

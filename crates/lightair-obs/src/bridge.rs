@@ -239,6 +239,90 @@ pub(crate) fn clear_timer_texts() {
     }
 }
 
+// ---------------------------------------------------------------- avatars
+
+/// What posed an avatar source on libobs's last tick, so the compositor can pose its own drawing
+/// of the same avatar. The libobs source keeps the camera, the trackers, the calibration, the
+/// co-host's face and mood, the mic level and push to talk; the compositor only reads this.
+#[derive(Clone, Debug)]
+pub struct AvatarPosing {
+    /// The face seen, calibrated and mirrored as the avatar's settings say, with the co-host's
+    /// face merged in when this is its avatar; `None`: none seen (the avatar settles).
+    pub face: Option<lightair_avatar::Face>,
+    /// The body seen (a VRM's body tracking; `None` for flat avatars or with the body off).
+    pub body: Option<lightair_avatar::body::BodyFrame>,
+    /// The co-host's mood over the avatar's own expression, and its weight.
+    pub mood: Option<(&'static str, f32)>,
+    /// A PNGtuber's mic track level (dBFS; `-inf` for silence or no mic).
+    pub mic_db: f32,
+    /// A PNGtuber's push to talk is held.
+    pub push_to_talk_held: bool,
+    /// With `show_tracking`: the face's points in the trackers' picture (0..1 across and down).
+    pub view_face: Vec<[f32; 2]>,
+    /// The anchors something is pinned to: each one's place in the avatar's picture at rest and
+    /// now, as the libobs source moves its pinned scene items.
+    pub pins: Vec<(String, crate::avatar_pins::Spot, crate::avatar_pins::Spot)>,
+    /// The avatar's picture size the pins' places are measured in.
+    pub size: (u32, u32),
+    /// When it was published.
+    pub at: Instant,
+}
+
+/// The trackers' picture an avatar source last handed its trackers (with `show_tracking`).
+#[derive(Clone, Debug)]
+pub struct TrackingPicture {
+    /// BGRA, rows `width * 4` bytes apart, top row first.
+    pub bgra: Arc<Vec<u8>>,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Default)]
+struct AvatarFeed {
+    posing: Option<Arc<AvatarPosing>>,
+    view: Option<TrackingPicture>,
+}
+
+/// Each avatar source's last posing and tracking picture, by libobs source.
+static AVATARS: LazyLock<Mutex<HashMap<usize, AvatarFeed>>> = LazyLock::new(Default::default);
+
+/// The avatar source `source` (libobs's) was posed this tick with `posing`. Its video thread.
+pub(crate) fn set_avatar_posing(source: usize, posing: AvatarPosing) {
+    if !own() {
+        return;
+    }
+    AVATARS.lock().entry(source).or_default().posing = Some(Arc::new(posing));
+}
+
+/// The avatar source `source` handed its trackers this picture (`show_tracking` on). Graphics
+/// thread.
+pub(crate) fn set_avatar_view(source: usize, bgra: Arc<Vec<u8>>, size: (u32, u32)) {
+    if !own() {
+        return;
+    }
+    let view = TrackingPicture { bgra, width: size.0, height: size.1 };
+    AVATARS.lock().entry(source).or_default().view = Some(view);
+}
+
+/// The avatar source `source` is gone.
+pub(crate) fn forget_avatar(source: usize) {
+    if !own() {
+        return;
+    }
+    // (freed outside the lock)
+    let gone = AVATARS.lock().remove(&source);
+    drop(gone);
+}
+
+/// The document avatar source `source`'s last posing, and its trackers' picture when it shows
+/// one; `None` before its libobs source has ticked. Any thread.
+pub fn avatar_posing(source: Id) -> Option<(Arc<AvatarPosing>, Option<TrackingPicture>)> {
+    let obs = BRIDGE.sources.lock().get(&source)?.as_ptr() as usize;
+    let feeds = AVATARS.lock();
+    let feed = feeds.get(&obs)?;
+    Some((feed.posing.clone()?, feed.view.clone()))
+}
+
 // ---------------------------------------------------------------- buffers
 
 /// A BGRA, IOSurface-backed pixel buffer (Metal and OpenGL can use its surface).

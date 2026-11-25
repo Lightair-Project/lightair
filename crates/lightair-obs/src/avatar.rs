@@ -27,7 +27,7 @@ use lightair_avatar::{Avatar, Calibration, Controls, Face, Framing, Landmarks, M
 use parking_lot::Mutex;
 use serde_json::json;
 
-use crate::avatar_pins::{Anchor, MeshRest};
+use crate::avatar_pins::{Anchor, MeshRest, Spot};
 use crate::obs::{Data, ObsSource};
 use crate::sys;
 
@@ -440,9 +440,9 @@ struct Render {
     grab_due: bool,
     measures: Option<Measures>,
     body: BodyState,
-    /// The tracking view: the last picture given to the trackers (BGRA), what they found in
-    /// it, and its texture.
-    view_pixels: Vec<u8>,
+    /// The tracking view: the last picture given to the trackers (BGRA; shared with the
+    /// compositor, which may draw it too), what they found in it, and its texture.
+    view_pixels: Arc<Vec<u8>>,
     view_face: Vec<[f32; 2]>,
     view_body: Option<BodyFrame>,
     view_tex: *mut sys::gs_texture_t,
@@ -1036,10 +1036,15 @@ impl Render {
                     }
                     if keep {
                         let row = tw as usize * 4;
-                        self.view_pixels.resize(row * th as usize, 0);
+                        // (a new buffer while the compositor may still hold the last one)
+                        if Arc::get_mut(&mut self.view_pixels).is_none() {
+                            self.view_pixels = Arc::default();
+                        }
+                        let px = Arc::make_mut(&mut self.view_pixels);
+                        px.resize(row * th as usize, 0);
                         for y in 0..th as usize {
                             let from = std::slice::from_raw_parts(data.add(y * linesize as usize), row);
-                            self.view_pixels[y * row..(y + 1) * row].copy_from_slice(from);
+                            px[y * row..(y + 1) * row].copy_from_slice(from);
                         }
                         self.view_size = (tw, th);
                     }
@@ -1072,7 +1077,7 @@ impl Render {
         if w == 0 || h == 0 || self.view_pixels.len() < (w * h * 4) as usize {
             return;
         }
-        let mut px = self.view_pixels.clone();
+        let mut px = Vec::clone(&self.view_pixels);
         let mirror = settings.mirror;
         // (dots on the picture as it is, then both flipped together)
         let mut dot = |x: f32, y: f32, r: i32, c: [u8; 3]| {
@@ -1227,7 +1232,7 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
             grab_due: false,
             measures: None,
             body: BodyState::default(),
-            view_pixels: Vec::new(),
+            view_pixels: Arc::default(),
             view_face: Vec::new(),
             view_body: None,
             view_tex: std::ptr::null_mut(),
@@ -1391,6 +1396,7 @@ fn model_name(path: &str) -> String {
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let s = unsafe { Box::from_raw(data as *mut Arc<Shared>) };
+    crate::bridge::forget_avatar(s.source);
     if let Some((_, c)) = s.camera.lock().take() {
         unsafe { sys::obs_source_dec_showing(c.as_ptr()) };
     }
@@ -1459,6 +1465,9 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
         None => (None, Vec::new()),
     };
     let body = if tracking && body_mode != BodyMode::Off { s.body() } else { None };
+    // the compositor draws its own picture of this avatar from what poses it here
+    let publish = crate::bridge::own();
+    let view_face = if publish && settings.show_tracking { face_points.clone() } else { Vec::new() };
     if let Some(b) = &body {
         dump(b);
     }
@@ -1518,53 +1527,88 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
         a.update(&Controls { face, expression: expression.map(|(e, w)| (e.to_owned(), w)), bones, torso }, dt);
         r.dirty = true;
     }
+    // (a PNGtuber's mic and push to talk)
+    let mic = (r.puppet.is_some() || publish && is_flat(&settings.file))
+        .then(|| (mic_level(&settings.mic), push_to_talk_held(s.source)));
     if let Some((_, l)) = r.puppet.as_mut() {
+        let (mic_db, held) = mic.unwrap_or((f32::NEG_INFINITY, false));
         l.set_expression_weight(expression.map_or(1.0, |e| e.1));
-        l.set_mic(mic_level(&settings.mic), settings.push_to_talk.then(|| push_to_talk_held(s.source)));
+        l.set_mic(mic_db, settings.push_to_talk.then_some(held));
         l.update(&face, expression.map(|e| e.0), dt);
         r.dirty = true;
     }
     r.grab_due = tracking;
-    follow_pins(s.source, r, &settings);
+    let pins = follow_pins(s.source, r, &settings);
+    if publish {
+        let (mic_db, push_to_talk_held) = mic.unwrap_or((f32::NEG_INFINITY, false));
+        crate::bridge::set_avatar_posing(
+            s.source,
+            crate::bridge::AvatarPosing {
+                face: seen,
+                body,
+                mood: ai_expression,
+                mic_db,
+                push_to_talk_held,
+                view_face,
+                pins,
+                size: (settings.width, settings.height),
+                at: now,
+            },
+        );
+    }
 }
 
-/// Moves what's pinned to this avatar to where its anchors are this frame.
-fn follow_pins(source: usize, r: &mut Render, settings: &Settings) {
+/// Moves what's pinned to this avatar to where its anchors are this frame. Gives each pinned
+/// anchor's place at rest and now, in the avatar's picture.
+fn follow_pins(source: usize, r: &mut Render, settings: &Settings) -> Vec<(String, Spot, Spot)> {
     let pinned = crate::avatar_pins::anchors_pinned(source);
     if pinned.is_empty() {
         r.rest = None;
-        return;
+        return Vec::new();
     }
     let (w, h) = (settings.width as f32, settings.height as f32);
     let aspect = w / h.max(1.0);
-    if let Some((_, a)) = &r.avatar {
+    let spots: Vec<(String, Spot, Spot)> = if let Some((_, a)) = &r.avatar {
         if r.rest.is_none() {
             let mut rest = Avatar::new(a.model.clone());
             rest.update(&Controls::default(), 0.0);
             r.rest = Some(rest);
         }
-        let Some(rest) = &r.rest else { return };
-        let vp_rest = crate::avatar_pins::view_projection(&rest.camera(settings.framing, aspect, settings.zoom), aspect);
+        let Some(rest) = &r.rest else { return Vec::new() };
+        let vp_rest =
+            crate::avatar_pins::view_projection(&rest.camera(settings.framing, aspect, settings.zoom), aspect);
         let vp_now = crate::avatar_pins::view_projection(&a.camera(settings.framing, aspect, settings.zoom), aspect);
         let anchors = &r.anchors;
-        crate::avatar_pins::apply(source, w, h, |key| {
-            let n = *anchors.get(key)?;
-            let axis = crate::avatar_pins::best_axis(rest.world.get(n)?);
-            Some((
-                crate::avatar_pins::bone_spot(rest.world.get(n)?, &vp_rest, w, h, axis)?,
-                crate::avatar_pins::bone_spot(a.world.get(n)?, &vp_now, w, h, axis)?,
-            ))
-        });
+        pinned
+            .into_iter()
+            .filter_map(|key| {
+                let n = *anchors.get(&key)?;
+                let axis = crate::avatar_pins::best_axis(rest.world.get(n)?);
+                let at_rest = crate::avatar_pins::bone_spot(rest.world.get(n)?, &vp_rest, w, h, axis)?;
+                let now = crate::avatar_pins::bone_spot(a.world.get(n)?, &vp_now, w, h, axis)?;
+                Some((key, at_rest, now))
+            })
+            .collect()
     } else if let Some((_, l)) = &r.puppet {
         let frame = crate::avatar_pins::flat_frame(l, settings.framing, aspect, settings.zoom);
         let (anchors, rest) = (&r.anchors, &r.rest2d);
-        crate::avatar_pins::apply(source, w, h, |key| {
-            let i = *anchors.get(key)?;
-            let at_rest = rest.get(i)?;
-            let now = crate::avatar_pins::mesh_spot(&crate::avatar_pins::flat_points(l, i), at_rest.far, frame, w, h)?;
-            Some((crate::avatar_pins::rest_spot(at_rest, frame, w, h), now))
-        });
-    }
+        pinned
+            .into_iter()
+            .filter_map(|key| {
+                let i = *anchors.get(&key)?;
+                let at_rest = rest.get(i)?;
+                let now =
+                    crate::avatar_pins::mesh_spot(&crate::avatar_pins::flat_points(l, i), at_rest.far, frame, w, h)?;
+                Some((key, crate::avatar_pins::rest_spot(at_rest, frame, w, h), now))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    crate::avatar_pins::apply(source, w, h, |key| {
+        spots.iter().find(|(k, ..)| k == key).map(|(_, at_rest, now)| (*at_rest, *now))
+    });
+    spots
 }
 
 unsafe extern "C" fn video_render(data: *mut c_void, _: *mut sys::gs_effect_t) {
@@ -1585,6 +1629,10 @@ unsafe extern "C" fn video_render(data: *mut c_void, _: *mut sys::gs_effect_t) {
             r.grab_due = false;
             if let Some(c) = camera {
                 r.grab(c, tracker, body, settings.show_tracking);
+                // the compositor draws the same tracking view on its own drawing of the avatar
+                if settings.show_tracking && r.view_size.0 > 0 {
+                    crate::bridge::set_avatar_view(s.source, r.view_pixels.clone(), r.view_size);
+                }
             }
         }
         if let Some(c) = camera {
@@ -1815,7 +1863,7 @@ pub fn track_body_once(bgra: &[u8], width: u32, height: u32) -> Option<BodyFrame
             grab_due: false,
             measures: None,
             body: BodyState::default(),
-            view_pixels: Vec::new(),
+            view_pixels: Arc::default(),
             view_face: Vec::new(),
             view_body: None,
             view_tex: std::ptr::null_mut(),
