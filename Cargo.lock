@@ -1742,6 +1742,7 @@ dependencies = [
  "quote",
  "rustc_version",
  "syn 2.0.119",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -4415,6 +4416,7 @@ dependencies = [
  "lightair-model",
  "lightair-phone-camera",
  "lightair-platform",
+ "lightair-pngtuber",
  "lightair-preview",
  "lightair-remote",
  "lightair-render",
@@ -4434,6 +4436,9 @@ dependencies = [
  "serde_json",
  "sha1 0.10.7",
  "sha2 0.10.9",
+ "sonora",
+ "sonora-agc2",
+ "sonora-simd",
  "tracing",
  "tracing-subscriber",
  "tungstenite",
@@ -4445,7 +4450,7 @@ dependencies = [
 [[package]]
 name = "lightair-audio"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb#9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=ad9eef8716765bfb096183c8575763db91926252#ad9eef8716765bfb096183c8575763db91926252"
 dependencies = [
  "ebur128",
  "nnnoiseless",
@@ -4455,7 +4460,7 @@ dependencies = [
 [[package]]
 name = "lightair-automation"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb#9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=ad9eef8716765bfb096183c8575763db91926252#ad9eef8716765bfb096183c8575763db91926252"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4503,6 +4508,7 @@ dependencies = [
  "crossbeam-channel",
  "glam",
  "hound",
+ "image",
  "libc",
  "libloading 0.8.9",
  "libobs-sys",
@@ -4511,6 +4517,7 @@ dependencies = [
  "lightair-model",
  "lightair-phone-camera",
  "lightair-platform",
+ "lightair-pngtuber",
  "lightair-render",
  "lightair-store",
  "lightair-web",
@@ -4531,7 +4538,7 @@ dependencies = [
 [[package]]
 name = "lightair-fonts"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb#9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=ad9eef8716765bfb096183c8575763db91926252#ad9eef8716765bfb096183c8575763db91926252"
 dependencies = [
  "fontdb",
  "serde",
@@ -4559,7 +4566,7 @@ dependencies = [
 [[package]]
 name = "lightair-live"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb#9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=ad9eef8716765bfb096183c8575763db91926252#ad9eef8716765bfb096183c8575763db91926252"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4592,7 +4599,7 @@ dependencies = [
 [[package]]
 name = "lightair-model"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb#9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=ad9eef8716765bfb096183c8575763db91926252#ad9eef8716765bfb096183c8575763db91926252"
 dependencies = [
  "serde",
  "serde_json",
@@ -4622,7 +4629,7 @@ dependencies = [
 [[package]]
 name = "lightair-platform"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb#9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=ad9eef8716765bfb096183c8575763db91926252#ad9eef8716765bfb096183c8575763db91926252"
 dependencies = [
  "block2 0.6.2",
  "dirs 6.0.0",
@@ -4632,6 +4639,18 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "lightair-pngtuber"
+version = "0.1.0"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=ad9eef8716765bfb096183c8575763db91926252#ad9eef8716765bfb096183c8575763db91926252"
+dependencies = [
+ "png 0.17.16",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "zip 9.8.1",
 ]
 
 [[package]]
@@ -4656,7 +4675,7 @@ dependencies = [
 [[package]]
 name = "lightair-remote"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb#9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=ad9eef8716765bfb096183c8575763db91926252#ad9eef8716765bfb096183c8575763db91926252"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4678,7 +4697,7 @@ dependencies = [
 [[package]]
 name = "lightair-render"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb#9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=ad9eef8716765bfb096183c8575763db91926252#ad9eef8716765bfb096183c8575763db91926252"
 dependencies = [
  "cosmic-text",
  "lightair-audio",
@@ -4703,7 +4722,7 @@ dependencies = [
 [[package]]
 name = "lightair-store"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb#9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=ad9eef8716765bfb096183c8575763db91926252#ad9eef8716765bfb096183c8575763db91926252"
 dependencies = [
  "lightair-model",
  "serde",
@@ -4733,7 +4752,7 @@ dependencies = [
 [[package]]
 name = "lightair-widgets"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb#9f2cf54ca6ab39c6e652f5b6dd1bc516c738b9fb"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=ad9eef8716765bfb096183c8575763db91926252#ad9eef8716765bfb096183c8575763db91926252"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4746,6 +4765,7 @@ dependencies = [
  "sha1_smol",
  "tracing",
  "tungstenite",
+ "ureq",
  "zip 9.8.1",
 ]
 
@@ -7797,6 +7817,82 @@ dependencies = [
 ]
 
 [[package]]
+name = "sonora"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d461e6c9ad112f8728919387a4bc5639fd28631f2070171efad38676e907edd8"
+dependencies = [
+ "sonora-aec3",
+ "sonora-agc2",
+ "sonora-common-audio",
+ "sonora-ns",
+ "sonora-simd",
+ "tracing",
+]
+
+[[package]]
+name = "sonora-aec3"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2809c3fda13f71deac22d0ddb6c02c493f254d3da2afe59a7e256a8f15bcffe"
+dependencies = [
+ "sonora-common-audio",
+ "sonora-fft",
+ "sonora-simd",
+]
+
+[[package]]
+name = "sonora-agc2"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "501b5dd3f8bdc8c983dc64a131cef22a429f3ff879d6f0007b8bfe46ec7b96aa"
+dependencies = [
+ "bytemuck",
+ "derive_more 2.1.1",
+ "sonora-common-audio",
+ "sonora-fft",
+ "sonora-simd",
+ "tracing",
+]
+
+[[package]]
+name = "sonora-common-audio"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c05dfa300c14dc8498751ce2c5b87aad2acf1892d4f9d66b92ae2f372a83410"
+dependencies = [
+ "derive_more 2.1.1",
+ "sonora-simd",
+]
+
+[[package]]
+name = "sonora-fft"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec3529f2cf748f1acc85d9403ffa08a3fe69dec6bf22383910b3bd21aca2fd26"
+dependencies = [
+ "sonora-simd",
+]
+
+[[package]]
+name = "sonora-ns"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31c0a62e78419a174dbf9c9c01943c1ecd8c298a68d15c4fb4906cb19f0428b9"
+dependencies = [
+ "sonora-fft",
+]
+
+[[package]]
+name = "sonora-simd"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f939d8e63a2a0baa7555294d7b09c5e3d382f28358755b920e13ad527658c8fa"
+dependencies = [
+ "cpufeatures 0.3.1",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8815,6 +8911,12 @@ name = "unicode-width"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
+
+[[package]]
+name = "unicode-xid"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "unit-prefix"
@@ -10792,7 +10894,7 @@ dependencies = [
  "memchr",
  "nix",
  "typed-path",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
  "zeroize",
  "zopfli",
 ]
