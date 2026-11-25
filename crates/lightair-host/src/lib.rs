@@ -10,6 +10,8 @@ pub mod buffers;
 pub mod clock;
 pub mod devices;
 pub mod gpu;
+#[cfg(target_os = "macos")]
+pub mod media_player;
 pub mod meters;
 pub mod ndi;
 pub mod outputs;

@@ -1,393 +1,29 @@
-//! Lightair's own media source on macOS (`lightair_media`): video files decoded by the
-//! hardware decoder straight into IOSurfaces that libobs draws as textures, with no copy through
-//! memory. OBS's media source (`ffmpeg_source`) hands libobs its frames in memory, so even with
-//! hardware decoding each frame comes back from the decoder and is uploaded again (measured in
-//! docs/benchmarks/lightair-vs-obs.md).
-//!
-//! AVFoundation reads the file (`AVAssetReader`): video as BGRA IOSurface-backed pixel buffers
-//! (VideoToolbox decodes and converts on the GPU), sound as 32-bit float PCM at libobs's rate,
-//! handed to libobs with timestamps on the same clock the frames are shown by.
-//!
-//! It plays as OBS's media source does, with the same settings (`local_file`, `looping`,
-//! `restart_on_activate`, `clear_on_media_end`) and the media controls; [`crate::kinds`]
+//! The media source's libobs side (the player is `lightair_host::media_player`, re-exported
+//! here): `lightair_media`, a shell over a [`MediaPlayer`] that draws its frames where libobs
+//! shows the source (a texture per surface, turned by the file's rotation), hands libobs the
+//! sound no track takes, and tells libobs when the file ends or starts over. [`crate::kinds`]
 //! routes the files AVFoundation plays (local MP4 and QuickTime files) here.
-//!
-//! With `LIGHTAIR_ENGINE=own`, Lightair's own compositor draws the frame each source shows from
-//! its surface ([`picture`]), picked on libobs's clock as libobs's own drawing is, so pause,
-//! seek, looping and the end follow the source. With the audio engine too, a track taking the
-//! source's sound gets it straight into the mixer (`audio_host::feeds_itself`), each part pushed
-//! as it comes due on the media clock (the mixer buffers it as it comes, not by timestamp), and
-//! libobs gets none meanwhile.
 
-use std::collections::{HashMap, VecDeque};
-use std::ffi::{CStr, CString, c_char, c_void};
-use std::ptr::NonNull;
-use std::sync::{Arc, LazyLock, Weak};
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::ffi::{CStr, c_char, c_void};
+use std::sync::Arc;
 
-use lightair_model::Id;
-use objc2_core_foundation::CFRetained;
-use objc2_core_video::CVPixelBuffer;
+use parking_lot::Mutex;
 
-use objc2::rc::{Retained, autoreleasepool};
-use objc2::runtime::{AnyClass, AnyObject};
-use objc2::{Encode, Encoding, RefEncode, msg_send};
-use parking_lot::{Condvar, Mutex};
+use lightair_host::media_player::{Elsewhere, MediaPlayer, Next, Settings, Slot};
+pub use lightair_host::media_player::{Frames, Picture, picture, plays};
 
 use crate::sys;
 
 /// The libobs source type.
 pub const ID: &CStr = c"lightair_media";
 
-/// How far ahead of the clock sound is handed to libobs (it buffers it by timestamp).
-const AUDIO_AHEAD_NS: i64 = 150_000_000;
-/// How far ahead of the clock sound is pushed into the mixer's feed: about what the feed keeps
-/// buffered (1024 frames), so it's heard when it's due.
-const FED_AHEAD_NS: i64 = 20_000_000;
-/// Decoded frames waiting to be shown, at most (60 fps: about 70 ms).
-const QUEUE: usize = 4;
-/// Time to decode the first frames before the clock starts.
-const PREROLL_NS: u64 = 60_000_000;
-/// Frames libobs may still be drawing from: kept (in use) for a few frames after replaced.
+/// Frames libobs may still be drawing from: kept for a few frames after replaced.
 const HELD: usize = 3;
-/// With Lightair's own compositor: more surfaces, for the frames its canvases may still be
-/// drawing from (each holds one until the GPU has finished with it).
-const COMPOSITOR_HELD: usize = 4;
 
-// ------------------------------------------------------------------ Apple frameworks
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-struct CMTime {
-    value: i64,
-    timescale: i32,
-    flags: u32,
-    epoch: i64,
-}
-// SAFETY: CMTime's Objective-C encoding ({?=qiIq}).
-unsafe impl Encode for CMTime {
-    const ENCODING: Encoding = Encoding::Struct("?", &[i64::ENCODING, i32::ENCODING, u32::ENCODING, i64::ENCODING]);
-}
-
-impl CMTime {
-    const VALID: u32 = 1;
-    fn from_ns(ns: i64) -> Self {
-        CMTime { value: ns, timescale: 1_000_000_000, flags: Self::VALID, epoch: 0 }
-    }
-    fn positive_infinity() -> Self {
-        CMTime { value: 0, timescale: 0, flags: Self::VALID | 4, epoch: 0 }
-    }
-    fn ns(&self) -> Option<i64> {
-        (self.flags & Self::VALID != 0 && self.flags & 0x1C == 0 && self.timescale > 0)
-            .then(|| (self.value as i128 * 1_000_000_000 / self.timescale as i128) as i64)
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CMTimeRange {
-    start: CMTime,
-    duration: CMTime,
-}
-// SAFETY: CMTimeRange's Objective-C encoding ({?={?=qiIq}{?=qiIq}}).
-unsafe impl Encode for CMTimeRange {
-    const ENCODING: Encoding = Encoding::Struct("?", &[CMTime::ENCODING, CMTime::ENCODING]);
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CGSize {
-    width: f64,
-    height: f64,
-}
-// SAFETY: CGSize's Objective-C encoding.
-unsafe impl Encode for CGSize {
-    const ENCODING: Encoding = Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CGAffineTransform {
-    a: f64,
-    b: f64,
-    c: f64,
-    d: f64,
-    tx: f64,
-    ty: f64,
-}
-// SAFETY: CGAffineTransform's Objective-C encoding.
-unsafe impl Encode for CGAffineTransform {
-    const ENCODING: Encoding = Encoding::Struct("CGAffineTransform", &[f64::ENCODING; 6]);
-}
-
-/// A `CMSampleBufferRef`'s target.
-#[repr(C)]
-struct OpaqueSampleBuffer {
-    _p: [u8; 0],
-}
-// SAFETY: CMSampleBufferRef's Objective-C encoding (^{opaqueCMSampleBuffer=}).
-unsafe impl RefEncode for OpaqueSampleBuffer {
-    const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("opaqueCMSampleBuffer", &[]));
-}
-
-#[link(name = "AVFoundation", kind = "framework")]
-unsafe extern "C" {
-    static AVMediaTypeVideo: *const AnyObject;
-    static AVMediaTypeAudio: *const AnyObject;
-    static AVFormatIDKey: *const AnyObject;
-    static AVSampleRateKey: *const AnyObject;
-    static AVNumberOfChannelsKey: *const AnyObject;
-    static AVLinearPCMBitDepthKey: *const AnyObject;
-    static AVLinearPCMIsFloatKey: *const AnyObject;
-    static AVLinearPCMIsNonInterleaved: *const AnyObject;
-    static AVLinearPCMIsBigEndianKey: *const AnyObject;
-}
-
-#[link(name = "CoreVideo", kind = "framework")]
-unsafe extern "C" {
-    static kCVPixelBufferPixelFormatTypeKey: *const AnyObject;
-    static kCVPixelBufferIOSurfacePropertiesKey: *const AnyObject;
-    static kCVPixelBufferMetalCompatibilityKey: *const AnyObject;
-    fn CVPixelBufferGetIOSurface(buffer: *mut c_void) -> *mut c_void;
-    fn CVPixelBufferGetWidth(buffer: *mut c_void) -> usize;
-    fn CVPixelBufferGetHeight(buffer: *mut c_void) -> usize;
-    fn CVPixelBufferLockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
-    fn CVPixelBufferUnlockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
-    fn CVPixelBufferGetBaseAddress(buffer: *mut c_void) -> *mut c_void;
-    fn CVPixelBufferGetDataSize(buffer: *mut c_void) -> usize;
-    fn CVPixelBufferCreate(
-        allocator: *const c_void,
-        width: usize,
-        height: usize,
-        format: u32,
-        attributes: *const c_void,
-        out: *mut *mut c_void,
-    ) -> i32;
-}
-
-#[link(name = "VideoToolbox", kind = "framework")]
-unsafe extern "C" {
-    fn VTPixelTransferSessionCreate(allocator: *const c_void, out: *mut *mut c_void) -> i32;
-    fn VTPixelTransferSessionTransferImage(session: *mut c_void, source: *mut c_void, destination: *mut c_void) -> i32;
-    fn VTPixelTransferSessionInvalidate(session: *mut c_void);
-}
-
-#[link(name = "CoreMedia", kind = "framework")]
-unsafe extern "C" {
-    fn CMSampleBufferGetImageBuffer(buffer: *mut OpaqueSampleBuffer) -> *mut c_void;
-    fn CMSampleBufferGetPresentationTimeStamp(buffer: *mut OpaqueSampleBuffer) -> CMTime;
-    fn CMSampleBufferGetDataBuffer(buffer: *mut OpaqueSampleBuffer) -> *mut c_void;
-    fn CMBlockBufferGetDataLength(buffer: *mut c_void) -> usize;
-    fn CMBlockBufferCopyDataBytes(buffer: *mut c_void, offset: usize, length: usize, destination: *mut c_void) -> i32;
-}
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFRetain(cf: *const c_void) -> *const c_void;
-    fn CFRelease(cf: *const c_void);
-    fn CFGetRetainCount(cf: *const c_void) -> isize;
-}
-
-const BGRA: u32 = u32::from_be_bytes(*b"BGRA");
-/// The decoder's own format (8-bit 4:2:0, video range): no conversion inside the reader.
-const NV12_VIDEO: u32 = u32::from_be_bytes(*b"420v");
-const LINEAR_PCM: u32 = u32::from_be_bytes(*b"lpcm");
-/// `AVAssetReaderStatus`.
-const READER_READING: isize = 1;
-
-fn class(name: &CStr) -> &'static AnyClass {
-    AnyClass::get(name).unwrap_or_else(|| panic!("{name:?} (AVFoundation) is missing"))
-}
-
-/// An autoreleased object, kept.
-unsafe fn keep(object: *mut AnyObject) -> Option<Retained<AnyObject>> {
-    unsafe { Retained::retain(object) }
-}
-
-unsafe fn number_u32(v: u32) -> *mut AnyObject {
-    unsafe { msg_send![class(c"NSNumber"), numberWithUnsignedInt: v] }
-}
-
-unsafe fn number_bool(v: bool) -> *mut AnyObject {
-    unsafe { msg_send![class(c"NSNumber"), numberWithBool: v] }
-}
-
-unsafe fn dictionary(pairs: &[(*const AnyObject, *const AnyObject)]) -> *mut AnyObject {
-    unsafe {
-        let d: *mut AnyObject = msg_send![class(c"NSMutableDictionary"), dictionary];
-        for &(k, v) in pairs {
-            let _: () = msg_send![d, setObject: v, forKey: k];
-        }
-        d
-    }
-}
-
-// ------------------------------------------------------------------ frames
-
-/// One of a source's own BGRA IOSurfaces (a retained `CVPixelBuffer`) that decoded frames are
-/// converted into, with a texture libobs makes over it once. In use while anything but the
-/// reader's ring holds it (queued, or on screen and the frames just before it).
-struct Slot {
-    id: u64,
-    buffer: *mut c_void,
-    size: (u32, u32),
-}
-
-// SAFETY: pixel buffers and IOSurfaces are reference-counted, usable from any thread.
-unsafe impl Send for Slot {}
-unsafe impl Sync for Slot {}
-
-impl Slot {
-    fn new(size: (u32, u32)) -> Option<Arc<Slot>> {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let mut buffer: *mut c_void = std::ptr::null_mut();
-        let rc = autoreleasepool(|_| unsafe {
-            let attrs = dictionary(&[
-                (kCVPixelBufferIOSurfacePropertiesKey, dictionary(&[])),
-                (kCVPixelBufferMetalCompatibilityKey, number_bool(true)),
-            ]);
-            CVPixelBufferCreate(std::ptr::null(), size.0 as usize, size.1 as usize, BGRA, attrs as *const c_void, &mut buffer)
-        });
-        if rc != 0 || buffer.is_null() {
-            tracing::error!(rc, ?size, "media: no picture buffer");
-            return None;
-        }
-        Some(Arc::new(Slot { id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), buffer, size }))
-    }
-    fn surface(&self) -> *mut c_void {
-        unsafe { CVPixelBufferGetIOSurface(self.buffer) }
-    }
-
-    /// A fully transparent slot (zeroed), never written again.
-    fn blank(size: (u32, u32)) -> Option<Arc<Slot>> {
-        let slot = Slot::new(size)?;
-        unsafe {
-            if CVPixelBufferLockBaseAddress(slot.buffer, 0) != 0 {
-                return None;
-            }
-            let base = CVPixelBufferGetBaseAddress(slot.buffer);
-            if !base.is_null() {
-                std::ptr::write_bytes(base as *mut u8, 0, CVPixelBufferGetDataSize(slot.buffer));
-            }
-            CVPixelBufferUnlockBaseAddress(slot.buffer, 0);
-        }
-        Some(slot)
-    }
-
-    /// The pixel buffer, with a reference of its own (for the compositor).
-    fn retained(&self) -> Option<CFRetained<CVPixelBuffer>> {
-        // SAFETY: `buffer` is a live `CVPixelBufferRef`; `retain` takes a reference of its own.
-        NonNull::new(self.buffer.cast::<CVPixelBuffer>()).map(|p| unsafe { CFRetained::retain(p) })
-    }
-
-    /// Whether anything outside the source holds its pixel buffer (the compositor drawing it).
-    fn lent(&self) -> bool {
-        unsafe { CFGetRetainCount(self.buffer) > 1 }
-    }
-}
-
-impl Drop for Slot {
-    fn drop(&mut self) {
-        unsafe { CFRelease(self.buffer) };
-    }
-}
-
-/// A decoder's frame (a retained `CVPixelBuffer` in its own format and pool), before it's
-/// converted into a slot.
-struct Decoded {
-    buffer: *mut c_void,
-    at: i64,
-}
-
-impl Drop for Decoded {
-    fn drop(&mut self) {
-        unsafe { CFRelease(self.buffer) };
-    }
-}
-
-/// The reader's slots: queue + on screen + spare. A slot is free when only the ring holds it.
-const SLOTS: usize = QUEUE + HELD + 1;
-
-/// The reader thread's slots and its converter (VideoToolbox, on the GPU).
-struct Ring {
-    slots: Vec<Arc<Slot>>,
-    transfer: *mut c_void,
-}
-
-impl Ring {
-    fn new() -> Self {
-        let mut transfer: *mut c_void = std::ptr::null_mut();
-        let rc = unsafe { VTPixelTransferSessionCreate(std::ptr::null(), &mut transfer) };
-        if rc != 0 {
-            tracing::error!(rc, "media: VTPixelTransferSessionCreate failed");
-        }
-        Ring { slots: Vec::new(), transfer }
-    }
-
-    /// `frame` converted into a free slot; `None` while every slot is in use.
-    fn convert(&mut self, frame: &Decoded) -> Option<Arc<Slot>> {
-        let size = unsafe { (CVPixelBufferGetWidth(frame.buffer) as u32, CVPixelBufferGetHeight(frame.buffer) as u32) };
-        self.slots.retain(|s| s.size == size);
-        // with the compositor, a slot it still draws from (holding its pixel buffer) isn't free
-        let own = crate::bridge::own();
-        let most = if own { SLOTS + COMPOSITOR_HELD } else { SLOTS };
-        let slot = match self.slots.iter().find(|s| Arc::strong_count(s) == 1 && !(own && s.lent())) {
-            Some(s) => s.clone(),
-            None if self.slots.len() < most => {
-                let s = Slot::new(size)?;
-                self.slots.push(s.clone());
-                s
-            }
-            None => return None,
-        };
-        if self.transfer.is_null() {
-            return None;
-        }
-        let rc = unsafe { VTPixelTransferSessionTransferImage(self.transfer, frame.buffer, slot.buffer) };
-        (rc == 0).then_some(slot)
-    }
-}
-
-impl Drop for Ring {
-    fn drop(&mut self) {
-        if !self.transfer.is_null() {
-            unsafe {
-                VTPixelTransferSessionInvalidate(self.transfer);
-                CFRelease(self.transfer);
-            }
-        }
-    }
-}
-
-struct Frame {
-    slot: Arc<Slot>,
-    /// When it shows, on the media clock (ns), loops included.
-    at: i64,
-    /// The play request it belongs to (frames of an earlier one are dropped).
-    run: u64,
-}
-
-/// What `video_render` takes next.
-enum Next {
-    Show(Arc<Slot>),
-    Clear,
-}
-
-/// What the source shows now, for Lightair's own compositor (`LIGHTAIR_ENGINE=own`): set on
-/// libobs's clock as libobs's own drawing is, whether libobs draws the source or not.
-#[derive(Default)]
-struct Composited {
-    /// The frame shown (`None` before the first one, or once cleared).
-    slot: Option<Arc<Slot>>,
-    /// Shows nothing (cleared at the end or on a stop).
-    cleared: bool,
-    /// Counts the pictures shown: a different value is a new picture.
-    serial: u64,
-    /// The last frame's size, for the transparent picture shown once cleared.
-    size: (u32, u32),
-    /// The transparent picture of that size.
-    blank: Option<Arc<Slot>>,
-}
+// the media states libobs hands on are the player's codes as they are
+const _: () = assert!(sys::OBS_MEDIA_STATE_PLAYING == lightair_host::media_player::state::PLAYING);
+const _: () = assert!(sys::OBS_MEDIA_STATE_ERROR == lightair_host::media_player::state::ERROR);
 
 struct Texture(*mut sys::gs_texture_t);
 // SAFETY: only touched on libobs's graphics thread.
@@ -450,621 +86,42 @@ impl Shown {
     }
 }
 
-// ------------------------------------------------------------------ playback state
+/// Where the player tells libobs what happens.
+struct ToLibobs(usize);
 
-#[derive(Clone, PartialEq)]
-struct Settings {
-    path: String,
-    looping: bool,
-    restart_on_activate: bool,
-    clear_on_end: bool,
-}
-
-struct Control {
-    state: sys::obs_media_state,
-    /// Bumped by every play, seek and stop: the reader starts over.
-    run: u64,
-    /// The reader should be reading (playing or paused).
-    reading: bool,
-    start_at: i64,
-    /// The clock: the media time `base_media` was (or will be) at `base_os` (`crate::clock`).
-    base_os: u64,
-    base_media: i64,
-    /// Media time added by the loops so far.
-    loop_offset: i64,
-    duration: i64,
-    /// The picture's size as stored, and its rotation in degrees (clockwise).
-    natural: (u32, u32),
-    rotation: u32,
-    settings: Settings,
-    quit: bool,
-}
-
-impl Control {
-    fn clock(&self, now: u64) -> i64 {
-        match self.state {
-            sys::OBS_MEDIA_STATE_PLAYING => self.base_media + (now as i64 - self.base_os as i64),
-            _ => self.base_media,
-        }
-    }
-}
-
-struct Shared {
-    source: usize,
-    rate: u32,
-    control: Mutex<Control>,
-    wake: Condvar,
-    queue: Mutex<VecDeque<Frame>>,
-    next: Mutex<Option<Next>>,
-    shown: Mutex<Shown>,
-    /// What the compositor draws (only kept with `LIGHTAIR_ENGINE=own`).
-    composited: Mutex<Composited>,
-    /// Off air, it waits to play (0 no, 1 from the start, 2 on from where it paused): a file
-    /// that doesn't restart on air (`restart_on_activate` off) still costs nothing off air.
-    on_air_play: std::sync::atomic::AtomicU8,
-    /// Where the sound goes instead of libobs while a track of the mixer takes it.
-    feed: Option<Arc<crate::audio_host::FeedSlot>>,
-}
-
-impl Shared {
+impl ToLibobs {
     fn source(&self) -> *mut sys::obs_source_t {
-        self.source as *mut sys::obs_source_t
+        self.0 as *mut sys::obs_source_t
     }
+}
 
-    /// Shows nothing from the next frame (the end, or a stop, with `clear_on_media_end`).
-    fn clear_picture(&self) {
-        *self.next.lock() = Some(Next::Clear);
-        if crate::bridge::own() {
-            let mut c = self.composited.lock();
-            c.slot = None;
-            c.cleared = true;
-            c.serial += 1;
-        }
-    }
-
-    /// Plays from `at` (ns), keeping a pause.
-    fn play_from(&self, at: i64, keep_pause: bool) {
-        let mut c = self.control.lock();
-        let paused = keep_pause && c.state == sys::OBS_MEDIA_STATE_PAUSED;
-        c.run += 1;
-        c.reading = !c.settings.path.is_empty();
-        c.start_at = at;
-        c.base_media = at;
-        c.base_os = crate::clock::now_ns() + PREROLL_NS;
-        c.loop_offset = 0;
-        c.state = match () {
-            _ if !c.reading => sys::OBS_MEDIA_STATE_NONE,
-            _ if paused => sys::OBS_MEDIA_STATE_PAUSED,
-            _ => sys::OBS_MEDIA_STATE_PLAYING,
+impl Elsewhere for ToLibobs {
+    fn audio(&self, interleaved: &[f32], rate: u32, timestamp_ns: u64) {
+        let null = std::ptr::null::<u8>();
+        let audio = sys::obs_source_audio {
+            data: [interleaved.as_ptr() as *const u8, null, null, null, null, null, null, null],
+            frames: (interleaved.len() / 2) as u32,
+            speakers: sys::SPEAKERS_STEREO,
+            format: sys::AUDIO_FORMAT_FLOAT,
+            samples_per_sec: rate,
+            timestamp: timestamp_ns,
         };
-        self.queue.lock().clear();
-        drop(c);
-        self.wake.notify_all();
+        unsafe { sys::obs_source_output_audio(self.source(), &audio) };
     }
 
-    fn stop(&self) {
-        let mut c = self.control.lock();
-        c.run += 1;
-        c.reading = false;
-        c.state = sys::OBS_MEDIA_STATE_STOPPED;
-        let clear = c.settings.clear_on_end;
-        drop(c);
-        self.queue.lock().clear();
-        if clear {
-            self.clear_picture();
-        }
-        self.wake.notify_all();
+    fn ended(&self) {
+        unsafe { sys::obs_source_media_ended(self.source()) };
     }
 
-    fn pause(&self, pause: bool) {
-        let mut c = self.control.lock();
-        let now = crate::clock::now_ns();
-        match c.state {
-            sys::OBS_MEDIA_STATE_PLAYING if pause => {
-                c.base_media = c.clock(now);
-                c.state = sys::OBS_MEDIA_STATE_PAUSED;
-            }
-            sys::OBS_MEDIA_STATE_PAUSED if !pause => {
-                c.base_os = now;
-                c.state = sys::OBS_MEDIA_STATE_PLAYING;
-            }
-            sys::OBS_MEDIA_STATE_STOPPED | sys::OBS_MEDIA_STATE_ENDED | sys::OBS_MEDIA_STATE_NONE if !pause => {
-                drop(c);
-                self.play_from(0, false);
-                unsafe { sys::obs_source_media_started(self.source()) };
-                return;
-            }
-            _ => {}
-        }
-        drop(c);
-        self.wake.notify_all();
-    }
-
-    /// The position shown now (ns), within the file.
-    fn time(&self) -> i64 {
-        let c = self.control.lock();
-        match c.state {
-            sys::OBS_MEDIA_STATE_NONE | sys::OBS_MEDIA_STATE_STOPPED => return 0,
-            sys::OBS_MEDIA_STATE_ENDED => return c.duration,
-            _ => {}
-        }
-        let mut t = c.clock(crate::clock::now_ns()) - c.loop_offset;
-        if t < 0 && c.duration > 0 && c.loop_offset > 0 {
-            t += c.duration;
-        }
-        t.clamp(0, c.duration.max(0))
+    fn started(&self) {
+        unsafe { sys::obs_source_media_started(self.source()) };
     }
 }
-
-// ------------------------------------------------------------------ the reader thread
-
-struct Asset {
-    path: String,
-    asset: Retained<AnyObject>,
-    video: Option<Retained<AnyObject>>,
-    audio: Option<Retained<AnyObject>>,
-}
-
-struct Reader {
-    reader: Retained<AnyObject>,
-    video: Option<Retained<AnyObject>>,
-    audio: Option<Retained<AnyObject>>,
-}
-
-impl Drop for Reader {
-    fn drop(&mut self) {
-        unsafe {
-            let status: isize = msg_send![&*self.reader, status];
-            if status == READER_READING {
-                let _: () = msg_send![&*self.reader, cancelReading];
-            }
-        }
-    }
-}
-
-fn first_track(asset: &AnyObject, kind: *const AnyObject) -> Option<Retained<AnyObject>> {
-    unsafe {
-        let tracks: *mut AnyObject = msg_send![asset, tracksWithMediaType: kind];
-        if tracks.is_null() {
-            return None;
-        }
-        let first: *mut AnyObject = msg_send![tracks, firstObject];
-        keep(first)
-    }
-}
-
-fn open_asset(path: &str) -> Option<Asset> {
-    let c_path = CString::new(path).ok()?;
-    unsafe {
-        let string: *mut AnyObject = msg_send![class(c"NSString"), stringWithUTF8String: c_path.as_ptr()];
-        let url: *mut AnyObject = msg_send![class(c"NSURL"), fileURLWithPath: string];
-        let asset: *mut AnyObject = msg_send![class(c"AVURLAsset"), URLAssetWithURL: url, options: std::ptr::null_mut::<AnyObject>()];
-        let asset = keep(asset)?;
-        let video = first_track(&asset, AVMediaTypeVideo);
-        let audio = first_track(&asset, AVMediaTypeAudio);
-        (video.is_some() || audio.is_some()).then(|| Asset { path: path.to_owned(), asset, video, audio })
-    }
-}
-
-/// A reader of `asset` from `start` (ns) on.
-fn open_reader(asset: &Asset, start: i64, rate: u32) -> Option<Reader> {
-    unsafe {
-        let mut error: *mut AnyObject = std::ptr::null_mut();
-        let reader: *mut AnyObject = msg_send![class(c"AVAssetReader"), assetReaderWithAsset: &*asset.asset, error: &mut error];
-        let reader = keep(reader)?;
-        let range = CMTimeRange { start: CMTime::from_ns(start.max(0)), duration: CMTime::positive_infinity() };
-        let _: () = msg_send![&*reader, setTimeRange: range];
-        let output = |track: &AnyObject, settings: *mut AnyObject| -> Option<Retained<AnyObject>> {
-            let out: *mut AnyObject =
-                msg_send![class(c"AVAssetReaderTrackOutput"), assetReaderTrackOutputWithTrack: track, outputSettings: settings];
-            let out = keep(out)?;
-            let _: () = msg_send![&*out, setAlwaysCopiesSampleData: false];
-            let ok: bool = msg_send![&*reader, canAddOutput: &*out];
-            if !ok {
-                return None;
-            }
-            let _: () = msg_send![&*reader, addOutput: &*out];
-            Some(out)
-        };
-        // the decoder's own format, in its own pool (converted into the source's surfaces)
-        let video = asset.video.as_deref().and_then(|t| {
-            let settings = dictionary(&[
-                (kCVPixelBufferPixelFormatTypeKey, number_u32(NV12_VIDEO)),
-                (kCVPixelBufferIOSurfacePropertiesKey, dictionary(&[])),
-                (kCVPixelBufferMetalCompatibilityKey, number_bool(true)),
-            ]);
-            output(t, settings)
-        });
-        let audio = asset.audio.as_deref().and_then(|t| {
-            let settings = dictionary(&[
-                (AVFormatIDKey, number_u32(LINEAR_PCM)),
-                (AVSampleRateKey, number_u32(rate)),
-                (AVNumberOfChannelsKey, number_u32(2)),
-                (AVLinearPCMBitDepthKey, number_u32(32)),
-                (AVLinearPCMIsFloatKey, number_bool(true)),
-                (AVLinearPCMIsNonInterleaved, number_bool(false)),
-                (AVLinearPCMIsBigEndianKey, number_bool(false)),
-            ]);
-            output(t, settings)
-        });
-        if video.is_none() && audio.is_none() {
-            return None;
-        }
-        let started: bool = msg_send![&*reader, startReading];
-        started.then_some(Reader { reader, video, audio })
-    }
-}
-
-/// The next sample of `output` (+1, released by the caller), or `None` at the end.
-fn next_sample(output: &AnyObject) -> Option<*mut OpaqueSampleBuffer> {
-    let sample: *mut OpaqueSampleBuffer = unsafe { msg_send![output, copyNextSampleBuffer] };
-    (!sample.is_null()).then_some(sample)
-}
-
-/// A decoded sound sample: when (ns, media clock) and stereo float frames.
-struct Sound {
-    at: i64,
-    data: Vec<f32>,
-    /// Frames already pushed into the mixer's feed.
-    sent: usize,
-}
-
-fn read_video(output: &AnyObject, offset: i64) -> Option<Option<Decoded>> {
-    autoreleasepool(|_| {
-        let sample = next_sample(output)?;
-        let frame = unsafe {
-            let at = CMSampleBufferGetPresentationTimeStamp(sample).ns();
-            let image = CMSampleBufferGetImageBuffer(sample);
-            if !image.is_null() {
-                CFRetain(image);
-            }
-            CFRelease(sample as *const c_void);
-            (!image.is_null()).then_some(Decoded { buffer: image, at: at.unwrap_or(0) + offset }).filter(|_| at.is_some())
-        };
-        Some(frame)
-    })
-}
-
-fn read_audio(output: &AnyObject, offset: i64) -> Option<Option<Sound>> {
-    autoreleasepool(|_| {
-        let sample = next_sample(output)?;
-        let sound = unsafe {
-            let at = CMSampleBufferGetPresentationTimeStamp(sample).ns();
-            let block = CMSampleBufferGetDataBuffer(sample);
-            let data = (!block.is_null()).then(|| {
-                let bytes = CMBlockBufferGetDataLength(block);
-                let mut data = vec![0f32; bytes / 4];
-                let rc = CMBlockBufferCopyDataBytes(block, 0, data.len() * 4, data.as_mut_ptr() as *mut c_void);
-                (rc == 0).then_some(data)
-            });
-            CFRelease(sample as *const c_void);
-            at.zip(data.flatten()).map(|(at, data)| Sound { at: at + offset, data, sent: 0 })
-        };
-        Some(sound)
-    })
-}
-
-/// Opens the file (once per path), learning its size, rotation and length.
-fn ensure_asset(shared: &Shared, asset: &mut Option<Asset>, path: &str) -> bool {
-    if asset.as_ref().is_some_and(|a| a.path == path) {
-        return true;
-    }
-    *asset = autoreleasepool(|_| open_asset(path));
-    let Some(a) = asset else {
-        tracing::warn!(path, "media: AVFoundation can't open the file");
-        return false;
-    };
-    let (duration, natural, rotation) = unsafe {
-        let duration: CMTime = msg_send![&*a.asset, duration];
-        let (natural, rotation) = a.video.as_deref().map_or(((0, 0), 0), |t| {
-            let size: CGSize = msg_send![t, naturalSize];
-            let m: CGAffineTransform = msg_send![t, preferredTransform];
-            let degrees = (m.b.atan2(m.a).to_degrees().round() as i32).rem_euclid(360) as u32;
-            ((size.width.round() as u32, size.height.round() as u32), degrees / 90 * 90)
-        });
-        (duration.ns().unwrap_or(0), natural, rotation)
-    };
-    let mut c = shared.control.lock();
-    c.duration = duration;
-    c.natural = natural;
-    c.rotation = rotation;
-    true
-}
-
-fn reader_thread(shared: Arc<Shared>) {
-    let mut asset: Option<Asset> = None;
-    let mut ring = Ring::new();
-    let mut done = 0;
-    loop {
-        let (run, start, settings) = {
-            let mut c = shared.control.lock();
-            while !c.quit && !(c.reading && c.run != done) {
-                shared.wake.wait(&mut c);
-            }
-            if c.quit {
-                return;
-            }
-            done = c.run;
-            (c.run, c.start_at, c.settings.clone())
-        };
-        if !ensure_asset(&shared, &mut asset, &settings.path) {
-            let mut c = shared.control.lock();
-            if c.run == run {
-                c.state = sys::OBS_MEDIA_STATE_ERROR;
-                c.reading = false;
-            }
-            continue;
-        }
-        play(&shared, asset.as_ref().unwrap(), &mut ring, run, start);
-    }
-}
-
-/// Reads from `start` until the play request `run` is replaced, or the end (looping on).
-fn play(shared: &Shared, asset: &Asset, ring: &mut Ring, run: u64, start: i64) {
-    let mut offset = 0;
-    let mut reader = open_reader(asset, start, shared.rate);
-    let (mut video, mut sound) = (None::<Decoded>, None::<Sound>);
-    loop {
-        let Some(r) = &reader else {
-            let mut c = shared.control.lock();
-            if c.run == run {
-                c.state = sys::OBS_MEDIA_STATE_ERROR;
-                c.reading = false;
-            }
-            return;
-        };
-        let (mut video_done, mut sound_done) = (r.video.is_none(), r.audio.is_none());
-        loop {
-            let (state, now, base_os, base_media, looping) = {
-                let c = shared.control.lock();
-                if c.quit || c.run != run {
-                    return;
-                }
-                let now = crate::clock::now_ns();
-                (c.state, c.clock(now), c.base_os, c.base_media, c.settings.looping)
-            };
-            if video.is_none() && !video_done {
-                match read_video(r.video.as_deref().unwrap(), offset) {
-                    Some(f) => video = f,
-                    None => video_done = true,
-                }
-            }
-            if sound.is_none() && !sound_done {
-                match read_audio(r.audio.as_deref().unwrap(), offset) {
-                    Some(s) => sound = s,
-                    None => sound_done = true,
-                }
-            }
-            let mut moved = false;
-            // into a free surface of the source's own once there's room in the queue (the decoder's
-            // buffer goes straight back to it)
-            if let Some(v) = &video
-                && shared.queue.lock().len() < QUEUE
-                && let Some(slot) = ring.convert(v)
-            {
-                shared.queue.lock().push_back(Frame { slot, at: v.at, run });
-                video = None;
-                moved = true;
-            }
-            // a track of the mixer takes the sound: the part due by now, into its feed
-            let fed = shared.feed.as_ref().is_some_and(|slot| slot.attached());
-            if state == sys::OBS_MEDIA_STATE_PLAYING
-                && fed
-                && let Some(s) = sound.as_mut()
-                && let Some(slot) = shared.feed.as_ref()
-            {
-                let total = s.data.len() / 2;
-                let ahead = (now + FED_AHEAD_NS - s.at).max(0) as i128;
-                let due = ((ahead * shared.rate as i128 / 1_000_000_000) as usize).min(total);
-                if due > s.sent && slot.push(&s.data[s.sent * 2..due * 2], 2, shared.rate) {
-                    s.sent = due;
-                    moved = true;
-                }
-                if s.sent >= total {
-                    sound = None;
-                }
-            }
-            if state == sys::OBS_MEDIA_STATE_PLAYING
-                && !fed
-                && let Some(s) = sound.as_ref().filter(|s| s.at - now < AUDIO_AHEAD_NS)
-            {
-                // (what a feed let go of mid-way didn't take)
-                let rest = &s.data[s.sent * 2..];
-                let at = base_os as i64 + (s.at - base_media) + (s.sent as i64 * 1_000_000_000 / shared.rate.max(1) as i64);
-                if at > 0 && !rest.is_empty() {
-                    let audio = sys::obs_source_audio {
-                        data: [rest.as_ptr() as *const u8, ptr_null(), ptr_null(), ptr_null(), ptr_null(), ptr_null(), ptr_null(), ptr_null()],
-                        frames: (rest.len() / 2) as u32,
-                        speakers: sys::SPEAKERS_STEREO,
-                        format: sys::AUDIO_FORMAT_FLOAT,
-                        samples_per_sec: shared.rate,
-                        timestamp: at as u64,
-                    };
-                    unsafe { sys::obs_source_output_audio(shared.source(), &audio) };
-                }
-                sound = None;
-                moved = true;
-            }
-            if video_done && sound_done && video.is_none() && sound.is_none() {
-                if looping {
-                    // on, seamlessly: the next pass's pictures and sound follow on the clock
-                    let duration = shared.control.lock().duration;
-                    offset += duration.max(1);
-                    shared.control.lock().loop_offset = offset;
-                    reader = open_reader(asset, 0, shared.rate);
-                    break;
-                }
-                // the end: once the clock gets there
-                let end = offset + shared.control.lock().duration;
-                let mut c = shared.control.lock();
-                while !c.quit && c.run == run && c.clock(crate::clock::now_ns()) < end {
-                    shared.wake.wait_for(&mut c, Duration::from_millis(10));
-                }
-                if c.quit || c.run != run {
-                    return;
-                }
-                c.state = sys::OBS_MEDIA_STATE_ENDED;
-                c.reading = false;
-                let clear = c.settings.clear_on_end;
-                drop(c);
-                if clear {
-                    shared.clear_picture();
-                }
-                unsafe { sys::obs_source_media_ended(shared.source()) };
-                return;
-            }
-            if !moved {
-                let mut c = shared.control.lock();
-                if c.run == run && !c.quit {
-                    shared.wake.wait_for(&mut c, Duration::from_millis(4));
-                }
-            }
-        }
-    }
-}
-
-fn ptr_null() -> *const u8 {
-    std::ptr::null()
-}
-
-// ------------------------------------------------------------------ a file's frames, for the compositor
-
-/// A video file's frames in time order, as the decoder writes them: BGRA IOSurface-backed pixel
-/// buffers that keep the file's alpha (ProRes 4444, HEVC with alpha), with no conversion. Lightair's
-/// own compositor plays stinger videos with it. Made and read on one thread.
-pub struct Frames {
-    _asset: Retained<AnyObject>,
-    reader: Retained<AnyObject>,
-    output: Retained<AnyObject>,
-    /// The file's length.
-    pub duration_ms: u32,
-}
-
-impl Frames {
-    /// The video of the file at `path`, from its start; `None` when AVFoundation can't read it
-    /// (a container or codec it doesn't know, or no video).
-    pub fn open(path: &str) -> Option<Frames> {
-        autoreleasepool(|_| unsafe {
-            let asset = open_asset(path)?;
-            let track = asset.video.clone()?;
-            let duration: CMTime = msg_send![&*asset.asset, duration];
-            let mut error: *mut AnyObject = std::ptr::null_mut();
-            let reader: *mut AnyObject =
-                msg_send![class(c"AVAssetReader"), assetReaderWithAsset: &*asset.asset, error: &mut error];
-            let reader = keep(reader)?;
-            let settings = dictionary(&[
-                (kCVPixelBufferPixelFormatTypeKey, number_u32(BGRA)),
-                (kCVPixelBufferIOSurfacePropertiesKey, dictionary(&[])),
-                (kCVPixelBufferMetalCompatibilityKey, number_bool(true)),
-            ]);
-            let output: *mut AnyObject = msg_send![
-                class(c"AVAssetReaderTrackOutput"),
-                assetReaderTrackOutputWithTrack: &*track,
-                outputSettings: settings
-            ];
-            let output = keep(output)?;
-            let _: () = msg_send![&*output, setAlwaysCopiesSampleData: false];
-            let ok: bool = msg_send![&*reader, canAddOutput: &*output];
-            if !ok {
-                return None;
-            }
-            let _: () = msg_send![&*reader, addOutput: &*output];
-            let started: bool = msg_send![&*reader, startReading];
-            if !started {
-                return None;
-            }
-            let duration_ms = (duration.ns().unwrap_or(0).max(0) / 1_000_000).min(u32::MAX as i64) as u32;
-            Some(Frames { _asset: asset.asset, reader, output, duration_ms })
-        })
-    }
-
-    /// The next frame and its time (ms from the file's start); `None` at the end.
-    pub fn next(&mut self) -> Option<(u32, lightair_render::texture::PixelBuffer)> {
-        loop {
-            let decoded = read_video(&self.output, 0)?;
-            let Some(decoded) = decoded else { continue };
-            let at = (decoded.at.max(0) / 1_000_000).min(u32::MAX as i64) as u32;
-            // the decoder's reference is handed to the pixel buffer, which releases it
-            let decoded = std::mem::ManuallyDrop::new(decoded);
-            // SAFETY: `buffer` is a retained `CVPixelBufferRef` whose reference is given up here.
-            if let Some(buffer) = unsafe { lightair_render::texture::PixelBuffer::from_raw(decoded.buffer) } {
-                return Some((at, buffer));
-            }
-        }
-    }
-}
-
-impl Drop for Frames {
-    fn drop(&mut self) {
-        unsafe {
-            let status: isize = msg_send![&*self.reader, status];
-            if status == READER_READING {
-                let _: () = msg_send![&*self.reader, cancelReading];
-            }
-        }
-    }
-}
-
-// ------------------------------------------------------------------ what each source shows, for the compositor
-
-/// The document's media sources this source type plays, by document id (only with
-/// `LIGHTAIR_ENGINE=own`).
-static SOURCES: LazyLock<Mutex<HashMap<Id, Weak<Shared>>>> = LazyLock::new(Default::default);
-
-/// The document source a libobs source plays (the reconciler names each by its id).
-fn document_id(source: *mut sys::obs_source_t) -> Option<Id> {
-    let name = unsafe { sys::obs_source_get_name(source) };
-    if name.is_null() {
-        return None;
-    }
-    let name = unsafe { CStr::from_ptr(name) }.to_str().ok()?;
-    uuid::Uuid::parse_str(name).ok().map(Id)
-}
-
-/// A frame a media source shows: a BGRA IOSurface-backed pixel buffer, opaque (so its colours
-/// are premultiplied too), or fully transparent once the source has cleared.
-pub struct Picture {
-    pub buffer: CFRetained<CVPixelBuffer>,
-    /// Counts the source's pictures: a different value is a new picture.
-    pub serial: u64,
-}
-
-/// Whether the document media source `source` plays through this source type now (a file
-/// AVFoundation plays), so its frames can be drawn from [`picture`]. Any thread.
-pub fn plays(source: Id) -> bool {
-    SOURCES.lock().get(&source).is_some_and(|s| s.strong_count() > 0)
-}
-
-/// The frame the document media source `source` shows now, picked on libobs's clock as its own
-/// drawing is (so pause, seek, looping, a new file and the end follow the source).
-/// `None` before its first frame, and for a file with a rotation (libobs turns it as it draws).
-/// The surface isn't written again while the buffer is held. Any thread.
-pub fn picture(source: Id) -> Option<Picture> {
-    let shared = SOURCES.lock().get(&source)?.upgrade()?;
-    if shared.control.lock().rotation != 0 {
-        return None;
-    }
-    let mut c = shared.composited.lock();
-    let slot = match (&c.slot, c.cleared) {
-        (Some(slot), _) => slot.clone(),
-        (None, true) if c.size.0 > 0 && c.size.1 > 0 => {
-            if c.blank.as_ref().is_none_or(|b| b.size != c.size) {
-                c.blank = Slot::blank(c.size);
-            }
-            c.blank.clone()?
-        }
-        _ => return None,
-    };
-    let serial = c.serial;
-    drop(c);
-    Some(Picture { buffer: slot.retained()?, serial })
-}
-
-// ------------------------------------------------------------------ the libobs source
 
 struct Media {
-    shared: Arc<Shared>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    player: MediaPlayer,
+    shown: Mutex<Shown>,
+    source: usize,
 }
 
 fn media<'a>(data: *mut c_void) -> &'a Media {
@@ -1098,71 +155,28 @@ unsafe extern "C" fn get_defaults(settings: *mut sys::obs_data_t) {
 
 unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::obs_source_t) -> *mut c_void {
     let mut info = sys::obs_audio_info::default();
-    let rate = if unsafe { sys::obs_get_audio_info(&mut info) } && info.samples_per_sec > 0 { info.samples_per_sec } else { 48000 };
-    let s = settings_of(settings);
-    let shared = Arc::new(Shared {
-        source: source as usize,
-        rate,
-        control: Mutex::new(Control {
-            state: sys::OBS_MEDIA_STATE_NONE,
-            run: 0,
-            reading: false,
-            start_at: 0,
-            base_os: 0,
-            base_media: 0,
-            loop_offset: 0,
-            duration: 0,
-            natural: (0, 0),
-            rotation: 0,
-            settings: s.clone(),
-            quit: false,
-        }),
-        wake: Condvar::new(),
-        queue: Mutex::new(VecDeque::new()),
-        next: Mutex::new(None),
-        shown: Mutex::new(Shown::default()),
-        composited: Mutex::new(Composited::default()),
-        on_air_play: Default::default(),
-        feed: crate::system_audio::mixer_captures()
-            .then(|| crate::obs::doc_id(source).map(crate::audio_host::feed_slot))
-            .flatten(),
-    });
-    // a document's source (named by its id) is found by the compositor
-    if crate::bridge::own()
-        && !unsafe { sys::obs_obj_is_private(source as *mut c_void) }
-        && let Some(id) = document_id(source)
-    {
-        SOURCES.lock().insert(id, Arc::downgrade(&shared));
-    }
-    let thread = {
-        let shared = shared.clone();
-        std::thread::Builder::new().name("lightair-media".into()).spawn(move || reader_thread(shared)).ok()
+    let rate = if unsafe { sys::obs_get_audio_info(&mut info) } && info.samples_per_sec > 0 {
+        info.samples_per_sec
+    } else {
+        48000
     };
+    let private = unsafe { sys::obs_obj_is_private(source as *mut c_void) };
+    // a document's source (named by its id) is found by the compositor and fed to the mixer
+    let id = if private { None } else { crate::obs::doc_id(source) };
     // plays once on air (from the start); a private one (the Library's player) at once
-    if unsafe { sys::obs_source_active(source) || sys::obs_obj_is_private(source as *mut c_void) } {
-        shared.play_from(0, false);
-    } else if !s.restart_on_activate {
-        shared.on_air_play.store(1, std::sync::atomic::Ordering::Relaxed);
-    }
-    Box::into_raw(Box::new(Media { shared, thread })) as *mut c_void
+    let play_now = unsafe { sys::obs_source_active(source) } || private;
+    let elsewhere: Arc<dyn Elsewhere> = Arc::new(ToLibobs(source as usize));
+    let player = MediaPlayer::new(id, settings_of(settings), rate, play_now, Some(elsewhere));
+    Box::into_raw(Box::new(Media { player, shown: Mutex::new(Shown::default()), source: source as usize }))
+        as *mut c_void
 }
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
-    let mut m = unsafe { Box::from_raw(data as *mut Media) };
-    if let Some(id) = crate::obs::doc_id(m.shared.source()) {
-        crate::audio_host::feeds_itself_no_more(id);
-    }
-    if crate::bridge::own() {
-        let me = Arc::downgrade(&m.shared);
-        SOURCES.lock().retain(|_, s| !Weak::ptr_eq(s, &me));
-    }
-    m.shared.control.lock().quit = true;
-    m.shared.wake.notify_all();
-    if let Some(t) = m.thread.take() {
-        let _ = t.join();
-    }
-    m.shared.queue.lock().clear();
-    let mut shown = m.shared.shown.lock();
+    let m = unsafe { Box::from_raw(data as *mut Media) };
+    let Media { player, shown, .. } = *m;
+    // the reader stops first
+    drop(player);
+    let mut shown = shown.lock();
     unsafe {
         sys::obs_enter_graphics();
         shown.destroy();
@@ -1172,96 +186,42 @@ unsafe extern "C" fn destroy(data: *mut c_void) {
 
 unsafe extern "C" fn update(data: *mut c_void, settings: *mut sys::obs_data_t) {
     let m = media(data);
-    let s = settings_of(settings);
-    let mut c = m.shared.control.lock();
-    let reopen = c.settings.path != s.path;
-    c.settings = s.clone();
-    drop(c);
-    if reopen && (!s.restart_on_activate || unsafe { sys::obs_source_active(m.shared.source()) }) {
-        m.shared.play_from(0, false);
-    }
+    let on_air = unsafe { sys::obs_source_active(m.source as *mut sys::obs_source_t) };
+    m.player.update(settings_of(settings), on_air);
 }
 
 unsafe extern "C" fn activate(data: *mut c_void) {
     let m = media(data);
-    if m.shared.control.lock().settings.restart_on_activate {
-        m.shared.play_from(0, false);
-        unsafe { sys::obs_source_media_started(m.shared.source()) };
-        return;
-    }
-    // on from where it was off air (or from the start, the first time)
-    match m.shared.on_air_play.swap(0, std::sync::atomic::Ordering::AcqRel) {
-        1 => m.shared.play_from(0, false),
-        2 => m.shared.pause(false),
-        _ => {}
+    if m.player.activate() {
+        unsafe { sys::obs_source_media_started(m.source as *mut sys::obs_source_t) };
     }
 }
 
 unsafe extern "C" fn deactivate(data: *mut c_void) {
-    let m = media(data);
-    if m.shared.control.lock().settings.restart_on_activate {
-        m.shared.stop();
-        return;
-    }
-    // off air: paused (nothing decoded), on again when back on air
-    if m.shared.control.lock().state == sys::OBS_MEDIA_STATE_PLAYING {
-        m.shared.pause(true);
-        m.shared.on_air_play.store(2, std::sync::atomic::Ordering::Release);
-    }
+    media(data).player.deactivate();
 }
 
 /// Picks the frame due now (libobs's graphics thread, before rendering).
 unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
-    let shared = &media(data).shared;
-    let (now, run) = {
-        let c = shared.control.lock();
-        (c.clock(crate::clock::now_ns()), c.run)
-    };
-    let mut due = None;
-    {
-        let mut q = shared.queue.lock();
-        while let Some(f) = q.front() {
-            if f.run != run {
-                q.pop_front();
-            } else if f.at <= now {
-                due = q.pop_front();
-            } else {
-                break;
-            }
-        }
-    }
-    if let Some(f) = due {
-        if crate::bridge::own() {
-            let mut c = shared.composited.lock();
-            c.size = f.slot.size;
-            c.slot = Some(f.slot.clone());
-            c.cleared = false;
-            c.serial += 1;
-        }
-        let mut next = shared.next.lock();
-        if !matches!(*next, Some(Next::Clear)) {
-            *next = Some(Next::Show(f.slot));
-        }
-        drop(next);
-        shared.wake.notify_all();
-    }
+    media(data).player.tick();
 }
 
 unsafe extern "C" fn video_render(data: *mut c_void, _effect: *mut sys::gs_effect_t) {
-    let shared = &media(data).shared;
-    let mut shown = shared.shown.lock();
-    match shared.next.lock().take() {
+    let m = media(data);
+    let mut shown = m.shown.lock();
+    match m.player.take_next() {
         Some(Next::Show(p)) => unsafe { shown.show(p) },
         Some(Next::Clear) => shown.clear(),
         None => {}
     }
     let Some(tex) = shown.texture() else { return };
     let (w, h) = shown.size;
-    let rotation = shared.control.lock().rotation;
+    let rotation = m.player.natural().1;
     unsafe {
         // an IOSurface is a rectangle texture on OpenGL (Metal has none)
         let rect = sys::gs_get_device_type() as u32 != sys::GS_DEVICE_METAL;
-        let effect = sys::obs_get_base_effect(if rect { sys::OBS_EFFECT_DEFAULT_RECT } else { sys::OBS_EFFECT_DEFAULT });
+        let effect =
+            sys::obs_get_base_effect(if rect { sys::OBS_EFFECT_DEFAULT_RECT } else { sys::OBS_EFFECT_DEFAULT });
         let image = sys::gs_effect_get_param_by_name(effect, c"image".as_ptr());
         sys::gs_effect_set_texture(image, tex);
         sys::gs_matrix_push();
@@ -1290,11 +250,11 @@ unsafe extern "C" fn video_render(data: *mut c_void, _effect: *mut sys::gs_effec
 }
 
 fn size(data: *mut c_void) -> (u32, u32) {
-    let shared = &media(data).shared;
-    let shown = shared.shown.lock().size;
-    let c = shared.control.lock();
-    let (w, h) = if shown.0 > 0 { shown } else { c.natural };
-    if c.rotation % 180 == 90 { (h, w) } else { (w, h) }
+    let m = media(data);
+    let shown = m.shown.lock().size;
+    let (natural, rotation) = m.player.natural();
+    let (w, h) = if shown.0 > 0 { shown } else { natural };
+    if rotation % 180 == 90 { (h, w) } else { (w, h) }
 }
 
 unsafe extern "C" fn get_width(data: *mut c_void) -> u32 {
@@ -1306,41 +266,33 @@ unsafe extern "C" fn get_height(data: *mut c_void) -> u32 {
 }
 
 unsafe extern "C" fn media_play_pause(data: *mut c_void, pause: bool) {
-    media(data).shared.pause(pause);
+    media(data).player.play_pause(pause);
 }
 
 unsafe extern "C" fn media_restart(data: *mut c_void) {
     let m = media(data);
-    m.shared.play_from(0, false);
-    unsafe { sys::obs_source_media_started(m.shared.source()) };
+    m.player.restart();
+    unsafe { sys::obs_source_media_started(m.source as *mut sys::obs_source_t) };
 }
 
 unsafe extern "C" fn media_stop(data: *mut c_void) {
-    media(data).shared.stop();
+    media(data).player.stop();
 }
 
 unsafe extern "C" fn media_get_duration(data: *mut c_void) -> i64 {
-    media(data).shared.control.lock().duration / 1_000_000
+    media(data).player.duration_ms()
 }
 
 unsafe extern "C" fn media_get_time(data: *mut c_void) -> i64 {
-    media(data).shared.time() / 1_000_000
+    media(data).player.time_ms()
 }
 
 unsafe extern "C" fn media_set_time(data: *mut c_void, ms: i64) {
-    let shared = &media(data).shared;
-    let (reading, duration) = {
-        let c = shared.control.lock();
-        (c.reading, c.duration)
-    };
-    if reading {
-        let at = (ms.max(0) * 1_000_000).min(duration.max(0));
-        shared.play_from(at, true);
-    }
+    media(data).player.set_time_ms(ms);
 }
 
 unsafe extern "C" fn media_get_state(data: *mut c_void) -> sys::obs_media_state {
-    media(data).shared.control.lock().state
+    media(data).player.state()
 }
 
 /// Registers the source with libobs (once; after startup).
