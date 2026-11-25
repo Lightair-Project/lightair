@@ -5,6 +5,8 @@
 pub mod access;
 pub mod audio;
 pub mod audio_host;
+#[cfg(target_os = "macos")]
+pub mod buffers;
 pub mod clock;
 pub mod devices;
 pub mod gpu;
@@ -21,6 +23,8 @@ pub mod program;
 pub mod plugins;
 pub mod rtsp;
 pub mod show;
+#[cfg(any(target_os = "macos", windows))]
+pub mod web;
 pub mod soundboard;
 #[cfg(target_os = "macos")]
 pub mod vcam_mac;

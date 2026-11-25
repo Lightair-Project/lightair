@@ -1,0 +1,484 @@
+//! Web pages as sources (`lightair_web`): a page Chromium renders off screen (`lightair_web`,
+//! one Chromium on every platform, bundled with Lightair), open only while something shows it.
+//!
+//! Settings: `url`; `width`, `height` (the frame's size: the page's in CSS pixels at 100%);
+//! `fps`; `zoom` (percent, as a browser's); `css` (added to the page each time it loads).
+//!
+//! On macOS Chromium shares its frames as IOSurfaces ([`Frames`]): while Lightair's compositor
+//! wants a page, each frame painted is also copied on the GPU into a BGRA IOSurface from a small
+//! ring of the page's, and the compositor takes the newest finished copy ([`feed`]). A page's
+//! sound goes into its track in the mixer while a track takes it.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use lightair_model::Id;
+use parking_lot::Mutex;
+
+pub const KIND: &str = "lightair_web";
+
+#[cfg(target_os = "macos")]
+use std::collections::{HashMap, VecDeque};
+#[cfg(target_os = "macos")]
+use std::ffi::c_void;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicU64;
+#[cfg(target_os = "macos")]
+use std::sync::{LazyLock, Weak};
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use super::*;
+    /// Copy buffers per page at most: the newest copy, one each compositor may still hold until
+    /// its next frame, one being copied into, one free.
+    const RING: usize = 6;
+
+    /// How long after the compositor last took a frame libobs still leaves the page undrawn
+    /// (less than an output's wait before it falls back to libobs's own picture).
+    const TAKEN_FOR: Duration = Duration::from_millis(250);
+
+    /// What [`now`] counts from.
+    static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+    /// Nanoseconds since `EPOCH`, never 0 (0 stands for "never").
+    fn now() -> u64 {
+        EPOCH.elapsed().as_nanos() as u64 + 1
+    }
+
+    #[link(name = "IOSurface", kind = "framework")]
+    unsafe extern "C" {
+        fn IOSurfaceIncrementUseCount(surface: *mut c_void);
+        fn IOSurfaceDecrementUseCount(surface: *mut c_void);
+        fn IOSurfaceGetWidth(surface: *mut c_void) -> usize;
+        fn IOSurfaceGetHeight(surface: *mut c_void) -> usize;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRetain(cf: *const c_void) -> *const c_void;
+        fn CFRelease(cf: *const c_void);
+    }
+
+    /// A retained IOSurface, in use until dropped.
+    pub struct Surface(*mut c_void);
+
+    impl Surface {
+        pub fn hold(surface: *mut c_void) -> Self {
+            unsafe {
+                CFRetain(surface);
+                IOSurfaceIncrementUseCount(surface);
+            }
+            Surface(surface)
+        }
+        /// The surface (an `IOSurfaceRef`), borrowed.
+        pub fn ptr(&self) -> *mut c_void {
+            self.0
+        }
+
+        pub fn size(&self) -> (u32, u32) {
+            unsafe { (IOSurfaceGetWidth(self.0) as u32, IOSurfaceGetHeight(self.0) as u32) }
+        }
+    }
+
+    impl Drop for Surface {
+        fn drop(&mut self) {
+            unsafe {
+                IOSurfaceDecrementUseCount(self.0);
+                CFRelease(self.0);
+            }
+        }
+    }
+
+    // SAFETY: IOSurfaces are reference-counted kernel objects usable from any thread.
+    unsafe impl Send for Surface {}
+
+    /// A buffer of the ring, and the GPU's view of it that copies go into.
+    struct Slot {
+        buffer: crate::buffers::Buffer,
+        target: lightair_web::copy::Target,
+    }
+
+    /// A copy the GPU is making: into `buffer`, from Chromium's surface (held until it's done).
+    struct Copying {
+        copy: lightair_web::copy::Copy,
+        buffer: crate::buffers::Buffer,
+        _from: Surface,
+    }
+
+    /// The compositor's copies of the page's frames.
+    #[derive(Default)]
+    struct Copies {
+        ring: Vec<Slot>,
+        /// Oldest first (one queue: they finish in order).
+        copying: VecDeque<Copying>,
+        /// The newest finished copy, and its count.
+        latest: Option<(crate::buffers::Buffer, u64)>,
+        serial: u64,
+    }
+
+    // SAFETY: CoreVideo pixel buffers are reference-counted and usable from any thread; the
+    // targets and copies are Metal objects only read once made; the surfaces IOSurfaces.
+    unsafe impl Send for Copies {}
+
+    impl Copies {
+        /// Hands on the copies the GPU has finished.
+        fn collect(&mut self) {
+            while let Some(done) = self.copying.front().and_then(|c| c.copy.finished()) {
+                let Some(c) = self.copying.pop_front() else { break };
+                if done {
+                    self.serial += 1;
+                    self.latest = Some((c.buffer, self.serial));
+                }
+            }
+        }
+
+        /// Starts copying `surface` (Chromium's, being painted now) into a free buffer of its
+        /// size; `false` when every buffer is still held (the frame is skipped).
+        fn start(&mut self, surface: *mut c_void) -> bool {
+            self.collect();
+            let size = unsafe { (IOSurfaceGetWidth(surface) as u32, IOSurfaceGetHeight(surface) as u32) };
+            // buffers of another size go once nothing holds them (the page was resized)
+            self.ring.retain(|s| s.target.size() == size || s.buffer.retain_count() > 1);
+            let free = self.ring.iter().position(|s| s.target.size() == size && s.buffer.retain_count() == 1);
+            let slot = match free {
+                Some(i) => i,
+                None if self.ring.len() < RING => {
+                    let Some(buffer) = crate::buffers::bgra_buffer(size.0, size.1) else { return true };
+                    let Some(target) =
+                        crate::buffers::surface_of(&buffer).and_then(|s| unsafe { lightair_web::copy::Target::new(s) })
+                    else {
+                        return true;
+                    };
+                    self.ring.push(Slot { buffer, target });
+                    self.ring.len() - 1
+                }
+                None => return false,
+            };
+            let slot = &self.ring[slot];
+            // SAFETY: `surface` is Chromium's, live during its paint; it's held below until the
+            // copy has run.
+            if let Some(copy) = unsafe { lightair_web::copy::copy(surface, &slot.target) } {
+                self.copying.push_back(Copying { copy, buffer: slot.buffer.clone(), _from: Surface::hold(surface) });
+            }
+            true
+        }
+    }
+
+    /// A page's painted frames (macOS): the newest Chromium painted (retained, and marked in use so
+    /// Chromium doesn't paint into it again meanwhile) until whoever draws the page takes it, and,
+    /// while a compositor wants the page, copies of each into buffers of the page's own ring
+    /// (Chromium's surface held in use until the GPU has copied it).
+    #[derive(Default)]
+    pub struct Frames {
+        /// Painted, not yet drawn.
+        next: Mutex<Option<Surface>>,
+        /// What libobs's drawing shows now (kept in use while it does).
+        shown: Mutex<Option<Surface>>,
+        /// Copies for Lightair's own compositor, made while it wants the page.
+        copies: Mutex<Copies>,
+        wanted: AtomicBool,
+        /// The page should paint again (the compositor has no copy of what it shows).
+        repaint: AtomicBool,
+        /// When the compositor last took a frame to draw in libobs's place ([`now`]; 0: never).
+        taken: AtomicU64,
+    }
+
+    impl Frames {
+        /// A new frame (main thread, during Chromium's paint).
+        pub fn put(&self, surface: *mut c_void) {
+            if surface.is_null() {
+                return;
+            }
+            if self.wanted.load(Ordering::Relaxed) && !self.copies.lock().start(surface) {
+                // every copy is still held: the next paint brings this one's picture
+                self.repaint.store(true, Ordering::Relaxed);
+            }
+            let held = Surface::hold(surface);
+            // the one it replaces (never drawn) goes back to Chromium
+            *self.next.lock() = Some(held);
+        }
+
+        /// Whether a compositor shows the page: while it does, each frame painted is copied for it
+        /// (and the page is asked to paint once more when there's no copy yet); when it stops, the
+        /// copies go.
+        pub fn want(&self, on: bool) {
+            let was = self.wanted.swap(on, Ordering::Relaxed);
+            if on && !was {
+                // the newest frame Chromium painted, copied now; and another asked for, in case
+                // the page has repainted that surface since (one lock at a time: a drawer takes
+                // `shown`, then `next`)
+                let next = self.next.lock().as_ref().map(|s| Surface::hold(s.0));
+                let newest = next.or_else(|| self.shown.lock().as_ref().map(|s| Surface::hold(s.0)));
+                if let Some(s) = newest {
+                    self.copies.lock().start(s.0);
+                }
+                self.repaint.store(true, Ordering::Relaxed);
+            } else if !on && was {
+                let old = std::mem::take(&mut *self.copies.lock());
+                self.taken.store(0, Ordering::Relaxed);
+                drop(old);
+            }
+        }
+
+        /// The newest finished copy of the page's frame, and a count that changes with each new
+        /// one. `take`: the compositor draws it in libobs's place, so libobs stops drawing the page
+        /// for as long as frames keep being taken.
+        pub fn frame(&self, take: bool) -> Option<(crate::buffers::Buffer, u64)> {
+            let latest = {
+                let mut copies = self.copies.lock();
+                copies.collect();
+                copies.latest.clone()
+            }?;
+            if take {
+                self.taken.store(now(), Ordering::Relaxed);
+            }
+            Some(latest)
+        }
+
+        /// Whether the page was asked to paint again since last asked (and forgets it).
+        pub fn repaint_asked(&self) -> bool {
+            self.repaint.swap(false, Ordering::Relaxed)
+        }
+
+        /// Whether the compositor draws the page in libobs's place now.
+        pub fn taken(&self) -> bool {
+            let at = self.taken.load(Ordering::Relaxed);
+            at != 0 && now().saturating_sub(at) < TAKEN_FOR.as_nanos() as u64
+        }
+
+        /// For a drawer (libobs): the newest painted frame not drawn yet.
+        pub fn take_next(&self) -> Option<Surface> {
+            self.next.lock().take()
+        }
+
+        /// For a drawer: it shows `surface` now (the one before goes back to Chromium).
+        pub fn set_shown(&self, surface: Surface) {
+            *self.shown.lock() = Some(surface);
+        }
+
+        /// The size of what's shown (0×0 before anything is).
+        pub fn shown_size(&self) -> (u32, u32) {
+            self.shown.lock().as_ref().map_or((0, 0), Surface::size)
+        }
+    }
+
+    /// The web pages' frames for Lightair's own compositor, by document source id (as text).
+    pub(super) static FEEDS: LazyLock<Mutex<HashMap<String, Weak<Frames>>>> = LazyLock::new(Default::default);
+
+    /// A web page's frames, as Lightair's own compositor takes them.
+    pub struct Feed(Arc<Frames>);
+
+    /// The frames of the web page of document source `source` (its id as text), when it has one.
+    pub fn feed(source: &str) -> Option<Feed> {
+        FEEDS.lock().get(source).and_then(Weak::upgrade).map(Feed)
+    }
+
+    impl Feed {
+        /// See [`Frames::want`].
+        pub fn want(&self, on: bool) {
+            self.0.want(on);
+        }
+
+        /// See [`Frames::frame`].
+        pub fn frame(&self, take: bool) -> Option<(crate::buffers::Buffer, u64)> {
+            self.0.frame(take)
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+use mac::FEEDS;
+#[cfg(target_os = "macos")]
+pub use mac::{Feed, Frames, Surface, feed};
+
+// ---------------------------------------------------------------------------------------------
+// The page
+
+/// Where a page's frames and sound go besides the compositor and the mixer (libobs's web source,
+/// while libobs is there).
+pub trait Elsewhere: Send + Sync {
+    /// A frame painted into memory (where Chromium can't share textures).
+    fn frame(&self, bgra: &[u8], width: u32, height: u32);
+    /// Sound no track of the mixer took.
+    fn audio(&self, planes: &[&[f32]], rate: u32);
+}
+
+/// How long a page stays open once nothing shows it (a scene being rebuilt, a transition's
+/// hand-over).
+const LINGER: Duration = Duration::from_secs(1);
+
+/// A web page for document source `source`: open only while something shows it (on air, a
+/// preview), closed a moment after nothing does, costing nothing off screen.
+pub struct WebPage {
+    source: Id,
+    page: Mutex<Option<lightair_web::Page>>,
+    /// On screen somewhere.
+    showing: AtomicBool,
+    hidden_since: Mutex<Option<Instant>>,
+    options: Mutex<lightair_web::PageOptions>,
+    texture: Option<lightair_web::TextureSink>,
+    frame: lightair_web::FrameSink,
+    audio: lightair_web::AudioSink,
+    #[cfg(target_os = "macos")]
+    frames: Arc<Frames>,
+}
+
+impl WebPage {
+    /// A page for `source` with `options` (opened when first shown). Its shared textures go to
+    /// `texture` (macOS: the page's own [`Frames`] when `None`); frames painted into memory and
+    /// sound no track takes go to `elsewhere`.
+    pub fn new(
+        source: Id,
+        options: lightair_web::PageOptions,
+        texture: Option<lightair_web::TextureSink>,
+        elsewhere: Option<Arc<dyn Elsewhere>>,
+    ) -> WebPage {
+        let slot = crate::audio_host::mixer_on().then(|| crate::audio_host::feed_slot(source));
+        let to = elsewhere.clone();
+        let frame: lightair_web::FrameSink = Arc::new(move |bgra: &[u8], w: u32, h: u32| {
+            if let Some(e) = &to {
+                e.frame(bgra, w, h);
+            }
+        });
+        let audio: lightair_web::AudioSink = Arc::new(move |planes: &[&[f32]], rate: u32| {
+            // a track takes the sound itself: into its feed
+            if slot.as_ref().is_some_and(|s| s.push_planar(planes, rate)) {
+                return;
+            }
+            if let Some(e) = &elsewhere {
+                e.audio(planes, rate);
+            }
+        });
+        #[cfg(target_os = "macos")]
+        let frames = Arc::new(Frames::default());
+        #[cfg(target_os = "macos")]
+        let texture = texture.or_else(|| {
+            let f = frames.clone();
+            Some(Arc::new(move |surface, _w, _h| f.put(surface)) as lightair_web::TextureSink)
+        });
+        #[cfg(target_os = "macos")]
+        if crate::show::own() {
+            FEEDS.lock().insert(source.to_string(), Arc::downgrade(&frames));
+        }
+        WebPage {
+            source,
+            page: Mutex::new(None),
+            showing: AtomicBool::new(false),
+            hidden_since: Mutex::new(None),
+            options: Mutex::new(options),
+            texture,
+            frame,
+            audio,
+            #[cfg(target_os = "macos")]
+            frames,
+        }
+    }
+
+    /// The page's frames (macOS).
+    #[cfg(target_os = "macos")]
+    pub fn frames(&self) -> &Arc<Frames> {
+        &self.frames
+    }
+
+    pub fn options(&self) -> lightair_web::PageOptions {
+        self.options.lock().clone()
+    }
+
+    /// New settings: the open page follows them; no address closes it (it opens with these
+    /// when shown).
+    pub fn set_options(&self, o: lightair_web::PageOptions) {
+        if o == *self.options.lock() {
+            return;
+        }
+        *self.options.lock() = o.clone();
+        let mut page = self.page.lock();
+        match page.as_ref() {
+            Some(p) if !o.url.trim().is_empty() => p.update(o),
+            _ => {
+                *page = None;
+                drop(page);
+                if self.showing.load(Ordering::Relaxed) {
+                    self.ensure_open();
+                }
+            }
+        }
+    }
+
+    /// Something shows the page now.
+    pub fn show(&self) {
+        self.showing.store(true, Ordering::Relaxed);
+        *self.hidden_since.lock() = None;
+        self.ensure_open();
+    }
+
+    /// Nothing shows the page now (it closes after a moment, [`WebPage::tick`]).
+    pub fn hide(&self) {
+        self.showing.store(false, Ordering::Relaxed);
+        *self.hidden_since.lock() = Some(Instant::now());
+        if let Some(page) = self.page.lock().as_ref() {
+            page.set_visible(false);
+        }
+    }
+
+    /// A few times a second: paints again when the compositor wants a frame the page hasn't
+    /// painted since (a still page paints once), and closes the page once nothing has shown it
+    /// for a moment.
+    pub fn tick(&self) {
+        #[cfg(target_os = "macos")]
+        if self.frames.repaint_asked()
+            && let Some(page) = self.page.lock().as_ref()
+        {
+            page.repaint();
+        }
+        if self.showing.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut since = self.hidden_since.lock();
+        if since.is_some_and(|t| t.elapsed() >= LINGER) {
+            *since = None;
+            drop(since);
+            // (closing only asks Chromium's thread to)
+            self.page.lock().take();
+        }
+    }
+
+    /// Loads the page again.
+    pub fn reload(&self) {
+        if let Some(p) = self.page.lock().as_ref() {
+            p.reload();
+        }
+    }
+
+    /// Restyles the page now (custom CSS being typed, not yet its setting).
+    pub fn restyle(&self, css: String) {
+        if let Some(p) = self.page.lock().as_ref() {
+            p.restyle(css);
+        }
+    }
+
+    fn ensure_open(&self) {
+        let mut page = self.page.lock();
+        if page.is_none() {
+            let o = self.options.lock().clone();
+            if !o.url.trim().is_empty() {
+                *page = Some(match &self.texture {
+                    Some(t) => lightair_web::Page::open_shared(o, t.clone(), self.frame.clone(), self.audio.clone()),
+                    None => lightair_web::Page::open(o, self.frame.clone(), self.audio.clone()),
+                });
+            }
+        }
+        if let Some(p) = page.as_ref() {
+            p.set_visible(true);
+        }
+    }
+}
+
+impl Drop for WebPage {
+    fn drop(&mut self) {
+        self.page.lock().take();
+        if crate::audio_host::mixer_on() {
+            crate::audio_host::feeds_itself_no_more(self.source);
+        }
+        #[cfg(target_os = "macos")]
+        FEEDS.lock().retain(|_, f| !std::ptr::eq(f.as_ptr(), Arc::as_ptr(&self.frames)));
+    }
+}

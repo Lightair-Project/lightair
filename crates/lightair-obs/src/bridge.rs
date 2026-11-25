@@ -25,11 +25,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use lightair_model::Id;
-use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType};
-use objc2_core_video::{
-    CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetIOSurface, kCVPixelBufferIOSurfacePropertiesKey,
-    kCVPixelBufferMetalCompatibilityKey, kCVPixelFormatType_32BGRA, kCVReturnSuccess,
-};
+use objc2_core_foundation::CFRetained;
 use parking_lot::Mutex;
 
 use crate::obs::{ObsSource, SourceRef};
@@ -63,7 +59,7 @@ pub fn scene_of(source: *mut sys::obs_source_t) -> Option<(Id, Id)> {
 // ---------------------------------------------------------------- sources
 
 /// A retained `CVPixelBuffer`: BGRA, IOSurface-backed.
-pub type Buffer = CFRetained<CVPixelBuffer>;
+pub use lightair_host::buffers::Buffer;
 
 struct Bridge {
     /// Document source → its libobs source (engine thread writes; graphics thread reads).
@@ -252,41 +248,7 @@ pub fn avatar_posing(source: Id) -> Option<(Arc<AvatarPosing>, Option<TrackingPi
     Some((feed.posing.clone()?, feed.view.clone()))
 }
 
-// ---------------------------------------------------------------- buffers
-
-/// A BGRA, IOSurface-backed pixel buffer (Metal and OpenGL can use its surface).
-pub(crate) fn bgra_buffer(width: u32, height: u32) -> Option<Buffer> {
-    let empty: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(&[], &[]);
-    // SAFETY: CoreVideo's constant keys, read only.
-    let keys: [&CFString; 2] = unsafe { [kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey] };
-    let values: [&CFType; 2] = [empty.as_ref(), CFBoolean::new(true).as_ref()];
-    let attrs = CFDictionary::from_slices(&keys, &values);
-    let mut out: *mut CVPixelBuffer = ptr::null_mut();
-    // SAFETY: `out` is a valid place for the new buffer; the attributes outlive the call.
-    let rc = unsafe {
-        CVPixelBufferCreate(
-            None,
-            width as usize,
-            height as usize,
-            kCVPixelFormatType_32BGRA,
-            Some(attrs.as_opaque()),
-            NonNull::from(&mut out),
-        )
-    };
-    if rc != kCVReturnSuccess || out.is_null() {
-        tracing::error!(rc, width, height, "bridge: CVPixelBufferCreate failed");
-        return None;
-    }
-    // SAFETY: CVPixelBufferCreate returned a buffer we own one reference to.
-    Some(unsafe { CFRetained::from_raw(NonNull::new_unchecked(out)) })
-}
-
-/// The buffer's IOSurface, borrowed (as an `IOSurfaceRef`).
-pub(crate) fn surface_of(buffer: &Buffer) -> Option<*mut c_void> {
-    let surface = CVPixelBufferGetIOSurface(Some(buffer))?;
-    // the buffer keeps its surface alive; the pointer is used while the buffer is held
-    Some(CFRetained::as_ptr(&surface).as_ptr().cast())
-}
+pub use lightair_host::buffers::{bgra_buffer, surface_of};
 
 // ---------------------------------------------------------------- OpenGL (libobs's context)
 mod gl {

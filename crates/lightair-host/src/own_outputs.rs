@@ -107,7 +107,7 @@ fn next_id() -> u64 {
 
 // ---------------------------------------------------------------- packets and sinks
 
-pub type Buffer = CFRetained<CVPixelBuffer>;
+pub use crate::buffers::Buffer;
 
 /// A finished compositor frame on its way to a canvas's encoders.
 struct Frame(Buffer);
