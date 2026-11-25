@@ -13,4 +13,4 @@ Changes from that commit:
 - `ModelRuntime::drawable_part`: the part a drawable sits in (Lightair groups art meshes by
   part when pinning things to an avatar).
 
-`README.md` is upstream's, as it was at that commit.
+`README.md` describes the crate as it's used in Lightair.

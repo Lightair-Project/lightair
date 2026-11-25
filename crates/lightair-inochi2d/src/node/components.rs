@@ -1,5 +1,5 @@
 /*!
-Inochi2D node types to Inox2D components:
+Inochi2D node types to this runtime's components:
 - Node -> (Nothing)
 - Part -> Drawable + TexturedMesh + Mesh (+ Welding, nijilive)
 - Composite -> Drawable + Composite

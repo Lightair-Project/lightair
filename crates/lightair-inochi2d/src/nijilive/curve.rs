@@ -1,8 +1,6 @@
 /*!
 nijilive's curves for PathDeformers: a Bezier through all control points, or a Catmull-Rom
-spline, each with its closest-point search. Ported from nijilive (`core/nodes/deformer/curve.d`)
-and its C++ port nicxlive (`core/nodes/curve.cpp`); both BSD-2-Clause, © 2020 Inochi2D Project,
-© 2024 nijigenerate Project.
+spline, each with its closest-point search (sources and licences in NOTICE.md).
 */
 
 use glam::Vec2;

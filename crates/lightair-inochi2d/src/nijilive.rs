@@ -1,8 +1,7 @@
 /*!
-nijilive's deformers (nijigenerate's puppets): MeshGroups and PathDeformers bend the nodes under
-them through filters, as nijilive (`core/nodes/node.d`, `deformable.d`, `meshgroup`,
-`deformer/path.d`, `drawable.d` for welding) and its C++ port nicxlive do; both BSD-2-Clause,
-© 2020 Inochi2D Project, © 2024 nijigenerate Project.
+nijilive puppets' deformers: MeshGroups and PathDeformers bend the nodes under them through
+filters, and welding joins parts, as the nijilive format defines them (sources and licences in
+NOTICE.md).
 
 Which nodes a deformer reaches is decided once: walking down from its children, a node takes its
 filter (a MeshGroup's: drawn nodes and, when it translates children, plain ones; a PathDeformer's:

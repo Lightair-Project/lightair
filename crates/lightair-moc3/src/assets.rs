@@ -136,7 +136,7 @@ pub enum AssetLoadError {
 
 /// Loads a model as a static default-pose snapshot.
 ///
-/// The `path` should point to a `.model3.json` file. Mocari reads the referenced
+/// The `path` should point to a `.model3.json` file. The runtime reads the referenced
 /// `.moc3` file and textures from the same model directory, then builds drawable
 /// meshes using the model's default parameter values.
 pub fn load_model(path: impl AsRef<Path>) -> Result<DefaultModel, AssetLoadError> {

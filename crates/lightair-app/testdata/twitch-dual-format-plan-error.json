@@ -1,0 +1,23 @@
+{
+  "_": "Twitch's 'error' answer from docs/plans/twitch-dual-format.md \u00a72.4 (#2), its ingest pointed at Stream Check (local checks: no Twitch traffic). Use with LIGHTAIR_MULTITRACK_PLAN.",
+  "meta": {
+    "service": "IVS",
+    "schema_version": "2025-01-25",
+    "config_id": "local-check-error"
+  },
+  "status": {
+    "result": "error",
+    "html_en_us": "Amazon IVS Multitrack Video requires at least 2 tracks per canvas.  You have either requested too few encodes (3) to support this, or we believe your GPU would not handle this workload."
+  },
+  "ingest_endpoints": [
+    {
+      "protocol": "RTMP",
+      "url_template": "rtmp://127.0.0.1:1935/twitch-dual/{stream_key}"
+    }
+  ],
+  "encoder_configurations": [],
+  "audio_configurations": {
+    "live": [],
+    "vod": []
+  }
+}

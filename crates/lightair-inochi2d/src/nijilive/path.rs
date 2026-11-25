@@ -1,10 +1,7 @@
 /*!
 nijilive's PathDeformer: a curve through control points, deformed by params (deform bindings on
 its control points), by the deformers above it and by its physics driver, that bends the drawn
-nodes under it. Ported from nijilive (`core/nodes/deformer/path.d`,
-`core/nodes/deformer/drivers/phys.d`) and its C++ port nicxlive (`core/nodes/path_deformer.cpp`,
-`core/nodes/deformer/drivers/phys.cpp`); both BSD-2-Clause, © 2020 Inochi2D Project, © 2024
-nijigenerate Project.
+nodes under it (sources and licences in NOTICE.md).
 
 Each vertex of a node it deforms is tied to the point of the curve closest to where the vertex
 rests; each frame the vertex keeps its distance along and across the curve there, as the curve

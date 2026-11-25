@@ -1,7 +1,6 @@
 [package]
 name = "lightair-inochi2d"
-description = "Lightair's built-in runtime for Inochi2D and nijilive puppets (from Inox2D, BSD-2-Clause; see NOTICE.md)"
-authors = ["Speykious"]
+description = "Lightair's built-in runtime for Inochi2D and nijilive puppets (third-party, BSD-2-Clause; see NOTICE.md)"
 version = "0.3.0"
 edition = "2021"
 publish = false

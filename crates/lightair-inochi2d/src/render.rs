@@ -352,7 +352,7 @@ impl RenderCtx {
 	}
 }
 
-/// Same as the reference Inochi2D implementation, Inox2D also aims for a "bring your own rendering backend" design.
+/// The runtime brings no renderer of its own ("bring your own rendering backend").
 /// A custom backend shall implement this trait.
 ///
 /// It is perfectly fine that the trait implementation does not contain everything needed to display a puppet as:
@@ -360,7 +360,7 @@ impl RenderCtx {
 /// - The renderer may want platform-specific optimizations, e.g. batching, and the provided implementation is merely for collecting puppet info.
 /// - The renderer may be a debug/just-for-fun renderer intercepting draw calls for other purposes.
 ///
-/// Either way, the point is Inox2D will implement a `draw()` method for any `impl InoxRenderer`, dispatching calls based on puppet structure according to Inochi2D standard.
+/// Either way, the runtime implements a `draw()` method for any `impl InoxRenderer`, dispatching calls based on puppet structure according to Inochi2D standard.
 pub trait InoxRenderer {
 	/// Begin masking.
 	///

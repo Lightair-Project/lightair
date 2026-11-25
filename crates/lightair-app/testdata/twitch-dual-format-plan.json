@@ -1,0 +1,38 @@
+{
+  "_": "A Dual Format plan for local checks (docs/plans/twitch-dual-format.md §7), shaped like Twitch's answer from §2.4, sending to Stream Check on this computer. Use: LIGHTAIR_MULTITRACK_PLAN=<this file>, on a Twitch destination with Dual Format on. No Twitch traffic.",
+  "meta": { "service": "IVS", "schema_version": "2025-01-25", "config_id": "local-check-0001" },
+  "status": { "result": "success" },
+  "ingest_endpoints": [
+    { "protocol": "RTMP", "url_template": "rtmp://127.0.0.1:1935/twitch-dual/{stream_key}" }
+  ],
+  "encoder_configurations": [
+    {
+      "type": "com.apple.videotoolbox.videoencoder.ave.avc", "width": 1920, "height": 1080,
+      "framerate": { "numerator": 60, "denominator": 1 }, "gpu_scale_type": "OBS_SCALE_BICUBIC",
+      "settings": { "bitrate": 6000, "bframes": false, "keyint_sec": 2, "profile": "high", "rate_control": "CBR" },
+      "canvas_index": 0
+    },
+    {
+      "type": "com.apple.videotoolbox.videoencoder.ave.avc", "width": 640, "height": 360,
+      "framerate": { "numerator": 30, "denominator": 1 }, "gpu_scale_type": "OBS_SCALE_BICUBIC",
+      "settings": { "bitrate": 500, "bframes": false, "keyint_sec": 2, "profile": "main", "rate_control": "CBR" },
+      "canvas_index": 0
+    },
+    {
+      "type": "com.apple.videotoolbox.videoencoder.ave.avc", "width": 1080, "height": 1920,
+      "framerate": { "numerator": 60, "denominator": 1 }, "gpu_scale_type": "OBS_SCALE_BICUBIC",
+      "settings": { "bitrate": 5000, "bframes": false, "keyint_sec": 2, "profile": "high", "rate_control": "CBR" },
+      "canvas_index": 1
+    },
+    {
+      "type": "com.apple.videotoolbox.videoencoder.ave.avc", "width": 360, "height": 640,
+      "framerate": { "numerator": 30, "denominator": 1 }, "gpu_scale_type": "OBS_SCALE_BICUBIC",
+      "settings": { "bitrate": 500, "bframes": false, "keyint_sec": 2, "profile": "main", "rate_control": "CBR" },
+      "canvas_index": 1
+    }
+  ],
+  "audio_configurations": {
+    "live": [ { "codec": "aac", "track_id": 0, "channels": 2, "settings": { "bitrate": 160 } } ],
+    "vod": []
+  }
+}

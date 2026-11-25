@@ -1,0 +1,130 @@
+{
+  "_": "Twitch's 'warning' answer from docs/plans/twitch-dual-format.md \u00a72.4 (#3), its ingest pointed at Stream Check (local checks: no Twitch traffic). Use with LIGHTAIR_MULTITRACK_PLAN.",
+  "meta": {
+    "schema_version": "2025-01-25",
+    "service": "IVS",
+    "config_id": "local-check-warning",
+    "required_encode_resource_estimate_percent": 0
+  },
+  "status": {
+    "result": "warning",
+    "html_en_us": "Heads Up: Your current GPU (Apple M4 Pro) is not optimal for Amazon IVS Multitrack Video Dual Format streaming (up to 1080p) and you may experience performance issues during your stream."
+  },
+  "ingest_endpoints": [
+    {
+      "protocol": "RTMP",
+      "url_template": "rtmp://127.0.0.1:1935/twitch-dual/{stream_key}"
+    }
+  ],
+  "encoder_configurations": [
+    {
+      "type": "com.apple.videotoolbox.videoencoder.ave.avc",
+      "bitrate_interpolation_points": [
+        0,
+        3960,
+        4800,
+        6000
+      ],
+      "framerate": {
+        "numerator": 60,
+        "denominator": 1
+      },
+      "gpu_scale_type": "OBS_SCALE_BICUBIC",
+      "width": 1920,
+      "height": 1080,
+      "canvas_index": 0,
+      "settings": {
+        "bitrate": 6000,
+        "bframes": false,
+        "keyint_sec": 2,
+        "profile": "high",
+        "rate_control": "CBR"
+      }
+    },
+    {
+      "type": "com.apple.videotoolbox.videoencoder.ave.avc",
+      "bitrate_interpolation_points": [
+        0,
+        500,
+        500,
+        500
+      ],
+      "framerate": {
+        "numerator": 30,
+        "denominator": 1
+      },
+      "gpu_scale_type": "OBS_SCALE_BICUBIC",
+      "width": 640,
+      "height": 360,
+      "canvas_index": 0,
+      "settings": {
+        "bitrate": 500,
+        "bframes": false,
+        "keyint_sec": 2,
+        "profile": "main",
+        "rate_control": "CBR"
+      }
+    },
+    {
+      "type": "com.apple.videotoolbox.videoencoder.ave.avc",
+      "bitrate_interpolation_points": [
+        0,
+        3300,
+        4000,
+        5000
+      ],
+      "framerate": {
+        "numerator": 60,
+        "denominator": 1
+      },
+      "gpu_scale_type": "OBS_SCALE_BICUBIC",
+      "width": 1080,
+      "height": 1920,
+      "canvas_index": 1,
+      "settings": {
+        "bitrate": 5000,
+        "bframes": false,
+        "keyint_sec": 2,
+        "profile": "high",
+        "rate_control": "CBR"
+      }
+    },
+    {
+      "type": "com.apple.videotoolbox.videoencoder.ave.avc",
+      "bitrate_interpolation_points": [
+        0,
+        500,
+        500,
+        500
+      ],
+      "framerate": {
+        "numerator": 30,
+        "denominator": 1
+      },
+      "gpu_scale_type": "OBS_SCALE_BICUBIC",
+      "width": 360,
+      "height": 640,
+      "canvas_index": 1,
+      "settings": {
+        "bitrate": 500,
+        "bframes": false,
+        "keyint_sec": 2,
+        "profile": "main",
+        "rate_control": "CBR"
+      }
+    }
+  ],
+  "audio_configurations": {
+    "live": [
+      {
+        "codec": "aac",
+        "track_id": 0,
+        "channels": 2,
+        "settings": {
+          "bitrate": 160
+        }
+      }
+    ],
+    "vod": []
+  }
+}

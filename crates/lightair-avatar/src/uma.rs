@@ -11,18 +11,9 @@
 //! seen, `ParamEyeLOpen` is the model's own left eye, `ParamEyeBallX` > 0 looks toward the
 //! viewer's right and `ParamEyeBallY` > 0 up.
 //!
-//! The evaluation is a port of Umamo's own (Kotlin, GPL-3.0, as Lightair's desktop is), at commit
-//! f7ef026 of its master:
-//! - reading: `module/format/.../format/uma/` (`Uma.kt`, `UmaManifest.kt`, `UmaBuffers.kt`,
-//!   `puppet/UmaPuppet.kt`, `puppet/UmaPuppetGeometry.kt`, `puppet/UmaPuppetEnums.kt`,
-//!   `textures/UmaTextures.kt`) and `module/interop/.../interop/uma/UmaPuppetImport.kt`;
-//! - keyform grids, channels and blend shapes: `module/runtime/.../runtime/eval/`
-//!   (`KeyformGridSampling.kt`, `ChannelSampling.kt`, `BlendShapeSampling.kt`);
-//! - deformers and meshes: `module/render/.../render/eval/` (`DeformerCascade.kt`,
-//!   `DeformTransforms.kt`, `KeyformGridEval.kt`, `BlendShapeEval.kt`, `DeformPrepare.kt`,
-//!   `RenderOrder.kt`), the render tree and visibility from `runtime/model/RenderRootDerive.kt` and
-//!   `PuppetModel.kt`, the atlas mapping from `runtime/model/AtlasPlacement.kt`, and the colour
-//!   maths from `render/glsl/PuppetShaders.kt`.
+//! The evaluation follows the format's reference runtime: reading, keyform grids, channels and
+//! blend shapes, the deformer cascade, render order and visibility, atlas placement and the
+//! colour maths (sources and licence in `crates/lightair-avatar/NOTICE.md`).
 //!
 //! Not supported: physics, pose groups, motions and expressions (a `.uma` carries none of them);
 //! Cubism 5.3's advanced blend modes beyond add and multiply (drawn as [`Blend::Normal`]) and its

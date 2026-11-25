@@ -2,7 +2,7 @@
 name = "lightair-moc3"
 version = "0.4.1"
 edition = "2024"
-description = "Lightair's built-in runtime for .moc3 avatar models (from Mocari, MIT; see NOTICE.md)"
+description = "Lightair's built-in runtime for .moc3 avatar models (third-party, MIT; see NOTICE.md)"
 license = "MIT"
 publish = false
 

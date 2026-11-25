@@ -1,6 +1,6 @@
 /*!
-Inochi2D 0.8's MeshGroups: a mesh that isn't drawn but deforms the nodes under it, ported from
-the reference implementation (inochi2d v0.8.7, `core/nodes/meshgroup`).
+Inochi2D 0.8's MeshGroups: a mesh that isn't drawn but deforms the nodes under it, as the
+Inochi2D format defines them (sources and licences in NOTICE.md).
 
 A group's mesh is deformed by params like a Part's. Each frame, every triangle's affine map from
 its rest shape to its deformed shape is found, and the group's nodes follow it:

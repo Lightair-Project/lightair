@@ -1,5 +1,5 @@
-//! Inochi2D puppets (`.inp`, `.inx`) on lightair-inochi2d (crates/lightair-inochi2d, built in
-//! from Inox2D), and nijilive's (nijigenerate's; PathDeformers, DynamicComposites, Masks). A [`Face`] sets the
+//! Inochi2D puppets (`.inp`, `.inx`) on lightair-inochi2d (crates/lightair-inochi2d), and
+//! nijilive puppets (PathDeformers, DynamicComposites, Masks). A [`Face`] sets the
 //! puppet's parameters each frame, then its physics run and its parts are posed; the result is a
 //! list of draw operations ([`Op`]) in Inochi2D's order (masks, composites, blend modes), with
 //! each part's vertices ready to draw (model units, y up).

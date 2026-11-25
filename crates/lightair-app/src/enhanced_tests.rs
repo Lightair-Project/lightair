@@ -1,4 +1,4 @@
-//! Dual Format at Go live, from the plan files in docs/plans (shaped as Twitch answers, pointed at
+//! Dual Format at Go live, from the plan files in testdata/ (shaped as Twitch answers, pointed at
 //! Stream Check; no Twitch traffic): what's asked for, and how a plan becomes the engine's tracks.
 
 use lightair_model::{Canvas, Destination, EnhancedBroadcasting, Id, StreamOptions, Workspace};
@@ -6,9 +6,9 @@ use lightair_live::enhanced_broadcasting as eb;
 
 use super::{Decision, decide, request, tracks};
 
-const PLAN: &str = include_str!("../../../docs/plans/twitch-dual-format-plan.json");
-const REFUSED: &str = include_str!("../../../docs/plans/twitch-dual-format-plan-error.json");
-const CAUTION: &str = include_str!("../../../docs/plans/twitch-dual-format-plan-warning.json");
+const PLAN: &str = include_str!("../testdata/twitch-dual-format-plan.json");
+const REFUSED: &str = include_str!("../testdata/twitch-dual-format-plan-error.json");
+const CAUTION: &str = include_str!("../testdata/twitch-dual-format-plan-warning.json");
 const ENCODER: &str = "com.apple.videotoolbox.videoencoder.ave.avc";
 
 /// A workspace with its landscape canvas and a vertical one.

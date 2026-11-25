@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 //! A pure Rust runtime for reading and driving Live2D/Cubism-compatible model data.
 //!
-//! Mocari is split into a small set of layers so applications can choose how much
+//! The runtime is split into a small set of layers so applications can choose how much
 //! control they need:
 //!
 //! - [`assets`] loads a `.model3.json` file, its referenced `.moc3` data, pose
@@ -20,7 +20,7 @@
 //! renderer.
 //!
 //! ```no_run
-//! use mocari::{assets::load_model_runtime, MotionPlayer};
+//! use lightair_moc3::{assets::load_model_runtime, MotionPlayer};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut model = load_model_runtime("assets/models/Hiyori/Hiyori.model3.json")?;
