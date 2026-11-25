@@ -15,7 +15,9 @@
 //! frames too ([`feed`]): while the compositor wants a page, each frame Chromium paints is also
 //! copied on the GPU into a BGRA IOSurface from a small ring of the source's, and the compositor
 //! takes the newest finished copy. While it takes them, libobs stops drawing the page itself
-//! (its draw would be thrown away); the page's sound still goes to libobs as before.
+//! (its draw would be thrown away). With the audio engine too, the page's sound goes straight
+//! into its track in the mixer (`audio_host::feeds_itself`) while a track takes it, not
+//! through libobs.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::Arc;
@@ -26,9 +28,22 @@ use crate::sys;
 
 pub const KIND: &str = "lightair_web";
 
-/// The source a page paints into, cleared when the source goes (a paint after that is dropped).
+/// The source a page paints into, cleared when the source goes (a paint after that is dropped),
+/// and the mixer's feed its sound goes into instead of libobs while a track takes it.
 #[derive(Clone)]
-struct Target(Arc<Mutex<Option<usize>>>);
+struct Target(Arc<Mutex<Option<usize>>>, Arc<Mutex<Option<crate::audio_host::InputFeed>>>);
+
+/// The audio engine's side of a page: a track taking its sound hands over the feed.
+#[cfg(target_os = "macos")]
+struct Sound(Arc<Mutex<Option<crate::audio_host::InputFeed>>>);
+
+#[cfg(target_os = "macos")]
+impl crate::audio_host::SoundFeeder for Sound {
+    fn attach(&self, feed: Option<crate::audio_host::InputFeed>) {
+        // the old feed (if any) is dropped here, on the engine thread
+        drop(std::mem::replace(&mut *self.0.lock(), feed));
+    }
+}
 
 /// How long a page stays open once nothing shows it (a scene being rebuilt, a transition's
 /// hand-over).
@@ -93,6 +108,17 @@ fn open(
     });
     let target = audio_target;
     let audio: lightair_web::AudioSink = Arc::new(move |planes: &[&[f32]], rate: u32| {
+        // a track takes the sound itself: into its feed (a block arriving while the feed is
+        // swapped is dropped, never waited for)
+        match target.1.try_lock() {
+            Some(mut feed) => {
+                if let Some(feed) = feed.as_mut() {
+                    feed.push_planar(planes, rate);
+                    return;
+                }
+            }
+            None => return,
+        }
         let held = target.0.lock();
         let Some(source) = *held else { return };
         let Some(frames) = planes.first().map(|p| p.len()) else { return };
@@ -216,7 +242,11 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
     // a page paints only when it changes, irregularly: its newest frame shows at once (libobs's
     // buffering, made for steady video, would hold it for a second or more)
     unsafe { sys::obs_source_set_async_unbuffered(source, true) };
-    let target = Target(Arc::new(Mutex::new(Some(source as usize))));
+    let target = Target(Arc::new(Mutex::new(Some(source as usize))), Arc::new(Mutex::new(None)));
+    #[cfg(target_os = "macos")]
+    if crate::system_audio::mixer_captures() {
+        crate::audio_host::feeds_itself(source, Arc::new(Sound(target.1.clone())));
+    }
     // (opened when something first shows it)
     let web = Web {
         page: Mutex::new(None),
@@ -241,7 +271,14 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let web = unsafe { Box::from_raw(data as *mut Web) };
     // no frame after this
-    *web.target.0.lock() = None;
+    let source = web.target.0.lock().take();
+    #[cfg(target_os = "macos")]
+    if let Some(source) = source {
+        crate::audio_host::feeds_itself_no_more(source as *mut sys::obs_source_t);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = source;
+    *web.target.1.lock() = None;
     #[cfg(target_os = "macos")]
     FEEDS.lock().retain(|_, f| !std::ptr::eq(f.as_ptr(), Arc::as_ptr(&web.shared)));
     drop(web);
