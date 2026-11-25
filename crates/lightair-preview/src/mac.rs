@@ -133,7 +133,7 @@ mod gl {
 }
 
 // ---------------------------------------------------------------- buffers
-fn pixel_buffer(width: u32, height: u32, format: u32) -> Option<CFRetained<CVPixelBuffer>> {
+pub(crate) fn pixel_buffer(width: u32, height: u32, format: u32) -> Option<CFRetained<CVPixelBuffer>> {
     let empty: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(&[], &[]);
     let keys: [&CFString; 2] = unsafe { [kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey] };
     let values: [&CFType; 2] = [empty.as_ref(), CFBoolean::new(true).as_ref()];
@@ -471,7 +471,7 @@ impl Pool {
 }
 
 // ---------------------------------------------------------------- shared state
-struct Shared {
+pub(crate) struct Shared {
     pool: Mutex<Option<Pool>>,
     /// Newest finished frame for the UI.
     latest: Mutex<Option<Frame>>,
@@ -490,6 +490,40 @@ struct Shared {
     /// A Core Animation layer each finished frame is shown in as well (the window's preview,
     /// drawn under its UI without the UI redrawing; `Preview::set_layer`). Retained.
     layer: Mutex<Option<LayerRef>>,
+    /// Lightair's own compositor is giving this preview its frames of the program
+    /// (`Preview::compose_program`): libobs draws only a source shown instead of the program.
+    fed: AtomicBool,
+}
+
+impl Shared {
+    /// Whether the compositor's program frames are wanted now: the preview is active and shows
+    /// the program (not a source in its place).
+    pub(crate) fn wants_program(&self) -> bool {
+        self.active.load(Ordering::Relaxed) && self.source.lock().is_none()
+    }
+
+    /// The compositor's newest finished program frame (BGRA): to the UI and the layer, as
+    /// libobs's frames go. Ignored while a source is shown instead of the program.
+    pub(crate) fn feed(&self, frame: &Frame) {
+        if self.source.lock().is_some() {
+            return;
+        }
+        // a buffer drawn into again: the NV12 copy of its last picture goes (see `nv12`)
+        frame.remove_attachment(&nv12_key());
+        *self.latest.lock() = Some(frame.clone());
+        self.frames.fetch_add(1, Ordering::Relaxed);
+        self.fed.store(true, Ordering::Relaxed);
+        if let Some(layer) = self.layer.lock().as_ref()
+            && let Some(surface) = CVPixelBufferGetIOSurface(Some(frame))
+        {
+            unsafe { ca::show(layer.0, CFRetained::as_ptr(&surface).as_ptr() as *mut c_void) };
+        }
+    }
+
+    /// The compositor stopped: libobs draws the program again.
+    pub(crate) fn unfeed(&self) {
+        self.fed.store(false, Ordering::Relaxed);
+    }
 }
 
 /// A retained `CALayer`.
@@ -567,6 +601,8 @@ pub struct Preview(Arc<Handle>);
 
 struct Handle {
     shared: Arc<Shared>,
+    /// Lightair's own compositor, drawing the program for this preview (`compose_program`).
+    compositor: Mutex<Option<crate::compose::Compositor>>,
 }
 
 impl Preview {
@@ -591,9 +627,25 @@ impl Preview {
             source: Mutex::new(None),
             own_size: AtomicBool::new(false),
             layer: Mutex::new(None),
+            fed: AtomicBool::new(false),
         });
         unsafe { sys::obs_add_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&shared) as *mut c_void) };
-        Self(Arc::new(Handle { shared }))
+        Self(Arc::new(Handle { shared, compositor: Mutex::new(None) }))
+    }
+
+    /// Shows the primary canvas's program as Lightair's own compositor draws it
+    /// (`lightair-render`, `LIGHTAIR_ENGINE=own`) instead of libobs: libobs's frames until its
+    /// first one, and whenever a source is shown in the program's place. For the main canvas's
+    /// preview (`attach`); false for another canvas's, or when the compositor couldn't start.
+    pub fn compose_program(&self) -> bool {
+        if self.0.shared.canvas.is_some() {
+            return false;
+        }
+        let mut compositor = self.0.compositor.lock();
+        if compositor.is_none() {
+            *compositor = crate::compose::Compositor::start(self.0.shared.clone());
+        }
+        compositor.is_some()
     }
 
     /// Renders at this pixel size (e.g. the on-screen size of the canvas view, rounded to even).
@@ -657,6 +709,8 @@ impl Preview {
 
 impl Drop for Handle {
     fn drop(&mut self) {
+        // its thread stops before the preview goes
+        self.compositor.lock().take();
         unsafe {
             sys::obs_remove_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&self.shared) as *mut c_void);
             if let Some(mut pool) = self.shared.pool.lock().take() {
@@ -677,6 +731,10 @@ impl Drop for Handle {
 unsafe extern "C" fn on_rendered(param: *mut c_void) {
     let shared = unsafe { &*(param as *const Shared) };
     if !shared.active.load(Ordering::Relaxed) {
+        return;
+    }
+    // the compositor draws the program (a source shown in its place is still libobs's)
+    if shared.fed.load(Ordering::Relaxed) && shared.source.lock().is_none() {
         return;
     }
     let main = unsafe { sys::obs_get_main_texture() };

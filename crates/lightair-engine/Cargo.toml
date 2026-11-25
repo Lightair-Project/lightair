@@ -39,6 +39,9 @@ lightair-render.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6"
+# the IOSurfaces libobs sources are drawn into for Lightair's own compositor (bridge.rs)
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVReturn", "objc2-io-surface"] }
 
 # VST3 modules (DLLs) on Windows
 [target.'cfg(windows)'.dependencies]

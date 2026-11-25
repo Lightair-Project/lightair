@@ -16,6 +16,8 @@ mod media_native;
 mod media_on_air;
 #[cfg(target_os = "macos")]
 mod nv12;
+#[cfg(target_os = "macos")]
+mod own_engine_off;
 mod resize_canvas;
 mod screen_zoom;
 mod shape_mask;

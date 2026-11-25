@@ -382,6 +382,11 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
     crate::phone_units::register();
     #[cfg(target_os = "macos")]
     crate::media_source::register();
+    // Lightair's own compositor's picture back into libobs (`LIGHTAIR_ENGINE=own`)
+    #[cfg(target_os = "macos")]
+    if crate::bridge::own() {
+        crate::program_source::register();
+    }
     #[cfg(target_os = "macos")]
     crate::on_screen::register();
     #[cfg(target_os = "macos")]

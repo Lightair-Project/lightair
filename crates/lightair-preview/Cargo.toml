@@ -16,6 +16,12 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVReturn", "objc2-io-surface"] }
 objc2-io-surface = { version = "0.3", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "objc2-core-foundation"] }
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTPixelTransferProperties", "VTPixelTransferSession", "VTSession", "objc2-core-video"] }
+# Lightair's own compositor (compose.rs): the program drawn on the GPU into IOSurfaces
+lightair-model.workspace = true
+lightair-render.workspace = true
+wgpu = "30"
+objc2 = "0.6.3"
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLTexture", "MTLPixelFormat", "MTLResource", "MTLTypes", "objc2-io-surface"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

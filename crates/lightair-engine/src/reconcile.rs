@@ -258,6 +258,8 @@ impl Reconciler {
         }
         self.sync_avatar_pins(workspace);
         self.sync_overlays(workspace);
+        #[cfg(target_os = "macos")]
+        crate::bridge::publish(workspace);
     }
 
     /// Puts the show's overlay scenes on each canvas's overlay channels (and clears the rest),
@@ -737,6 +739,8 @@ impl Reconciler {
                 }
                 let chain = unsafe { chain_build(src.as_ptr(), &lower(&source.effects)) };
                 self.source_effects.insert(source.id, chain);
+                #[cfg(target_os = "macos")]
+                crate::bridge::source_added(source.id, &src);
                 self.sources.insert(source.id, src);
             }
             None => tracing::warn!(kind, name = source.name, "could not create input"),
@@ -759,6 +763,8 @@ impl Reconciler {
         if let (Some(src), Some((filter, _))) = (self.sources.get(&id), self.screen_zoom_pointers.remove(&id)) {
             unsafe { sys::obs_source_filter_remove(src.as_ptr(), filter.as_ptr()) };
         }
+        #[cfg(target_os = "macos")]
+        crate::bridge::source_removed(id);
         self.sources.remove(&id);
     }
 
@@ -1041,6 +1047,16 @@ impl Reconciler {
             _ => TransitionKind::Cut,
         };
         let ms = settings.duration_ms;
+        #[cfg(target_os = "macos")]
+        crate::bridge::set_switch(match (previous, program) {
+            (Some(from), Some(to)) if kind != TransitionKind::Cut => Some(crate::bridge::Switch {
+                from,
+                to,
+                settings: TransitionSettings { kind, ..settings },
+                started: std::time::Instant::now(),
+            }),
+            _ => None,
+        });
         match kind {
             TransitionKind::Cut => self.land(program),
             TransitionKind::Fade
@@ -1709,6 +1725,8 @@ impl Reconciler {
         self.scenes.clear();
         self.obs_canvases.clear();
         self.canvases.clear();
+        #[cfg(target_os = "macos")]
+        crate::bridge::clear();
         self.sources.clear();
         self.program = None;
         // libobs destroys sources on its own thread. Wait until it has, so whatever is built

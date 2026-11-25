@@ -156,6 +156,11 @@ fn main() {
     // iPhones and iPads by USB, among the cameras
     lightair_platform::devices::allow_ios_screens();
     let preview = Preview::attach();
+    // Lightair's own compositor draws the program in the window instead of libobs
+    #[cfg(target_os = "macos")]
+    if lightair_engine::bridge::own() && !preview.compose_program() {
+        tracing::warn!("LIGHTAIR_ENGINE=own: the compositor didn't start; libobs draws the program");
+    }
 
     gpui_kit::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         gpui_kit::init(cx);

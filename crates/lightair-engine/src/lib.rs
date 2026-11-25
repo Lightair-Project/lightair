@@ -15,6 +15,8 @@ mod avatar_inochi2d;
 mod avatar_png;
 mod avatar_uma;
 pub mod backdrop;
+#[cfg(target_os = "macos")]
+pub mod bridge;
 pub mod devices;
 pub mod displays;
 pub mod face_drive;
@@ -53,6 +55,8 @@ pub mod dslr;
 pub mod vision;
 pub mod plugins;
 pub mod pointer;
+#[cfg(target_os = "macos")]
+pub mod program_source;
 mod reconcile;
 mod runtime;
 pub mod studio_take;
