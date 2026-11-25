@@ -1715,6 +1715,11 @@ fn source_call(source: *mut sys::obs_source_t, name: &CStr) -> Option<sys::calld
     }
 }
 
+/// An avatar source's status, for code off the engine thread.
+pub fn status_of(source: &crate::obs::SourceRef) -> Status {
+    status(source.as_ptr())
+}
+
 /// An avatar source's status.
 pub fn status(source: *mut sys::obs_source_t) -> Status {
     let Some(mut cd) = source_call(source, c"status") else { return Status::default() };

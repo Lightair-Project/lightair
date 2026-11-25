@@ -54,7 +54,7 @@ fn camera(engine: &Engine) {
         let mut look = Data::new();
         look.set_int("smooth", 60);
         if let Some(fx) = ObsSource::create_private(crate::camera_studio::KIND, "Self-test Lightair Effect Stack", Some(&look)) {
-            unsafe { lightair_engine::sys::obs_source_filter_add(cam.as_ptr(), fx.as_ptr()) };
+            cam.add_filter(&fx);
             s.sources.insert("fx".into(), fx);
         }
         let scene = ObsScene::create("Self-test").unwrap();
@@ -82,7 +82,7 @@ fn camera(engine: &Engine) {
     println!("SELFTEST stats: {stats:?}");
     engine.call(|s| {
         if let (Some(cam), Some(fx)) = (s.sources.get("cam"), s.sources.get("fx")) {
-            unsafe { lightair_engine::sys::obs_source_filter_remove(cam.as_ptr(), fx.as_ptr()) };
+            cam.remove_filter(fx);
         }
         s.sources.remove("fx");
     });
@@ -123,7 +123,7 @@ fn green_key(engine: &Engine) {
         look.set_int("bg_feather", 30);
         look.set_int("bg_key", i64::from(blue));
         if let Some(fx) = ObsSource::create_private(crate::camera_studio::KIND, "Self-test green key", Some(&look)) {
-            unsafe { lightair_engine::sys::obs_source_filter_add(cam.as_ptr(), fx.as_ptr()) };
+            cam.add_filter(&fx);
             s.sources.insert("fx".into(), fx);
         }
         let magenta = Data::from_json(&serde_json::json!({"color": 0xFFFF00FFu32, "width": 1920, "height": 1080}));
@@ -190,7 +190,7 @@ fn green_key(engine: &Engine) {
     drop(preview);
     engine.call(|s| {
         if let (Some(cam), Some(fx)) = (s.sources.get("cam"), s.sources.get("fx")) {
-            unsafe { lightair_engine::sys::obs_source_filter_remove(cam.as_ptr(), fx.as_ptr()) };
+            cam.remove_filter(fx);
         }
         s.sources.remove("fx");
     });
@@ -264,7 +264,7 @@ fn virtual_camera(engine: &Engine) {
     let found = engine.call(move |s| {
         let devices = lightair_engine::kinds::cameras();
         let Some((name, uid)) = devices.into_iter().find(|(_, u)| u.eq_ignore_ascii_case(&uuid)) else {
-            return format!("no camera with uid {uuid}");
+            return (format!("no camera with uid {uuid}"), None);
         };
         let (kind, settings) = lightair_engine::kinds::resolve(lightair_model::kinds::CAMERA, &serde_json::json!({ "device": uid })).unwrap();
         let cam = ObsSource::create(kind, "Self-test virtual camera in", Some(&Data::from_json(&settings))).unwrap();
@@ -272,20 +272,18 @@ fn virtual_camera(engine: &Engine) {
         let canvas = lightair_engine::obs::ObsCanvas::create("Self-test readback", 640, 360, 30, 1).unwrap();
         let scene = canvas.create_scene("Self-test in").unwrap();
         scene.add(&cam);
-        unsafe { lightair_engine::sys::obs_canvas_set_channel(canvas.as_ptr(), 0, scene.source_ptr()) };
+        canvas.set_channel(0, &scene);
         s.sources.insert("cam".into(), cam);
         s.scenes.insert("selftest-in".into(), scene);
-        let ptr = canvas.as_ptr() as usize;
-        std::mem::forget(canvas);
-        format!("{name}\u{1f}{ptr}")
+        (name, Some(canvas.into_ref()))
     });
-    let (found, canvas) = found.split_once('\u{1f}').map_or((found.clone(), 0usize), |(a, b)| (a.to_string(), b.parse().unwrap_or(0)));
+    let (found, canvas) = found;
     println!("SELFTEST reading back from: {found}");
     std::thread::sleep(Duration::from_secs(4));
     let (w, h) = engine.call(|s| s.sources.get("cam").map_or((0, 0), |c| (c.width(), c.height())));
     println!("SELFTEST frames back: {w}x{h}");
-    if canvas != 0 {
-        let preview = engine.call(move |_| lightair_preview::Preview::attach_canvas(canvas as *mut lightair_engine::sys::obs_canvas_t));
+    if let Some(canvas) = canvas {
+        let preview = engine.call(move |_| lightair_preview::Preview::attach_canvas(canvas));
         std::thread::sleep(Duration::from_secs(1));
         match preview.latest_frame() {
             Some(f) => {
@@ -322,20 +320,6 @@ fn virtual_camera(engine: &Engine) {
     });
     std::thread::sleep(Duration::from_millis(500));
     println!("SELFTEST stopped: {:?}", lightair_engine::outputs::runtime().get(lightair_engine::outputs::OutputKey::VirtualCamera).state);
-}
-
-/// The loudest sample the self-test page has sent libobs (linear amplitude bits).
-static WEB_PEAK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-unsafe extern "C" fn web_audio(_: *mut std::ffi::c_void, _: *mut lightair_engine::sys::obs_source_t, audio: *const lightair_engine::sys::audio_data, _: bool) {
-    let Some(audio) = (unsafe { audio.as_ref() }) else { return };
-    let plane = audio.data[0] as *const f32;
-    if plane.is_null() {
-        return;
-    }
-    let samples = unsafe { std::slice::from_raw_parts(plane, audio.frames as usize) };
-    let loudest = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-    WEB_PEAK.fetch_max(loudest.to_bits(), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// `LIGHTAIR_SELFTEST=twitch-login`: signs in to Twitch's chat server with the profile's
@@ -540,16 +524,18 @@ fn web(engine: &Engine) {
         let _app: *mut AnyObject = unsafe { msg_send![AnyClass::get(c"NSApplication").unwrap(), sharedApplication] };
     }
     println!("SELFTEST Chromium bundled: {}", lightair_web::available());
-    engine.call(|s| {
+    // the page's sound, tapped
+    let mut tap = engine.call(|s| {
         let url = "data:text/html,<html><body style='margin:0;background:%23ff00ff'><div style='position:fixed;left:0;top:0;width:300px;height:100%25;background:%23000'></div><script>const c=new AudioContext();const o=c.createOscillator();o.connect(c.destination);o.start();</script></body></html>";
         let settings = Data::from_json(&serde_json::json!({"url": url, "width": 1920, "height": 1080, "fps": 30}));
         let src = ObsSource::create(lightair_engine::web::KIND, "Self-test page", Some(&settings)).unwrap();
-        unsafe { lightair_engine::sys::obs_source_add_audio_capture_callback(src.as_ptr(), Some(web_audio), std::ptr::null_mut()) };
+        let tap = src.new_ref().map(lightair_engine::audio_tap::Tap::open_source);
         let scene = ObsScene::create("Self-test").unwrap();
         scene.add(&src);
         s.sources.insert("page".into(), src);
         s.scenes.insert("selftest".into(), scene);
         s.set_program("selftest");
+        tap
     });
     let preview = engine.call(|_| lightair_preview::Preview::attach());
     let start = std::time::Instant::now();
@@ -587,7 +573,14 @@ fn web(engine: &Engine) {
             let frame = preview.latest_frame();
             let colour = frame.as_ref().and_then(|f| lightair_preview::sample_ycbcr(f, 0.3, 0.3));
             let at_768 = frame.as_ref().and_then(|f| lightair_preview::sample_ycbcr(f, 0.4, 0.3));
-            let peak = f32::from_bits(WEB_PEAK.swap(0, std::sync::atomic::Ordering::Relaxed));
+            // the loudest sample since the last second
+            let peak = tap.as_mut().map_or(0.0, |(_, sound)| {
+                let mut loudest = 0i32;
+                while let Ok(sample) = sound.pop() {
+                    loudest = loudest.max(i32::from(sample).abs());
+                }
+                loudest as f32 / 32768.0
+            });
             println!("SELFTEST {} s: page {w}x{h}, program YCbCr {colour:?}, at x 768 {at_768:?} (magenta is about 105/212/234: full-range BT.601), sound peak {peak:.3}", next - 1);
         }
     }
@@ -605,7 +598,7 @@ fn displays(engine: &Engine) {
         let (w, h) = d.size.unwrap_or((16, 9));
         preview.set_size(Some((480, (480 * h / w.max(1)).max(2))));
         if let Some(c) = &d.capture {
-            preview.set_source(Some(unsafe { lightair_engine::sys::obs_source_get_ref(c.as_ptr()) }));
+            preview.set_source(c.new_ref());
         }
         previews.push(preview);
     }

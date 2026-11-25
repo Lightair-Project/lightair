@@ -62,8 +62,8 @@ fn preview_shows_an_off_air_scene() {
     assert!(is_red(centre_after(&program)), "program shows Live");
     assert!(is_red(centre_after(&preview)), "preview starts on the program");
 
-    let next_src = engine.call(move |s| s.reconciler.scene_source_ref(next_id, f).map(|p| p as usize)).unwrap();
-    preview.set_source(Some(next_src as *mut _));
+    let next_src = engine.call(move |s| s.reconciler.scene_source_ref(next_id, f)).unwrap();
+    preview.set_source(Some(next_src));
     let p = centre_after(&preview);
     assert!(is_blue(p), "preview shows the off-air scene: {p:?}");
     let p = centre_after(&program);

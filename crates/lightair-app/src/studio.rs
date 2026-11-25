@@ -420,7 +420,7 @@ impl Studio {
                 for (group, items) in [
                     ("converted", &report.converted),
                     ("replaced", &report.replaced),
-                    ("kept as plugin", &report.kept_plugin),
+                    ("left out (plugins)", &report.left_out),
                     ("needs attention", &report.attention),
                 ] {
                     for item in items {

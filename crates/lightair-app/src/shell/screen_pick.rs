@@ -142,7 +142,7 @@ impl ScreenPick {
                     let preview = Preview::attach();
                     preview.set_own_size(true);
                     preview.set_size(Some(THUMB));
-                    preview.set_source(Some(unsafe { lightair_engine::sys::obs_source_get_ref(c.as_ptr()) }));
+                    preview.set_source(c.new_ref());
                     thumb.preview = Some(preview);
                     thumb.capture = Some(c);
                 }
@@ -150,12 +150,7 @@ impl ScreenPick {
         }
         for thumb in &mut self.thumbs {
             let (Some(c), Some(preview)) = (&thumb.capture, &thumb.preview) else { continue };
-            let (w, h) = unsafe {
-                (
-                    lightair_engine::sys::obs_source_get_width(c.as_ptr()),
-                    lightair_engine::sys::obs_source_get_height(c.as_ptr()),
-                )
-            };
+            let (w, h) = (c.width(), c.height());
             if w > 0 && h > 0 && thumb.size != Some((w, h)) {
                 // drawn in its own shape
                 preview.set_size(Some(fit((w, h))));

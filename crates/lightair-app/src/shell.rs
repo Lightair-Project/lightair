@@ -1272,21 +1272,17 @@ impl StudioWindow {
         let canvas = studio.workspace().primary_canvas().id;
         let Some(preview) = self.previews.get(&canvas) else { return };
         let want = studio.selected_scene.filter(|_| self.cue_scenes);
-        let current = preview.source().map(|p| p as usize);
+        let current = preview.source();
         let engine = studio.engine().clone();
-        let next = match want {
-            None => None,
-            Some(scene) => {
-                // Only studio_take a new reference when the libobs scene changed (rebuilds replace it).
-                let ptr = engine.call(move |s| s.reconciler.scene_source(scene, canvas).map(|p| p as usize));
-                if ptr == current {
-                    return;
-                }
-                engine.call(move |s| s.reconciler.scene_source_ref(scene, canvas).map(|p| p as usize))
-            }
+        let next = want.and_then(|scene| engine.call(move |s| s.reconciler.scene_source_ref(scene, canvas)));
+        // only when the scene's picture changed (rebuilds replace it)
+        let same = match (&current, &next) {
+            (Some(a), Some(b)) => a.same(b),
+            (None, None) => true,
+            _ => false,
         };
-        if next.is_some() || current.is_some() {
-            preview.set_source(next.map(|p| p as *mut _));
+        if !same {
+            preview.set_source(next);
         }
     }
 
@@ -1458,9 +1454,9 @@ impl StudioWindow {
                 continue;
             }
             let id = f.id;
-            let canvas = self.studio.read(cx).engine().call(move |s| s.reconciler.canvas_ref(id).map(|p| p as usize));
-            if let Some(ptr) = canvas {
-                self.previews.insert(id, Preview::attach_canvas(ptr as *mut _));
+            let canvas = self.studio.read(cx).engine().call(move |s| s.reconciler.canvas_ref(id));
+            if let Some(canvas) = canvas {
+                self.previews.insert(id, Preview::attach_canvas(canvas));
             }
         }
     }

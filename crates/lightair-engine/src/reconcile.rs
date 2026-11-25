@@ -19,7 +19,7 @@ use crate::timers::{TIMER_KIND, TIMER_SOURCE, TimerAction, TimerStatus, Timers, 
 use crate::transition::{CanvasMove, MoveAnim, Tween, item_fade, match_object};
 
 use crate::meters::{MeterCell, db_to_mul, meters};
-use crate::obs::{ObsCanvas, Data, ObsScene, ObsSource, vec2};
+use crate::obs::{CanvasRef, Data, ObsCanvas, ObsScene, ObsSource, SourceRef, vec2};
 use std::sync::Arc;
 
 /// libobs state owned on behalf of the document.
@@ -862,19 +862,17 @@ impl Reconciler {
         Some(crate::avatar::status(src.as_ptr()))
     }
 
-    /// A new strong reference to a source (the caller releases it).
-    pub fn source_ref(&self, source: Id) -> Option<*mut sys::obs_source_t> {
-        self.sources.get(&source).map(|s| unsafe { sys::obs_source_get_ref(s.as_ptr()) }).filter(|p| !p.is_null())
+    /// A reference to a source, for a preview or an audio tap off the engine thread.
+    pub fn source_ref(&self, source: Id) -> Option<SourceRef> {
+        self.sources.get(&source).and_then(ObsSource::new_ref)
     }
 
     /// Where an avatar's anchor is in its picture at rest (pixels).
     /// A model drawn on its own, not on any canvas (a library picture of an avatar no scene shows):
-    /// a new strong reference to a private avatar source showing `file` (the caller lets it go).
-    pub fn avatar_snapshot_source(&self, file: &str, framing: &str) -> Option<*mut sys::obs_source_t> {
+    /// a private avatar source showing `file`, kept for as long as the returned reference lives.
+    pub fn avatar_snapshot_source(&self, file: &str, framing: &str) -> Option<SourceRef> {
         let settings = serde_json::json!({"file": file, "framing": framing, "width": 1080, "height": 1080, "mirror": true, "device": ""});
-        let s = ObsSource::create_private(crate::avatar::KIND, "library picture", Some(&data_from_json(&settings)))?;
-        let p = unsafe { sys::obs_source_get_ref(s.as_ptr()) };
-        (!p.is_null()).then_some(p)
+        ObsSource::create_private(crate::avatar::KIND, "library picture", Some(&data_from_json(&settings)))?.new_ref()
     }
 
     /// A PNGtuber's push to talk held, or let go.
@@ -981,22 +979,24 @@ impl Reconciler {
         (w > 0 && h > 0).then_some((w, h))
     }
 
-    /// The libobs scene source for a document scene in a canvas, if it exists.
+    /// The libobs scene source for a document scene in a canvas, if it exists (engine thread).
     pub fn scene_source(&self, scene: Id, canvas: Id) -> Option<*mut sys::obs_source_t> {
         self.scenes.get(&(scene, canvas)).map(|s| s.source_ptr())
     }
 
-    /// A new strong reference to that scene source (the caller releases it), e.g. for Studio
-    /// mode's preview of a scene that isn't on air.
-    pub fn scene_source_ref(&self, scene: Id, canvas: Id) -> Option<*mut sys::obs_source_t> {
-        self.scene_source(scene, canvas).map(|s| unsafe { sys::obs_source_get_ref(s) }).filter(|p| !p.is_null())
+    /// A reference to that scene's picture, e.g. for Studio mode's preview of a scene that isn't
+    /// on air.
+    pub fn scene_source_ref(&self, scene: Id, canvas: Id) -> Option<SourceRef> {
+        self.scene_source(scene, canvas).and_then(|s| unsafe { SourceRef::from_borrowed(s) })
     }
 
-    pub fn canvas_ref(&self, canvas: Id) -> Option<*mut sys::obs_canvas_t> {
+    /// A reference to a format's canvas, for its preview.
+    pub fn canvas_ref(&self, canvas: Id) -> Option<CanvasRef> {
         if Some(canvas) == self.primary_canvas {
-            return Some(unsafe { sys::obs_get_main_canvas() });
+            // the main canvas, as a new reference
+            return unsafe { CanvasRef::from_owned(sys::obs_get_main_canvas()) };
         }
-        self.obs_canvases.get(&canvas).map(|c| unsafe { sys::obs_canvas_get_ref(c.as_ptr()) })
+        self.obs_canvases.get(&canvas).and_then(|c| unsafe { CanvasRef::from_owned(sys::obs_canvas_get_ref(c.as_ptr())) })
     }
 
     /// The canvas's video output, for encoders recording or streaming a canvas.

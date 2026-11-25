@@ -34,6 +34,12 @@ impl Tap {
     /// Taps `source`, taking over the strong reference the caller holds (from
     /// `Reconciler::source_ref`).
     ///
+    /// Taps `source`'s sound; the tap holds the reference until it's dropped.
+    pub fn open_source(source: crate::obs::SourceRef) -> (Tap, rtrb::Consumer<i16>) {
+        // SAFETY: a `SourceRef` is a live source with a reference it gives up here
+        unsafe { Self::open(source.into_raw()) }
+    }
+
     /// # Safety
     /// `source` must be a live libobs source with a reference the caller owns.
     pub unsafe fn open(source: *mut sys::obs_source_t) -> (Tap, rtrb::Consumer<i16>) {

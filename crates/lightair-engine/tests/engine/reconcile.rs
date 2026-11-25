@@ -116,8 +116,7 @@ fn incremental_reconcile_matches_full_rebuild() {
     let canvas_ok = engine.call(move |s| {
         let Some(c) = s.reconciler.canvas_ref(vid) else { return false };
         let mut ovi = lightair_engine::sys::obs_video_info::default();
-        let ok = unsafe { lightair_engine::sys::obs_canvas_get_video_info(c, &mut ovi) };
-        unsafe { lightair_engine::sys::obs_canvas_release(c) };
+        let ok = unsafe { lightair_engine::sys::obs_canvas_get_video_info(c.as_ptr(), &mut ovi) };
         ok && ovi.base_width == 1080 && ovi.base_height == 1920
     });
     assert!(canvas_ok, "vertical canvas is 1080x1920");

@@ -117,11 +117,122 @@ impl ObsSource {
     pub fn reset(&self, settings: &Data) {
         unsafe { sys::obs_source_reset_settings(self.as_ptr(), settings.as_ptr()) }
     }
+    /// Adds `filter` at the end of this source's effects.
+    pub fn add_filter(&self, filter: &ObsSource) {
+        unsafe { sys::obs_source_filter_add(self.as_ptr(), filter.as_ptr()) }
+    }
+    /// Removes `filter` from this source's effects.
+    pub fn remove_filter(&self, filter: &ObsSource) {
+        unsafe { sys::obs_source_filter_remove(self.as_ptr(), filter.as_ptr()) }
+    }
+}
+
+impl ObsSource {
+    /// A reference to this source for code off the engine thread (`None` while it's going away).
+    pub fn new_ref(&self) -> Option<SourceRef> {
+        unsafe { SourceRef::from_borrowed(self.as_ptr()) }
+    }
 }
 
 impl Drop for ObsSource {
     fn drop(&mut self) {
         unsafe { sys::obs_source_release(self.as_ptr()) }
+    }
+}
+
+/// A counted reference to a source, for code outside the engine: a preview showing it, its size,
+/// an audio tap. It can cross threads; dropping it lets the source go. The app holds sources only
+/// this way, never as libobs pointers.
+pub struct SourceRef(NonNull<sys::obs_source_t>);
+// SAFETY: libobs reference counts are atomic, and the getters used here are thread-safe.
+unsafe impl Send for SourceRef {}
+unsafe impl Sync for SourceRef {}
+
+impl SourceRef {
+    /// Takes ownership of a strong reference (`None` for null).
+    ///
+    /// # Safety
+    /// `ptr` must be null or a strong reference the caller owns and gives up.
+    pub unsafe fn from_owned(ptr: *mut sys::obs_source_t) -> Option<Self> {
+        NonNull::new(ptr).map(Self)
+    }
+
+    /// A new reference to a borrowed source (`None` for null, or one going away).
+    ///
+    /// # Safety
+    /// `ptr` must be null or point to a live `obs_source_t`.
+    pub unsafe fn from_borrowed(ptr: *mut sys::obs_source_t) -> Option<Self> {
+        NonNull::new(unsafe { sys::obs_source_get_ref(ptr) }).map(Self)
+    }
+
+    /// The source's picture size (0×0 until it has a picture).
+    pub fn size(&self) -> (u32, u32) {
+        unsafe { (sys::obs_source_get_width(self.as_ptr()), sys::obs_source_get_height(self.as_ptr())) }
+    }
+
+    /// Whether both refer to the same source.
+    pub fn same(&self, other: &SourceRef) -> bool {
+        self.0 == other.0
+    }
+
+    /// The pointer, still owned by `self`: for the engine's own renderers.
+    pub fn as_ptr(&self) -> *mut sys::obs_source_t {
+        self.0.as_ptr()
+    }
+
+    /// Hands the reference to code that releases it itself.
+    pub fn into_raw(self) -> *mut sys::obs_source_t {
+        let p = self.as_ptr();
+        std::mem::forget(self);
+        p
+    }
+}
+
+impl Clone for SourceRef {
+    fn clone(&self) -> Self {
+        // the source is alive while `self` holds it, so a new reference always succeeds
+        Self(NonNull::new(unsafe { sys::obs_source_get_ref(self.as_ptr()) }).expect("a live source"))
+    }
+}
+
+impl Drop for SourceRef {
+    fn drop(&mut self) {
+        unsafe { sys::obs_source_release(self.as_ptr()) }
+    }
+}
+
+/// A counted reference to a canvas, for code outside the engine (a preview of a format).
+/// Dropping it lets the canvas go; it doesn't remove the canvas.
+pub struct CanvasRef(NonNull<sys::obs_canvas_t>);
+// SAFETY: as for `SourceRef`.
+unsafe impl Send for CanvasRef {}
+unsafe impl Sync for CanvasRef {}
+
+impl CanvasRef {
+    /// Takes ownership of a strong reference (`None` for null).
+    ///
+    /// # Safety
+    /// `ptr` must be null or a strong reference the caller owns and gives up.
+    pub unsafe fn from_owned(ptr: *mut sys::obs_canvas_t) -> Option<Self> {
+        NonNull::new(ptr).map(Self)
+    }
+
+    /// The pointer, still owned by `self`: for the engine's own renderers.
+    pub fn as_ptr(&self) -> *mut sys::obs_canvas_t {
+        self.0.as_ptr()
+    }
+
+    /// Hands the reference to code that releases it itself.
+    pub fn into_raw(self) -> *mut sys::obs_canvas_t {
+        let p = self.as_ptr();
+        std::mem::forget(self);
+        p
+    }
+}
+
+impl Drop for CanvasRef {
+    fn drop(&mut self) {
+        unsafe { sys::obs_canvas_release(self.as_ptr()) }
     }
 }
 
@@ -218,6 +329,19 @@ impl ObsCanvas {
     pub fn reset(&self, width: u32, height: u32, fps_num: u32, fps_den: u32) {
         let mut ovi = canvas_video_info(width, height, fps_num, fps_den);
         unsafe { sys::obs_canvas_reset_video(self.as_ptr(), &mut ovi) };
+    }
+
+    /// Shows `scene` on the canvas's output channel `channel`.
+    pub fn set_channel(&self, channel: u32, scene: &ObsScene) {
+        unsafe { sys::obs_canvas_set_channel(self.as_ptr(), channel, scene.source_ptr()) };
+    }
+
+    /// Keeps the canvas for as long as the returned reference lives, without removing it when this
+    /// wrapper goes (a canvas made for a check and handed to a preview).
+    pub fn into_ref(self) -> CanvasRef {
+        let p = self.0;
+        std::mem::forget(self);
+        CanvasRef(p)
     }
 }
 

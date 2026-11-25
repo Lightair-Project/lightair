@@ -1,6 +1,6 @@
-//! An imported OBS collection reconciles into libobs, including plugin sources and filters
-//! that aren't installed (they must not take the engine down). No cameras or microphones here,
-//! so the test never triggers a permission prompt.
+//! An imported OBS collection reconciles into libobs; plugin sources and filters Lightair
+//! doesn't have are left out, so nothing of theirs reaches the engine. No cameras or
+//! microphones here, so the test never triggers a permission prompt.
 
 use lightair_model::{Document, Workspace, diff};
 use lightair_engine::{Engine, EngineConfig};
@@ -42,7 +42,8 @@ fn imported_collection_reconciles() {
     // (a Windows path's backslashes would be escapes in the JSON)
     let collection = COLLECTION.replace("BOARD", &board.replace('\\', "/"));
     let (cmd, report) = lightair_store::import_obs_collection(&collection, doc.workspace()).unwrap();
-    assert_eq!(report.kept_plugin.len(), 2, "{report:#?}");
+    assert!(report.left_out.iter().any(|s| s.contains("not_installed_filter")), "{report:#?}");
+    assert!(report.left_out.iter().any(|s| s.contains("not_installed_source")), "{report:#?}");
     let change = doc.apply(&cmd).unwrap();
     let patches = diff(&change.before, &change.after);
     let workspace = change.after.clone();
@@ -51,8 +52,8 @@ fn imported_collection_reconciles() {
     let described = engine.call(|s| s.reconciler.describe());
     eprintln!("{described:#?}");
     let (sources, scenes, items) = engine.call(|s| s.reconciler.counts());
-    assert_eq!((sources, scenes), (3, 2), "inputs and scenes exist in libobs");
-    assert_eq!(items, 4);
+    assert_eq!((sources, scenes), (2, 2), "inputs and scenes exist in libobs, the plugin source doesn't");
+    assert_eq!(items, 3, "Main has Red only; Other has Board and Red");
 
     // The board's size was guessed (1920x1080); the image is 1800x1700. Hold it showing off
     // air, read the real size, and refit.

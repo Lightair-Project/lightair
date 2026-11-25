@@ -575,10 +575,9 @@ impl Preview {
         Self::attach_to(None)
     }
 
-    /// Previews another canvas (an additional format). Takes ownership of the strong reference
-    /// in `canvas` (e.g. from `Reconciler::canvas_ref`).
-    pub fn attach_canvas(canvas: *mut sys::obs_canvas_t) -> Self {
-        Self::attach_to((!canvas.is_null()).then_some(CanvasRef(canvas)))
+    /// Previews another canvas (an additional format), e.g. from `Reconciler::canvas_ref`.
+    pub fn attach_canvas(canvas: lightair_engine::obs::CanvasRef) -> Self {
+        Self::attach_to(Some(CanvasRef(canvas.into_raw())))
     }
 
     fn attach_to(canvas: Option<CanvasRef>) -> Self {
@@ -605,9 +604,10 @@ impl Preview {
     }
 
     /// Shows `source` (e.g. a scene that isn't on air) instead of the program, or the program
-    /// again with `None`. Takes ownership of the strong reference in `source`.
-    pub fn set_source(&self, source: Option<*mut sys::obs_source_t>) {
-        let new = source.filter(|p| !p.is_null()).map(|p| {
+    /// again with `None`.
+    pub fn set_source(&self, source: Option<lightair_engine::obs::SourceRef>) {
+        let new = source.map(|s| {
+            let p = s.into_raw();
             unsafe { sys::obs_source_inc_showing(p) };
             SourceRef(p)
         });
@@ -616,7 +616,6 @@ impl Preview {
         drop(old);
     }
 
-    /// The source shown instead of the program, if any (borrowed pointer, for comparison).
     /// Draws the source at its own size (a player: the whole picture, whatever the canvas),
     /// rather than where it sits on the canvas.
     pub fn set_own_size(&self, own: bool) {
@@ -635,8 +634,9 @@ impl Preview {
         drop(old);
     }
 
-    pub fn source(&self) -> Option<*mut sys::obs_source_t> {
-        self.0.shared.source.lock().as_ref().map(|s| s.0)
+    /// The source shown instead of the program, if any (a new reference).
+    pub fn source(&self) -> Option<lightair_engine::obs::SourceRef> {
+        self.0.shared.source.lock().as_ref().and_then(|s| unsafe { lightair_engine::obs::SourceRef::from_borrowed(s.0) })
     }
 
     /// Pauses or resumes rendering (hidden views cost nothing).

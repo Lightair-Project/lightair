@@ -173,9 +173,9 @@ impl Preview {
         Self::attach_to(None)
     }
 
-    /// Previews another canvas (an additional format); takes ownership of the strong reference.
-    pub fn attach_canvas(canvas: *mut sys::obs_canvas_t) -> Self {
-        Self::attach_to((!canvas.is_null()).then_some(CanvasRef(canvas)))
+    /// Previews another canvas (an additional format), e.g. from `Reconciler::canvas_ref`.
+    pub fn attach_canvas(canvas: lightair_engine::obs::CanvasRef) -> Self {
+        Self::attach_to(Some(CanvasRef(canvas.into_raw())))
     }
 
     fn attach_to(canvas: Option<CanvasRef>) -> Self {
@@ -201,8 +201,9 @@ impl Preview {
         self.0.shared.size.store(packed, Ordering::Relaxed);
     }
 
-    pub fn set_source(&self, source: Option<*mut sys::obs_source_t>) {
-        let new = source.filter(|p| !p.is_null()).map(|p| {
+    pub fn set_source(&self, source: Option<lightair_engine::obs::SourceRef>) {
+        let new = source.map(|s| {
+            let p = s.into_raw();
             unsafe { sys::obs_source_inc_showing(p) };
             SourceRef(p)
         });
@@ -233,8 +234,9 @@ impl Preview {
         self.0.shared.own_size.store(own, Ordering::Relaxed);
     }
 
-    pub fn source(&self) -> Option<*mut sys::obs_source_t> {
-        self.0.shared.source.lock().as_ref().map(|s| s.0)
+    /// The source shown instead of the program, if any (a new reference).
+    pub fn source(&self) -> Option<lightair_engine::obs::SourceRef> {
+        self.0.shared.source.lock().as_ref().and_then(|s| unsafe { lightair_engine::obs::SourceRef::from_borrowed(s.0) })
     }
 
     pub fn set_active(&self, active: bool) {

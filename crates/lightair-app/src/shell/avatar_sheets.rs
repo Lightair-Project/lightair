@@ -155,7 +155,7 @@ impl StudioWindow {
         };
         let engine = self.studio.read(cx).engine().clone();
         let file = e.file.clone();
-        let Some(src) = engine.call(move |s| s.reconciler.avatar_snapshot_source(&file, &framing).map(|p| p as usize))
+        let Some(src) = engine.call(move |s| s.reconciler.avatar_snapshot_source(&file, &framing))
         else {
             return self.next_picture(cx);
         };
@@ -163,14 +163,14 @@ impl StudioWindow {
         let preview = lightair_preview::Preview::attach();
         preview.set_own_size(true);
         preview.set_size(Some(picture_size(1080, 1080)));
-        preview.set_source(Some(src as *mut lightair_engine::sys::obs_source_t));
+        preview.set_source(Some(src.clone()));
         cx.spawn(async move |this, cx| {
             let start = Instant::now();
             // loaded (a big model takes a few seconds), then a few frames drawn
             let mut seen_at = None;
             let frame = loop {
                 cx.background_executor().timer(Duration::from_millis(150)).await;
-                let status = lightair_engine::avatar::status(src as *mut lightair_engine::sys::obs_source_t);
+                let status = lightair_engine::avatar::status_of(&src);
                 if !status.error.is_empty() || start.elapsed() > Duration::from_secs(20) {
                     break None;
                 }
@@ -318,21 +318,14 @@ impl StudioWindow {
     fn take_avatar_picture(&mut self, source: Id, entry: Id, cx: &mut Context<Self>) {
         self.avatar_pictures.insert(entry);
         let engine = self.studio.read(cx).engine().clone();
-        let Some((src, sw, sh)) = engine.call(move |e| {
-            e.reconciler.source_ref(source).map(|p| unsafe {
-                (
-                    p as usize,
-                    lightair_engine::sys::obs_source_get_width(p),
-                    lightair_engine::sys::obs_source_get_height(p),
-                )
-            })
-        }) else {
+        let Some(src) = engine.call(move |e| e.reconciler.source_ref(source)) else {
             return;
         };
+        let (sw, sh) = src.size();
         let preview = lightair_preview::Preview::attach();
         preview.set_own_size(true);
         preview.set_size(Some(picture_size(sw, sh)));
-        preview.set_source(Some(src as *mut lightair_engine::sys::obs_source_t));
+        preview.set_source(Some(src));
         cx.spawn(async move |this, cx| {
             let start = Instant::now();
             let frame = loop {

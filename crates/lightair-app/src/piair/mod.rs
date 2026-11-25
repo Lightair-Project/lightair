@@ -1841,8 +1841,8 @@ fn track_sound(
         if let Some(c) = e.reconciler.listen_track(track, lightair_audio::Tap::PreFader, muted) {
             return Some((None, c));
         }
-        e.reconciler.source_ref(source).map(|p| {
-            let (tap, c) = unsafe { lightair_engine::audio_tap::Tap::open(p) };
+        e.reconciler.source_ref(source).map(|s| {
+            let (tap, c) = lightair_engine::audio_tap::Tap::open_source(s);
             (Some(tap), c)
         })
     })

@@ -266,7 +266,7 @@ impl Library {
         let preview = Preview::attach();
         preview.set_own_size(true);
         preview.set_size(Some((1280, 720)));
-        preview.set_source(Some(player.source_ref()));
+        preview.set_source(player.source_ref());
         self.playing = Some(Playing { player, preview, title: item.title, bar: Default::default() });
         cx.notify();
     }

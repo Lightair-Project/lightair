@@ -83,12 +83,11 @@ fn a_local_video_plays_through_lightairs_own_source() {
         let settings = Data::from_json(&json!({"local_file": file, "looping": true, "is_local_file": true, "restart_on_activate": false}));
         ObsSource::create_private("ffmpeg_source", "Bars (OBS)", Some(&settings)).unwrap()
     });
-    let ptr = theirs.as_ptr() as usize;
+    let theirs_ref = theirs.new_ref().expect("a live source");
     let obs_preview = engine.call(move |_| {
         let p = Preview::attach();
         p.set_own_size(true);
-        unsafe { sys::obs_source_get_ref(ptr as *mut sys::obs_source_t) };
-        p.set_source(Some(ptr as *mut sys::obs_source_t));
+        p.set_source(Some(theirs_ref));
         p
     });
     std::thread::sleep(Duration::from_millis(800));

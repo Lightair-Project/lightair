@@ -1396,8 +1396,8 @@ impl StudioWindow {
                 let shot = view.remote.shot.get_or_insert_with(|| Shot { preview: Preview::attach(), scene: None, used: Instant::now() });
                 shot.used = Instant::now();
                 if shot.scene != scene {
-                    let source = scene.and_then(|s| engine.call(move |e| e.reconciler.scene_source_ref(s, canvas).map(|p| p as usize)));
-                    shot.preview.set_source(source.map(|p| p as *mut lightair_engine::sys::obs_source_t));
+                    let source = scene.and_then(|s| engine.call(move |e| e.reconciler.scene_source_ref(s, canvas)));
+                    shot.preview.set_source(source);
                     shot.scene = scene;
                     return Ok(shot.preview.frames() + 3);
                 }

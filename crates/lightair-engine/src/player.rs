@@ -40,9 +40,9 @@ impl Player {
         self.source.as_ptr()
     }
 
-    /// A new strong reference to the source (what `Preview::set_source` takes).
-    pub fn source_ref(&self) -> *mut sys::obs_source_t {
-        unsafe { sys::obs_source_get_ref(self.source.as_ptr()) }
+    /// A reference to the source (what `Preview::set_source` takes).
+    pub fn source_ref(&self) -> Option<crate::obs::SourceRef> {
+        self.source.new_ref()
     }
 
     /// The picture's size (0×0 until the file has opened, and for sound only).
