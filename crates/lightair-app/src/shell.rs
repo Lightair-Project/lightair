@@ -1268,7 +1268,7 @@ impl StudioWindow {
             let f = self.studio.read(cx).workspace().primary_canvas().clone();
             m.set_size(Some((512, 512 * f.height / f.width.max(1))));
             // Lightair's own compositor draws the program here too, as on the stage and outputs
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             m.compose_program();
         }
         self.sync_studio_preview(cx);
@@ -1468,7 +1468,7 @@ impl StudioWindow {
             if let Some(canvas) = canvas {
                 let preview = Preview::attach_canvas(canvas);
                 // Lightair's own compositor draws the canvas's program, as it does its outputs
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 if lightair_host::bridge::own() && !preview.compose_program() {
                     tracing::warn!(canvas = f.name, "the compositor didn't start: the canvas's preview stays empty");
                 }
@@ -2730,7 +2730,7 @@ impl StudioWindow {
             let shot = self.thumbnail_shot.get_or_insert_with(|| {
                 let preview = Preview::attach();
                 // the still as the recording has it (Lightair's own compositor's, when it draws)
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 preview.compose_program();
                 (preview, Vec::new())
             });

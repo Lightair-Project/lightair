@@ -297,7 +297,7 @@ impl Studio {
             crate::widget_feeds::start(w.clone(), engine.clone());
         }
         // Lightair's own compositor draws the built-in widgets from the same chat and widget server
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if lightair_host::bridge::own() {
             lightair_preview::feed_widgets(&chat, widgets.as_ref());
         }
