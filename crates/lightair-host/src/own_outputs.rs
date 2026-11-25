@@ -1,13 +1,13 @@
-//! macOS, with `LIGHTAIR_ENGINE=own`: recording, streaming and the replay buffer made by
-//! Lightair itself instead of libobs's encoders and outputs.
+//! macOS and Windows, with `LIGHTAIR_ENGINE=own`: recording, streaming and the replay buffer made
+//! by Lightair itself instead of libobs's encoders and outputs.
 //!
 //! - **Pictures:** each canvas's compositor hands its finished frames over
 //!   (the compositor calls [`frame`]). A thread per canvas in use stamps each frame,
 //!   places it on the canvas's frame grid and gives it to the canvas's video encoders
-//!   (`lightair-encode`'s VideoToolbox sessions): each copies the frame into a buffer from its own
-//!   pool (scaled when the encoder's size differs) and encodes it, so the compositor's buffer goes
-//!   back to it at once. While the compositor hands nothing over, the last frame is repeated, so
-//!   a stream never stalls.
+//!   (`lightair-encode`'s VideoToolbox sessions on macOS, the GPU's Media Foundation encoder on
+//!   Windows): each copies the frame into a picture of its own (scaled when the encoder's size
+//!   differs) and encodes it, so the compositor's buffer goes back to it at once. While the
+//!   compositor hands nothing over, the last frame is repeated, so a stream never stalls.
 //! - **Sound:** the audio engine's Program and mixes come straight from the mixer
 //!   (`audio_host::tap_mix`) and are encoded to AAC, or Opus for WHIP.
 //! - **One clock:** pictures are stamped with the frame time when they're handed over, sound
@@ -21,8 +21,9 @@
 //!   keep the last N seconds of packets and write a clip on request. Their state goes to
 //!   [`outputs::runtime`] as libobs's outputs report theirs, so the interface reads it unchanged.
 //! - **Pictures out as they are:** the virtual camera and NDI take a canvas's frames unencoded
-//!   through a tap ([`add_tap`]): each frame copied into a buffer of the tap's own, then handed
-//!   to a thread of its own that sends it (the camera extension's sink queue, NDI's runtime).
+//!   through a tap ([`add_tap`]): each frame copied into a picture of the tap's own (read back
+//!   into memory on Windows), then handed to a thread of its own that sends it (the camera
+//!   extension's sink queue or the Windows camera's shared memory, NDI's runtime).
 //! - **The RTSP server** is fed by a canvas's H.264 encoder (one already running without
 //!   B-frames when there is one) and the Program's AAC encoder.
 //! - **Following the primary canvas:** when another canvas becomes primary (another workspace
@@ -34,14 +35,18 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded, unbounded};
+#[cfg(target_os = "macos")]
 use lightair_encode::apple::{
+    AudioEncoder, AudioSettings, EncodedAudio, Hardware, InputFormat, VideoEncoder, VideoOutput, VideoSettings,
+};
+#[cfg(windows)]
+use lightair_encode::windows::{
     AudioEncoder, AudioSettings, EncodedAudio, Hardware, InputFormat, VideoEncoder, VideoOutput, VideoSettings,
 };
 use lightair_encode::{
@@ -53,10 +58,11 @@ use lightair_feed::net::Bind;
 use lightair_feed::ts::{AudioConfig, Muxer, NalFormat, VideoCodec as TsCodec};
 use lightair_feed::{RtmpAudioTrack, RtmpSender, RtmpTarget, RtmpTrack, RtmpTracks, RtmpVideo, SrtSender};
 use lightair_model::Id;
-use objc2_core_foundation::CFRetained;
-use objc2_core_video::{CVPixelBuffer, CVPixelBufferPool};
-use objc2_video_toolbox::VTPixelTransferSession;
 use parking_lot::Mutex;
+
+#[cfg(windows)]
+#[path = "own_outputs_win.rs"]
+mod pictures;
 
 use crate::outputs::{
     self, ClipsConfig, Container, EncoderConfig, OutputKey, OutputState, OutputStatus, ReconnectInfo, RecordingConfig,
@@ -108,11 +114,16 @@ fn next_id() -> u64 {
 // ---------------------------------------------------------------- packets and sinks
 
 pub use crate::buffers::Buffer;
+pub use pictures::TapFn;
+#[cfg(target_os = "macos")]
+use pictures::TapFormat;
+#[cfg(windows)]
+pub use pictures::{Picture, TapFormat};
 
 /// A finished compositor frame on its way to a canvas's encoders.
 struct Frame(Buffer);
 
-// SAFETY: CoreVideo's buffers are reference counted thread-safely, and a finished frame isn't
+// SAFETY: Lightair's buffers are reference counted thread-safely, and a finished frame isn't
 // written while it's handed over.
 unsafe impl Send for Frame {}
 
@@ -154,24 +165,6 @@ struct VideoKey {
     owner: u64,
 }
 
-/// The pixel transfer session that copies (and scales) the compositor's frames into the
-/// encoder's buffers, and the last buffer encoded (repeated while no new frame comes).
-struct Transfer {
-    session: Option<CFRetained<VTPixelTransferSession>>,
-    last: Option<Buffer>,
-}
-
-// SAFETY: used under its mutex only; the session and buffers are thread-safe CF objects.
-unsafe impl Send for Transfer {}
-
-impl Drop for Transfer {
-    fn drop(&mut self) {
-        if let Some(s) = &self.session {
-            unsafe { s.invalidate() };
-        }
-    }
-}
-
 type Subs = Arc<Mutex<Vec<(u64, Arc<dyn Sink>)>>>;
 
 /// A canvas's video encoder and the outputs it feeds.
@@ -180,7 +173,8 @@ struct VideoPipe {
     /// The canvas whose frames it encodes (another when the primary canvas moves).
     canvas: Mutex<Id>,
     encoder: VideoEncoder,
-    transfer: Mutex<Transfer>,
+    /// Copies the compositor's frames into the encoder's pictures; keeps the last.
+    transfer: Mutex<pictures::Copier>,
     subs: Subs,
     /// Frames not encoded: the copy failed or the encoder dropped them.
     skipped: Arc<AtomicU32>,
@@ -273,16 +267,6 @@ impl Gop {
     }
 }
 
-fn transfer_session() -> Option<CFRetained<VTPixelTransferSession>> {
-    let mut out: *mut VTPixelTransferSession = std::ptr::null_mut();
-    let status = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut out)) };
-    if status != 0 {
-        tracing::error!(status, "own outputs: no pixel transfer session");
-        return None;
-    }
-    NonNull::new(out).map(|p| unsafe { CFRetained::from_raw(p) })
-}
-
 impl VideoPipe {
     fn open(
         key: VideoKey,
@@ -317,15 +301,15 @@ impl VideoPipe {
             VideoOutput::Failed(e) => tracing::warn!(%e, "own outputs: a picture wasn't encoded"),
         });
         let name = settings.codec.name();
-        let encoder =
-            VideoEncoder::new(settings, sink).map_err(|e| format!("Couldn't open the {name} encoder ({e})."))?;
+        let encoder = pictures::open_encoder(settings, key.cbr, sink)
+            .map_err(|e| format!("Couldn't open the {name} encoder ({e})."))?;
         tracing::info!(%canvas, codec = name, width = key.width, height = key.height, kbps = key.kbps,
             hardware = encoder.using_hardware(), "own outputs: video encoder open");
         Ok(Arc::new(VideoPipe {
             key,
             canvas: Mutex::new(canvas),
             encoder,
-            transfer: Mutex::new(Transfer { session: transfer_session(), last: None }),
+            transfer: Mutex::new(pictures::Copier::new()),
             subs,
             skipped,
             fed: AtomicU64::new(0),
@@ -334,7 +318,7 @@ impl VideoPipe {
     }
 
     /// Encodes `frame` (`None`: the last one again) as canvas frame `slot`, shown at `pts`.
-    fn push(&self, frame: Option<&CVPixelBuffer>, slot: i64, pts: i64) {
+    fn push(&self, frame: Option<&Buffer>, slot: i64, pts: i64) {
         if slot.rem_euclid(self.key.divisor as i64) != 0 {
             return;
         }
@@ -347,44 +331,26 @@ impl VideoPipe {
             },
             None => false,
         };
-        let mut t = self.transfer.lock();
-        if let Some(src) = frame {
-            match self.copy(&t, src) {
-                Some(dst) => t.last = Some(dst),
-                None => {
+        match self.transfer.lock().feed(&self.encoder, frame, pts, key) {
+            pictures::Fed::NotCopied => {
+                self.skipped.fetch_add(1, Ordering::Relaxed);
+                if key {
+                    self.encoder.request_keyframe();
+                }
+            }
+            pictures::Fed::NoPicture => {
+                if key {
+                    self.encoder.request_keyframe();
+                }
+            }
+            pictures::Fed::Encoded(result) => {
+                self.fed.fetch_add(1, Ordering::Relaxed);
+                if let Err(e) = result {
                     self.skipped.fetch_add(1, Ordering::Relaxed);
-                    if key {
-                        self.encoder.request_keyframe();
-                    }
-                    return;
+                    tracing::debug!(%e, "own outputs: frame refused");
                 }
             }
         }
-        let Some(buffer) = t.last.as_ref() else {
-            if key {
-                self.encoder.request_keyframe();
-            }
-            return;
-        };
-        self.fed.fetch_add(1, Ordering::Relaxed);
-        if let Err(e) = self.encoder.encode(buffer, pts, key) {
-            self.skipped.fetch_add(1, Ordering::Relaxed);
-            tracing::debug!(%e, "own outputs: frame refused");
-        }
-    }
-
-    /// `src` copied into a buffer from the encoder's pool, at the encoder's size.
-    fn copy(&self, t: &Transfer, src: &CVPixelBuffer) -> Option<Buffer> {
-        let session = t.session.as_ref()?;
-        let pool = self.encoder.pixel_buffer_pool()?;
-        let mut out: *mut CVPixelBuffer = std::ptr::null_mut();
-        let status = unsafe { CVPixelBufferPool::create_pixel_buffer(None, &pool, NonNull::from(&mut out)) };
-        if status != 0 {
-            return None;
-        }
-        let dst = unsafe { CFRetained::from_raw(NonNull::new(out)?) };
-        let status = unsafe { session.transfer_image(src, &dst) };
-        (status == 0).then_some(dst)
     }
 
     /// Adds an output; the next picture is a keyframe, so it can start at once.
@@ -424,11 +390,11 @@ impl VideoPipe {
 /// What takes a canvas's frames on the canvas's thread: a video encoder or a tap.
 trait Consumer: Send + Sync {
     /// `frame` (`None`: the last one again) as canvas frame `slot`, shown at `pts`. Never blocks.
-    fn push(&self, frame: Option<&CVPixelBuffer>, slot: i64, pts: i64);
+    fn push(&self, frame: Option<&Buffer>, slot: i64, pts: i64);
 }
 
 impl Consumer for VideoPipe {
-    fn push(&self, frame: Option<&CVPixelBuffer>, slot: i64, pts: i64) {
+    fn push(&self, frame: Option<&Buffer>, slot: i64, pts: i64) {
         VideoPipe::push(self, frame, slot, pts);
     }
 }
@@ -582,7 +548,7 @@ fn run_canvas(rx: Receiver<(Frame, i64)>, pipes: Consumers, fps: (u32, u32)) {
                 let pts = grid(o, slot);
                 let pipes = pipes.lock().clone();
                 for p in &pipes {
-                    p.push(Some(&*frame.0), slot, pts);
+                    p.push(Some(&frame.0), slot, pts);
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
@@ -608,60 +574,12 @@ fn run_canvas(rx: Receiver<(Frame, i64)>, pipes: Consumers, fps: (u32, u32)) {
 
 // ---------------------------------------------------------------- taps: frames as pictures
 
-/// What a tap does with each picture (its own BGRA copy of the frame, and its time), on the
-/// tap's own thread.
-pub type TapFn = Box<dyn FnMut(&CVPixelBuffer, i64) + Send>;
-
-/// A pool of BGRA, IOSurface-backed buffers of one size.
-fn bgra_pool(width: u32, height: u32) -> Option<CFRetained<CVPixelBufferPool>> {
-    use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFString, CFType};
-    use objc2_core_video::{
-        kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
-        kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey, kCVPixelFormatType_32BGRA,
-    };
-    let empty: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(&[], &[]);
-    let (format, w, h) = (
-        CFNumber::new_i32(kCVPixelFormatType_32BGRA as i32),
-        CFNumber::new_i32(width as i32),
-        CFNumber::new_i32(height as i32),
-    );
-    // SAFETY: CoreVideo's constant keys, read only.
-    let keys: [&CFString; 5] = unsafe {
-        [
-            kCVPixelBufferPixelFormatTypeKey,
-            kCVPixelBufferWidthKey,
-            kCVPixelBufferHeightKey,
-            kCVPixelBufferIOSurfacePropertiesKey,
-            kCVPixelBufferMetalCompatibilityKey,
-        ]
-    };
-    let values: [&CFType; 5] = [format.as_ref(), w.as_ref(), h.as_ref(), empty.as_ref(), CFBoolean::new(true).as_ref()];
-    let attrs = CFDictionary::from_slices(&keys, &values);
-    let mut out: *mut CVPixelBufferPool = std::ptr::null_mut();
-    let status = unsafe { CVPixelBufferPool::create(None, None, Some(attrs.as_opaque()), NonNull::from(&mut out)) };
-    if status != 0 {
-        tracing::error!(status, width, height, "own outputs: no buffer pool");
-        return None;
-    }
-    NonNull::new(out).map(|p| unsafe { CFRetained::from_raw(p) })
-}
-
-/// A tap's copying side: the session that copies (and scales) the compositor's frames into the
-/// tap's pool, and the last copy (sent again while no new frame comes).
+/// A tap's copying side: the platform's copier and the last copy (sent again while no new frame
+/// comes).
 struct TapCopy {
-    session: CFRetained<VTPixelTransferSession>,
-    pool: CFRetained<CVPixelBufferPool>,
-    last: Option<Buffer>,
+    copier: pictures::TapCopier,
+    last: Option<pictures::TapPicture>,
     last_pts: Option<i64>,
-}
-
-// SAFETY: used under its mutex only; the session, pool and buffers are thread-safe CF objects.
-unsafe impl Send for TapCopy {}
-
-impl Drop for TapCopy {
-    fn drop(&mut self) {
-        unsafe { self.session.invalidate() };
-    }
 }
 
 /// A canvas's frames taken unencoded (the virtual camera, NDI): copied on the canvas's thread,
@@ -670,38 +588,31 @@ struct Tap {
     copy: Mutex<TapCopy>,
     /// Pictures closer together than this are left out (a receiver slower than the canvas).
     min_gap_ns: i64,
-    tx: Mutex<Option<Sender<(Frame, i64)>>>,
+    tx: Mutex<Option<Sender<(pictures::TapPicture, i64)>>>,
     /// Pictures the receiver wasn't ready for.
     skipped: AtomicU32,
 }
 
 impl Consumer for Tap {
-    fn push(&self, frame: Option<&CVPixelBuffer>, _slot: i64, pts: i64) {
+    fn push(&self, frame: Option<&Buffer>, _slot: i64, pts: i64) {
         let picture = {
             let mut c = self.copy.lock();
             if c.last_pts.is_some_and(|last| pts - last < self.min_gap_ns) {
                 return;
             }
             if let Some(src) = frame {
-                let mut out: *mut CVPixelBuffer = std::ptr::null_mut();
-                let made = unsafe { CVPixelBufferPool::create_pixel_buffer(None, &c.pool, NonNull::from(&mut out)) };
-                let Some(dst) = NonNull::new(out).filter(|_| made == 0).map(|p| unsafe { CFRetained::from_raw(p) })
-                else {
+                let Some(copy) = c.copier.copy(src) else {
                     self.skipped.fetch_add(1, Ordering::Relaxed);
                     return;
                 };
-                if unsafe { c.session.transfer_image(src, &dst) } != 0 {
-                    self.skipped.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-                c.last = Some(dst);
+                c.last = Some(copy);
             }
             let Some(last) = c.last.clone() else { return };
             c.last_pts = Some(pts);
             last
         };
         if let Some(tx) = self.tx.lock().as_ref()
-            && let Err(TrySendError::Full(_)) = tx.try_send((Frame(picture), pts))
+            && let Err(TrySendError::Full(_)) = tx.try_send((picture, pts))
         {
             self.skipped.fetch_add(1, Ordering::Relaxed);
         }
@@ -721,34 +632,34 @@ static TAPS: Mutex<Option<HashMap<u64, TapEntry>>> = Mutex::new(None);
 /// for [`remove_tap`]. Engine thread.
 pub fn add_tap(canvas: Id, size: Option<(u32, u32)>, max_fps: Option<u32>, f: TapFn) -> Result<u64, String> {
     let shape = canvas_shape(canvas).ok_or_else(|| "The canvas isn't ready yet.".to_string())?;
-    add_tap_on(canvas, shape, size, max_fps, f)
+    add_tap_on(canvas, shape, size, max_fps, TapFormat::Bgra, f)
 }
 
 /// [`add_tap`] on the frames handed over under `feed` (a canvas, or a scene drawn for an
-/// output), whose pictures are `shape` (width, height, frame rate).
+/// output), whose pictures are `shape` (width, height, frame rate), in `format`.
 fn add_tap_on(
     feed: Id,
     (cw, ch, num, den): (u32, u32, u32, u32),
     size: Option<(u32, u32)>,
     max_fps: Option<u32>,
+    format: TapFormat,
     mut f: TapFn,
 ) -> Result<u64, String> {
     let (w, h) = size.unwrap_or((cw, ch));
     let (w, h) = (w.max(2) & !1, h.max(2) & !1);
-    let pool = bgra_pool(w, h).ok_or_else(|| "Couldn't make pictures to send.".to_string())?;
-    let session = transfer_session().ok_or_else(|| "Couldn't copy the canvas's pictures.".to_string())?;
-    let (tx, rx) = bounded::<(Frame, i64)>(1);
+    let copier = pictures::TapCopier::new(w, h, format)?;
+    let (tx, rx) = bounded::<(pictures::TapPicture, i64)>(1);
     let thread = std::thread::Builder::new()
         .name("lightair-tap".into())
         .spawn(move || {
             while let Ok((picture, pts)) = rx.recv() {
-                f(&picture.0, pts);
+                picture.give(&mut f, pts);
             }
         })
         .map_err(|e| format!("Couldn't start sending pictures: {e}"))?;
     let min_gap_ns = max_fps.filter(|f| *f > 0).map_or(0, |f| 1_000_000_000 / f as i64 * 9 / 10);
     let tap = Arc::new(Tap {
-        copy: Mutex::new(TapCopy { session, pool, last: None, last_pts: None }),
+        copy: Mutex::new(TapCopy { copier, last: None, last_pts: None }),
         min_gap_ns,
         tx: Mutex::new(Some(tx)),
         skipped: AtomicU32::new(0),
@@ -1724,6 +1635,7 @@ impl StreamOut {
 
 /// Sends from the local address `ip` (`StreamNet::bind_ip`); a socket of the other family is
 /// left to the system.
+#[cfg(unix)]
 fn bind_to(ip: std::net::IpAddr) -> Bind {
     Bind::new(move |fd, v6| {
         let r = match ip {
@@ -1759,6 +1671,51 @@ fn bind_to(ip: std::net::IpAddr) -> Bind {
                         std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
                     )
                 }
+            }
+            _ => 0,
+        };
+        if r == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    })
+}
+
+/// Sends from the local address `ip` (`StreamNet::bind_ip`); a socket of the other family is
+/// left to the system.
+#[cfg(windows)]
+fn bind_to(ip: std::net::IpAddr) -> Bind {
+    /// WinSock's `SOCKADDR_IN` and `SOCKADDR_IN6`, port and address in network order.
+    #[repr(C)]
+    struct V4 {
+        family: u16,
+        port: u16,
+        addr: [u8; 4],
+        zero: [u8; 8],
+    }
+    #[repr(C)]
+    struct V6 {
+        family: u16,
+        port: u16,
+        flowinfo: u32,
+        addr: [u8; 16],
+        scope_id: u32,
+    }
+    const AF_INET: u16 = 2;
+    const AF_INET6: u16 = 23;
+    #[link(name = "ws2_32")]
+    unsafe extern "system" {
+        fn bind(socket: usize, name: *const std::ffi::c_void, length: i32) -> i32;
+    }
+    Bind::new(move |socket, v6| {
+        let socket = socket as usize;
+        let r = match ip {
+            std::net::IpAddr::V4(a) if !v6 => {
+                let sa = V4 { family: AF_INET, port: 0, addr: a.octets(), zero: [0; 8] };
+                // SAFETY: `sa` is a whole SOCKADDR_IN, alive for the call.
+                unsafe { bind(socket, &sa as *const V4 as *const _, std::mem::size_of::<V4>() as i32) }
+            }
+            std::net::IpAddr::V6(a) if v6 => {
+                let sa = V6 { family: AF_INET6, port: 0, flowinfo: 0, addr: a.octets(), scope_id: 0 };
+                // SAFETY: `sa` is a whole SOCKADDR_IN6, alive for the call.
+                unsafe { bind(socket, &sa as *const V6 as *const _, std::mem::size_of::<V6>() as i32) }
             }
             _ => 0,
         };
@@ -3144,6 +3101,37 @@ pub fn sample() {
 
 // ---------------------------------------------------------------- the virtual camera
 
+/// The virtual camera's sink and the pictures it takes: the canvas's own size in BGRA for the
+/// camera extension (macOS); the camera's 1080p in NV12 for Lightair's camera (Windows).
+#[cfg(target_os = "macos")]
+mod camera {
+    pub use crate::vcam_mac::{FPS, Sink};
+    pub const SIZE: Option<(u32, u32)> = None;
+    pub const FORMAT: super::TapFormat = super::TapFormat::Bgra;
+}
+
+#[cfg(windows)]
+mod camera {
+    use super::{Picture, TapFormat};
+    pub use crate::vcam::win::{FPS, SIZE};
+    pub const FORMAT: TapFormat = TapFormat::Nv12Bt601;
+
+    /// Lightair's camera, given the tap's pictures.
+    pub struct Sink(crate::vcam::win::Sink);
+
+    impl Sink {
+        pub fn open() -> Result<Sink, String> {
+            crate::vcam::win::Sink::open().map(Sink)
+        }
+
+        pub fn send(&mut self, picture: &Picture<'_>, pts_ns: i64) {
+            if picture.format == FORMAT {
+                self.0.send(picture.data, picture.stride, (picture.width, picture.height), pts_ns);
+            }
+        }
+    }
+}
+
 /// Starts the virtual camera on `canvas`'s compositor frames: copied into buffers of its own
 /// and queued on the camera extension's sink stream (the canvas's size, BGRA, at most the
 /// camera's rate). Its status is `OutputKey::VirtualCamera`'s.
@@ -3157,12 +3145,13 @@ pub fn start_virtual_camera(canvas: Id) -> Result<(), String> {
         Err(why)
     };
     runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
-    let mut camera = match crate::vcam_mac::Sink::open() {
+    let Some(shape) = canvas_shape(canvas) else { return fail("The canvas isn't ready yet.".into()) };
+    let mut camera = match camera::Sink::open() {
         Ok(c) => c,
         Err(e) => return fail(e),
     };
     let send: TapFn = Box::new(move |picture, pts| camera.send(picture, pts));
-    match add_tap(canvas, None, Some(crate::vcam_mac::FPS), send) {
+    match add_tap_on(canvas, shape, camera::SIZE, Some(camera::FPS), camera::FORMAT, send) {
         Ok(id) => {
             with(|st| st.camera = Some(id));
             runtime().update(key, |s| s.state = OutputState::Active { since: Instant::now() });
@@ -3187,13 +3176,13 @@ pub fn start_virtual_camera_scene(scene: Id, canvas: Id) -> Result<(), String> {
     };
     runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
     let Some(shape) = canvas_shape(canvas) else { return fail("The canvas isn't ready yet.".into()) };
-    let mut camera = match crate::vcam_mac::Sink::open() {
+    let mut camera = match camera::Sink::open() {
         Ok(c) => c,
         Err(e) => return fail(e),
     };
     let feed = Id::new();
     let send: TapFn = Box::new(move |picture, pts| camera.send(picture, pts));
-    match add_tap_on(feed, shape, None, Some(crate::vcam_mac::FPS), send) {
+    match add_tap_on(feed, shape, camera::SIZE, Some(camera::FPS), camera::FORMAT, send) {
         Ok(id) => {
             crate::program::add_scene_target(crate::program::SceneTarget {
                 key: feed,
@@ -3378,5 +3367,193 @@ pub fn shutdown() {
     }
     for a in std::mem::take(&mut st.audios) {
         a.close();
+    }
+}
+
+// ---------------------------------------------------------------- macOS: pictures
+
+/// macOS: the compositor's frames copied (and scaled) by VideoToolbox's pixel transfer into the
+/// encoders' own buffer pools and the taps' pools.
+#[cfg(target_os = "macos")]
+mod pictures {
+    use std::ptr::NonNull;
+
+    use lightair_encode::apple::{VideoEncoder, VideoSettings, VideoSink};
+    use objc2_core_foundation::CFRetained;
+    use objc2_core_video::{CVPixelBuffer, CVPixelBufferPool};
+    use objc2_video_toolbox::VTPixelTransferSession;
+
+    use super::Buffer;
+
+    /// What a tap does with each picture (its own BGRA copy of the frame, and its time), on the
+    /// tap's own thread.
+    pub type TapFn = Box<dyn FnMut(&CVPixelBuffer, i64) + Send>;
+
+    /// The pictures a tap takes: BGRA.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TapFormat {
+        Bgra,
+    }
+
+    /// A VideoToolbox encoder (its rate control follows the settings' ceiling).
+    pub fn open_encoder(
+        settings: VideoSettings,
+        _cbr: bool,
+        sink: VideoSink,
+    ) -> Result<VideoEncoder, lightair_encode::Error> {
+        VideoEncoder::new(settings, sink)
+    }
+
+    /// What became of a frame given to an encoder.
+    pub enum Fed {
+        /// It couldn't be copied.
+        NotCopied,
+        /// No picture yet (nothing to repeat).
+        NoPicture,
+        Encoded(Result<(), lightair_encode::Error>),
+    }
+
+    fn transfer_session() -> Option<CFRetained<VTPixelTransferSession>> {
+        let mut out: *mut VTPixelTransferSession = std::ptr::null_mut();
+        let status = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut out)) };
+        if status != 0 {
+            tracing::error!(status, "own outputs: no pixel transfer session");
+            return None;
+        }
+        NonNull::new(out).map(|p| unsafe { CFRetained::from_raw(p) })
+    }
+
+    /// The pixel transfer session that copies (and scales) the compositor's frames into the
+    /// encoder's buffers, and the last buffer encoded (repeated while no new frame comes).
+    pub struct Copier {
+        session: Option<CFRetained<VTPixelTransferSession>>,
+        last: Option<Buffer>,
+    }
+
+    // SAFETY: used under its mutex only; the session and buffers are thread-safe CF objects.
+    unsafe impl Send for Copier {}
+
+    impl Drop for Copier {
+        fn drop(&mut self) {
+            if let Some(s) = &self.session {
+                unsafe { s.invalidate() };
+            }
+        }
+    }
+
+    impl Copier {
+        pub fn new() -> Copier {
+            Copier { session: transfer_session(), last: None }
+        }
+
+        /// Copies `frame` into a buffer of `encoder`'s and encodes it (`None`: the last again).
+        pub fn feed(&mut self, encoder: &VideoEncoder, frame: Option<&Buffer>, pts: i64, key: bool) -> Fed {
+            if let Some(src) = frame {
+                match self.copy(encoder, src) {
+                    Some(dst) => self.last = Some(dst),
+                    None => return Fed::NotCopied,
+                }
+            }
+            let Some(buffer) = self.last.as_ref() else { return Fed::NoPicture };
+            Fed::Encoded(encoder.encode(buffer, pts, key))
+        }
+
+        /// `src` copied into a buffer from the encoder's pool, at the encoder's size.
+        fn copy(&self, encoder: &VideoEncoder, src: &CVPixelBuffer) -> Option<Buffer> {
+            let session = self.session.as_ref()?;
+            let pool = encoder.pixel_buffer_pool()?;
+            let mut out: *mut CVPixelBuffer = std::ptr::null_mut();
+            let status = unsafe { CVPixelBufferPool::create_pixel_buffer(None, &pool, NonNull::from(&mut out)) };
+            if status != 0 {
+                return None;
+            }
+            let dst = unsafe { CFRetained::from_raw(NonNull::new(out)?) };
+            let status = unsafe { session.transfer_image(src, &dst) };
+            (status == 0).then_some(dst)
+        }
+    }
+
+    /// A pool of BGRA, IOSurface-backed buffers of one size.
+    fn bgra_pool(width: u32, height: u32) -> Option<CFRetained<CVPixelBufferPool>> {
+        use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFString, CFType};
+        use objc2_core_video::{
+            kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
+            kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey, kCVPixelFormatType_32BGRA,
+        };
+        let empty: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(&[], &[]);
+        let (format, w, h) = (
+            CFNumber::new_i32(kCVPixelFormatType_32BGRA as i32),
+            CFNumber::new_i32(width as i32),
+            CFNumber::new_i32(height as i32),
+        );
+        // SAFETY: CoreVideo's constant keys, read only.
+        let keys: [&CFString; 5] = unsafe {
+            [
+                kCVPixelBufferPixelFormatTypeKey,
+                kCVPixelBufferWidthKey,
+                kCVPixelBufferHeightKey,
+                kCVPixelBufferIOSurfacePropertiesKey,
+                kCVPixelBufferMetalCompatibilityKey,
+            ]
+        };
+        let values: [&CFType; 5] =
+            [format.as_ref(), w.as_ref(), h.as_ref(), empty.as_ref(), CFBoolean::new(true).as_ref()];
+        let attrs = CFDictionary::from_slices(&keys, &values);
+        let mut out: *mut CVPixelBufferPool = std::ptr::null_mut();
+        let status = unsafe { CVPixelBufferPool::create(None, None, Some(attrs.as_opaque()), NonNull::from(&mut out)) };
+        if status != 0 {
+            tracing::error!(status, width, height, "own outputs: no buffer pool");
+            return None;
+        }
+        NonNull::new(out).map(|p| unsafe { CFRetained::from_raw(p) })
+    }
+
+    /// The session that copies (and scales) the compositor's frames into a tap's pool.
+    pub struct TapCopier {
+        session: CFRetained<VTPixelTransferSession>,
+        pool: CFRetained<CVPixelBufferPool>,
+    }
+
+    // SAFETY: used under its tap's mutex only; the session and pool are thread-safe CF objects.
+    unsafe impl Send for TapCopier {}
+
+    impl Drop for TapCopier {
+        fn drop(&mut self) {
+            unsafe { self.session.invalidate() };
+        }
+    }
+
+    impl TapCopier {
+        pub fn new(width: u32, height: u32, _format: TapFormat) -> Result<TapCopier, String> {
+            let pool = bgra_pool(width, height).ok_or_else(|| "Couldn't make pictures to send.".to_string())?;
+            let session = transfer_session().ok_or_else(|| "Couldn't copy the canvas's pictures.".to_string())?;
+            Ok(TapCopier { session, pool })
+        }
+
+        /// `src` copied into a buffer from the tap's pool; `None` when it couldn't be.
+        pub fn copy(&mut self, src: &Buffer) -> Option<TapPicture> {
+            let mut out: *mut CVPixelBuffer = std::ptr::null_mut();
+            let made = unsafe { CVPixelBufferPool::create_pixel_buffer(None, &self.pool, NonNull::from(&mut out)) };
+            let dst = NonNull::new(out).filter(|_| made == 0).map(|p| unsafe { CFRetained::from_raw(p) })?;
+            if unsafe { self.session.transfer_image(src, &dst) } != 0 {
+                return None;
+            }
+            Some(TapPicture(dst))
+        }
+    }
+
+    /// A tap's copy of a frame, on its way to the tap's thread.
+    #[derive(Clone)]
+    pub struct TapPicture(Buffer);
+
+    // SAFETY: CoreVideo's buffers are reference counted thread-safely, and a tap's copy isn't
+    // written once it's made.
+    unsafe impl Send for TapPicture {}
+
+    impl TapPicture {
+        /// Gives the picture to the tap's function. The tap's thread.
+        pub fn give(&self, f: &mut TapFn, pts: i64) {
+            f(&self.0, pts);
+        }
     }
 }
