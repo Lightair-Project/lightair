@@ -6,7 +6,14 @@
 //!
 //! The runtime is called through its documented C functions (NDI SDK, "Processing.NDI.Lib"),
 //! with the structures it documents.
+//!
+//! A source is received once, by its libobs source, whatever shows it: with
+//! `LIGHTAIR_ENGINE=own`, Lightair's compositor takes the same pictures through a [`Tap`]
+//! instead of connecting a second receiver, and (with the audio engine, macOS) a track taking
+//! the source's sound gets it straight into the mixer (`audio_host::feeds_itself`), not through
+//! libobs.
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -202,11 +209,56 @@ pub fn sources() -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Handing received pictures on (Lightair's compositor)
+
+/// A received picture as NDI gave it: `height` rows `stride` bytes apart, each starting with
+/// `width` BGRA pixels with straight colours (`opaque`: the sender has no alpha, and the fourth
+/// byte means nothing). Valid only during the call it's given to.
+pub struct Picture<'a> {
+    pub data: &'a [u8],
+    pub stride: usize,
+    pub width: u32,
+    pub height: u32,
+    pub opaque: bool,
+}
+
+/// Takes a source's pictures as they're received, besides libobs. Called on the source's
+/// receiving thread: keep it short, and never wait on libobs there.
+pub type Tap = Arc<dyn Fn(&Picture) + Send + Sync>;
+
+fn taps() -> &'static Mutex<HashMap<String, Tap>> {
+    static TAPS: OnceLock<Mutex<HashMap<String, Tap>>> = OnceLock::new();
+    TAPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Hands every picture the NDI source named `source` (its libobs name: the document source's
+/// id) receives to `tap` as well, from now on, in place of any tap it had. A source made later
+/// picks it up when it starts receiving.
+pub fn tap(source: &str, tap: Tap) {
+    if let Ok(mut t) = taps().lock() {
+        t.insert(source.to_owned(), tap);
+    }
+}
+
+/// Stops handing `source`'s pictures on.
+pub fn untap(source: &str) {
+    if let Ok(mut t) = taps().lock() {
+        t.remove(source);
+    }
+}
+
+fn tap_of(source: &str) -> Option<Tap> {
+    taps().lock().ok()?.get(source).cloned()
+}
+
+// ---------------------------------------------------------------------------------------------
 // Receiving: the source
 
 struct Receiver {
     source: *mut sys::obs_source_t,
     name: Mutex<String>,
+    /// Where the sound goes instead of libobs while a track of the mixer takes it.
+    sound: Sound,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -216,6 +268,22 @@ unsafe impl Send for Receiver {}
 struct SrcPtr(*mut sys::obs_source_t);
 unsafe impl Send for SrcPtr {}
 
+type Sound = Arc<Mutex<Option<crate::audio_host::InputFeed>>>;
+
+/// The audio engine's side of a source: a track taking its sound hands over the feed.
+#[cfg(target_os = "macos")]
+struct Fed(Sound);
+
+#[cfg(target_os = "macos")]
+impl crate::audio_host::SoundFeeder for Fed {
+    fn attach(&self, feed: Option<crate::audio_host::InputFeed>) {
+        // the old feed (if any) is dropped here, on the engine thread
+        if let Ok(mut f) = self.0.lock() {
+            drop(std::mem::replace(&mut *f, feed));
+        }
+    }
+}
+
 impl Receiver {
     fn start(&mut self) {
         self.stop_thread();
@@ -224,6 +292,12 @@ impl Receiver {
         let stop = Arc::new(AtomicBool::new(false));
         self.stop = stop.clone();
         let src = SrcPtr(self.source);
+        let sound = self.sound.clone();
+        // the libobs name, which a tap is registered by
+        let me_name = unsafe {
+            let p = sys::obs_source_get_name(self.source);
+            if p.is_null() { String::new() } else { CStr::from_ptr(p).to_string_lossy().into_owned() }
+        };
         self.thread = std::thread::Builder::new()
             .name("lightair-ndi-recv".into())
             .spawn(move || {
@@ -258,6 +332,17 @@ impl Receiver {
                                 frame.full_range = true;
                                 frame.timestamp = unsafe { sys::os_gettime_ns() };
                                 unsafe { sys::obs_source_output_video(src.0, &frame) };
+                                if let Some(tap) = tap_of(&me_name).filter(|_| video.line_stride_in_bytes >= video.xres * 4) {
+                                    let stride = video.line_stride_in_bytes as usize;
+                                    let picture = Picture {
+                                        data: unsafe { std::slice::from_raw_parts(video.p_data, stride * video.yres as usize) },
+                                        stride,
+                                        width: video.xres as u32,
+                                        height: video.yres as u32,
+                                        opaque: video.four_cc != FOURCC_BGRA,
+                                    };
+                                    tap(&picture);
+                                }
                             }
                             unsafe { (l.recv_free_video_v2)(recv, &video) };
                         }
@@ -267,6 +352,20 @@ impl Receiver {
                                 let stride = (audio.channel_stride_in_bytes as usize / 4).max(n);
                                 planar.clear();
                                 planar.extend_from_slice(unsafe { std::slice::from_raw_parts(audio.p_data, stride * ch) });
+                                // a track of the mixer takes the sound itself: into its feed
+                                // (a block arriving while the feed is swapped is dropped)
+                                let fed = match sound.try_lock() {
+                                    Ok(mut feed) => feed.as_mut().map(|feed| {
+                                        let planes: Vec<&[f32]> =
+                                            (0..ch.min(2)).map(|c| &planar[c * stride..c * stride + n]).collect();
+                                        feed.push_planar(&planes, audio.sample_rate.max(1) as u32);
+                                    }),
+                                    Err(_) => Some(()),
+                                };
+                                if fed.is_some() {
+                                    unsafe { (l.recv_free_audio_v2)(recv, &audio) };
+                                    continue;
+                                }
                                 let mut out: sys::obs_source_audio = unsafe { std::mem::zeroed() };
                                 for c in 0..ch {
                                     out.data[c] = planar[c * stride..].as_ptr() as *const u8;
@@ -309,7 +408,18 @@ unsafe extern "C" fn get_name(_: *mut c_void) -> *const c_char {
 }
 
 unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::obs_source_t) -> *mut c_void {
-    let r = Box::new(Receiver { source, name: Mutex::new(String::new()), stop: Arc::new(AtomicBool::new(true)), thread: None });
+    let sound: Sound = Arc::new(Mutex::new(None));
+    #[cfg(target_os = "macos")]
+    if crate::system_audio::mixer_captures() {
+        crate::audio_host::feeds_itself(source, Arc::new(Fed(sound.clone())));
+    }
+    let r = Box::new(Receiver {
+        source,
+        name: Mutex::new(String::new()),
+        sound,
+        stop: Arc::new(AtomicBool::new(true)),
+        thread: None,
+    });
     let p = Box::into_raw(r) as *mut c_void;
     unsafe { update(p, settings) };
     p
@@ -327,7 +437,14 @@ unsafe extern "C" fn update(data: *mut c_void, settings: *mut sys::obs_data_t) {
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let mut r = unsafe { Box::from_raw(data as *mut Receiver) };
+    #[cfg(target_os = "macos")]
+    if crate::system_audio::mixer_captures() {
+        crate::audio_host::feeds_itself_no_more(r.source);
+    }
     r.stop_thread();
+    if let Ok(mut f) = r.sound.lock() {
+        f.take();
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

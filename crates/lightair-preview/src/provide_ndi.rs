@@ -1,184 +1,85 @@
-//! NDI sources (`lightair_ndi`) received for the compositor, with `LIGHTAIR_ENGINE=own`.
+//! NDI sources (`lightair_ndi`) for the compositor, with `LIGHTAIR_ENGINE=own`.
 //!
-//! - **One receiver per source while shown.** A source a canvas's compositor shows gets a
-//!   receiver of its own on a thread of its own; once no compositor shows it, the receiver stops
-//!   a second later (so a scene being rebuilt or a switch's hand-over doesn't reconnect).
-//! - **Pictures.** The receiver asks NDI for UYVY when the sender's picture is opaque and BGRA
-//!   when it carries alpha. UYVY is copied into a 4:2:2 IOSurface and converted to BGRA by
-//!   VideoToolbox; BGRA is copied with its colours multiplied by alpha in the same pass
-//!   (Accelerate's vImage). Each picture goes into a buffer the compositor isn't holding.
-//! - **Sound** isn't taken here: the receiver drops it. The libobs NDI source keeps receiving the
-//!   source, sound and picture, and carries the sound into the mix as before. That means a shown
-//!   NDI source is received twice while the switch is on, until the libobs source asks NDI for
-//!   its sound only (NDI's "audio only" bandwidth) whenever this provider draws the picture.
-//! - **NDI's runtime** is loaded at run time from where it's installed (the same places the
-//!   libobs source looks), never shipped. Without it this provider handles nothing.
+//! - **Received once.** The libobs NDI source already receives its NDI source, picture and sound,
+//!   from creation on, and carries the sound into the mix. This provider connects no receiver of
+//!   its own: while a compositor shows a source it taps that receiver (`lightair_obs::ndi::tap`)
+//!   and copies each picture it gets into a buffer the compositor isn't holding. libobs keeps its
+//!   own picture of the source, so thumbnails, Studio mode's libobs preview and a source with an
+//!   effect only libobs draws stay right.
+//! - **Pictures.** NDI gives BGRA (BGRX for senders without alpha); the copy multiplies the
+//!   colours by alpha, or makes them opaque, in one pass (Accelerate's vImage).
+//! - **Letting go.** A source no compositor has shown for a second is copied no more; its tap
+//!   goes the next time a compositor says what it shows.
 
-use std::collections::HashMap;
-use std::ffi::{CString, c_char, c_void};
-use std::ptr::NonNull;
-use std::sync::{Arc, OnceLock};
+use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lightair_model::{Id, Source};
-use lightair_obs::bridge;
-use objc2_core_foundation::CFRetained;
+use lightair_obs::{bridge, ndi};
 use objc2_core_video::{
-    CVAttachmentMode, CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
+    CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
     CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
-    kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVImageBufferYCbCrMatrixKey,
-    kCVPixelFormatType_32BGRA, kCVPixelFormatType_422YpCbCr8,
+    kCVPixelFormatType_32BGRA,
 };
-use objc2_video_toolbox::VTPixelTransferSession;
 use parking_lot::Mutex;
 
 use crate::providers::{Frame, Provider};
 
-/// How long a receiver keeps running once no compositor shows its source.
+/// How long pictures are still copied once no compositor shows their source.
 const LINGER: Duration = Duration::from_secs(1);
-/// How long one wait for a frame may take: the receiver looks at whether it's still wanted at
-/// least this often.
-const CAPTURE_TIMEOUT_MS: u32 = 100;
 
-// ---------------------------------------------------------------- NDI's runtime (receiving)
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct NdiSource {
-    p_ndi_name: *const c_char,
-    p_url_address: *const c_char,
-}
-
-#[repr(C)]
-struct RecvCreate {
-    source_to_connect_to: NdiSource,
-    color_format: i32,
-    bandwidth: i32,
-    allow_video_fields: bool,
-    p_ndi_recv_name: *const c_char,
-}
-
-#[repr(C)]
-struct VideoFrame {
-    xres: i32,
-    yres: i32,
-    four_cc: u32,
-    frame_rate_n: i32,
-    frame_rate_d: i32,
-    picture_aspect_ratio: f32,
-    frame_format_type: i32,
-    timecode: i64,
-    p_data: *mut u8,
-    line_stride_in_bytes: i32,
-    p_metadata: *const c_char,
-    timestamp: i64,
-}
-
-/// `NDIlib_frame_type_e`.
-const FRAME_VIDEO: i32 = 1;
-const FRAME_ERROR: i32 = 4;
-/// `NDIlib_recv_color_format_UYVY_BGRA`: opaque pictures as UYVY, pictures with alpha as BGRA.
-const COLOR_UYVY_BGRA: i32 = 1;
-const BANDWIDTH_HIGHEST: i32 = 100;
-const FOURCC_UYVY: u32 = u32::from_le_bytes(*b"UYVY");
-const FOURCC_BGRA: u32 = u32::from_le_bytes(*b"BGRA");
-const FOURCC_BGRX: u32 = u32::from_le_bytes(*b"BGRX");
-
-type Ptr = *mut c_void;
-
-struct Lib {
-    _lib: libloading::Library,
-    recv_create_v3: unsafe extern "C" fn(*const RecvCreate) -> Ptr,
-    recv_destroy: unsafe extern "C" fn(Ptr),
-    recv_capture_v2: unsafe extern "C" fn(Ptr, *mut VideoFrame, *mut c_void, *mut c_void, u32) -> i32,
-    recv_free_video_v2: unsafe extern "C" fn(Ptr, *const VideoFrame),
-}
-
-// SAFETY: NDI's functions may be called from any thread; the library handle is only kept.
-unsafe impl Send for Lib {}
-unsafe impl Sync for Lib {}
-
-/// Where NDI's runtime may be installed, in the order the libobs NDI source looks.
-fn candidates() -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    for var in ["NDI_RUNTIME_DIR_V6", "NDI_RUNTIME_DIR_V5"] {
-        if let Ok(dir) = std::env::var(var) {
-            out.push(std::path::Path::new(&dir).join("libndi.dylib"));
-        }
-    }
-    for p in [
-        "/usr/local/lib/libndi.dylib",
-        "/Library/NDI SDK for Apple/lib/macOS/libndi.dylib",
-        "/Library/Application Support/NDI/lib/libndi.dylib",
-        "/Applications/NDI Video Monitor.app/Contents/Frameworks/libndi_advanced.dylib",
-    ] {
-        out.push(p.into());
-    }
-    out
-}
-
-/// NDI's runtime, loaded the first time an NDI source is shown (by then the libobs source has
-/// usually loaded the same library, so this only takes another reference to it).
-fn runtime() -> Option<&'static Lib> {
-    static LIB: OnceLock<Option<Lib>> = OnceLock::new();
-    LIB.get_or_init(|| {
-        for path in candidates().into_iter().filter(|p| p.exists()) {
-            // SAFETY: NDI's runtime runs no code on load that needs anything from Lightair.
-            let Ok(l) = (unsafe { libloading::Library::new(&path) }) else { continue };
-            // SAFETY: the symbols have the types NDI documents for them.
-            let lib = unsafe {
-                macro_rules! sym {
-                    ($name:literal) => {
-                        match l.get($name) {
-                            Ok(s) => *s,
-                            Err(_) => continue,
-                        }
-                    };
-                }
-                let initialize: unsafe extern "C" fn() -> bool = sym!(b"NDIlib_initialize\0");
-                if !initialize() {
-                    continue;
-                }
-                Lib {
-                    recv_create_v3: sym!(b"NDIlib_recv_create_v3\0"),
-                    recv_destroy: sym!(b"NDIlib_recv_destroy\0"),
-                    recv_capture_v2: sym!(b"NDIlib_recv_capture_v2\0"),
-                    recv_free_video_v2: sym!(b"NDIlib_recv_free_video_v2\0"),
-                    _lib: l,
-                }
-            };
-            return Some(lib);
-        }
-        None
-    })
-    .as_ref()
-}
-
-// ---------------------------------------------------------------- the provider
-
-/// Receives the NDI sources the compositors show.
+/// Takes the pictures of the NDI sources the compositors show.
 #[derive(Default)]
 pub(crate) struct Ndi {
-    state: Arc<Mutex<State>>,
+    state: Mutex<State>,
 }
 
 #[derive(Default)]
 struct State {
-    /// What each canvas's compositor shows: source → NDI name.
-    wanted: HashMap<Id, HashMap<Id, String>>,
-    receivers: HashMap<Id, Entry>,
+    /// What each canvas's compositor shows.
+    wanted: HashMap<Id, HashSet<Id>>,
+    /// The sources tapped, by document id.
+    taken: HashMap<Id, Arc<Taken>>,
 }
 
-struct Entry {
-    receiver: Arc<Receiver>,
-    /// When the receiver stops unless a compositor shows its source again (`None`: shown).
-    stop_at: Option<Instant>,
-}
-
-struct Receiver {
+/// One tapped source.
+struct Taken {
+    /// The NDI name it receives: a new name starts afresh (no picture of the old one).
     name: String,
-    /// The newest picture and its number.
+    /// Until when pictures are copied (pushed on while shown).
+    until: Mutex<Instant>,
     latest: Mutex<Option<Latest>>,
+    copier: Mutex<Copier>,
+}
+
+#[derive(Default)]
+struct Copier {
+    pool: Pool,
+    serial: u64,
+}
+
+impl Taken {
+    /// A received picture (on the source's receiving thread): copied while wanted.
+    fn take(&self, picture: &ndi::Picture) {
+        if Instant::now() > *self.until.lock() {
+            return;
+        }
+        let (w, h) = (picture.width, picture.height);
+        if w == 0 || h == 0 || picture.data.len() < picture.stride * h as usize {
+            return;
+        }
+        let alpha = if picture.opaque { Alpha::Opaque } else { Alpha::Straight };
+        let mut copier = self.copier.lock();
+        let Some(out) = copier.pool.take(w, h) else { return };
+        // SAFETY: `data` holds `h` rows of `stride` bytes (checked above); `copy_bgra` checks
+        // that each holds `w` pixels.
+        if unsafe { copy_bgra(picture.data.as_ptr(), picture.stride, w, h, &out, alpha) } {
+            copier.serial += 1;
+            *self.latest.lock() = Some(Latest { buffer: out, serial: copier.serial });
+        }
+    }
 }
 
 /// The NDI name a source receives (its `ndi_name` setting).
@@ -188,215 +89,49 @@ fn ndi_name(source: &Source) -> Option<&str> {
 
 impl Provider for Ndi {
     fn handles(&self, source: &Source) -> bool {
-        source.kind == lightair_obs::ndi::KIND && ndi_name(source).is_some() && runtime().is_some()
+        source.kind == ndi::KIND && ndi_name(source).is_some() && ndi::available()
     }
 
     fn want(&self, canvas: Id, shown: &[&Source]) {
         let mut st = self.state.lock();
-        let names: HashMap<Id, String> = shown.iter().filter_map(|s| Some((s.id, ndi_name(s)?.to_owned()))).collect();
+        let names: HashMap<Id, &str> = shown.iter().filter_map(|s| Some((s.id, ndi_name(s)?))).collect();
         if names.is_empty() {
             st.wanted.remove(&canvas);
         } else {
-            st.wanted.insert(canvas, names);
+            st.wanted.insert(canvas, names.keys().copied().collect());
         }
-        let all: HashMap<Id, String> =
-            st.wanted.values().flat_map(|m| m.iter().map(|(id, n)| (*id, n.clone()))).collect();
         let now = Instant::now();
-        // not shown any more: stops after a moment (the receiver's thread lets itself go)
-        for (id, entry) in st.receivers.iter_mut() {
-            if !all.contains_key(id) && entry.stop_at.is_none() {
-                entry.stop_at = Some(now + LINGER);
-            }
-        }
-        for (id, name) in all {
-            match st.receivers.get_mut(&id) {
-                Some(entry) if entry.receiver.name == name => entry.stop_at = None,
-                // new, or another NDI source now: a new receiver (the old one sees it's replaced)
+        for (&id, &name) in &names {
+            match st.taken.get(&id) {
+                Some(t) if t.name == name => *t.until.lock() = now + LINGER,
+                // newly shown, or receiving another NDI source now
                 _ => {
-                    let Some(lib) = runtime() else { return };
-                    let receiver = Arc::new(Receiver { name, latest: Mutex::new(None) });
-                    let (state, me) = (self.state.clone(), receiver.clone());
-                    let spawned = std::thread::Builder::new()
-                        .name("lightair-ndi-provider".into())
-                        .spawn(move || receive(lib, state, id, me));
-                    if spawned.is_ok() {
-                        st.receivers.insert(id, Entry { receiver, stop_at: None });
-                    }
+                    let taken = Arc::new(Taken {
+                        name: name.to_owned(),
+                        until: Mutex::new(now + LINGER),
+                        latest: Mutex::new(None),
+                        copier: Mutex::new(Copier::default()),
+                    });
+                    let me = taken.clone();
+                    ndi::tap(&id.to_string(), Arc::new(move |p: &ndi::Picture| me.take(p)));
+                    st.taken.insert(id, taken);
                 }
             }
         }
+        // shown by no compositor for a moment: let go
+        let all: HashSet<Id> = st.wanted.values().flatten().copied().collect();
+        st.taken.retain(|id, t| {
+            let keep = all.contains(id) || now <= *t.until.lock();
+            if !keep {
+                ndi::untap(&id.to_string());
+            }
+            keep
+        });
     }
 
     fn frame(&self, source: Id) -> Option<Frame> {
-        let receiver = self.state.lock().receivers.get(&source)?.receiver.clone();
-        receiver.latest.lock().as_ref().map(Latest::frame)
-    }
-}
-
-/// Whether `me` should keep receiving `id`: it's still the source's receiver and either shown
-/// or within its moment after. Lets go of the entry when its moment is over.
-fn still_wanted(state: &Mutex<State>, id: Id, me: &Arc<Receiver>) -> bool {
-    let mut st = state.lock();
-    let Some(entry) = st.receivers.get(&id) else { return false };
-    if !Arc::ptr_eq(&entry.receiver, me) {
-        return false;
-    }
-    if entry.stop_at.is_some_and(|t| Instant::now() >= t) {
-        st.receivers.remove(&id);
-        return false;
-    }
-    true
-}
-
-/// A receiver's thread: connects to the NDI source `me.name` and turns each picture into a BGRA
-/// IOSurface until it isn't wanted any more.
-fn receive(lib: &'static Lib, state: Arc<Mutex<State>>, id: Id, me: Arc<Receiver>) {
-    let name = CString::new(me.name.as_str()).unwrap_or_default();
-    let receiver_name = CString::new("Lightair").unwrap_or_default();
-    let create = RecvCreate {
-        source_to_connect_to: NdiSource { p_ndi_name: name.as_ptr(), p_url_address: std::ptr::null() },
-        color_format: COLOR_UYVY_BGRA,
-        bandwidth: BANDWIDTH_HIGHEST,
-        allow_video_fields: false,
-        p_ndi_recv_name: receiver_name.as_ptr(),
-    };
-    // SAFETY: `create` and the strings it points to outlive the call.
-    let recv = unsafe { (lib.recv_create_v3)(&create) };
-    if recv.is_null() {
-        tracing::warn!(source = %me.name, "NDI provider: couldn't receive");
-        // keep the entry until it's let go, so it isn't tried again every frame
-        while still_wanted(&state, id, &me) {
-            std::thread::sleep(Duration::from_millis(CAPTURE_TIMEOUT_MS as u64));
-        }
-        return;
-    }
-    let mut converter = Converter::new();
-    let mut serial = 0u64;
-    while still_wanted(&state, id, &me) {
-        // SAFETY: a zeroed frame is what NDI expects to fill in.
-        let mut video: VideoFrame = unsafe { std::mem::zeroed() };
-        // sound and metadata aren't asked for (null): NDI drops them for this receiver
-        // SAFETY: `recv` is this thread's receiver; `video` is a valid place for a frame.
-        let kind = unsafe {
-            (lib.recv_capture_v2)(recv, &mut video, std::ptr::null_mut(), std::ptr::null_mut(), CAPTURE_TIMEOUT_MS)
-        };
-        match kind {
-            FRAME_VIDEO => {
-                let picture = converter.convert(&video);
-                // SAFETY: the frame came from this receiver and is given back once.
-                unsafe { (lib.recv_free_video_v2)(recv, &video) };
-                if let Some(buffer) = picture {
-                    serial += 1;
-                    *me.latest.lock() = Some(Latest { buffer, serial });
-                }
-            }
-            // the connection was lost: NDI reconnects by itself; don't spin meanwhile
-            FRAME_ERROR => std::thread::sleep(Duration::from_millis(CAPTURE_TIMEOUT_MS as u64)),
-            _ => {}
-        }
-    }
-    // SAFETY: made above, used only on this thread, destroyed once.
-    unsafe { (lib.recv_destroy)(recv) };
-}
-
-// ---------------------------------------------------------------- pictures
-
-/// Turns NDI's frames into BGRA IOSurfaces with premultiplied colours.
-struct Converter {
-    session: Option<CFRetained<VTPixelTransferSession>>,
-    /// The 4:2:2 IOSurface UYVY frames are copied into before VideoToolbox converts them
-    /// (reused: the conversion is done when the transfer returns).
-    staging: Option<bridge::Buffer>,
-    pool: Pool,
-    warned: bool,
-}
-
-impl Converter {
-    fn new() -> Converter {
-        let mut session: *mut VTPixelTransferSession = std::ptr::null_mut();
-        // SAFETY: `session` is a valid place for the new session.
-        let rc = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut session)) };
-        let session = (rc == 0 && !session.is_null()).then(|| {
-            // SAFETY: the session was just made, one reference ours.
-            unsafe { CFRetained::from_raw(NonNull::new_unchecked(session)) }
-        });
-        if session.is_none() {
-            tracing::warn!(rc, "NDI provider: no VideoToolbox session; opaque NDI pictures stay libobs's");
-        }
-        Converter { session, staging: None, pool: Pool::default(), warned: false }
-    }
-
-    fn convert(&mut self, video: &VideoFrame) -> Option<bridge::Buffer> {
-        let (w, h, stride) = (video.xres, video.yres, video.line_stride_in_bytes);
-        if video.p_data.is_null() || w <= 0 || h <= 0 || stride <= 0 {
-            return None;
-        }
-        let (w, h, stride) = (w as u32, h as u32, stride as usize);
-        match video.four_cc {
-            FOURCC_UYVY => self.uyvy(video.p_data, stride, w, h),
-            FOURCC_BGRA | FOURCC_BGRX => {
-                let alpha = if video.four_cc == FOURCC_BGRA { Alpha::Straight } else { Alpha::Opaque };
-                let out = self.pool.take(w, h)?;
-                // SAFETY: NDI's frame holds `h` rows of `stride` bytes, each with `w` BGRA pixels.
-                unsafe { copy_bgra(video.p_data, stride, w, h, &out, alpha) }.then_some(out)
-            }
-            other => {
-                if !std::mem::replace(&mut self.warned, true) {
-                    tracing::warn!(four_cc = other, "NDI provider: a picture format it doesn't take");
-                }
-                None
-            }
-        }
-    }
-
-    /// A UYVY frame, converted to BGRA by VideoToolbox.
-    fn uyvy(&mut self, data: *const u8, stride: usize, w: u32, h: u32) -> Option<bridge::Buffer> {
-        let session = self.session.as_ref()?;
-        if w % 2 != 0 || stride < w as usize * 2 {
-            return None;
-        }
-        let fits = |b: &bridge::Buffer| (CVPixelBufferGetWidth(b) as u32, CVPixelBufferGetHeight(b) as u32) == (w, h);
-        if !self.staging.as_ref().is_some_and(fits) {
-            let staging = crate::mac::pixel_buffer(w, h, kCVPixelFormatType_422YpCbCr8)?;
-            // NDI's YUV is BT.709 from HD up, BT.601 below (video range, as 4:2:2 here is)
-            // SAFETY: CoreVideo's constants; the matrix attachment takes one of them.
-            unsafe {
-                let matrix = if h >= 720 {
-                    kCVImageBufferYCbCrMatrix_ITU_R_709_2
-                } else {
-                    kCVImageBufferYCbCrMatrix_ITU_R_601_4
-                };
-                staging.set_attachment(
-                    kCVImageBufferYCbCrMatrixKey,
-                    matrix.as_ref(),
-                    CVAttachmentMode::ShouldNotPropagate,
-                );
-            }
-            self.staging = Some(staging);
-        }
-        let staging = self.staging.as_ref()?;
-        // SAFETY: the staging buffer is locked while written, within its rows; NDI's frame
-        // holds `h` rows of `stride` bytes, each with `w * 2` bytes of UYVY.
-        unsafe {
-            if CVPixelBufferLockBaseAddress(staging, CVPixelBufferLockFlags(0)) != 0 {
-                return None;
-            }
-            let base = CVPixelBufferGetBaseAddress(staging) as *mut u8;
-            let row = CVPixelBufferGetBytesPerRow(staging);
-            let ok = !base.is_null() && row >= w as usize * 2;
-            if ok {
-                for y in 0..h as usize {
-                    std::ptr::copy_nonoverlapping(data.add(y * stride), base.add(y * row), w as usize * 2);
-                }
-            }
-            CVPixelBufferUnlockBaseAddress(staging, CVPixelBufferLockFlags(0));
-            if !ok {
-                return None;
-            }
-        }
-        let out = self.pool.take(w, h)?;
-        // SAFETY: both are valid IOSurface-backed pixel buffers of the same size.
-        (unsafe { session.transfer_image(staging, &out) } == 0).then_some(out)
+        let taken = self.state.lock().taken.get(&source)?.clone();
+        taken.latest.lock().as_ref().map(Latest::frame)
     }
 }
 
