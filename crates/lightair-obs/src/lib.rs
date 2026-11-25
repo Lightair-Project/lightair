@@ -4,8 +4,8 @@
 //! thread: every mutating libobs call happens there, in order (docs/03-architecture.md,
 //! "Threading model"). Other threads send jobs with [`Engine::call`] / [`Engine::post`].
 
-pub mod access;
-pub mod audio;
+pub use lightair_host::access;
+pub use lightair_host::audio;
 pub mod audio_host;
 pub mod audio_tap;
 pub mod avatar;
@@ -17,19 +17,19 @@ mod avatar_uma;
 pub mod backdrop;
 #[cfg(target_os = "macos")]
 pub mod bridge;
-pub mod clock;
-pub mod devices;
+pub use lightair_host::clock;
+pub use lightair_host::devices;
 pub mod displays;
 pub mod face_drive;
 mod engine;
-pub mod gpu;
+pub use lightair_host::gpu;
 pub mod kinds;
 mod log;
 pub mod loudness;
 pub mod media;
 #[cfg(target_os = "macos")]
 pub mod media_source;
-pub mod meters;
+pub use lightair_host::meters;
 pub mod monitoring;
 pub mod obs;
 #[cfg(target_os = "macos")]
@@ -48,15 +48,15 @@ mod phone_units;
 pub mod player;
 pub mod filters;
 pub mod shared_video;
-pub mod soundboard;
+pub use lightair_host::soundboard;
 pub mod playlists;
 pub mod autoframe;
 pub mod ndi;
 pub mod rtsp;
 pub mod dslr;
 #[cfg(target_os = "macos")]
-pub mod vision;
-pub mod plugins;
+pub use lightair_host::vision;
+pub use lightair_host::plugins;
 pub mod pointer;
 #[cfg(target_os = "macos")]
 pub mod program_source;
@@ -71,7 +71,7 @@ pub mod timers;
 mod transition;
 pub mod vcam;
 pub mod web;
-pub mod zoom_to;
+pub use lightair_host::zoom_to;
 
 pub use engine::{Capabilities, Engine, EngineConfig, EngineError, EngineState, Graphics, Modules, Stats, read_stats};
 pub use libobs_sys as sys;

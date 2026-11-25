@@ -88,14 +88,14 @@ impl MeterBank {
         self.cells.read().get(&track).cloned()
     }
 
-    pub(crate) fn insert(&self, track: Id) -> Arc<MeterCell> {
+    pub fn insert(&self, track: Id) -> Arc<MeterCell> {
         let cell = Arc::new(MeterCell::default());
         epoch();
         self.cells.write().insert(track, cell.clone());
         cell
     }
 
-    pub(crate) fn remove(&self, track: Id) {
+    pub fn remove(&self, track: Id) {
         self.cells.write().remove(&track);
     }
 }

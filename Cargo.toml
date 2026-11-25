@@ -15,6 +15,7 @@ publish = false
 # internal
 libobs-sys = { path = "crates/libobs-sys" }
 lightair-obs = { path = "crates/lightair-obs" }
+lightair-host = { path = "crates/lightair-host" }
 lightair-avatar = { path = "crates/lightair-avatar" }
 # The avatar runtimes, built in from upstream projects (each crate's NOTICE.md): .moc3 models,
 # and Inochi2D and nijilive puppets.

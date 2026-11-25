@@ -56,7 +56,7 @@ pub fn set_main_thread(run: impl Fn(Job) + Send + Sync + 'static) {
     let _ = MAIN.set(Box::new(run));
 }
 
-pub(crate) fn on_main(job: Job) {
+pub fn on_main(job: Job) {
     match MAIN.get() {
         Some(run) => run(job),
         None => job(),
