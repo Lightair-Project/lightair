@@ -19,6 +19,8 @@ mod compose;
 #[cfg(target_os = "macos")]
 pub mod providers;
 #[cfg(target_os = "macos")]
+mod provide_media;
+#[cfg(target_os = "macos")]
 mod looks;
 #[cfg(target_os = "macos")]
 mod mac;

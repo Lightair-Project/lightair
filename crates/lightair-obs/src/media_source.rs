@@ -11,11 +11,20 @@
 //! It plays as OBS's media source does, with the same settings (`local_file`, `looping`,
 //! `restart_on_activate`, `clear_on_media_end`) and the media controls; [`crate::kinds`]
 //! routes the files AVFoundation plays (local MP4 and QuickTime files) here.
+//!
+//! With `LIGHTAIR_ENGINE=own`, Lightair's own compositor draws the frame each source shows from
+//! its surface ([`picture`]), picked on libobs's clock as libobs's own drawing is, so pause,
+//! seek, looping and the end follow the source; the source keeps playing its sound into the mix.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::Arc;
+use std::ptr::NonNull;
+use std::sync::{Arc, LazyLock, Weak};
 use std::time::Duration;
+
+use lightair_model::Id;
+use objc2_core_foundation::CFRetained;
+use objc2_core_video::CVPixelBuffer;
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyClass, AnyObject};
@@ -35,6 +44,9 @@ const QUEUE: usize = 4;
 const PREROLL_NS: u64 = 60_000_000;
 /// Frames libobs may still be drawing from: kept (in use) for a few frames after replaced.
 const HELD: usize = 3;
+/// With Lightair's own compositor: more surfaces, for the frames its canvases may still be
+/// drawing from (each holds one until the GPU has finished with it).
+const COMPOSITOR_HELD: usize = 4;
 
 // ------------------------------------------------------------------ Apple frameworks
 
@@ -133,6 +145,10 @@ unsafe extern "C" {
     fn CVPixelBufferGetIOSurface(buffer: *mut c_void) -> *mut c_void;
     fn CVPixelBufferGetWidth(buffer: *mut c_void) -> usize;
     fn CVPixelBufferGetHeight(buffer: *mut c_void) -> usize;
+    fn CVPixelBufferLockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
+    fn CVPixelBufferUnlockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
+    fn CVPixelBufferGetBaseAddress(buffer: *mut c_void) -> *mut c_void;
+    fn CVPixelBufferGetDataSize(buffer: *mut c_void) -> usize;
     fn CVPixelBufferCreate(
         allocator: *const c_void,
         width: usize,
@@ -163,6 +179,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn CFRetain(cf: *const c_void) -> *const c_void;
     fn CFRelease(cf: *const c_void);
+    fn CFGetRetainCount(cf: *const c_void) -> isize;
 }
 
 const BGRA: u32 = u32::from_be_bytes(*b"BGRA");
@@ -234,6 +251,33 @@ impl Slot {
     fn surface(&self) -> *mut c_void {
         unsafe { CVPixelBufferGetIOSurface(self.buffer) }
     }
+
+    /// A fully transparent slot (zeroed), never written again.
+    fn blank(size: (u32, u32)) -> Option<Arc<Slot>> {
+        let slot = Slot::new(size)?;
+        unsafe {
+            if CVPixelBufferLockBaseAddress(slot.buffer, 0) != 0 {
+                return None;
+            }
+            let base = CVPixelBufferGetBaseAddress(slot.buffer);
+            if !base.is_null() {
+                std::ptr::write_bytes(base as *mut u8, 0, CVPixelBufferGetDataSize(slot.buffer));
+            }
+            CVPixelBufferUnlockBaseAddress(slot.buffer, 0);
+        }
+        Some(slot)
+    }
+
+    /// The pixel buffer, with a reference of its own (for the compositor).
+    fn retained(&self) -> Option<CFRetained<CVPixelBuffer>> {
+        // SAFETY: `buffer` is a live `CVPixelBufferRef`; `retain` takes a reference of its own.
+        NonNull::new(self.buffer.cast::<CVPixelBuffer>()).map(|p| unsafe { CFRetained::retain(p) })
+    }
+
+    /// Whether anything outside the source holds its pixel buffer (the compositor drawing it).
+    fn lent(&self) -> bool {
+        unsafe { CFGetRetainCount(self.buffer) > 1 }
+    }
 }
 
 impl Drop for Slot {
@@ -278,9 +322,12 @@ impl Ring {
     fn convert(&mut self, frame: &Decoded) -> Option<Arc<Slot>> {
         let size = unsafe { (CVPixelBufferGetWidth(frame.buffer) as u32, CVPixelBufferGetHeight(frame.buffer) as u32) };
         self.slots.retain(|s| s.size == size);
-        let slot = match self.slots.iter().find(|s| Arc::strong_count(s) == 1) {
+        // with the compositor, a slot it still draws from (holding its pixel buffer) isn't free
+        let own = crate::bridge::own();
+        let most = if own { SLOTS + COMPOSITOR_HELD } else { SLOTS };
+        let slot = match self.slots.iter().find(|s| Arc::strong_count(s) == 1 && !(own && s.lent())) {
             Some(s) => s.clone(),
-            None if self.slots.len() < SLOTS => {
+            None if self.slots.len() < most => {
                 let s = Slot::new(size)?;
                 self.slots.push(s.clone());
                 s
@@ -318,6 +365,22 @@ struct Frame {
 enum Next {
     Show(Arc<Slot>),
     Clear,
+}
+
+/// What the source shows now, for Lightair's own compositor (`LIGHTAIR_ENGINE=own`): set on
+/// libobs's clock as libobs's own drawing is, whether libobs draws the source or not.
+#[derive(Default)]
+struct Composited {
+    /// The frame shown (`None` before the first one, or once cleared).
+    slot: Option<Arc<Slot>>,
+    /// Shows nothing (cleared at the end or on a stop).
+    cleared: bool,
+    /// Counts the pictures shown: a different value is a new picture.
+    serial: u64,
+    /// The last frame's size, for the transparent picture shown once cleared.
+    size: (u32, u32),
+    /// The transparent picture of that size.
+    blank: Option<Arc<Slot>>,
 }
 
 struct Texture(*mut sys::gs_texture_t);
@@ -428,6 +491,8 @@ struct Shared {
     queue: Mutex<VecDeque<Frame>>,
     next: Mutex<Option<Next>>,
     shown: Mutex<Shown>,
+    /// What the compositor draws (only kept with `LIGHTAIR_ENGINE=own`).
+    composited: Mutex<Composited>,
     /// Off air, it waits to play (0 no, 1 from the start, 2 on from where it paused): a file
     /// that doesn't restart on air (`restart_on_activate` off) still costs nothing off air.
     on_air_play: std::sync::atomic::AtomicU8,
@@ -436,6 +501,17 @@ struct Shared {
 impl Shared {
     fn source(&self) -> *mut sys::obs_source_t {
         self.source as *mut sys::obs_source_t
+    }
+
+    /// Shows nothing from the next frame (the end, or a stop, with `clear_on_media_end`).
+    fn clear_picture(&self) {
+        *self.next.lock() = Some(Next::Clear);
+        if crate::bridge::own() {
+            let mut c = self.composited.lock();
+            c.slot = None;
+            c.cleared = true;
+            c.serial += 1;
+        }
     }
 
     /// Plays from `at` (ns), keeping a pause.
@@ -467,7 +543,7 @@ impl Shared {
         drop(c);
         self.queue.lock().clear();
         if clear {
-            *self.next.lock() = Some(Next::Clear);
+            self.clear_picture();
         }
         self.wake.notify_all();
     }
@@ -801,7 +877,7 @@ fn play(shared: &Shared, asset: &Asset, ring: &mut Ring, run: u64, start: i64) {
                 let clear = c.settings.clear_on_end;
                 drop(c);
                 if clear {
-                    *shared.next.lock() = Some(Next::Clear);
+                    shared.clear_picture();
                 }
                 unsafe { sys::obs_source_media_ended(shared.source()) };
                 return;
@@ -898,6 +974,61 @@ impl Drop for Frames {
     }
 }
 
+// ------------------------------------------------------------------ what each source shows, for the compositor
+
+/// The document's media sources this source type plays, by document id (only with
+/// `LIGHTAIR_ENGINE=own`).
+static SOURCES: LazyLock<Mutex<HashMap<Id, Weak<Shared>>>> = LazyLock::new(Default::default);
+
+/// The document source a libobs source plays (the reconciler names each by its id).
+fn document_id(source: *mut sys::obs_source_t) -> Option<Id> {
+    let name = unsafe { sys::obs_source_get_name(source) };
+    if name.is_null() {
+        return None;
+    }
+    let name = unsafe { CStr::from_ptr(name) }.to_str().ok()?;
+    uuid::Uuid::parse_str(name).ok().map(Id)
+}
+
+/// A frame a media source shows: a BGRA IOSurface-backed pixel buffer, opaque (so its colours
+/// are premultiplied too), or fully transparent once the source has cleared.
+pub struct Picture {
+    pub buffer: CFRetained<CVPixelBuffer>,
+    /// Counts the source's pictures: a different value is a new picture.
+    pub serial: u64,
+}
+
+/// Whether the document media source `source` plays through this source type now (a file
+/// AVFoundation plays), so its frames can be drawn from [`picture`]. Any thread.
+pub fn plays(source: Id) -> bool {
+    SOURCES.lock().get(&source).is_some_and(|s| s.strong_count() > 0)
+}
+
+/// The frame the document media source `source` shows now, picked on libobs's clock as its own
+/// drawing is (so pause, seek, looping, a new file and the end follow the source).
+/// `None` before its first frame, and for a file with a rotation (libobs turns it as it draws).
+/// The surface isn't written again while the buffer is held. Any thread.
+pub fn picture(source: Id) -> Option<Picture> {
+    let shared = SOURCES.lock().get(&source)?.upgrade()?;
+    if shared.control.lock().rotation != 0 {
+        return None;
+    }
+    let mut c = shared.composited.lock();
+    let slot = match (&c.slot, c.cleared) {
+        (Some(slot), _) => slot.clone(),
+        (None, true) if c.size.0 > 0 && c.size.1 > 0 => {
+            if c.blank.as_ref().is_none_or(|b| b.size != c.size) {
+                c.blank = Slot::blank(c.size);
+            }
+            c.blank.clone()?
+        }
+        _ => return None,
+    };
+    let serial = c.serial;
+    drop(c);
+    Some(Picture { buffer: slot.retained()?, serial })
+}
+
 // ------------------------------------------------------------------ the libobs source
 
 struct Media {
@@ -959,8 +1090,16 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         queue: Mutex::new(VecDeque::new()),
         next: Mutex::new(None),
         shown: Mutex::new(Shown::default()),
+        composited: Mutex::new(Composited::default()),
         on_air_play: Default::default(),
     });
+    // a document's source (named by its id) is found by the compositor
+    if crate::bridge::own()
+        && !unsafe { sys::obs_obj_is_private(source as *mut c_void) }
+        && let Some(id) = document_id(source)
+    {
+        SOURCES.lock().insert(id, Arc::downgrade(&shared));
+    }
     let thread = {
         let shared = shared.clone();
         std::thread::Builder::new().name("lightair-media".into()).spawn(move || reader_thread(shared)).ok()
@@ -976,6 +1115,10 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let mut m = unsafe { Box::from_raw(data as *mut Media) };
+    if crate::bridge::own() {
+        let me = Arc::downgrade(&m.shared);
+        SOURCES.lock().retain(|_, s| !Weak::ptr_eq(s, &me));
+    }
     m.shared.control.lock().quit = true;
     m.shared.wake.notify_all();
     if let Some(t) = m.thread.take() {
@@ -1051,6 +1194,13 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
         }
     }
     if let Some(f) = due {
+        if crate::bridge::own() {
+            let mut c = shared.composited.lock();
+            c.size = f.slot.size;
+            c.slot = Some(f.slot.clone());
+            c.cleared = false;
+            c.serial += 1;
+        }
         let mut next = shared.next.lock();
         if !matches!(*next, Some(Next::Clear)) {
             *next = Some(Next::Show(f.slot));

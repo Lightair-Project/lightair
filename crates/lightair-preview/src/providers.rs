@@ -49,7 +49,7 @@ fn builtin() -> Vec<Arc<dyn Provider>> {
     // Syphon:
     // SRT from another computer:
     // the phone camera:
-    // media files:
+    all.push(Arc::new(crate::provide_media::Media)); // media files
     all
 }
 
