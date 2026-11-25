@@ -23,6 +23,9 @@ pub(super) type JobSender = futures_channel::mpsc::UnboundedSender<Job>;
 
 /// How long a client waits for the app to answer.
 const ANSWER_WITHIN: Duration = Duration::from_secs(20);
+/// The most frames a second Lightair's own compositor draws a scene for a screenshot.
+#[cfg(target_os = "macos")]
+const SHOT_FPS: u32 = 15;
 
 /// The server, and what the window keeps for it.
 pub(crate) struct Remote {
@@ -1393,7 +1396,17 @@ impl StudioWindow {
                 };
                 let canvas = w.primary_canvas().id;
                 let engine = studio.engine().clone();
-                let shot = view.remote.shot.get_or_insert_with(|| Shot { preview: Preview::attach(), scene: None, used: Instant::now() });
+                let shot = view.remote.shot.get_or_insert_with(|| {
+                    let preview = Preview::attach();
+                    // with Lightair's own compositor: its program, and a scene shown here drawn by
+                    // it a few times a second (a screenshot is a still)
+                    #[cfg(target_os = "macos")]
+                    {
+                        preview.compose_program();
+                        preview.set_rate(Some(SHOT_FPS));
+                    }
+                    Shot { preview, scene: None, used: Instant::now() }
+                });
                 shot.used = Instant::now();
                 if shot.scene != scene {
                     let source = scene.and_then(|s| engine.call(move |e| e.reconciler.scene_source_ref(s, canvas)));

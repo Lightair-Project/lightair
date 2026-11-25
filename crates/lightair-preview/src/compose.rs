@@ -54,6 +54,16 @@
 //! without its effects so nothing is drawn twice. The renderer does the rest: position, fit,
 //! crop, turn, flip, tilt, shape, opacity, and the switch between scenes.
 //!
+//! Scenes shown in the program's place (`Preview::set_source` with a scene: Studio mode's
+//! preview of the scene not on air, the phones' and the remote's shots, thumbnails, a
+//! multiview's views) are drawn by the compositor of the canvas they're laid out in, each by a
+//! renderer of its own at the view's size ([`View`]), from the same pictures the program is
+//! drawn from that frame: their sources are gathered, captured and asked of libobs with the
+//! program's, so nothing is captured or drawn by libobs twice. A view is drawn only while its
+//! preview is active, at its own rate (`Preview::set_rate`; a view a quarter of the canvas's
+//! area or smaller at most [`THUMBNAIL_FPS`] a second), without the show's overlays, as libobs
+//! draws a scene there. A source other than a scene shown there is still libobs's.
+//!
 //! Switches are drawn as libobs draws them: a stinger plays its video (`stinger`, decoded here)
 //! for the video's length, cutting at its cut point; a stinger with no video, and a Scene
 //! transition with no scene to play, are crossfades. A stinger video the compositor can't read
@@ -85,7 +95,7 @@ use parking_lot::Mutex;
 use crate::avatars::{AvatarRenderer, TrackingView};
 use crate::capture;
 use crate::looks;
-use crate::mac::{Frame, Shared, pixel_buffer};
+use crate::mac::{Frame, SceneView, Shared, pixel_buffer};
 use crate::stinger::Player;
 use crate::widget_feed;
 
@@ -109,6 +119,9 @@ const UNKNOWN_LENGTH_MS: u32 = 3_600_000;
 /// An avatar's posing older than this is stale (its libobs source stopped ticking): the
 /// avatar is drawn as with nothing tracked.
 const POSING_STALE: Duration = Duration::from_millis(500);
+/// The most frames a second a small view of a scene (a quarter of the canvas's area or less) is
+/// drawn, unless its preview asks for another rate.
+const THUMBNAIL_FPS: f64 = 30.0;
 
 // ---------------------------------------------------------------- the hub
 
@@ -130,6 +143,8 @@ struct Viewer {
 struct Hub {
     /// The previews given the compositors' frames.
     viewers: Vec<Viewer>,
+    /// The previews whose scenes shown in the program's place the compositors draw.
+    scenes: Vec<Weak<Shared>>,
     /// Canvases something records or streams from.
     in_use: HashSet<Id>,
 }
@@ -159,10 +174,36 @@ pub(crate) fn watch(target: Target, preview: &Arc<Shared>) {
     hub.viewers.push(Viewer { target, shared: Arc::downgrade(preview) });
 }
 
-/// Stops giving `preview` frames: libobs draws its program again.
+/// Draws the scenes `preview` shows in the program's place from now on (whenever it shows one).
+pub(crate) fn watch_scenes(preview: &Arc<Shared>) {
+    let mut hub = HUB.lock();
+    if !hub.scenes.iter().any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(preview))) {
+        hub.scenes.push(Arc::downgrade(preview));
+    }
+}
+
+/// Stops giving `preview` frames: libobs draws its program, and any scene in its place, again.
 pub(crate) fn unwatch(preview: &Arc<Shared>) {
-    HUB.lock().viewers.retain(|v| !std::ptr::eq(v.shared.as_ptr(), Arc::as_ptr(preview)));
+    {
+        let mut hub = HUB.lock();
+        hub.viewers.retain(|v| !std::ptr::eq(v.shared.as_ptr(), Arc::as_ptr(preview)));
+        hub.scenes.retain(|w| !std::ptr::eq(w.as_ptr(), Arc::as_ptr(preview)));
+    }
     preview.unfeed();
+    preview.unfeed_scene();
+}
+
+/// The previews showing a scene of `canvas` in the program's place, and what each shows.
+fn scene_views(canvas: Id) -> Vec<(Arc<Shared>, SceneView)> {
+    let hub = HUB.lock();
+    hub.scenes
+        .iter()
+        .filter_map(|w| w.upgrade())
+        .filter_map(|preview| {
+            let view = preview.scene_view()?;
+            (view.canvas == canvas).then_some((preview, view))
+        })
+        .collect()
 }
 
 /// The previews of `canvas` (`name`: its id as text), and whether something records or streams
@@ -206,6 +247,7 @@ fn run_hub() {
             let mut hub = HUB.lock();
             hub.in_use = in_use;
             hub.viewers.retain(|v| v.shared.strong_count() > 0);
+            hub.scenes.retain(|w| w.strong_count() > 0);
         }
         std::thread::sleep(HUB_PERIOD);
     }
@@ -270,6 +312,7 @@ fn run(canvas: Id, stop: &AtomicBool) {
         stingers: HashMap::new(),
         stingers_of: 0,
         playing: None,
+        views: HashMap::new(),
     };
     let mut next = Instant::now();
     while !stop.load(Ordering::Acquire) {
@@ -286,6 +329,7 @@ fn run(canvas: Id, stop: &AtomicBool) {
     state.idle();
     state.stop_captures();
     state.unfeed(&[]);
+    state.drop_views();
 }
 
 /// What the thread keeps between ticks.
@@ -322,19 +366,71 @@ struct State {
     stingers_of: usize,
     /// The stinger switch being drawn: when it started, and its video's path.
     playing: Option<(Instant, String)>,
+    /// The scenes previews show in the program's place, by preview (its address).
+    views: HashMap<usize, View>,
+}
+
+/// A scene a preview shows in the program's place, drawn for it.
+struct View {
+    preview: Weak<Shared>,
+    scene: Id,
+    /// What the preview showed when this was worked out (`SceneView::generation`).
+    generation: u64,
+    /// The size it's drawn at, and the time between its frames.
+    size: (u32, u32),
+    period: Duration,
+    /// When it was last drawn (`None`: not since what's shown changed).
+    drawn: Option<Instant>,
+    /// Its renderer and buffers (no overlays drawn).
+    drawer: Option<Drawer>,
+    /// A size nothing could be made for (not tried again; libobs draws it).
+    failed: Option<(u32, u32)>,
+}
+
+impl View {
+    /// Whether a frame is due at `now`, the compositor ticking every `tick`.
+    fn due(&self, now: Instant, tick: Duration) -> bool {
+        self.drawn.is_none_or(|t| now.saturating_duration_since(t) + tick / 2 >= self.period)
+    }
+}
+
+/// The size a view of `canvas` is drawn at: the size its preview asks for, at most the canvas's
+/// (its pictures are no larger), even.
+fn view_size(view: &SceneView, canvas: &Canvas) -> (u32, u32) {
+    let whole = (canvas.width.max(2), canvas.height.max(2));
+    let (w, h) = match view.size {
+        Some((w, h)) if w <= whole.0 && h <= whole.1 => (w, h),
+        _ => whole,
+    };
+    (w.max(2) & !1, h.max(2) & !1)
+}
+
+/// The time between a view's frames: the rate its preview asks for, else at most
+/// [`THUMBNAIL_FPS`] for a small one; never faster than the canvas (`tick`).
+fn view_period(view: &SceneView, size: (u32, u32), canvas: &Canvas, tick: Duration) -> Duration {
+    let small = size.0 as u64 * size.1 as u64 * 4 <= canvas.width as u64 * canvas.height as u64;
+    let fps = match view.rate {
+        Some(fps) => fps as f64,
+        None if small => THUMBNAIL_FPS,
+        None => return tick,
+    };
+    Duration::from_secs_f64(1.0 / fps.max(1.0)).max(tick)
 }
 
 impl State {
-    /// Draws a frame if one is wanted; the time until the next.
+    /// Draws a frame of the program, and of the scenes previews show in its place, if one is
+    /// wanted; the time until the next.
     fn tick(&mut self) -> Duration {
         let Some(snapshot) = bridge::snapshot() else {
             self.idle();
             self.stop_captures();
+            self.drop_views();
             return frame_period(None);
         };
         let Some(canvas) = snapshot.workspace.canvas(self.canvas).cloned() else {
             self.idle();
             self.stop_captures();
+            self.drop_views();
             return frame_period(None);
         };
         let period = frame_period(Some(&canvas));
@@ -343,32 +439,59 @@ impl State {
         // previews that no longer look at this canvas show libobs's frames again
         self.unfeed(&viewers);
         let showing: Vec<&Arc<Shared>> = viewers.iter().filter(|v| v.wants_program()).collect();
-        if showing.is_empty() && !in_use {
+        // the program is drawn for its previews and the canvas's outputs
+        let program = !showing.is_empty() || in_use;
+        let base = self.doc.update(&snapshot.workspace);
+        // the scenes previews show in the program's place (those still in the document)
+        let wanted: Vec<(Arc<Shared>, SceneView)> =
+            scene_views(self.canvas).into_iter().filter(|(_, v)| base.scene(v.scene).is_some()).collect();
+        self.keep_views(&wanted, &canvas, period);
+        if !program && self.views.is_empty() {
             self.idle();
             self.stop_captures();
             return period;
         }
-        let base = self.doc.update(&snapshot.workspace);
         let now = Instant::now();
+        let due: Vec<usize> = self.views.iter().filter(|(_, v)| v.due(now, period)).map(|(k, _)| *k).collect();
+        if !program {
+            // only views: the outputs show libobs's picture
+            program_source::withdraw(self.canvas);
+            if due.is_empty() {
+                // nothing to draw this tick; what's asked for stays asked for
+                return period;
+            }
+        }
         self.keep_stingers(&base);
         // the switch to what's on air, while it runs, as libobs draws it
-        let switch = snapshot.switch.filter(|s| base.program == Some(s.to)).and_then(|s| self.plan(&base, s, now));
+        let switch =
+            snapshot.switch.filter(|s| program && base.program == Some(s.to)).and_then(|s| self.plan(&base, s, now));
         self.played(switch.as_ref().and_then(|p| p.stinger.as_ref().map(|(st, _)| (p.started, st.path.as_str()))));
         if switch.as_ref().is_some_and(|p| p.stand_in) {
-            // libobs draws this switch (a stinger video the compositor can't read); the captures
-            // keep running (libobs's wrappers draw their frames), so they don't restart after it
+            // libobs draws this switch (a stinger video the compositor can't read), and the views
+            // meanwhile; the captures keep running (libobs's wrappers draw their frames), so they
+            // don't restart after it
             self.idle();
             self.unfeed(&[]);
+            self.drop_views();
             return period;
         }
-        let mut scenes: Vec<Id> = match &switch {
-            Some(p) => [Some(p.from), Some(p.to), p.over].into_iter().flatten().collect(),
-            None => base.program.into_iter().collect(),
+        let mut scenes: Vec<Id> = match (&switch, program) {
+            (Some(p), _) => [Some(p.from), Some(p.to), p.over].into_iter().flatten().collect(),
+            (None, true) => base.program.into_iter().collect(),
+            (None, false) => Vec::new(),
         };
-        let overlays = self.doc.overlays;
+        let overlays = if program { self.doc.overlays } else { None };
         scenes.extend(overlays);
+        // the views' scenes, in a steady order (the sources shown are worked out again when it
+        // changes)
+        let viewed: BTreeSet<Id> = self.views.values().map(|v| v.scene).collect();
+        for scene in viewed {
+            if !scenes.contains(&scene) {
+                scenes.push(scene);
+            }
+        }
         let size = (canvas.width.max(2) & !1, canvas.height.max(2) & !1);
-        if self.drawer.as_ref().is_none_or(|d| d.size != size) {
+        if program && self.drawer.as_ref().is_none_or(|d| d.size != size) {
             self.drawer = None;
             if self.failed != Some(size) {
                 self.drawer = Drawer::new(&self.gpu, size);
@@ -381,6 +504,7 @@ impl State {
                 self.idle();
                 self.stop_captures();
                 self.unfeed(&[]);
+                self.drop_views();
                 return period;
             }
         }
@@ -421,8 +545,6 @@ impl State {
             bridge::want(canvas.id, want.clone());
             self.wanted = Some(want);
         }
-
-        let Some(drawer) = self.drawer.as_mut() else { return period };
 
         let time = self.clock.elapsed().as_secs_f32();
         // every picture, before drawing: which sources keep their effects depends on them
@@ -490,68 +612,64 @@ impl State {
         // a stinger switch: the renderer is given the stinger it plays (the scene's own, or the
         // workspace's) and its frame now, held until the GPU is done with it
         let playing = switch.as_ref().and_then(|p| p.stinger.as_ref());
-        let ws = match playing {
-            Some((st, _)) if ws.stinger.as_ref() != Some(st) => {
-                let mut with = Workspace::clone(&ws);
-                with.stinger = Some(st.clone());
-                Arc::new(with)
-            }
-            _ => ws,
-        };
         let stinger = playing
             .and_then(|(st, at)| self.stingers.get(&st.path)?.frame(*at))
             .map(|b| Shot { size: b.size(), picture: Picture::Buffer(b), premultiplied: false });
-        let mut pictures = Ready { shots: &shots, stinger: stinger.clone() };
-        match (&switch, ws.program) {
-            (Some(p), _) => {
-                let _ = drawer.renderer.transition(
-                    &ws,
-                    p.from,
-                    p.to,
-                    canvas.id,
-                    &p.settings,
-                    p.progress,
-                    &mut pictures,
-                    time,
-                );
-            }
-            // nothing on air: black, as libobs shows it
-            (None, program) => {
-                let _ = drawer.renderer.frame(&ws, program.unwrap_or(Id::nil()), canvas.id, &mut pictures, time);
+        if program && let Some(drawer) = self.drawer.as_mut() {
+            let ws = match playing {
+                Some((st, _)) if ws.stinger.as_ref() != Some(st) => {
+                    let mut with = Workspace::clone(&ws);
+                    with.stinger = Some(st.clone());
+                    Arc::new(with)
+                }
+                _ => ws.clone(),
+            };
+            let mut pictures = Ready { shots: &shots, stinger: stinger.clone() };
+            let drawn = draw_program(&self.gpu, drawer, &ws, switch.as_ref(), overlays, canvas.id, &mut pictures, time);
+            if let Some(frame) = drawn {
+                for preview in &showing {
+                    preview.feed(&frame);
+                    if !self.fed.iter().any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(preview))) {
+                        self.fed.push(Arc::downgrade(preview));
+                    }
+                }
+                program_source::publish(canvas.id, &frame);
             }
         }
-        // the show's overlays, over whatever is on air
-        if overlays.is_some() && drawer.over.is_none() {
-            drawer.over = overlay_renderer(size);
-        }
-        let over = match (overlays, drawer.over.as_mut()) {
-            (Some(scene), Some(r)) => {
-                let _ = r.frame(&ws, scene, canvas.id, &mut pictures, time);
-                Some(&*r)
+        // the scenes shown in the program's place that are due, from the same pictures
+        for key in &due {
+            let Some(view) = self.views.get_mut(key) else { continue };
+            let Some(preview) = view.preview.upgrade() else { continue };
+            if view.drawer.as_ref().is_none_or(|d| d.size != view.size) {
+                view.drawer = None;
+                if view.failed == Some(view.size) {
+                    continue;
+                }
+                view.drawer = Drawer::new(&self.gpu, view.size);
+                if view.drawer.is_none() {
+                    tracing::error!(size = ?view.size, "compositor: no renderer for a scene's view; libobs draws it");
+                    view.failed = Some(view.size);
+                    continue;
+                }
             }
-            _ => None,
-        };
-        // every buffer still in use: this frame is dropped rather than waited for
-        let Some(i) = drawer.ring.free(&self.gpu.device) else { return period };
-        let target = drawer.renderer.target();
-        if !drawer.blit.copy(&self.gpu, target, over.map(|r| r.target()), &drawer.ring.slots[i].texture) {
-            return period;
+            let Some(drawer) = view.drawer.as_mut() else { continue };
+            let mut pictures = Ready { shots: &shots, stinger: None };
+            let _ = drawer.renderer.frame(&ws, view.scene, canvas.id, &mut pictures, time);
+            let Some(i) = drawer.ring.free(&self.gpu.device) else { continue };
+            if !drawer.blit.copy(&self.gpu, drawer.renderer.target(), None, &drawer.ring.slots[i].texture) {
+                continue;
+            }
+            drawer.ring.handed(i);
+            view.drawn = Some(now);
+            preview.feed_scene(&drawer.ring.slots[i].buffer, view.generation);
         }
-        drawer.ring.handed(i);
-        // the GPU is done with the sources' buffers and the stinger's frame
+        // the GPU is done with the sources' buffers and the stinger's frame (each copy above
+        // waited for it)
         drop(held);
         drop(stinger);
         if let Some(native) = self.native.as_mut() {
             native.frame_done();
         }
-        let frame = &drawer.ring.slots[i].buffer;
-        for preview in showing {
-            preview.feed(frame);
-            if !self.fed.iter().any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(preview))) {
-                self.fed.push(Arc::downgrade(preview));
-            }
-        }
-        program_source::publish(canvas.id, frame);
         period
     }
 
@@ -596,6 +714,49 @@ impl State {
         }
         capture::want(self.canvas, plans.clone());
         self.captures = (!plans.is_empty()).then_some(plans);
+    }
+
+    /// Keeps a view for each scene shown in the program's place in `wanted`: one no longer
+    /// wanted (its preview inactive, showing something else, or gone) is let go, and libobs
+    /// draws it again; one whose preview shows something new is drawn at the next tick.
+    fn keep_views(&mut self, wanted: &[(Arc<Shared>, SceneView)], canvas: &Canvas, tick: Duration) {
+        self.views.retain(|key, view| {
+            let keep = wanted.iter().any(|(p, _)| Arc::as_ptr(p) as usize == *key);
+            if !keep && let Some(preview) = view.preview.upgrade() {
+                preview.unfeed_scene();
+            }
+            keep
+        });
+        for (preview, shown) in wanted {
+            let size = view_size(shown, canvas);
+            let period = view_period(shown, size, canvas, tick);
+            let view = self.views.entry(Arc::as_ptr(preview) as usize).or_insert_with(|| View {
+                preview: Arc::downgrade(preview),
+                scene: shown.scene,
+                generation: shown.generation,
+                size,
+                period,
+                drawn: None,
+                drawer: None,
+                failed: None,
+            });
+            if view.generation != shown.generation {
+                view.generation = shown.generation;
+                view.scene = shown.scene;
+                view.drawn = None;
+            }
+            view.size = size;
+            view.period = period;
+        }
+    }
+
+    /// Draws no scene in the program's place any more: libobs draws them again.
+    fn drop_views(&mut self) {
+        for (_, view) in self.views.drain() {
+            if let Some(preview) = view.preview.upgrade() {
+                preview.unfeed_scene();
+            }
+        }
     }
 
     /// Previews given frames that aren't among `viewers` any more: libobs draws them again.
@@ -694,6 +855,49 @@ impl State {
             self.stingers.entry(path.clone()).or_insert_with(|| Player::new(&path));
         }
     }
+}
+
+/// Draws the program into `drawer`: the switch under way (`switch`) or the scene on air, the
+/// show's overlays (`overlays`) over it, and copies it into a free output buffer, which it
+/// returns once the GPU has finished it; `None` when every buffer is still in use (the frame is
+/// dropped rather than waited for) or the GPU didn't finish in time.
+#[allow(clippy::too_many_arguments)]
+fn draw_program(
+    gpu: &SharedGpu,
+    drawer: &mut Drawer,
+    ws: &Workspace,
+    switch: Option<&Planned>,
+    overlays: Option<Id>,
+    canvas: Id,
+    pictures: &mut Ready,
+    time: f32,
+) -> Option<Frame> {
+    match switch {
+        Some(p) => {
+            let _ = drawer.renderer.transition(ws, p.from, p.to, canvas, &p.settings, p.progress, pictures, time);
+        }
+        // nothing on air: black, as libobs shows it
+        None => {
+            let _ = drawer.renderer.frame(ws, ws.program.unwrap_or(Id::nil()), canvas, pictures, time);
+        }
+    }
+    // the show's overlays, over whatever is on air
+    if overlays.is_some() && drawer.over.is_none() {
+        drawer.over = overlay_renderer(drawer.size);
+    }
+    let over = match (overlays, drawer.over.as_mut()) {
+        (Some(scene), Some(r)) => {
+            let _ = r.frame(ws, scene, canvas, pictures, time);
+            Some(&*r)
+        }
+        _ => None,
+    };
+    let i = drawer.ring.free(&gpu.device)?;
+    if !drawer.blit.copy(gpu, drawer.renderer.target(), over.map(|r| r.target()), &drawer.ring.slots[i].texture) {
+        return None;
+    }
+    drawer.ring.handed(i);
+    Some(drawer.ring.slots[i].buffer.clone())
 }
 
 /// A switch as the compositor draws it.

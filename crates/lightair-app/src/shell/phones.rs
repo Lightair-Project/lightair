@@ -29,6 +29,10 @@ use serde_json::{Value, json};
 use super::StudioWindow;
 use crate::ui::tok;
 
+/// The most frames a second Lightair's own compositor draws a scene for a phone's shot.
+#[cfg(target_os = "macos")]
+const SHOT_FPS: u32 = 15;
+
 /// What phones are told this desktop answers (lightair-live's docs/05 §9).
 const FEATURES: &[&str] = &[
     "audio.levels",
@@ -842,20 +846,33 @@ impl StudioWindow {
                             .unwrap_or_else(lightair_preview::Preview::attach),
                         None => lightair_preview::Preview::attach(),
                     };
+                    // with Lightair's own compositor: its program, and a scene shown here drawn by
+                    // it a few times a second (a still is all a phone takes)
+                    #[cfg(target_os = "macos")]
+                    {
+                        preview.compose_program();
+                        preview.set_rate(Some(SHOT_FPS));
+                    }
                     PhonePreview { preview, scene: None, canvas: other, used: std::time::Instant::now() }
                 });
-                if made {
-                    return shot.preview.frames() + 3;
-                }
                 shot.used = std::time::Instant::now();
+                if !program {
+                    // a scene's thumbnail is drawn at the thumbnail's size
+                    let f = w.primary_canvas();
+                    shot.preview.set_size(Some((width as u32, (width as u32 * f.height / f.width.max(1)).max(2))));
+                }
                 // the program scene is the program's own picture
                 let scene = scene.filter(|s| Some(*s) != w.program);
+                // (a new preview shows the scene asked for from its first picture too)
                 if shot.scene != scene {
                     let source = scene.and_then(|s| {
                         engine.call(move |e| e.reconciler.scene_source_ref(s, canvas))
                     });
                     shot.preview.set_source(source);
                     shot.scene = scene;
+                    return shot.preview.frames() + 3;
+                }
+                if made {
                     return shot.preview.frames() + 3;
                 }
                 shot.preview.frames().max(if program { 2 } else { 6 })

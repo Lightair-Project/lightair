@@ -1267,6 +1267,9 @@ impl StudioWindow {
         if let Some(m) = &self.program_monitor {
             let f = self.studio.read(cx).workspace().primary_canvas().clone();
             m.set_size(Some((512, 512 * f.height / f.width.max(1))));
+            // Lightair's own compositor draws the program here too, as on the stage and outputs
+            #[cfg(target_os = "macos")]
+            m.compose_program();
         }
         self.sync_studio_preview(cx);
         cx.notify();
@@ -2723,7 +2726,13 @@ impl StudioWindow {
     fn take_thumbnails(&mut self, cx: &mut Context<Self>) {
         let wanted = self.studio.update(cx, |s, _| std::mem::take(&mut s.thumbnails));
         if !wanted.is_empty() {
-            let shot = self.thumbnail_shot.get_or_insert_with(|| (Preview::attach(), Vec::new()));
+            let shot = self.thumbnail_shot.get_or_insert_with(|| {
+                let preview = Preview::attach();
+                // the still as the recording has it (Lightair's own compositor's, when it draws)
+                #[cfg(target_os = "macos")]
+                preview.compose_program();
+                (preview, Vec::new())
+            });
             shot.1.extend(wanted);
         }
         let Some((preview, _)) = &self.thumbnail_shot else { return };

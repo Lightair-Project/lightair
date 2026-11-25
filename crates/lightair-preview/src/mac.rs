@@ -17,8 +17,9 @@ use std::ffi::c_void;
 use crate::render::{draw_scaled, draw_with};
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use lightair_model::Id;
 use lightair_obs::sys;
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType};
 use objc2_core_video::{
@@ -496,6 +497,35 @@ pub(crate) struct Shared {
     /// The libobs frame last drawn (its time): with Lightair's own compositor libobs draws more
     /// canvases than it shows, and the preview is drawn once a frame.
     last_frame: AtomicU64,
+    /// The document's scene `source` is, when it is one (Lightair's own compositor draws it).
+    scene: Mutex<Shown>,
+    /// Lightair's own compositor gave this preview a frame of the scene shown now: libobs doesn't
+    /// draw it.
+    scene_fed: AtomicBool,
+    /// The most frames a second the compositor draws a scene shown here (0: none set).
+    rate: AtomicU32,
+}
+
+/// The scene shown instead of the program, if the source shown is one.
+#[derive(Default)]
+struct Shown {
+    /// The scene and the canvas it's laid out in.
+    at: Option<(Id, Id)>,
+    /// Counts every change of what's shown, so a frame drawn before one is never given after it.
+    generation: u64,
+}
+
+/// A scene a preview shows instead of the program, as Lightair's own compositor draws it.
+#[derive(Clone, Copy)]
+pub(crate) struct SceneView {
+    pub(crate) scene: Id,
+    pub(crate) canvas: Id,
+    /// What `Shared::feed_scene` is given with the frame.
+    pub(crate) generation: u64,
+    /// The size asked for (`Preview::set_size`); `None`: the canvas's.
+    pub(crate) size: Option<(u32, u32)>,
+    /// The most frames a second asked for (`Preview::set_rate`).
+    pub(crate) rate: Option<u32>,
 }
 
 impl Shared {
@@ -527,6 +557,64 @@ impl Shared {
     pub(crate) fn unfeed(&self) {
         self.fed.store(false, Ordering::Relaxed);
     }
+
+    /// The scene shown instead of the program, while the preview is active and shows one.
+    pub(crate) fn scene_view(&self) -> Option<SceneView> {
+        if !self.active.load(Ordering::Relaxed) {
+            return None;
+        }
+        let shown = self.scene.lock();
+        let (scene, canvas) = shown.at?;
+        let packed = self.size.load(Ordering::Relaxed);
+        let rate = self.rate.load(Ordering::Relaxed);
+        Some(SceneView {
+            scene,
+            canvas,
+            generation: shown.generation,
+            size: (packed != 0).then(|| ((packed >> 32) as u32, packed as u32)),
+            rate: (rate != 0).then_some(rate),
+        })
+    }
+
+    /// The compositor's newest frame (BGRA) of the scene shown, drawn for `generation`: to the
+    /// UI and the layer, as libobs's frames go. Ignored when what's shown changed since. libobs
+    /// stops drawing the scene from the first one.
+    pub(crate) fn feed_scene(&self, frame: &Frame, generation: u64) {
+        let shown = self.scene.lock();
+        if shown.generation != generation || shown.at.is_none() {
+            return;
+        }
+        frame.remove_attachment(&nv12_key());
+        *self.latest.lock() = Some(frame.clone());
+        self.frames.fetch_add(1, Ordering::Relaxed);
+        self.scene_fed.store(true, Ordering::Relaxed);
+        if let Some(layer) = self.layer.lock().as_ref()
+            && let Some(surface) = CVPixelBufferGetIOSurface(Some(frame))
+        {
+            unsafe { ca::show(layer.0, CFRetained::as_ptr(&surface).as_ptr() as *mut c_void) };
+        }
+    }
+
+    /// The compositor no longer draws the scene shown: libobs draws it again.
+    pub(crate) fn unfeed_scene(&self) {
+        self.scene_fed.store(false, Ordering::Relaxed);
+    }
+}
+
+/// The document's scene and canvas `source` shows, when it's a scene the engine made: the
+/// engine names a scene's libobs scene `<scene id>:<canvas id>`.
+fn scene_of(source: *mut sys::obs_source_t) -> Option<(Id, Id)> {
+    if unsafe { sys::obs_scene_from_source(source) }.is_null() {
+        return None;
+    }
+    let name = unsafe { sys::obs_source_get_name(source) };
+    if name.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().ok()?;
+    let (scene, canvas) = name.split_once(':')?;
+    let id = |s: &str| serde_json::from_value::<Id>(serde_json::Value::String(s.to_string())).ok();
+    Some((id(scene)?, id(canvas)?))
 }
 
 /// A retained `CALayer`.
@@ -606,6 +694,8 @@ struct Handle {
     shared: Arc<Shared>,
     /// Lightair's own compositor gives this preview its frames (`compose_program`).
     composed: AtomicBool,
+    /// Lightair's own compositor draws the scenes shown in the program's place (`set_source`).
+    scenes: AtomicBool,
 }
 
 impl Preview {
@@ -632,9 +722,12 @@ impl Preview {
             layer: Mutex::new(None),
             fed: AtomicBool::new(false),
             last_frame: AtomicU64::new(u64::MAX),
+            scene: Mutex::new(Shown::default()),
+            scene_fed: AtomicBool::new(false),
+            rate: AtomicU32::new(0),
         });
         unsafe { sys::obs_add_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&shared) as *mut c_void) };
-        Self(Arc::new(Handle { shared, composed: AtomicBool::new(false) }))
+        Self(Arc::new(Handle { shared, composed: AtomicBool::new(false), scenes: AtomicBool::new(false) }))
     }
 
     /// Shows the canvas's program as Lightair's own compositor draws it (`lightair-render`,
@@ -673,16 +766,41 @@ impl Preview {
     }
 
     /// Shows `source` (e.g. a scene that isn't on air) instead of the program, or the program
-    /// again with `None`.
+    /// again with `None`. With `LIGHTAIR_ENGINE=own`, a scene of the document is drawn by
+    /// Lightair's own compositor (libobs's frames until its first one); any other source by
+    /// libobs. The source is held showing either way, so libobs keeps what it shows running.
     pub fn set_source(&self, source: Option<lightair_obs::obs::SourceRef>) {
         let new = source.map(|s| {
             let p = s.into_raw();
             unsafe { sys::obs_source_inc_showing(p) };
             SourceRef(p)
         });
+        let scene = new.as_ref().and_then(|s| scene_of(s.0));
+        let shared = &self.0.shared;
+        // what's shown changes first, so a frame of the old scene isn't taken after it
+        {
+            let mut shown = shared.scene.lock();
+            shown.at = scene;
+            shown.generation += 1;
+            shared.scene_fed.store(false, Ordering::Relaxed);
+        }
         // Swap under the lock (the graphics thread renders under it); release afterwards.
-        let old = std::mem::replace(&mut *self.0.shared.source.lock(), new);
+        let old = std::mem::replace(&mut *shared.source.lock(), new);
         drop(old);
+        if scene.is_some()
+            && lightair_obs::bridge::own()
+            && crate::compose::start()
+            && !self.0.scenes.swap(true, Ordering::Relaxed)
+        {
+            crate::compose::watch_scenes(shared);
+        }
+    }
+
+    /// The most frames a second Lightair's own compositor draws a scene shown here
+    /// (`set_source`), for thumbnails and other views that needn't move smoothly. `None`: the
+    /// canvas's rate, or at most 30 for a view a quarter of the canvas's area or smaller.
+    pub fn set_rate(&self, fps: Option<u32>) {
+        self.0.shared.rate.store(fps.unwrap_or(0), Ordering::Relaxed);
     }
 
     /// Draws the source at its own size (a player: the whole picture, whatever the canvas),
@@ -727,7 +845,7 @@ impl Preview {
 impl Drop for Handle {
     fn drop(&mut self) {
         // the compositor gives it no more frames
-        if self.composed.load(Ordering::Relaxed) {
+        if self.composed.load(Ordering::Relaxed) || self.scenes.load(Ordering::Relaxed) {
             crate::compose::unwatch(&self.shared);
         }
         unsafe {
@@ -760,8 +878,10 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
             return;
         }
     }
-    // the compositor draws the program (a source shown in its place is still libobs's)
-    if shared.fed.load(Ordering::Relaxed) && shared.source.lock().is_none() {
+    // the compositor draws the program, or the scene shown in its place (any other source shown
+    // there is libobs's)
+    let fed = if shared.source.lock().is_some() { &shared.scene_fed } else { &shared.fed };
+    if fed.load(Ordering::Relaxed) {
         return;
     }
     let main = unsafe { sys::obs_get_main_texture() };
