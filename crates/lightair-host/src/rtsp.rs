@@ -4,7 +4,7 @@
 //! RTP over the RTSP connection itself (interleaved; RFC 2326 §10.12), H.264 by RFC 6184 (single
 //! NAL units and FU-A) and AAC by RFC 3640 (AAC-hbr). Lightair's own code.
 //!
-//! macOS, with `LIGHTAIR_ENGINE=own`: the packets come from Lightair's own encoders of the
+//! macOS and Windows, with `LIGHTAIR_ENGINE=own`: the packets come from Lightair's own encoders of the
 //! primary canvas's compositor frames instead (`own_outputs::start_rtsp`, which shares an
 //! encoder already running when one fits), through [`own_video`] and [`own_audio`].
 
@@ -401,7 +401,7 @@ pub fn address() -> Option<String> {
 /// `_available_encoders`: libobs's, which aren't used here.
 pub fn set(on: bool, _available_encoders: &[String]) -> Result<(), String> {
     if SERVING.swap(false, Ordering::Relaxed) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         crate::own_outputs::stop_rtsp();
         if let Ok(mut s) = shared().lock() {
             s.players.clear();
@@ -431,7 +431,7 @@ pub fn set(on: bool, _available_encoders: &[String]) -> Result<(), String> {
     if !ok {
         return Err(format!("Port {PORT} is taken by another app"));
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     {
         let canvas = crate::program::primary_canvas().ok_or("There's no canvas to serve yet.")?;
         crate::own_outputs::start_rtsp(canvas)?;
@@ -439,6 +439,6 @@ pub fn set(on: bool, _available_encoders: &[String]) -> Result<(), String> {
         tracing::info!(port = PORT, "serving the program over RTSP (Lightair's encoders)");
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
-    Err("Serving over RTSP without libobs works on macOS only for now.".into())
+    #[cfg(not(any(target_os = "macos", windows)))]
+    Err("Serving over RTSP without libobs works on macOS and Windows only for now.".into())
 }

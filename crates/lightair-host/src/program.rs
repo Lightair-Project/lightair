@@ -130,13 +130,9 @@ mod frames {
         to_outputs(canvas, frame);
     }
 
-    /// `frame` to Lightair's own outputs as `key`'s newest picture. Windows: they don't run
-    /// there yet.
+    /// `frame` to Lightair's own outputs as `key`'s newest picture.
     pub(super) fn to_outputs(key: Id, frame: &Buffer) {
-        #[cfg(target_os = "macos")]
         crate::own_outputs::frame(key, frame);
-        #[cfg(not(target_os = "macos"))]
-        let _ = (key, frame);
     }
 
     /// Forgets `canvas`'s picture (its compositor stopped).
@@ -163,10 +159,7 @@ mod frames {
     /// Whether something records or streams `canvas`'s program: Lightair's own encoders, or
     /// libobs's outputs while there are any. Any thread.
     pub fn in_use(canvas: Id) -> bool {
-        #[cfg(target_os = "macos")]
         let own = crate::own_outputs::uses(canvas);
-        #[cfg(not(target_os = "macos"))]
-        let own = false;
         own || LIBOBS_IN_USE.get().is_some_and(|f| f(canvas))
     }
 }

@@ -47,7 +47,7 @@ pub mod phone_decode;
 pub mod phone_run;
 pub mod phone_units;
 pub mod piair_voice;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod own_outputs;
 pub mod program;
 #[cfg(target_os = "macos")]

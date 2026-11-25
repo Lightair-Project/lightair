@@ -86,7 +86,7 @@ pub const FRAME_AUDIO: i32 = 2;
 pub const COLOR_BGRX_BGRA: i32 = 0;
 pub const BANDWIDTH_HIGHEST: i32 = 100;
 pub const FOURCC_BGRA: u32 = u32::from_le_bytes(*b"BGRA");
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub const FOURCC_BGRX: u32 = u32::from_le_bytes(*b"BGRX");
 pub const PROGRESSIVE: i32 = 1;
 pub const TIMECODE_SYNTHESIZE: i64 = i64::MAX;
@@ -387,12 +387,12 @@ impl Drop for Receiver {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Sending the program, from Lightair's compositor and mixer (macOS)
+// Sending the program, from Lightair's compositor and mixer (macOS and Windows)
 
 /// The program sent over NDI from Lightair's own outputs: a canvas's compositor frames (BGRX:
 /// they're opaque) and the mixer's Program, each with its time on the program clock as NDI
 /// timecodes, so receivers line them up. Dropping it stops sending.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub struct OwnSender {
     send: Arc<SendPtr>,
     tap: u64,
@@ -405,7 +405,7 @@ pub struct SendPtr(pub Ptr);
 unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl OwnSender {
     /// Sends `canvas`'s compositor frames and the mixer's Program as the NDI source `name`.
     /// Engine thread.
@@ -445,7 +445,7 @@ impl OwnSender {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl Drop for OwnSender {
     fn drop(&mut self) {
         // nothing sends once the taps are gone
@@ -459,7 +459,7 @@ impl Drop for OwnSender {
 }
 
 /// A block of the mixer's Program (interleaved stereo, at its time) sent over NDI.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn send_sound(send: &SendPtr, audio: &mut Vec<f32>, interleaved: &[f32], ts: u64) {
     let Some(l) = lib() else { return };
     let n = interleaved.len() / 2;
@@ -516,13 +516,39 @@ fn send_picture(send: &SendPtr, fps: (i32, i32), picture: &objc2_core_video::CVP
     unsafe { CVPixelBufferUnlockBaseAddress(picture, CVPixelBufferLockFlags::ReadOnly) };
 }
 
+/// Sends one BGRA picture (the tap's own copy, read back) as NDI video. The tap's thread.
+#[cfg(windows)]
+fn send_picture(send: &SendPtr, fps: (i32, i32), picture: &crate::own_outputs::Picture<'_>, pts_ns: i64) {
+    let Some(l) = lib() else { return };
+    if picture.format != crate::own_outputs::TapFormat::Bgra {
+        return;
+    }
+    let v = VideoFrame {
+        xres: picture.width as i32,
+        yres: picture.height as i32,
+        four_cc: FOURCC_BGRX,
+        frame_rate_n: fps.0,
+        frame_rate_d: fps.1,
+        picture_aspect_ratio: 0.0,
+        frame_format_type: PROGRESSIVE,
+        timecode: pts_ns / 100,
+        // NDI only reads the picture
+        p_data: picture.data.as_ptr() as *mut u8,
+        line_stride_in_bytes: picture.stride as i32,
+        p_metadata: std::ptr::null(),
+        timestamp: 0,
+    };
+    // NDI has the picture (compressed or copied) when this returns
+    unsafe { (l.send_send_video_v2)(send.0, &v) };
+}
+
 /// NDI out: the primary canvas's compositor frames and the mixer's Program, sent as `name`.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 static SENDING: std::sync::Mutex<Option<OwnSender>> = std::sync::Mutex::new(None);
 
 /// Sends the program over NDI as `name` (empty: stops).
 pub fn set_output(name: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     {
         let old = SENDING.lock().ok().and_then(|mut s| s.take());
         drop(old);
@@ -536,8 +562,12 @@ pub fn set_output(name: &str) -> Result<(), String> {
         }
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
-        if name.is_empty() { Ok(()) } else { Err("NDI out without libobs works on macOS only for now.".into()) }
+        if name.is_empty() {
+            Ok(())
+        } else {
+            Err("NDI out without libobs works on macOS and Windows only for now.".into())
+        }
     }
 }

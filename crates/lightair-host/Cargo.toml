@@ -46,6 +46,9 @@ lightair-engine.workspace = true
 lightair-capture.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+lightair-encode.workspace = true
+lightair-feed.workspace = true
+lightair-engine.workspace = true
 # displays, windows, apps and cameras to choose from, and display thumbnails
 lightair-capture.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
