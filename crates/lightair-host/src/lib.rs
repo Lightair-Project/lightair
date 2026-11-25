@@ -5,6 +5,7 @@
 pub mod access;
 pub mod audio;
 pub mod audio_host;
+pub mod audio_tap;
 pub mod avatar;
 pub mod avatar_pins;
 #[cfg(target_os = "macos")]
@@ -14,15 +15,20 @@ pub mod buffers;
 pub mod clock;
 pub mod devices;
 pub mod displays;
+pub mod dslr;
 pub mod engine;
 pub mod face_drive;
 pub mod gpu;
 pub mod host;
+pub mod kinds;
+pub mod loudness;
 pub mod media;
 #[cfg(target_os = "macos")]
 pub mod media_player;
 pub mod meters;
+pub mod monitoring;
 pub mod ndi;
+pub mod on_screen;
 pub mod outputs;
 pub mod outputs_host;
 pub mod phone_camera;
@@ -33,9 +39,13 @@ pub mod piair_voice;
 #[cfg(target_os = "macos")]
 pub mod own_outputs;
 pub mod program;
+#[cfg(target_os = "macos")]
+pub mod player;
+pub mod playlists;
 pub mod plugins;
 pub mod pointer;
 pub mod rtsp;
+pub mod shared_video;
 pub mod show;
 pub mod timers;
 #[cfg(target_os = "macos")]
@@ -45,6 +55,8 @@ pub mod system_audio;
 #[cfg(any(target_os = "macos", windows))]
 pub mod web;
 pub mod soundboard;
+pub mod studio_take;
+pub mod vcam;
 #[cfg(target_os = "macos")]
 pub mod vcam_mac;
 #[cfg(target_os = "macos")]

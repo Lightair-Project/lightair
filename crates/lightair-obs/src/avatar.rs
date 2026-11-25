@@ -1801,26 +1801,7 @@ pub fn register() {
     });
 }
 
-/// What an avatar is doing, for the Inspector.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Status {
-    pub loaded: bool,
-    /// A face is being followed.
-    pub tracking: bool,
-    /// Why the model didn't load.
-    pub error: String,
-    /// The model's own name.
-    pub name: String,
-    /// What body tracking sees ("body, left arm", "no body"; empty when off).
-    pub body: String,
-    /// The model's expressions: a VRM's moods and its own, a Live2D model's, an Inochi2D or
-    /// Umamo puppet's parameters the face doesn't drive.
-    pub expressions: Vec<String>,
-    /// What things can be pinned to (bones, meshes), in the picker's order.
-    pub anchors: Vec<Anchor>,
-    /// Which of its expressions are costumes (a PNGtuber's).
-    pub costumes: Vec<String>,
-}
+pub use lightair_host::avatar::Status;
 
 fn get_string(cd: &mut sys::calldata_t, name: &CStr) -> String {
     let mut p: *const c_char = std::ptr::null();

@@ -193,6 +193,7 @@ impl Library {
     }
 
     /// Keeps a picture (PNG bytes) for it, in place of the one before.
+    #[cfg_attr(not(feature = "libobs"), allow(dead_code))]
     pub fn set_picture(&mut self, id: Id, png: &[u8]) {
         let Some(e) = self.get_mut(id) else { return };
         let name = format!("{id}-{}.png", stamp());

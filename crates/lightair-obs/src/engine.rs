@@ -389,6 +389,7 @@ unsafe fn load_modules(cfg: &EngineConfig, runtime: &Runtime) {
         // the pictures of the sources libobs draws for the compositor
         crate::bridge::install();
     }
+    crate::kinds::install();
     #[cfg(target_os = "macos")]
     crate::on_screen::register();
     #[cfg(target_os = "macos")]

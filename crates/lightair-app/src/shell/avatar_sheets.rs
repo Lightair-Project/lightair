@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+#[cfg(feature = "libobs")]
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::Sizable;
@@ -142,6 +143,7 @@ impl StudioWindow {
 
     /// Takes the next queued library picture from the model's file, one at a time: a private
     /// avatar source draws it (once loaded) into a preview that's read back.
+    #[cfg(feature = "libobs")]
     fn next_picture(&mut self, cx: &mut Context<Self>) {
         if self.picture_busy {
             return;
@@ -199,6 +201,13 @@ impl StudioWindow {
             });
         })
         .detach();
+    }
+
+    /// Library pictures from a model's file need an avatar drawn off screen: not yet without
+    /// libobs (the queue is let go; an avatar on screen still gets its picture).
+    #[cfg(not(feature = "libobs"))]
+    fn next_picture(&mut self, _cx: &mut Context<Self>) {
+        self.picture_queue.clear();
     }
 
     fn close_avatar_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -315,6 +324,7 @@ impl StudioWindow {
     }
 
     /// Takes a picture of an avatar for its library entry (it must be on screen).
+    #[cfg(feature = "libobs")]
     fn take_avatar_picture(&mut self, source: Id, entry: Id, cx: &mut Context<Self>) {
         self.avatar_pictures.insert(entry);
         let engine = self.studio.read(cx).engine().clone();
@@ -326,6 +336,19 @@ impl StudioWindow {
         preview.set_own_size(true);
         preview.set_size(Some(picture_size(sw, sh)));
         preview.set_source(Some(src));
+        self.read_avatar_picture(preview, entry, cx);
+    }
+
+    /// Without libobs: the avatar as the compositor draws it alone isn't there yet (a source
+    /// shown on its own), so no picture is taken.
+    #[cfg(not(feature = "libobs"))]
+    fn take_avatar_picture(&mut self, _source: Id, entry: Id, _cx: &mut Context<Self>) {
+        self.avatar_pictures.insert(entry);
+    }
+
+    /// Reads `preview` back once it has drawn a few frames: the library picture of `entry`.
+    #[cfg(feature = "libobs")]
+    fn read_avatar_picture(&mut self, preview: lightair_preview::Preview, entry: Id, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let start = Instant::now();
             let frame = loop {
@@ -1109,6 +1132,7 @@ pub(super) fn expression_keys(workspace: &lightair_model::Workspace) -> Vec<(Id,
 const OLD_PICTURE: (u32, u32) = (320, 180);
 
 /// The size a library picture is drawn at: the avatar's own shape, its long side 360.
+#[cfg_attr(not(feature = "libobs"), allow(dead_code))]
 fn picture_size(w: u32, h: u32) -> (u32, u32) {
     let (w, h) = (w.max(1) as f32, h.max(1) as f32);
     let k = 360.0 / w.max(h);
@@ -1117,6 +1141,7 @@ fn picture_size(w: u32, h: u32) -> (u32, u32) {
 
 /// A frame as a PNG picture for the library: at most 360 wide, cut to what's drawn when the
 /// background is see-through.
+#[cfg_attr(not(feature = "libobs"), allow(dead_code))]
 fn picture_png(frame: &lightair_preview::Frame) -> Option<Vec<u8>> {
     let (w, h, rgba) = lightair_preview::frame_rgba(frame, 360)?;
     let mut img = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;

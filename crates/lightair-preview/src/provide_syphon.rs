@@ -21,16 +21,18 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lightair_model::{Id, Source};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
 use objc2::{msg_send, sel};
-use objc2_core_foundation::{CFRetained, CFString};
+use objc2_core_foundation::CFRetained;
 use objc2_io_surface::IOSurfaceRef;
 use parking_lot::Mutex;
+
+use lightair_host::shared_video::{framework, ns_string, string_at};
 
 use crate::provide_ndi::{Alpha, Latest, Pool, copy_bgra};
 use crate::providers::{Frame, Provider};
@@ -52,33 +54,6 @@ const LOCK_READ_ONLY: u32 = 1;
 unsafe extern "C" {
     fn IOSurfaceLock(surface: &IOSurfaceRef, options: u32, seed: *mut u32) -> i32;
     fn IOSurfaceUnlock(surface: &IOSurfaceRef, options: u32, seed: *mut u32) -> i32;
-}
-
-/// Syphon's classes are there (loading its framework from the app bundle if they aren't yet).
-fn framework() -> bool {
-    static FOUND: OnceLock<bool> = OnceLock::new();
-    *FOUND.get_or_init(|| {
-        if AnyClass::get(c"SyphonClientBase").is_some() {
-            return true;
-        }
-        // Lightair.app/Contents/MacOS/<exe> → Lightair.app/Contents/Frameworks
-        let path = std::env::current_exe()
-            .ok()
-            .and_then(|exe| Some(exe.parent()?.parent()?.join("Frameworks/Syphon.framework/Syphon")));
-        if let Some(path) = path.filter(|p| p.exists()) {
-            // SAFETY: Syphon's framework only registers its classes on load.
-            match unsafe { libloading::Library::new(&path) } {
-                // kept loaded for the rest of the run: its classes stay registered
-                Ok(lib) => std::mem::forget(lib),
-                Err(e) => tracing::warn!(%e, "Syphon provider: couldn't load Syphon's framework"),
-            }
-        }
-        let found = AnyClass::get(c"SyphonClientBase").is_some() && AnyClass::get(c"SyphonServerDirectory").is_some();
-        if !found {
-            tracing::info!("Syphon provider: no Syphon framework; Syphon sources stay libobs's");
-        }
-        found
-    })
 }
 
 /// Which server a source shows, and how.
@@ -246,29 +221,6 @@ struct Client(Retained<AnyObject>);
 
 // SAFETY: Syphon's clients may be used and released from any thread.
 unsafe impl Send for Client {}
-
-/// `NSString` for `s` (toll-free bridged with `CFString`).
-fn ns_string(s: &str) -> CFRetained<CFString> {
-    CFString::from_str(s)
-}
-
-/// The string `dict[key]`, when it's one.
-///
-/// # Safety
-///
-/// `dict` must be an `NSDictionary`.
-unsafe fn string_at(dict: *mut AnyObject, key: &CFString) -> String {
-    let key = key as *const CFString as *const AnyObject;
-    // SAFETY: `dict` is a dictionary; the key is a string.
-    let value: *mut AnyObject = unsafe { msg_send![dict, objectForKey: key] };
-    let Some(value) = NonNull::new(value) else { return String::new() };
-    // SAFETY: Syphon's descriptions keep strings under these keys (NSString is a CFString).
-    let is_string: Bool = unsafe { msg_send![value.as_ptr(), isKindOfClass: AnyClass::get(c"NSString")] };
-    if !is_string.as_bool() {
-        return String::new();
-    }
-    unsafe { &*(value.as_ptr() as *const CFString) }.to_string()
-}
 
 impl Client {
     /// A client of the server `wanted` names (by its UUID, else by its app and name), sending

@@ -384,3 +384,61 @@ pub fn own_audio(data: &[u8], at_ns: i64) {
     let ts = (at_ns.max(0) as i128 * rate / 1_000_000_000) as i64 as u32;
     audio_packet(&mut s, data, ts);
 }
+
+// ------------------------------------------------------------------ serving, without libobs
+
+/// Whether Lightair's own encoders serve the program now (`set`).
+static SERVING: AtomicBool = AtomicBool::new(false);
+
+/// The address players open, when it's on.
+pub fn address() -> Option<String> {
+    SERVING.load(Ordering::Relaxed).then(|| {
+        format!("rtsp://{}:{PORT}/live", lightair_platform::net::local_ip().unwrap_or_else(|| "127.0.0.1".into()))
+    })
+}
+
+/// Serves the primary canvas's program over RTSP with Lightair's own encoders (or stops).
+/// `_available_encoders`: libobs's, which aren't used here.
+pub fn set(on: bool, _available_encoders: &[String]) -> Result<(), String> {
+    if SERVING.swap(false, Ordering::Relaxed) {
+        #[cfg(target_os = "macos")]
+        crate::own_outputs::stop_rtsp();
+        if let Ok(mut s) = shared().lock() {
+            s.players.clear();
+            (s.sps, s.pps, s.asc) = (Vec::new(), Vec::new(), Vec::new());
+        }
+    }
+    if !on {
+        return Ok(());
+    }
+    // the server, once
+    static LISTENING: OnceLock<bool> = OnceLock::new();
+    let ok = *LISTENING.get_or_init(|| match std::net::TcpListener::bind(("0.0.0.0", PORT)) {
+        Ok(l) => std::thread::Builder::new()
+            .name("lightair-rtsp".into())
+            .spawn(move || {
+                for s in l.incoming().flatten() {
+                    let _ = s.set_nodelay(true);
+                    std::thread::spawn(move || serve(s));
+                }
+            })
+            .is_ok(),
+        Err(e) => {
+            tracing::warn!(%e, "RTSP: port {PORT} is taken");
+            false
+        }
+    });
+    if !ok {
+        return Err(format!("Port {PORT} is taken by another app"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let canvas = crate::program::primary_canvas().ok_or("There's no canvas to serve yet.")?;
+        crate::own_outputs::start_rtsp(canvas)?;
+        SERVING.store(true, Ordering::Relaxed);
+        tracing::info!(port = PORT, "serving the program over RTSP (Lightair's encoders)");
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err("Serving over RTSP without libobs works on macOS only for now.".into())
+}

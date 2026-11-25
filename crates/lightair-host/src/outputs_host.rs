@@ -12,8 +12,13 @@ use crate::outputs::{ClipsConfig, Multitrack, RecordingConfig, StreamConfig};
 /// is laid out in (whose compositor draws it for the camera alone).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VirtualCameraScene {
-    pub scene: Id,
-    pub canvas: Id,
+    /// The scene and the canvas it's laid out in (`Host::scene_source`).
+    pub source: (Id, Id),
+    /// The canvas's size and frame rate (the scene is drawn at the canvas's own).
+    pub width: u32,
+    pub height: u32,
+    pub fps_num: u32,
+    pub fps_den: u32,
 }
 
 /// Running outputs, owned by the engine thread. They live in `crate::own_outputs`; this is the
@@ -113,7 +118,12 @@ impl Outputs {
 
     /// Enhanced Broadcasting (several encodes in one RTMP connection): not available without
     /// libobs yet.
-    pub fn start_multitrack_stream(&mut self, cfg: &StreamConfig, plan: &Multitrack, canvases: &[Id]) -> Result<(), String> {
+    pub fn start_multitrack_stream(
+        &mut self,
+        cfg: &StreamConfig,
+        plan: &Multitrack,
+        canvases: &[Id],
+    ) -> Result<(), String> {
         let _ = (plan, canvases);
         let why = "Enhanced Broadcasting isn't available without libobs yet.".to_string();
         crate::outputs::mark_failed(crate::outputs::OutputKey::Stream(cfg.id), &why);
@@ -181,10 +191,14 @@ impl Outputs {
     /// Starts the virtual camera: what a canvas has on air (`canvas`; `None` the primary), or
     /// one scene (`scene`, drawn by its canvas's compositor for the camera alone). Its status is
     /// `OutputKey::VirtualCamera`'s.
-    pub fn start_virtual_camera(&mut self, canvas: Option<Id>, scene: Option<VirtualCameraScene>) -> Result<(), String> {
+    pub fn start_virtual_camera(
+        &mut self,
+        canvas: Option<Id>,
+        scene: Option<VirtualCameraScene>,
+    ) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         return match scene {
-            Some(sc) => crate::own_outputs::start_virtual_camera_scene(sc.scene, sc.canvas),
+            Some(sc) => crate::own_outputs::start_virtual_camera_scene(sc.source.0, sc.source.1),
             None => crate::own_outputs::start_virtual_camera(canvas_or_primary(canvas)?),
         };
         #[cfg(not(target_os = "macos"))]

@@ -14,12 +14,14 @@
 
 use std::ffi::c_void;
 
+#[cfg(feature = "libobs")]
 use crate::render::{draw_scaled, draw_with};
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use lightair_model::Id;
+#[cfg(feature = "libobs")]
 use lightair_obs::sys;
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType};
 use objc2_core_video::{
@@ -31,9 +33,11 @@ use objc2_core_video::{
 use parking_lot::Mutex;
 
 /// NV12 buffers: the one on screen, up to two the GPU is still filling, one free.
+#[cfg(feature = "libobs")]
 const RING: usize = 4;
 
 /// The conversion to what GPUI draws (full-range BT.601, as `pixel_buffer` tags the buffers).
+#[cfg(feature = "libobs")]
 const NV12_EFFECT: &str = r#"
 uniform float4x4 ViewProj;
 uniform texture2d image;
@@ -64,6 +68,7 @@ technique Chroma { pass { vertex_shader = VSDefault(vert_in); pixel_shader = PSC
 pub type Frame = CFRetained<CVPixelBuffer>;
 
 // ---------------------------------------------------------------- OpenGL (libobs's context)
+#[cfg(feature = "libobs")]
 mod gl {
     #![allow(non_upper_case_globals)]
     use std::ffi::c_void;
@@ -170,6 +175,7 @@ pub(crate) fn pixel_buffer(width: u32, height: u32, format: u32) -> Option<CFRet
 
 /// One NV12 buffer and its planes as GL textures (OpenGL), or one BGRA buffer as a libobs
 /// texture (Metal).
+#[cfg(feature = "libobs")]
 struct Slot {
     buffer: CFRetained<CVPixelBuffer>,
     luma: gl::GLuint,
@@ -182,6 +188,7 @@ struct Slot {
 
 /// Everything sized to one preview resolution. Owned by the graphics thread except the slots'
 /// buffers, which the UI also retains.
+#[cfg(feature = "libobs")]
 struct Pool {
     width: u32,
     height: u32,
@@ -206,10 +213,13 @@ struct Pool {
 
 // SAFETY: GL/libobs handles are only used on libobs's graphics thread; the CoreVideo buffers
 // are thread-safe reference-counted objects.
+#[cfg(feature = "libobs")]
 unsafe impl Send for Pool {}
+#[cfg(feature = "libobs")]
 unsafe impl Sync for Pool {}
 
 /// A GL rectangle texture over one plane of an IOSurface.
+#[cfg(feature = "libobs")]
 unsafe fn plane_texture(surface: *const c_void, plane: u32, w: u32, h: u32, internal: gl::GLenum, format: gl::GLenum) -> Option<gl::GLuint> {
     unsafe {
         let mut prev: gl::GLint = 0;
@@ -238,6 +248,7 @@ unsafe fn plane_texture(surface: *const c_void, plane: u32, w: u32, h: u32, inte
     }
 }
 
+#[cfg(feature = "libobs")]
 impl Pool {
     /// Must run inside the libobs graphics context (GL context current).
     unsafe fn new(width: u32, height: u32) -> Option<Self> {
@@ -473,6 +484,7 @@ impl Pool {
 
 // ---------------------------------------------------------------- shared state
 pub(crate) struct Shared {
+    #[cfg(feature = "libobs")]
     pool: Mutex<Option<Pool>>,
     /// Newest finished frame for the UI.
     latest: Mutex<Option<Frame>>,
@@ -482,10 +494,10 @@ pub(crate) struct Shared {
     frames: AtomicU64,
     /// `None`: the main canvas (program). `Some`: another canvas (an additional format); we
     /// own one strong reference.
-    canvas: Option<CanvasRef>,
+    canvas: Option<CanvasHandle>,
     /// When set, renders this source (a scene that isn't on air: Studio mode's preview)
     /// instead of the canvas's program. Held "showing" so its sources run.
-    source: Mutex<Option<SourceRef>>,
+    source: Mutex<Option<SourceHandle>>,
     /// Draw the source at its own size (a player), not in the canvas's coordinates.
     own_size: AtomicBool,
     /// A Core Animation layer each finished frame is shown in as well (the window's preview,
@@ -496,6 +508,7 @@ pub(crate) struct Shared {
     fed: AtomicBool,
     /// The libobs frame last drawn (its time): with Lightair's own compositor libobs draws more
     /// canvases than it shows, and the preview is drawn once a frame.
+    #[cfg(feature = "libobs")]
     last_frame: AtomicU64,
     /// The document's scene `source` is, when it is one (Lightair's own compositor draws it).
     scene: Mutex<Shown>,
@@ -505,6 +518,19 @@ pub(crate) struct Shared {
     /// The most frames a second the compositor draws a scene shown here (0: none set).
     rate: AtomicU32,
 }
+
+/// A canvas previewed: libobs's canvas (a strong reference), or the canvas's id.
+#[cfg(feature = "libobs")]
+type CanvasHandle = CanvasRef;
+#[cfg(not(feature = "libobs"))]
+type CanvasHandle = Id;
+
+/// What's shown instead of the program: a libobs source (held showing), or a scene and the
+/// canvas it's laid out in.
+#[cfg(feature = "libobs")]
+type SourceHandle = SourceRef;
+#[cfg(not(feature = "libobs"))]
+type SourceHandle = (Id, Id);
 
 /// The scene shown instead of the program, if the source shown is one.
 #[derive(Default)]
@@ -603,6 +629,7 @@ impl Shared {
 
 /// The document's scene and canvas `source` shows, when it's a scene the engine made: the
 /// engine names a scene's libobs scene `<scene id>:<canvas id>`.
+#[cfg(feature = "libobs")]
 fn scene_of(source: *mut sys::obs_source_t) -> Option<(Id, Id)> {
     lightair_obs::bridge::scene_of(source)
 }
@@ -654,11 +681,14 @@ mod ca {
     }
 }
 
+#[cfg(feature = "libobs")]
 struct CanvasRef(*mut sys::obs_canvas_t);
 
 /// A strong, showing reference to a source.
+#[cfg(feature = "libobs")]
 struct SourceRef(*mut sys::obs_source_t);
 
+#[cfg(feature = "libobs")]
 impl Drop for SourceRef {
     fn drop(&mut self) {
         unsafe {
@@ -695,12 +725,20 @@ impl Preview {
     }
 
     /// Previews another canvas (an additional format), e.g. from `Reconciler::canvas_ref`.
+    #[cfg(feature = "libobs")]
     pub fn attach_canvas(canvas: lightair_obs::obs::CanvasRef) -> Self {
         Self::attach_to(Some(CanvasRef(canvas.into_raw())))
     }
 
-    fn attach_to(canvas: Option<CanvasRef>) -> Self {
+    /// Previews another canvas (an additional format), by its id.
+    #[cfg(not(feature = "libobs"))]
+    pub fn attach_canvas(canvas: Id) -> Self {
+        Self::attach_to(Some(canvas))
+    }
+
+    fn attach_to(canvas: Option<CanvasHandle>) -> Self {
         let shared = Arc::new(Shared {
+            #[cfg(feature = "libobs")]
             pool: Mutex::new(None),
             latest: Mutex::new(None),
             size: AtomicU64::new(0),
@@ -711,12 +749,16 @@ impl Preview {
             own_size: AtomicBool::new(false),
             layer: Mutex::new(None),
             fed: AtomicBool::new(false),
+            #[cfg(feature = "libobs")]
             last_frame: AtomicU64::new(u64::MAX),
             scene: Mutex::new(Shown::default()),
             scene_fed: AtomicBool::new(false),
             rate: AtomicU32::new(0),
         });
-        unsafe { sys::obs_add_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&shared) as *mut c_void) };
+        #[cfg(feature = "libobs")]
+        unsafe {
+            sys::obs_add_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&shared) as *mut c_void)
+        };
         Self(Arc::new(Handle { shared, composed: AtomicBool::new(false), scenes: AtomicBool::new(false) }))
     }
 
@@ -732,6 +774,7 @@ impl Preview {
         let target = match &self.0.shared.canvas {
             None => crate::compose::Target::Primary,
             // the engine names a canvas's libobs canvas by the canvas's id
+            #[cfg(feature = "libobs")]
             Some(c) => {
                 let name = unsafe { sys::obs_canvas_get_name(c.0) };
                 if name.is_null() {
@@ -739,6 +782,8 @@ impl Preview {
                 }
                 crate::compose::Target::Canvas(unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned())
             }
+            #[cfg(not(feature = "libobs"))]
+            Some(c) => crate::compose::Target::Canvas(c.to_string()),
         };
         if !crate::compose::start() {
             return false;
@@ -759,6 +804,7 @@ impl Preview {
     /// again with `None`. With `LIGHTAIR_ENGINE=own`, a scene of the document is drawn by
     /// Lightair's own compositor (libobs's frames until its first one); any other source by
     /// libobs. The source is held showing either way, so libobs keeps what it shows running.
+    #[cfg(feature = "libobs")]
     pub fn set_source(&self, source: Option<lightair_obs::obs::SourceRef>) {
         let new = source.map(|s| {
             let p = s.into_raw();
@@ -766,6 +812,17 @@ impl Preview {
             SourceRef(p)
         });
         let scene = new.as_ref().and_then(|s| scene_of(s.0));
+        self.show(new, scene);
+    }
+
+    /// Shows a scene (and the canvas it's laid out in) instead of the program, or the program
+    /// again with `None`, as Lightair's own compositor draws it.
+    #[cfg(not(feature = "libobs"))]
+    pub fn set_source(&self, source: Option<(Id, Id)>) {
+        self.show(source, source);
+    }
+
+    fn show(&self, new: Option<SourceHandle>, scene: Option<(Id, Id)>) {
         let shared = &self.0.shared;
         // what's shown changes first, so a frame of the old scene isn't taken after it
         {
@@ -775,8 +832,8 @@ impl Preview {
             shared.scene_fed.store(false, Ordering::Relaxed);
         }
         // Swap under the lock (the graphics thread renders under it); release afterwards.
-        let old = std::mem::replace(&mut *shared.source.lock(), new);
-        drop(old);
+        // (the old one is let go here, outside the lock)
+        let _old = std::mem::replace(&mut *shared.source.lock(), new);
         if scene.is_some()
             && lightair_host::bridge::own()
             && crate::compose::start()
@@ -812,8 +869,15 @@ impl Preview {
     }
 
     /// The source shown instead of the program, if any (a new reference).
+    #[cfg(feature = "libobs")]
     pub fn source(&self) -> Option<lightair_obs::obs::SourceRef> {
         self.0.shared.source.lock().as_ref().and_then(|s| unsafe { lightair_obs::obs::SourceRef::from_borrowed(s.0) })
+    }
+
+    /// The scene shown instead of the program, if any, and its canvas.
+    #[cfg(not(feature = "libobs"))]
+    pub fn source(&self) -> Option<(Id, Id)> {
+        *self.0.shared.source.lock()
     }
 
     /// Pauses or resumes rendering (hidden views cost nothing).
@@ -838,6 +902,7 @@ impl Drop for Handle {
         if self.composed.load(Ordering::Relaxed) || self.scenes.load(Ordering::Relaxed) {
             crate::compose::unwatch(&self.shared);
         }
+        #[cfg(feature = "libobs")]
         unsafe {
             sys::obs_remove_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&self.shared) as *mut c_void);
             if let Some(mut pool) = self.shared.pool.lock().take() {
@@ -855,6 +920,7 @@ impl Drop for Handle {
 
 // ---------------------------------------------------------------- graphics thread
 /// Runs on libobs's graphics thread after the main texture is rendered (graphics context held).
+#[cfg(feature = "libobs")]
 unsafe extern "C" fn on_rendered(param: *mut c_void) {
     let shared = unsafe { &*(param as *const Shared) };
     if !shared.active.load(Ordering::Relaxed) {

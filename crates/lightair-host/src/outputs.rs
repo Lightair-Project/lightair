@@ -549,3 +549,10 @@ pub fn default_encoders(available: &[String], video_bitrate_kbps: u32, constant_
 
 /// The canvas whose buffer saved a clip last.
 pub static LAST_CLIP: Mutex<Option<(Id, std::time::Instant)>> = Mutex::new(None);
+
+pub use crate::outputs_host::VirtualCameraScene;
+
+/// Frames the primary canvas's encoders skipped. Lightair's compositor keeps no such count yet.
+pub fn primary_skipped_frames() -> u32 {
+    0
+}

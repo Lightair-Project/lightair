@@ -3,6 +3,10 @@
 // Windows: a window app, no console (development builds keep theirs, for the log)
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+// Without libobs, lightair-host stands where lightair-obs did (the same names, ids for its refs).
+#[cfg(not(feature = "libobs"))]
+extern crate lightair_host as lightair_obs;
+
 mod activity_panel;
 mod assets;
 mod automations_panel;
@@ -53,6 +57,7 @@ mod midi_map;
 mod ptz;
 mod keys;
 mod secrets;
+#[cfg(feature = "libobs")]
 mod selftest;
 mod shell;
 mod starter;
@@ -150,6 +155,8 @@ fn main() {
         // before the engine starts: nothing to restart
         s.reconciler.set_audio_block(block, &lightair_model::Workspace::new(""));
     });
+    // the self-tests drive libobs's sources
+    #[cfg(feature = "libobs")]
     if let Ok(what) = std::env::var("LIGHTAIR_SELFTEST") {
         selftest::run(&engine, &what);
         return;

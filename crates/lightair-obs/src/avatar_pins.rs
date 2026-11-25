@@ -31,16 +31,7 @@ pub use lightair_host::avatar_pins::{Placement, Spot, on_canvas};
 use crate::avatar2d::Flat;
 use crate::sys;
 
-/// A point of an avatar something can be pinned to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Anchor {
-    /// How the pin names it (a node's or mesh's name; `name#2` for the second of that name).
-    pub key: String,
-    /// What the picker shows ("Left hand"; a mesh's own name).
-    pub label: String,
-    /// Where the picker files it ("Head", "Left hand", a Live2D part's id, …).
-    pub group: String,
-}
+pub use lightair_host::avatar_pins::Anchor;
 
 /// Keys from names, unique: the second "Hair" is `Hair#2`.
 fn keyed(names: impl Iterator<Item = String>) -> Vec<String> {

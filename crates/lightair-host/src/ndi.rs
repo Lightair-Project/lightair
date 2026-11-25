@@ -515,3 +515,29 @@ fn send_picture(send: &SendPtr, fps: (i32, i32), picture: &objc2_core_video::CVP
     }
     unsafe { CVPixelBufferUnlockBaseAddress(picture, CVPixelBufferLockFlags::ReadOnly) };
 }
+
+/// NDI out: the primary canvas's compositor frames and the mixer's Program, sent as `name`.
+#[cfg(target_os = "macos")]
+static SENDING: std::sync::Mutex<Option<OwnSender>> = std::sync::Mutex::new(None);
+
+/// Sends the program over NDI as `name` (empty: stops).
+pub fn set_output(name: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let old = SENDING.lock().ok().and_then(|mut s| s.take());
+        drop(old);
+        if name.is_empty() {
+            return Ok(());
+        }
+        let canvas = crate::program::primary_canvas().ok_or("There's no canvas to send yet.")?;
+        let own = OwnSender::start(name, canvas)?;
+        if let Ok(mut s) = SENDING.lock() {
+            *s = Some(own);
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if name.is_empty() { Ok(()) } else { Err("NDI out without libobs works on macOS only for now.".into()) }
+    }
+}

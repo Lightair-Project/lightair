@@ -4,6 +4,17 @@
 
 use lightair_model::Fit;
 
+/// A point of an avatar something can be pinned to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Anchor {
+    /// How the pin names it (a node's or mesh's name; `name#2` for the second of that name).
+    pub key: String,
+    /// What the picker shows ("Left hand"; a mesh's own name).
+    pub label: String,
+    /// Where the picker files it ("Head", "Left hand", a Live2D part's id, …).
+    pub group: String,
+}
+
 /// An anchor in the avatar's picture: pixels, its turn (radians, clockwise as seen) and its size
 /// (only ever compared with itself at rest).
 #[derive(Clone, Copy, Debug, PartialEq)]

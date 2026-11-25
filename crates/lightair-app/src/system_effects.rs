@@ -60,6 +60,7 @@ pub fn portrait_on() -> Option<bool> {
 }
 
 /// Whether Backgrounds (replacement) is on for Lightair; `None` before macOS 15.
+#[cfg_attr(not(feature = "libobs"), allow(dead_code))]
 pub fn backgrounds_on() -> Option<bool> {
     class_bool(c"isBackgroundReplacementEnabled")
 }
@@ -96,6 +97,7 @@ pub fn set_background_picture(path: &std::path::Path) -> bool {
 
 /// A camera's state for Backgrounds (by its unique id): whether macOS is replacing its
 /// background now, and whether the format it runs in can (diagnostics).
+#[cfg_attr(not(feature = "libobs"), allow(dead_code))]
 pub fn camera_backgrounds(uid: &str) -> Option<(bool, bool)> {
     use objc2::msg_send;
     use objc2::rc::Retained;

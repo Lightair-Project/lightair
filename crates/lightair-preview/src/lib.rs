@@ -8,6 +8,7 @@
 //! Threading: the render callback runs on libobs's graphics thread. It never waits on the UI;
 //! the only shared lock is held for a pointer swap.
 
+#[cfg(feature = "libobs")]
 mod render;
 
 #[cfg(target_os = "macos")]

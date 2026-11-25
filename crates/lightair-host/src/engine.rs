@@ -31,7 +31,13 @@ pub struct EngineConfig {
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self { canvas: (1920, 1080), output: (1920, 1080), fps: (60, 1), sample_rate: 48_000, extra_plugin_dirs: Vec::new() }
+        Self {
+            canvas: (1920, 1080),
+            output: (1920, 1080),
+            fps: (60, 1),
+            sample_rate: 48_000,
+            extra_plugin_dirs: Vec::new(),
+        }
     }
 }
 
@@ -65,19 +71,7 @@ pub struct Stats {
     pub lagged_frames: u32,
 }
 
-/// A Studio take's per-source recordings. Not made without libobs yet: a placeholder so
-/// [`EngineState`] has the libobs engine's shape.
-#[derive(Debug, Default)]
-pub struct StudioTake {
-    _private: (),
-}
-
-impl StudioTake {
-    /// Whether every recording of the take has stopped (there are none).
-    pub fn finished(&self) -> bool {
-        true
-    }
-}
+pub use crate::studio_take::StudioTake;
 
 /// State owned by the engine thread. Jobs receive `&mut EngineState`.
 #[derive(Default)]
@@ -115,6 +109,8 @@ impl Engine {
         // Lightair's own compositor, mixer and outputs are all there is
         crate::show::set_own();
         crate::plugins::set_sample_rate(config.sample_rate);
+        // the stream mix's loudness, for the meters
+        crate::loudness::attach(config.sample_rate, 2);
         let (tx, rx) = unbounded::<Job>();
         let (ready_tx, ready_rx) = bounded::<()>(1);
         let rate = config.sample_rate;
@@ -148,7 +144,12 @@ impl Engine {
         ready_rx.recv().map_err(|_| EngineError::Stopped)?;
         let capabilities = Capabilities { encoders: encoders(), ..Default::default() };
         let version = env!("CARGO_PKG_VERSION").to_string();
-        tracing::info!(version, encoders = capabilities.encoders.len(), sample_rate = config.sample_rate, "engine ready (no libobs)");
+        tracing::info!(
+            version,
+            encoders = capabilities.encoders.len(),
+            sample_rate = config.sample_rate,
+            "engine ready (no libobs)"
+        );
         Ok(Self { tx: Some(tx), thread: Some(thread), capabilities, version })
     }
 
@@ -199,6 +200,7 @@ fn shutdown(state: EngineState) {
     let EngineState { mut reconciler, mut outputs, studio_take: _ } = state;
     outputs.shutdown();
     reconciler.clear();
+    crate::loudness::detach();
     crate::show::clear();
     tracing::info!("engine stopped");
 }

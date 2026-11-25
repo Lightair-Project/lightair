@@ -11,6 +11,7 @@ use lightair_model::catalog::{self, Presets};
 use serde_json::{Value, json};
 
 /// The libobs filter all face effects run on.
+#[cfg_attr(not(feature = "libobs"), allow(dead_code))]
 pub const KIND: &str = catalog::STUDIO_FILTER;
 
 /// Where the Lightair Effect Stack module bundle lives: the app's own `Contents/PlugIns` (the shipped

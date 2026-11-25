@@ -34,37 +34,8 @@ use crate::timers::{TIMER_KIND, TimerAction, TimerOut, TimerStatus, Timers};
 
 // ---------------------------------------------------------------- avatars (not here yet)
 
-/// A point of an avatar something can be pinned to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Anchor {
-    /// How the pin names it (a node's or mesh's name; `name#2` for the second of that name).
-    pub key: String,
-    /// What the picker shows ("Left hand"; a mesh's own name).
-    pub label: String,
-    /// Where the picker files it ("Head", "Left hand", a Live2D part's id, …).
-    pub group: String,
-}
-
-/// What an avatar is doing, for the Inspector.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct AvatarStatus {
-    pub loaded: bool,
-    /// A face is being followed.
-    pub tracking: bool,
-    /// Why the model didn't load.
-    pub error: String,
-    /// The model's own name.
-    pub name: String,
-    /// What body tracking sees ("body, left arm", "no body"; empty when off).
-    pub body: String,
-    /// The model's expressions.
-    pub expressions: Vec<String>,
-    /// What things can be pinned to (bones, meshes), in the picker's order.
-    pub anchors: Vec<Anchor>,
-    /// Which of its expressions are costumes (a PNGtuber's).
-    pub costumes: Vec<String>,
-}
-
+pub use crate::avatar::{Status as AvatarStatus, status_of as avatar_status_of};
+pub use crate::avatar_pins::Anchor;
 pub use crate::avatar_pins::Spot;
 
 // ---------------------------------------------------------------- what a source needs
@@ -130,7 +101,9 @@ fn need(source: &Source) -> Need {
         crate::piair_voice::KIND => Need::Voice,
         crate::devices::DEVICE_KIND | kinds::MIC => Need::Device(text(s, "device")),
         // a loopback device (BlackHole and the like) is an input like any other
-        kinds::DESKTOP_AUDIO if !crate::devices::is_system_default(&text(s, "device")) => Need::Device(text(s, "device")),
+        kinds::DESKTOP_AUDIO if !crate::devices::is_system_default(&text(s, "device")) => {
+            Need::Device(text(s, "device"))
+        }
         kinds::DESKTOP_AUDIO if mac => Need::SystemSound(None),
         kinds::APP_AUDIO if mac => Need::SystemSound(Some(text(s, "app"))),
         kinds::DESKTOP_AUDIO | kinds::APP_AUDIO => Need::Missing("desktop or app sound"),
@@ -172,16 +145,31 @@ enum Runtime {
     /// The timer lives in [`Host::timers`]; this says whether it's on air.
     Timer(Arc<AtomicBool>),
     #[cfg(target_os = "macos")]
-    Media { player: crate::media_player::MediaPlayer, active: bool },
+    Media {
+        player: crate::media_player::MediaPlayer,
+        active: bool,
+    },
     #[cfg(target_os = "macos")]
-    Soundboard { player: crate::media_player::MediaPlayer, playing: Mutex<(String, bool)> },
+    Soundboard {
+        player: crate::media_player::MediaPlayer,
+        playing: Mutex<(String, bool)>,
+    },
     #[cfg(any(target_os = "macos", windows))]
-    Web { page: crate::web::WebPage, shown: bool },
+    Web {
+        page: crate::web::WebPage,
+        shown: bool,
+    },
     /// Held for its receiving thread (it stops as it drops); likewise the next two.
-    Ndi { _receiver: crate::ndi::Receiver },
+    Ndi {
+        _receiver: crate::ndi::Receiver,
+    },
     #[cfg(target_os = "macos")]
-    SystemSound { _sound: crate::system_audio::SystemSound },
-    Voice { _voice: crate::piair_voice::Voice },
+    SystemSound {
+        _sound: crate::system_audio::SystemSound,
+    },
+    Voice {
+        _voice: crate::piair_voice::Voice,
+    },
     /// The sound slot is registered with the mixer by id (`crate::audio_host::feed_slot`).
     Link,
 }
@@ -422,12 +410,9 @@ impl Host {
         };
         let now = Instant::now();
         let switch = match (previous, program) {
-            (Some(from), Some(to)) if kind != TransitionKind::Cut => Some(crate::show::Switch {
-                from,
-                to,
-                settings: TransitionSettings { kind, ..settings },
-                started: now,
-            }),
+            (Some(from), Some(to)) if kind != TransitionKind::Cut => {
+                Some(crate::show::Switch { from, to, settings: TransitionSettings { kind, ..settings }, started: now })
+            }
             _ => None,
         };
         crate::show::set_switch(switch);
@@ -600,8 +585,12 @@ impl Host {
             },
             #[cfg(target_os = "macos")]
             Need::Soundboard => {
-                let settings =
-                    crate::media_player::Settings { path: String::new(), looping: false, restart_on_activate: false, clear_on_end: true };
+                let settings = crate::media_player::Settings {
+                    path: String::new(),
+                    looping: false,
+                    restart_on_activate: false,
+                    clear_on_end: true,
+                };
                 Runtime::Soundboard {
                     player: crate::media_player::MediaPlayer::new(Some(id), settings, self.sample_rate, false, None),
                     playing: Mutex::new((String::new(), false)),
@@ -751,7 +740,9 @@ impl Host {
             .filter(|t| t.record || !marked)
             .map(|t| {
                 // a mono channel records as mono (before the pan it's the same on both sides)
-                let ch = if matches!(t.channels, lightair_model::TrackChannels::Mono(_)) && tap != lightair_audio::Tap::PostFader {
+                let ch = if matches!(t.channels, lightair_model::TrackChannels::Mono(_))
+                    && tap != lightair_audio::Tap::PostFader
+                {
                     1
                 } else {
                     2
@@ -759,7 +750,9 @@ impl Host {
                 (crate::audio::node(t.id), t.name.clone(), ch)
             })
             .collect();
-        strips.extend(workspace.audio.buses.iter().filter(|b| b.record).map(|b| (crate::audio::node(b.id), b.name.clone(), 2)));
+        strips.extend(
+            workspace.audio.buses.iter().filter(|b| b.record).map(|b| (crate::audio::node(b.id), b.name.clone(), 2)),
+        );
         if program {
             strips.push((lightair_audio::PROGRAM, "Program".into(), 2));
         }
@@ -970,10 +963,31 @@ impl Host {
 
     // ------------------------------------------------------------ avatars and face effects
 
+    /// The screens and cameras a Studio take records: those visible in the program, each once.
+    pub fn studio_take_sources(&self, workspace: &Workspace) -> Vec<(lightair_model::Source, Id)> {
+        let Some(scene) = workspace.program.and_then(|p| workspace.scene(p)) else { return Vec::new() };
+        let canvas = workspace.primary_canvas().id;
+        let mut out: Vec<(lightair_model::Source, Id)> = Vec::new();
+        for object in scene.flatten().objects {
+            let visible = object.layouts.get(&canvas).is_none_or(|l| l.visible);
+            let Some(source) = object.source.and_then(|i| workspace.sources.get(&i)) else { continue };
+            if !visible
+                || !matches!(source.kind.as_str(), lightair_model::kinds::SCREEN | lightair_model::kinds::CAMERA)
+                || out.iter().any(|(s, _)| s.id == source.id)
+            {
+                continue;
+            }
+            out.push(((**source).clone(), source.id));
+        }
+        out
+    }
+
     /// An avatar source's status (`None`: avatars don't run without libobs yet).
-    pub fn avatar_status(&self, _source: Id) -> Option<AvatarStatus> {
-        not_yet("avatar_status");
-        None
+    pub fn avatar_status(&self, source: Id) -> Option<AvatarStatus> {
+        // posing (and what it reports) isn't here yet: an avatar reads as not loaded
+        let avatar =
+            self.workspace.as_ref().and_then(|w| w.sources.get(&source)).is_some_and(|s| s.kind == crate::avatar::KIND);
+        avatar.then(|| avatar_status_of(&source))
     }
 
     /// A model drawn on its own for a library picture (`None`: not without libobs yet).
@@ -1081,7 +1095,10 @@ impl Host {
         if self.active.contains(&source) {
             return true;
         }
-        let sound_only = matches!(self.needs.get(&source), Some(Need::Device(_) | Need::SystemSound(_) | Need::Voice | Need::Soundboard));
+        let sound_only = matches!(
+            self.needs.get(&source),
+            Some(Need::Device(_) | Need::SystemSound(_) | Need::Voice | Need::Soundboard)
+        );
         sound_only && self.workspace.as_ref().is_some_and(|ws| ws.tracks.iter().any(|t| t.source == source))
     }
 
@@ -1119,7 +1136,8 @@ impl Host {
     pub fn counts(&self) -> (usize, usize, usize) {
         let Some(ws) = &self.workspace else { return (0, 0, 0) };
         let canvases = ws.canvases.len();
-        let items: usize = ws.scenes.iter().map(|s| s.flatten().objects.iter().filter(|o| o.source.is_some()).count()).sum();
+        let items: usize =
+            ws.scenes.iter().map(|s| s.flatten().objects.iter().filter(|o| o.source.is_some()).count()).sum();
         (ws.sources.len(), ws.scenes.len() * canvases, items * canvases)
     }
 
@@ -1132,7 +1150,10 @@ impl Host {
         keys.sort();
         let mut out = Vec::new();
         for (scene, canvas) in keys {
-            out.push(format!("scene {scene} format {canvas}{}", if self.program == Some(scene) { " (program)" } else { "" }));
+            out.push(format!(
+                "scene {scene} format {canvas}{}",
+                if self.program == Some(scene) { " (program)" } else { "" }
+            ));
             let Some(s) = ws.scene(scene) else { continue };
             for object in s.flatten().objects {
                 let Some(source) = object.source else { continue };

@@ -380,6 +380,7 @@ pub struct StudioWindow {
     avatar_pictures: HashSet<Id>,
     /// Library pictures to take from their files, one at a time, and whether one is being taken.
     picture_queue: std::collections::VecDeque<Id>,
+    #[cfg_attr(not(feature = "libobs"), allow(dead_code))]
     picture_busy: bool,
     /// The Avatar section's shortcut list is open; an expression waiting for its keys (avatar
     /// source, expression; "" for none).
@@ -1286,7 +1287,10 @@ impl StudioWindow {
         let next = want.and_then(|scene| engine.call(move |s| s.reconciler.scene_source_ref(scene, canvas)));
         // only when the scene's picture changed (rebuilds replace it)
         let same = match (&current, &next) {
+            #[cfg(feature = "libobs")]
             (Some(a), Some(b)) => a.same(b),
+            #[cfg(not(feature = "libobs"))]
+            (Some(a), Some(b)) => a == b,
             (None, None) => true,
             _ => false,
         };

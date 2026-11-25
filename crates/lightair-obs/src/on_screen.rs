@@ -116,19 +116,8 @@ struct Drawn {
 // counted thread-safely.
 unsafe impl Send for Drawn {}
 
-/// Devices that came back (an iPhone that went away and returned): (unique id, when, as a
-/// count of reconnections). A camera capture of one that's running starts again, as if new:
-/// OBS's own reconnection doesn't always catch an iPhone's return.
-static RECONNECTED: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
-static RECONNECTIONS: AtomicU64 = AtomicU64::new(0);
-
-/// A camera (or a phone's screen) with this unique id has (re)connected.
-pub fn device_reconnected(uid: &str) {
-    let n = RECONNECTIONS.fetch_add(1, Ordering::AcqRel) + 1;
-    let mut list = RECONNECTED.lock();
-    list.retain(|(u, _)| u != uid);
-    list.push((uid.to_string(), n));
-}
+pub use lightair_host::on_screen::device_reconnected;
+use lightair_host::on_screen::{reconnected_since, reconnections};
 
 /// The device a camera capture's settings name.
 fn device_of(settings: *mut sys::obs_data_t) -> String {
@@ -384,7 +373,7 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         busy: AtomicBool::new(false),
         hidden_since: Mutex::new(None),
         size: AtomicU64::new(0),
-        reconnections: AtomicU64::new(RECONNECTIONS.load(Ordering::Acquire)),
+        reconnections: AtomicU64::new(reconnections()),
         weak: unsafe { sys::obs_source_get_weak_source(source) } as usize,
         doc,
         drawn: Mutex::new(Drawn { buffer: None, tex: std::ptr::null_mut(), size: (0, 0) }),
@@ -442,11 +431,11 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
     }
     // its device came back: the capture let go, and made again (next tick) as if new
     if s.kind.access.is_some() {
-        let now = RECONNECTIONS.load(Ordering::Acquire);
+        let now = reconnections();
         let seen = s.reconnections.swap(now, Ordering::AcqRel);
         if now != seen && running {
             let device = device_of(s.settings());
-            if !device.is_empty() && RECONNECTED.lock().iter().any(|(u, at)| *at > seen && *u == device) {
+            if !device.is_empty() && reconnected_since(&device, seen) {
                 s.on_worker(false);
                 return;
             }

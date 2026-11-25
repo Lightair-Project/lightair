@@ -21,7 +21,7 @@ lightair-avatar = { path = "crates/lightair-avatar" }
 # and Inochi2D and nijilive puppets.
 lightair-moc3 = { path = "crates/lightair-moc3" }
 lightair-inochi2d = { path = "crates/lightair-inochi2d" }
-lightair-preview = { path = "crates/lightair-preview" }
+lightair-preview = { path = "crates/lightair-preview", default-features = false }
 lightair-web = { path = "crates/lightair-web" }
 lightair-phone-camera = { path = "crates/lightair-phone-camera" }
 

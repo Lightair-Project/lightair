@@ -144,3 +144,8 @@ mod frames {
 
 #[cfg(target_os = "macos")]
 pub use frames::in_use;
+
+/// The primary canvas (the document's first), as the show has it now.
+pub fn primary_canvas() -> Option<Id> {
+    crate::show::snapshot().and_then(|s| s.workspace.canvases.first().map(|c| c.id))
+}
