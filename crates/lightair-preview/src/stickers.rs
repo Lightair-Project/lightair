@@ -8,7 +8,8 @@
 //! the top of the head, a cheek), moved from it and sized in face units (the distance between the
 //! eyes), turned with the head and by its own rotation, and animated (bob, pulse, spin, sway,
 //! twinkle). Each is blended over the picture (normal, add or multiply) and fades in and out with
-//! the face. A preset's face-shape distortion (its `shape`) isn't drawn here.
+//! the face. A preset's face-shape distortion (its `shape`) is drawn by the camera looks' warp
+//! ([`shape`], given to the engine's looks by `crate::looks`).
 //!
 //! The landmarks overlay is the tracked face's points as small green squares.
 //!
@@ -151,9 +152,17 @@ impl Sprite {
     }
 }
 
-/// Every preset's sprites, by name (the presets in `effects` at the top and in each category).
-fn presets() -> &'static HashMap<String, Vec<Sprite>> {
-    static ALL: OnceLock<HashMap<String, Vec<Sprite>>> = OnceLock::new();
+/// One preset: its sprites and its face distortion.
+struct Preset {
+    sprites: Vec<Sprite>,
+    /// Reshape keys to amounts (slider/100, may go past the sliders' range); none when it
+    /// doesn't distort the face.
+    shape: Option<serde_json::Map<String, Value>>,
+}
+
+/// Every preset, by name (the presets in `effects` at the top and in each category).
+fn presets() -> &'static HashMap<String, Preset> {
+    static ALL: OnceLock<HashMap<String, Preset>> = OnceLock::new();
     ALL.get_or_init(|| {
         let root: Value = serde_json::from_str(PRESETS).unwrap_or(Value::Null);
         let lists = std::iter::once(&root).chain(root["categories"].as_array().into_iter().flatten());
@@ -161,17 +170,28 @@ fn presets() -> &'static HashMap<String, Vec<Sprite>> {
         for p in lists.filter_map(|l| l["effects"].as_array()).flatten() {
             let Some(name) = p["name"].as_str() else { continue };
             let sprites = p["sprites"].as_array().into_iter().flatten().take(8).map(Sprite::parse).collect();
-            out.entry(name.to_string()).or_insert(sprites);
+            let shape = p["shape"].as_object().filter(|o| !o.is_empty()).cloned();
+            out.entry(name.to_string()).or_insert(Preset { sprites, shape });
         }
         out
     })
 }
 
+/// The preset of a stickers effect's settings.
+fn preset(settings: &Value) -> Option<&'static Preset> {
+    let name = settings.get("effect_preset").and_then(Value::as_str).unwrap_or(DEFAULT_PRESET);
+    presets().get(name)
+}
+
 /// The sprites of a stickers effect's preset (none for an unknown one, or one that only
 /// distorts the face).
 fn sprites(settings: &Value) -> &'static [Sprite] {
-    let name = settings.get("effect_preset").and_then(Value::as_str).unwrap_or(DEFAULT_PRESET);
-    presets().get(name).map_or(&[], Vec::as_slice)
+    preset(settings).map_or(&[], |p| p.sprites.as_slice())
+}
+
+/// The face distortion of a stickers effect's preset, when it has one.
+pub(crate) fn shape(settings: &Value) -> Option<&'static serde_json::Map<String, Value>> {
+    preset(settings).and_then(|p| p.shape.as_ref())
 }
 
 /// Whether `source`'s looks show the face's landmarks: the last switched-on look that says

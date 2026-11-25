@@ -14,7 +14,10 @@
 //! before the tracker smooths it, with the picture's time. A camera no longer drawn with looks
 //! lets its host go after a while. The faces each host finds are also shared with the face
 //! stickers and the landmarks overlay (`crate::stickers::share`), so a camera isn't analysed twice.
+//! A face stickers preset's face distortion is drawn by the looks' warp: the source the engine
+//! reads is given it first ([`with_sticker_shape`]).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +29,7 @@ use std::time::{Duration, Instant};
 use lightair_engine::feeds::{Feed, Picture as Pushed, VideoFeed};
 use lightair_engine::gpu::apple::Kept;
 use lightair_engine::hot::Hot;
-use lightair_engine::looks::render::Settings;
+use lightair_engine::looks::render::{EFFECT_SHAPE, Settings};
 use lightair_engine::{background, clock, looks};
 use lightair_host::bridge::{self, FaceTracker};
 use lightair_model::{Id, Source};
@@ -38,6 +41,7 @@ use objc2_core_video::{
 };
 use objc2_video_toolbox::VTPixelTransferSession;
 use parking_lot::Mutex;
+use serde_json::{Map, Value};
 
 /// The analysis picture's short side at most (the Effect Stack filter's: eyelid detail for
 /// eyeliner on HD cameras).
@@ -54,9 +58,42 @@ fn drawn_kind(kind: &str) -> bool {
     looks::render::KINDS.contains(&kind) || background::KINDS.contains(&kind)
 }
 
-/// Whether `source` has a look switched on (any `studio.*` effect: the camera studio filter).
+/// Whether `source` has a look switched on (any `studio.*` effect: the camera studio filter), or
+/// face stickers whose preset distorts the face.
 pub(crate) fn has_looks(source: &Source) -> bool {
-    source.effects.iter().any(|e| e.enabled && is_look(&e.kind))
+    source.effects.iter().any(|e| e.enabled && is_look(&e.kind)) || sticker_shape(source).is_some()
+}
+
+/// The face distortion of `source`'s face stickers, with the place of the effect it's from: the
+/// last switched-on stickers effect (its preset is the one the looks' merged settings hold), when
+/// its preset has one.
+fn sticker_shape(source: &Source) -> Option<(usize, &'static Map<String, Value>)> {
+    let (i, e) = source.effects.iter().enumerate().rfind(|(_, e)| e.enabled && e.kind == crate::stickers::KIND)?;
+    Some((i, crate::stickers::shape(&e.settings)?))
+}
+
+/// Gives `source`'s face stickers effect its preset's face distortion (`EFFECT_SHAPE` in its
+/// settings), where the engine's looks read it: their warp then draws it. Called on the source
+/// the engine draws the looks of.
+pub(crate) fn with_sticker_shape(source: &mut Source) {
+    let Some((i, shape)) = sticker_shape(source) else { return };
+    let settings = &mut source.effects[i].settings;
+    if !settings.is_object() {
+        *settings = Value::Object(Map::new());
+    }
+    if let Value::Object(settings) = settings {
+        settings.insert(EFFECT_SHAPE.into(), Value::Object(shape.clone()));
+    }
+}
+
+/// `source` as the engine's looks read it (with its stickers' face distortion).
+fn shaped(source: &Source) -> Cow<'_, Source> {
+    if sticker_shape(source).is_none() {
+        return Cow::Borrowed(source);
+    }
+    let mut s = source.clone();
+    with_sticker_shape(&mut s);
+    Cow::Owned(s)
 }
 
 /// A `studio.*` effect the engine's looks draw (camera motion, ambience and face stickers are the
@@ -114,7 +151,7 @@ struct Needs {
 impl Needs {
     /// As the Effect Stack's filter asks its tracker for the same looks.
     fn of(source: &Source) -> Needs {
-        let settings = Settings::from_source(source);
+        let settings = Settings::from_source(&shaped(source));
         let faces = settings.as_ref().is_some_and(|s| s.active());
         let light = settings.as_ref().is_some_and(|s| s.light_active());
         let bg = background::look(source);
