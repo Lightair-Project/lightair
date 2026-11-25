@@ -51,7 +51,7 @@ use lightair_encode::{
 use lightair_engine::whip::WhipSender;
 use lightair_feed::net::Bind;
 use lightair_feed::ts::{AudioConfig, Muxer, NalFormat, VideoCodec as TsCodec};
-use lightair_feed::{RtmpSender, RtmpTarget, RtmpVideo, SrtSender};
+use lightair_feed::{RtmpSender, RtmpTarget, RtmpTrack, RtmpTracks, RtmpVideo, SrtSender};
 use lightair_model::Id;
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{CVPixelBuffer, CVPixelBufferPool};
@@ -180,6 +180,93 @@ struct VideoPipe {
     subs: Subs,
     /// Frames not encoded: the copy failed or the encoder dropped them.
     skipped: Arc<AtomicU32>,
+    /// Frames given to the encoder.
+    fed: AtomicU64,
+    /// A track of a multitrack stream: the stream's keyframe beat and this canvas's place in it.
+    gop: Option<(Arc<Gop>, usize)>,
+}
+
+/// Where a multitrack stream's pictures stand on a canvas frame: not yet sent, a keyframe, or
+/// an ordinary picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Beat {
+    Wait,
+    Key,
+    Frame,
+}
+
+/// One canvas's tracks in a [`Gop`].
+struct GopCanvas {
+    /// Every this many canvas frames each of its tracks takes one (the divisors' least common
+    /// multiple): keyframes only fall there.
+    step: i64,
+    /// The last canvas frame decided, and what for.
+    slot: i64,
+    beat: Beat,
+    started: bool,
+    /// The next keyframe is due at this time.
+    next_ns: i64,
+    /// Keyframe requests answered.
+    answered: u64,
+}
+
+/// The keyframes of a multitrack stream's tracks: every track of a canvas makes its keyframes
+/// on the same canvas frames (the same times), every keyframe interval on the program clock and
+/// when the connection asks for one, so the renditions switch cleanly. Its tracks wait for
+/// the first keyframe once the stream is set up.
+struct Gop {
+    every_ns: i64,
+    ready: AtomicBool,
+    asked: AtomicU64,
+    canvases: Mutex<Vec<GopCanvas>>,
+}
+
+impl Gop {
+    fn new(keyint_s: u32, steps: &[i64]) -> Gop {
+        let canvases = steps
+            .iter()
+            .map(|&step| GopCanvas {
+                step: step.max(1),
+                slot: i64::MIN,
+                beat: Beat::Wait,
+                started: false,
+                next_ns: 0,
+                answered: 0,
+            })
+            .collect();
+        Gop {
+            every_ns: keyint_s.max(1) as i64 * 1_000_000_000,
+            ready: AtomicBool::new(false),
+            asked: AtomicU64::new(0),
+            canvases: Mutex::new(canvases),
+        }
+    }
+
+    /// What canvas `canvas`'s frame `slot` (shown at `pts`) is to its tracks. Decided once per
+    /// frame, by the first track to ask, so every track of the canvas does the same.
+    fn beat(&self, canvas: usize, slot: i64, pts: i64) -> Beat {
+        let mut canvases = self.canvases.lock();
+        let Some(c) = canvases.get_mut(canvas) else { return Beat::Frame };
+        if c.slot == slot {
+            return c.beat;
+        }
+        let asked = self.asked.load(Ordering::Acquire);
+        let beat = if !self.ready.load(Ordering::Acquire) {
+            Beat::Wait
+        } else if slot.rem_euclid(c.step) != 0 {
+            if c.started { Beat::Frame } else { Beat::Wait }
+        } else if !c.started || pts >= c.next_ns || asked != c.answered {
+            c.started = true;
+            c.answered = asked;
+            c.next_ns = (pts.div_euclid(self.every_ns) + 1) * self.every_ns;
+            Beat::Key
+        } else {
+            Beat::Frame
+        };
+        c.slot = slot;
+        c.beat = beat;
+        beat
+    }
 }
 
 fn transfer_session() -> Option<CFRetained<VTPixelTransferSession>> {
@@ -193,7 +280,12 @@ fn transfer_session() -> Option<CFRetained<VTPixelTransferSession>> {
 }
 
 impl VideoPipe {
-    fn open(key: VideoKey, canvas: Id, settings: VideoSettings) -> Result<Arc<VideoPipe>, String> {
+    fn open(
+        key: VideoKey,
+        canvas: Id,
+        settings: VideoSettings,
+        gop: Option<(Arc<Gop>, usize)>,
+    ) -> Result<Arc<VideoPipe>, String> {
         let subs: Subs = Arc::default();
         let skipped = Arc::new(AtomicU32::new(0));
         let format: Arc<Mutex<Option<Arc<VideoFormat>>>> = Arc::default();
@@ -232,6 +324,8 @@ impl VideoPipe {
             transfer: Mutex::new(Transfer { session: transfer_session(), last: None }),
             subs,
             skipped,
+            fed: AtomicU64::new(0),
+            gop,
         }))
     }
 
@@ -240,18 +334,36 @@ impl VideoPipe {
         if slot.rem_euclid(self.key.divisor as i64) != 0 {
             return;
         }
+        // a multitrack stream's track: its keyframes where the stream's other tracks have theirs
+        let key = match &self.gop {
+            Some((gop, canvas)) => match gop.beat(*canvas, slot, pts) {
+                Beat::Wait => return,
+                Beat::Key => true,
+                Beat::Frame => false,
+            },
+            None => false,
+        };
         let mut t = self.transfer.lock();
         if let Some(src) = frame {
             match self.copy(&t, src) {
                 Some(dst) => t.last = Some(dst),
                 None => {
                     self.skipped.fetch_add(1, Ordering::Relaxed);
+                    if key {
+                        self.encoder.request_keyframe();
+                    }
                     return;
                 }
             }
         }
-        let Some(buffer) = t.last.as_ref() else { return };
-        if let Err(e) = self.encoder.encode(buffer, pts, false) {
+        let Some(buffer) = t.last.as_ref() else {
+            if key {
+                self.encoder.request_keyframe();
+            }
+            return;
+        };
+        self.fed.fetch_add(1, Ordering::Relaxed);
+        if let Err(e) = self.encoder.encode(buffer, pts, key) {
             self.skipped.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(%e, "own outputs: frame refused");
         }
@@ -274,13 +386,28 @@ impl VideoPipe {
     /// Adds an output; the next picture is a keyframe, so it can start at once.
     fn subscribe(&self, sink: Arc<dyn Sink>) -> u64 {
         let id = next_id();
+        self.subscribe_as(id, sink);
+        id
+    }
+
+    /// [`VideoPipe::subscribe`] under the output's id `id` (an output on several encoders).
+    fn subscribe_as(&self, id: u64, sink: Arc<dyn Sink>) {
         self.subs.lock().push((id, sink));
         self.encoder.request_keyframe();
-        id
     }
 
     fn unsubscribe(&self, id: u64) {
         self.subs.lock().retain(|(s, _)| *s != id);
+    }
+
+    /// A keyframe soon: on every track at once when it's a multitrack stream's.
+    fn ask_keyframe(&self) {
+        match &self.gop {
+            Some((gop, _)) => {
+                gop.asked.fetch_add(1, Ordering::AcqRel);
+            }
+            None => self.encoder.request_keyframe(),
+        }
     }
 
     fn others(&self, id: u64) -> usize {
@@ -1117,6 +1244,8 @@ impl RecordingOut {
 /// A destination's sender.
 enum Out {
     Rtmp(RtmpSender),
+    /// Several picture tracks in one RTMP stream (Enhanced Broadcasting).
+    Multi(RtmpSender),
     Srt(Mutex<SrtOut>),
     Udp(Mutex<UdpOut>),
     Whip(Mutex<WhipSender>),
@@ -1178,9 +1307,10 @@ struct Stats {
 }
 
 impl Out {
-    fn parameter_sets(&self, format: &VideoFormat) {
+    fn parameter_sets(&self, track: u8, format: &VideoFormat) {
         let sets = &format.parameter_sets;
         match self {
+            Out::Multi(s) => s.track_config_record(track as usize, &format.config),
             // HEVC over Enhanced RTMP takes the `hvcC` record as the encoder made it
             Out::Rtmp(s) if matches!(format.codec, VideoCodec::Hevc { .. }) => s.config_record(&format.config),
             Out::Rtmp(s) => s.parameter_sets(sets),
@@ -1190,8 +1320,9 @@ impl Out {
         }
     }
 
-    fn video(&self, p: &Pkt, pts_us: u64, dts_us: u64) {
+    fn video(&self, track: u8, p: &Pkt, pts_us: u64, dts_us: u64) {
         match self {
+            Out::Multi(s) => s.track_video(track as usize, &p.data, NalFormat::LengthPrefixed, pts_us, dts_us, p.key),
             Out::Rtmp(s) => s.video(&p.data, NalFormat::LengthPrefixed, pts_us, dts_us, p.key),
             Out::Srt(s) => {
                 let mut o = s.lock();
@@ -1212,7 +1343,7 @@ impl Out {
 
     fn audio(&self, data: &[u8], pts_us: u64) {
         match self {
-            Out::Rtmp(s) => s.audio(data, pts_us),
+            Out::Rtmp(s) | Out::Multi(s) => s.audio(data, pts_us),
             Out::Srt(s) => {
                 let mut o = s.lock();
                 if !o.sender.waiting_for_keyframe() {
@@ -1232,7 +1363,7 @@ impl Out {
 
     fn stats(&self) -> Stats {
         match self {
-            Out::Rtmp(s) => {
+            Out::Rtmp(s) | Out::Multi(s) => {
                 let s = s.stats();
                 Stats {
                     connected: s.connected,
@@ -1271,7 +1402,7 @@ impl Out {
 
     fn take_keyframe_request(&self) -> bool {
         match self {
-            Out::Rtmp(s) => s.take_keyframe_request(),
+            Out::Rtmp(s) | Out::Multi(s) => s.take_keyframe_request(),
             Out::Srt(s) => s.lock().sender.take_keyframe_request(),
             Out::Udp(_) => false,
             Out::Whip(s) => s.lock().take_keyframe_request(),
@@ -1281,7 +1412,7 @@ impl Out {
     /// Bytes waiting for the network, where the sender counts them.
     fn queued_bytes(&self) -> Option<u64> {
         match self {
-            Out::Rtmp(s) => Some(s.queued_bytes()),
+            Out::Rtmp(s) | Out::Multi(s) => Some(s.queued_bytes()),
             Out::Srt(s) => Some(s.lock().sender.queued() as u64 * lightair_feed::srt::DATAGRAM as u64),
             Out::Udp(_) => None,
             Out::Whip(s) => Some(s.lock().queued_bytes()),
@@ -1295,10 +1426,12 @@ impl Out {
     }
 }
 
+/// What a destination's sender is handed; pictures and formats by picture track (0 when it
+/// has one).
 enum Item {
     /// The picture's format (its parameter sets and decoder configuration record) from now on.
-    Format(Arc<VideoFormat>),
-    Video(Arc<Pkt>),
+    Format(u8, Arc<VideoFormat>),
+    Video(u8, Arc<Pkt>),
     Audio(Arc<Pkt>),
     End,
 }
@@ -1306,6 +1439,8 @@ enum Item {
 struct StreamSink {
     tx: Sender<(Instant, Item)>,
     delay: Duration,
+    /// The picture track it is (0 when the destination has one).
+    track: u8,
     /// The format whose parameter sets were sent last.
     format: Mutex<Option<Arc<VideoFormat>>>,
 }
@@ -1317,10 +1452,10 @@ impl Sink for StreamSink {
             let mut f = self.format.lock();
             if f.as_ref().is_none_or(|x| !Arc::ptr_eq(x, format)) {
                 *f = Some(format.clone());
-                let _ = self.tx.send((due, Item::Format(format.clone())));
+                let _ = self.tx.send((due, Item::Format(self.track, format.clone())));
             }
         }
-        let _ = self.tx.send((due, Item::Video(packet.clone())));
+        let _ = self.tx.send((due, Item::Video(self.track, packet.clone())));
     }
     fn audio(&self, track: usize, packet: &Arc<Pkt>) {
         if track == 0 {
@@ -1344,9 +1479,9 @@ fn pump(rx: Receiver<(Instant, Item)>, out: Arc<Out>, base_ns: i64, abort: Arc<A
             std::thread::sleep((due - now).min(Duration::from_millis(50)));
         }
         match item {
-            Item::Format(format) => out.parameter_sets(&format),
-            Item::Video(p) => {
-                out.video(&p, us(p.pts), us(p.dts));
+            Item::Format(track, format) => out.parameter_sets(track, &format),
+            Item::Video(track, p) => {
+                out.video(track, &p, us(p.pts), us(p.dts));
                 frames.fetch_add(1, Ordering::Relaxed);
             }
             Item::Audio(p) => out.audio(&p.data, us(p.pts)),
@@ -1394,7 +1529,8 @@ impl Adapt {
 struct Watch {
     key: OutputKey,
     out: Arc<Out>,
-    video: Weak<VideoPipe>,
+    /// Its video encoders: one, or a multitrack stream's tracks (the first the main one).
+    videos: Vec<Weak<VideoPipe>>,
     audio: Weak<AudioPipe>,
     sub: u64,
     retries: u32,
@@ -1410,7 +1546,7 @@ impl Watch {
     fn give_up(&self, why: String) {
         tracing::warn!(%why, "own outputs: stream stopped");
         self.abort.store(true, Ordering::Release);
-        if let Some(v) = self.video.upgrade() {
+        for v in self.videos.iter().filter_map(Weak::upgrade) {
             v.unsubscribe(self.sub);
         }
         if let Some(a) = self.audio.upgrade() {
@@ -1430,9 +1566,9 @@ impl Watch {
                 break;
             }
             if self.out.take_keyframe_request()
-                && let Some(v) = self.video.upgrade()
+                && let Some(v) = self.videos.first().and_then(Weak::upgrade)
             {
-                v.encoder.request_keyframe();
+                v.ask_keyframe();
             }
             let s = self.out.stats();
             let frames = self.frames.load(Ordering::Relaxed);
@@ -1490,7 +1626,7 @@ impl Watch {
                 let before = a.target;
                 let target = a.step(queued, self.audio_kbps);
                 if target != before
-                    && let Some(v) = self.video.upgrade()
+                    && let Some(v) = self.videos.first().and_then(Weak::upgrade)
                 {
                     v.encoder.set_bitrate(target);
                     self.out.set_bitrate(target + self.audio_kbps);
@@ -1515,6 +1651,8 @@ impl Watch {
 
 struct StreamOut {
     video: Arc<VideoPipe>,
+    /// A multitrack stream's other tracks, in order.
+    extra: Vec<Arc<VideoPipe>>,
     audio: Arc<AudioPipe>,
     sub: u64,
     tx: Sender<(Instant, Item)>,
@@ -1526,6 +1664,11 @@ struct StreamOut {
 }
 
 impl StreamOut {
+    /// Its video encoders, the main one first.
+    fn videos(&self) -> Vec<Arc<VideoPipe>> {
+        std::iter::once(&self.video).chain(&self.extra).cloned().collect()
+    }
+
     fn finished(&self) -> bool {
         self.watch.as_ref().is_none_or(|t| t.is_finished())
     }
@@ -1725,6 +1868,20 @@ impl State {
         reorder: bool,
         exclusive: bool,
     ) -> Result<Arc<VideoPipe>, String> {
+        self.video_pipe_in(canvas, enc, reorder, exclusive, None)
+    }
+
+    /// [`State::video_pipe`], a track of a multitrack stream when `gop` is given (its own,
+    /// its keyframes on the stream's beat).
+    fn video_pipe_in(
+        &mut self,
+        canvas: Id,
+        enc: &EncoderConfig,
+        reorder: bool,
+        exclusive: bool,
+        gop: Option<(Arc<Gop>, usize)>,
+    ) -> Result<Arc<VideoPipe>, String> {
+        let exclusive = exclusive || gop.is_some();
         let (cw, ch, num, den) = canvas_shape(canvas).ok_or_else(|| "The canvas isn't ready yet.".to_string())?;
         let (w, h) = enc.scaled.unwrap_or((cw, ch));
         let codec = video_codec(&enc.video_encoder);
@@ -1743,6 +1900,8 @@ impl State {
         if let Some(p) = self.videos.iter().find(|p| p.key == key && *p.canvas.lock() == canvas) {
             return Ok(p.clone());
         }
+        // on the stream's beat, the encoder's own keyframes never come first
+        let keyframe_interval_s = if gop.is_some() { key.keyint as f32 * 2.0 + 1.0 } else { key.keyint as f32 };
         let settings = VideoSettings {
             codec,
             width: key.width,
@@ -1751,14 +1910,14 @@ impl State {
             fps_den: den.saturating_mul(key.divisor),
             bitrate_kbps: key.kbps,
             max_bitrate_kbps: key.cbr.then_some(key.kbps),
-            keyframe_interval_s: key.keyint as f32,
+            keyframe_interval_s,
             realtime: true,
             allow_reordering: key.reorder,
             input: InputFormat::Bgra,
             color: Color::BT709,
             hardware: Hardware::Prefer,
         };
-        let pipe = VideoPipe::open(key, canvas, settings)?;
+        let pipe = VideoPipe::open(key, canvas, settings, gop)?;
         self.videos.push(pipe.clone());
         add_to_feed(canvas, pipe.clone(), (num, den));
         Ok(pipe)
@@ -1808,7 +1967,9 @@ impl State {
         let finished: Vec<Id> = self.streams.iter().filter(|(_, s)| s.finished()).map(|(id, _)| *id).collect();
         for id in finished {
             if let Some(mut s) = self.streams.remove(&id) {
-                self.release_video(&s.video, s.sub);
+                for v in s.videos() {
+                    self.release_video(&v, s.sub);
+                }
                 self.release_audio(&s.audio, s.sub);
                 if let Some(t) = s.watch.take() {
                     let _ = t.join();
@@ -1859,8 +2020,10 @@ impl State {
                 st.stopping_since = Some(Instant::now());
             }
         });
-        let (video, audio, sub, tx) = (s.video.clone(), s.audio.clone(), s.sub, s.tx.clone());
-        self.release_video(&video, sub);
+        let (videos, audio, sub, tx) = (s.videos(), s.audio.clone(), s.sub, s.tx.clone());
+        for v in &videos {
+            self.release_video(v, sub);
+        }
         self.release_audio(&audio, sub);
         // what's held back still goes out (unless forced), then the connection closes
         let _ = tx.send((Instant::now() + delay, Item::End));
@@ -2072,7 +2235,9 @@ pub fn start_stream(cfg: &StreamConfig, canvas: Id) -> Result<(), String> {
             // the last connection to it is still closing: it goes now
             s.abort.store(true, Ordering::Release);
             if let Some(mut s) = st.streams.remove(&cfg.id) {
-                st.release_video(&s.video, s.sub);
+                for v in s.videos() {
+                    st.release_video(&v, s.sub);
+                }
                 st.release_audio(&s.audio, s.sub);
                 if let Some(t) = s.watch.take() {
                     let _ = t.join();
@@ -2173,7 +2338,7 @@ pub fn start_stream(cfg: &StreamConfig, canvas: Id) -> Result<(), String> {
         };
         let delay = cfg.net.delay.map_or(Duration::ZERO, |(s, _)| Duration::from_secs(s as u64));
         let (tx, rx) = unbounded();
-        let sink: Arc<dyn Sink> = Arc::new(StreamSink { tx: tx.clone(), delay, format: Mutex::new(None) });
+        let sink: Arc<dyn Sink> = Arc::new(StreamSink { tx: tx.clone(), delay, track: 0, format: Mutex::new(None) });
         let out = Arc::new(out);
         let abort = Arc::new(AtomicBool::new(false));
         let stopping = Arc::new(AtomicBool::new(false));
@@ -2201,7 +2366,7 @@ pub fn start_stream(cfg: &StreamConfig, canvas: Id) -> Result<(), String> {
         let watch = Watch {
             key,
             out,
-            video: Arc::downgrade(&video),
+            videos: vec![Arc::downgrade(&video)],
             audio: Arc::downgrade(&audio),
             sub,
             retries,
@@ -2219,7 +2384,10 @@ pub fn start_stream(cfg: &StreamConfig, canvas: Id) -> Result<(), String> {
         };
         let watch = std::thread::Builder::new().name("lightair-stream".into()).spawn(move || watch.run()).ok();
         let skipped_base = dropped_of(canvas) + video.skipped.load(Ordering::Relaxed);
-        st.streams.insert(cfg.id, StreamOut { video, audio, sub, tx, delay, stopping, abort, watch, skipped_base });
+        st.streams.insert(
+            cfg.id,
+            StreamOut { video, extra: Vec::new(), audio, sub, tx, delay, stopping, abort, watch, skipped_base },
+        );
         tracing::info!(id = %cfg.id, server = %StreamProtocol::label(&cfg.server), "own outputs: streaming");
         Ok(())
     })
@@ -2260,7 +2428,8 @@ pub fn share_groups() -> Vec<Vec<Id>> {
 /// How many video encoders the destinations use.
 pub fn stream_encoder_count() -> usize {
     with(|st| {
-        let mut seen: Vec<usize> = st.streams.values().map(|s| Arc::as_ptr(&s.video) as usize).collect();
+        let mut seen: Vec<usize> =
+            st.streams.values().flat_map(|s| s.videos()).map(|v| Arc::as_ptr(&v) as usize).collect();
         seen.sort_unstable();
         seen.dedup();
         seen.len()
@@ -2275,6 +2444,414 @@ pub fn stream_video_encoder(id: Id) -> Option<usize> {
 /// Destination `id`'s sound tracks: the libobs mix each encodes.
 pub fn stream_audio_tracks(id: Id) -> Option<Vec<usize>> {
     with(|st| st.streams.get(&id).map(|s| vec![s.audio.key.mix]))
+}
+
+// ---------------------------------------------------------------- multitrack streams
+
+/// A multitrack stream's track `t`'s encoder settings as the platform planned them (its
+/// bitrate, rate control, keyframe interval and B-frames; the rest from the destination's), and
+/// whether it may reorder frames (B-frames).
+fn track_encoder(cfg: &StreamConfig, t: &outputs::MultitrackVideo) -> (EncoderConfig, bool) {
+    let s = &t.settings;
+    let number = |k: &str| {
+        s.get(k).and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_f64().map(|f| f as u64))
+                .or_else(|| v.as_str().and_then(|x| x.trim().parse().ok()))
+        })
+    };
+    let kbps = number("bitrate").map_or(cfg.encoders.video_bitrate_kbps, |b| b as u32);
+    let cbr = s.get("rate_control").and_then(|v| v.as_str()).is_none_or(|r| r.eq_ignore_ascii_case("CBR"));
+    let bframes = match s.get("bframes").or_else(|| s.get("bf")) {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(v) => v.as_u64().is_some_and(|n| n > 0),
+        None => false,
+    };
+    let keyint = number("keyint_sec").filter(|k| *k > 0).map_or(2, |k| k as u32);
+    let enc = EncoderConfig {
+        video_encoder: t.encoder.clone(),
+        video_bitrate_kbps: kbps,
+        constant_bitrate: cbr,
+        bframes,
+        keyint_sec: keyint,
+        scaled: Some((t.width, t.height)),
+        fps_divisor: t.fps_divisor.max(1),
+        adaptive: false,
+        ..cfg.encoders.clone()
+    };
+    (enc, bframes)
+}
+
+fn gcd(a: i64, b: i64) -> i64 {
+    if b == 0 { a.abs() } else { gcd(b, a % b) }
+}
+
+/// What a multitrack stream's tracks counted when each one's last IDR went out.
+#[derive(Debug, Clone, Copy)]
+struct BpmMark {
+    rendered: u32,
+    lagged: u32,
+    dropped: u64,
+    /// Every track's encoded frames together.
+    output: u64,
+    fed: u64,
+    skipped: u32,
+    encoded: u64,
+}
+
+/// A multitrack stream's broadcast performance metrics, put in front of every track's IDRs.
+struct Bpm {
+    tracks: Vec<Weak<VideoPipe>>,
+    hevc: Vec<bool>,
+    last: Vec<Option<BpmMark>>,
+}
+
+impl Bpm {
+    fn mark(&self, track: usize, dropped: u64) -> Option<BpmMark> {
+        let (_, _, rendered, lagged) = crate::program::frame_stats();
+        let pipes: Vec<Arc<VideoPipe>> = self.tracks.iter().filter_map(Weak::upgrade).collect();
+        let p = self.tracks.get(track)?.upgrade()?;
+        Some(BpmMark {
+            rendered,
+            lagged,
+            dropped,
+            output: pipes.iter().map(|p| p.encoder.packets()).sum(),
+            fed: p.fed.load(Ordering::Relaxed),
+            skipped: p.skipped.load(Ordering::Relaxed),
+            encoded: p.encoder.packets(),
+        })
+    }
+
+    /// The messages for track `track`'s IDR going out now: what was counted since its last one
+    /// (zeros the first time). `dropped`: what the connection has dropped so far.
+    fn messages(&mut self, track: usize, dropped: u64) -> Vec<u8> {
+        use lightair_feed::bpm::{RenditionCounts, SessionCounts};
+        let Some(now) = self.mark(track, dropped) else { return Vec::new() };
+        let d = |a: u64, b: u64| a.saturating_sub(b).min(u32::MAX as u64) as u32;
+        let (session, rendition) = match self.last.get(track).copied().flatten() {
+            Some(was) => (
+                SessionCounts {
+                    rendered: now.rendered.saturating_sub(was.rendered),
+                    lagged: now.lagged.saturating_sub(was.lagged),
+                    dropped: d(now.dropped, was.dropped),
+                    output: d(now.output, was.output),
+                },
+                RenditionCounts {
+                    input: d(now.fed, was.fed),
+                    skipped: now.skipped.saturating_sub(was.skipped),
+                    output: d(now.encoded, was.encoded),
+                },
+            ),
+            None => Default::default(),
+        };
+        if let Some(l) = self.last.get_mut(track) {
+            *l = Some(now);
+        }
+        let hevc = self.hevc.get(track).copied().unwrap_or(false);
+        lightair_feed::bpm::sei_nals(hevc, std::time::SystemTime::now(), session, rendition)
+    }
+}
+
+/// Hands a multitrack destination's packets to its sender, each when its delay is up, in
+/// decode time order across its tracks and sound (a packet goes once every track and the
+/// sound have reached its time, or after half a second), every IDR with the broadcast
+/// performance metrics in front. `tracks`: its picture tracks.
+fn pump_tracks(
+    rx: Receiver<(Instant, Item)>,
+    out: Arc<Out>,
+    base_ns: i64,
+    abort: Arc<AtomicBool>,
+    frames: Arc<AtomicU64>,
+    tracks: usize,
+    mut bpm: Bpm,
+) {
+    const HOLD: Duration = Duration::from_millis(500);
+    let us = |ns: i64| ((ns - base_ns).max(0) / 1000) as u64;
+    // per source (each track, then the sound): the latest decode time come
+    let mut latest: Vec<Option<i64>> = vec![None; tracks + 1];
+    // (decode time, order come, when come, the packet)
+    let mut held: Vec<(i64, u64, Instant, Item)> = Vec::new();
+    let mut order = 0u64;
+    let mut ending = false;
+    'run: loop {
+        match rx.recv_timeout(Duration::from_millis(20)) {
+            Ok((due, item)) => {
+                loop {
+                    if abort.load(Ordering::Acquire) {
+                        break 'run;
+                    }
+                    let now = Instant::now();
+                    if due <= now {
+                        break;
+                    }
+                    std::thread::sleep((due - now).min(Duration::from_millis(50)));
+                }
+                let (source, dts) = match &item {
+                    Item::Format(track, format) => {
+                        out.parameter_sets(*track, format);
+                        continue;
+                    }
+                    Item::Video(track, p) => (*track as usize, p.dts),
+                    Item::Audio(p) => (tracks, p.dts),
+                    Item::End => {
+                        ending = true;
+                        (usize::MAX, 0)
+                    }
+                };
+                if let Some(l) = latest.get_mut(source) {
+                    *l = Some(l.map_or(dts, |was| was.max(dts)));
+                    held.push((dts, order, Instant::now(), item));
+                    order += 1;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => ending = true,
+        }
+        if abort.load(Ordering::Acquire) {
+            break;
+        }
+        // what can go: up to the time every source has reached, and whatever waited too long
+        let mut floor =
+            if ending { i64::MAX } else { latest.iter().map(|l| l.unwrap_or(i64::MIN)).min().unwrap_or(i64::MIN) };
+        if let Some(waited) = held.iter().filter(|h| h.2.elapsed() >= HOLD).map(|h| h.0).max() {
+            floor = floor.max(waited);
+        }
+        held.sort_by_key(|h| (h.0, h.1));
+        let ready = held.iter().take_while(|h| h.0 <= floor).count();
+        for (_, _, _, item) in held.drain(..ready) {
+            match item {
+                Item::Video(track, p) => {
+                    let p = if p.key {
+                        let mut data = bpm.messages(track as usize, out.stats().dropped);
+                        data.extend_from_slice(&p.data);
+                        Arc::new(Pkt { data, pts: p.pts, dts: p.dts, key: true })
+                    } else {
+                        p
+                    };
+                    out.video(track, &p, us(p.pts), us(p.dts));
+                    if track == 0 {
+                        frames.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Item::Audio(p) => out.audio(&p.data, us(p.pts)),
+                Item::Format(..) | Item::End => {}
+            }
+        }
+        if ending {
+            break;
+        }
+    }
+}
+
+/// Starts destination `cfg.id` as several encodes in one RTMP connection (Enhanced
+/// Broadcasting), as `plan` says: video track *i* made from canvas `canvases[i]`, scaled to its
+/// size, at its rate and bitrate, every track's keyframes together; the plan's first live sound
+/// track on the destination's mix. `cfg.server` and `cfg.key` are the plan's ingest and key.
+pub fn start_multitrack_stream(cfg: &StreamConfig, plan: &outputs::Multitrack, canvases: &[Id]) -> Result<(), String> {
+    let key = OutputKey::Stream(cfg.id);
+    with(|st| {
+        if let Some(s) = st.streams.get(&cfg.id) {
+            if !s.stopping.load(Ordering::Acquire) && !s.finished() {
+                return Ok(());
+            }
+            // the last connection to it is still closing: it goes now
+            s.abort.store(true, Ordering::Release);
+            if let Some(mut s) = st.streams.remove(&cfg.id) {
+                for v in s.videos() {
+                    st.release_video(&v, s.sub);
+                }
+                st.release_audio(&s.audio, s.sub);
+                if let Some(t) = s.watch.take() {
+                    let _ = t.join();
+                }
+            }
+        }
+        let fail = |why: String| {
+            runtime().update(key, |s| s.state = OutputState::Failed(why.clone()));
+            Err(why)
+        };
+        let server = cfg.server.trim().to_string();
+        let lower = server.to_ascii_lowercase();
+        if !(lower.starts_with("rtmp://") || lower.starts_with("rtmps://")) {
+            return fail("Enhanced Broadcasting goes over RTMP or RTMPS.".into());
+        }
+        if plan.video.is_empty() || plan.audio.is_empty() || canvases.len() != plan.video.len() {
+            return fail("The platform's plan has no video or audio to send.".into());
+        }
+        if plan.video.len() > 255 {
+            return fail("The platform's plan has more video tracks than a stream can carry.".into());
+        }
+        if let Some(t) =
+            plan.video.iter().find(|t| !matches!(video_codec(&t.encoder), VideoCodec::H264 | VideoCodec::Hevc { .. }))
+        {
+            return fail(format!("The platform's plan asks for an encoder Lightair doesn't have ({}).", t.encoder));
+        }
+        if cfg.vod_mix.is_some() && !plan.vod_audio.is_empty() {
+            tracing::warn!(id = %cfg.id, "own outputs: Enhanced Broadcasting goes without the VOD sound track (not sent yet)");
+        }
+        if plan.audio.len() > 1 {
+            tracing::warn!(id = %cfg.id, tracks = plan.audio.len(), "own outputs: only the plan's first live sound track is sent");
+        }
+        let encoders: Vec<(EncoderConfig, bool)> = plan.video.iter().map(|t| track_encoder(cfg, t)).collect();
+        // the canvases in the stream, each with the frames its tracks all take (a keyframe can
+        // only fall on those), and each track's canvas among them
+        let mut beats: Vec<(Id, i64)> = Vec::new();
+        let mut places = Vec::with_capacity(canvases.len());
+        for (canvas, (enc, _)) in canvases.iter().zip(&encoders) {
+            let divisor = enc.fps_divisor.max(1) as i64;
+            match beats.iter().position(|(c, _)| c == canvas) {
+                Some(i) => {
+                    let step = beats[i].1;
+                    beats[i].1 = step / gcd(step, divisor) * divisor;
+                    places.push(i);
+                }
+                None => {
+                    places.push(beats.len());
+                    beats.push((*canvas, divisor));
+                }
+            }
+        }
+        let keyint = encoders.first().map_or(2, |(e, _)| e.keyint_sec);
+        let gop = Arc::new(Gop::new(keyint, &beats.iter().map(|(_, step)| *step).collect::<Vec<_>>()));
+        let audio_kbps =
+            plan.audio[0].get("bitrate").and_then(|b| b.as_u64()).map_or(cfg.encoders.audio_bitrate_kbps, |b| b as u32);
+        // the encoders: each track's own
+        let mut videos: Vec<Arc<VideoPipe>> = Vec::with_capacity(encoders.len());
+        for ((canvas, (enc, reorder)), place) in canvases.iter().zip(&encoders).zip(&places) {
+            match st.video_pipe_in(*canvas, enc, *reorder, true, Some((gop.clone(), *place))) {
+                Ok(v) => videos.push(v),
+                Err(e) => {
+                    for v in &videos {
+                        st.release_video(v, 0);
+                    }
+                    return fail(e);
+                }
+            }
+        }
+        let audio = match st.audio_pipe(cfg.encoders.audio_mix, AudioCodec::Aac, audio_kbps) {
+            Ok(a) => a,
+            Err(e) => {
+                for v in &videos {
+                    st.release_video(v, 0);
+                }
+                return fail(e);
+            }
+        };
+        let release = |st: &mut State| {
+            for v in &videos {
+                st.release_video(v, 0);
+            }
+            st.release_audio(&audio, 0);
+        };
+        // the connection: every track described as it's encoded
+        let bind = match cfg.net.bind_ip.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(ip) => match ip.parse() {
+                Ok(ip) => Some(bind_to(ip)),
+                Err(_) => {
+                    release(st);
+                    return fail(format!("{ip} isn't an address to send from."));
+                }
+            },
+            None => None,
+        };
+        let tracks: Vec<RtmpTrack> = videos
+            .iter()
+            .map(|v| {
+                let canvas = *v.canvas.lock();
+                let (num, den) = canvas_shape(canvas).map_or((30, 1), |(_, _, n, d)| (n, d));
+                RtmpTrack {
+                    codec: if matches!(v.key.codec, VideoCodec::Hevc { .. }) {
+                        RtmpVideo::Hevc
+                    } else {
+                        RtmpVideo::Avc
+                    },
+                    width: v.key.width,
+                    height: v.key.height,
+                    fps: num as f64 / (den.max(1) as f64 * v.key.divisor as f64),
+                    kbps: v.key.kbps,
+                }
+            })
+            .collect();
+        let total_kbps = tracks.iter().map(|t| t.kbps).sum::<u32>() + audio.key.kbps;
+        let info = RtmpTracks {
+            video: tracks,
+            audio_kbps: audio.key.kbps,
+            sample_rate: SAMPLE_RATE,
+            channels: CHANNELS as u8,
+        };
+        let sender = match RtmpSender::start_multitrack(RtmpTarget { url: server, key: cfg.key.clone(), bind }, info) {
+            Ok(s) => s,
+            Err(e) => {
+                release(st);
+                return fail(e);
+            }
+        };
+        sender.audio_config(SAMPLE_RATE, CHANNELS as u8);
+        sender.set_bitrate(total_kbps);
+        let out = Arc::new(Out::Multi(sender));
+        let delay = cfg.net.delay.map_or(Duration::ZERO, |(s, _)| Duration::from_secs(s as u64));
+        let (tx, rx) = unbounded();
+        let abort = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let frames = Arc::new(AtomicU64::new(0));
+        let base_ns = now_ns() - 1_000_000_000;
+        let bpm = Bpm {
+            tracks: videos.iter().map(Arc::downgrade).collect(),
+            hevc: videos.iter().map(|v| matches!(v.key.codec, VideoCodec::Hevc { .. })).collect(),
+            last: vec![None; videos.len()],
+        };
+        let pump = {
+            let (out, abort, frames, n) = (out.clone(), abort.clone(), frames.clone(), videos.len());
+            std::thread::Builder::new()
+                .name("lightair-send".into())
+                .spawn(move || pump_tracks(rx, out, base_ns, abort, frames, n, bpm))
+        };
+        let pump = match pump {
+            Ok(p) => p,
+            Err(e) => {
+                release(st);
+                return fail(format!("Couldn't start the stream: {e}"));
+            }
+        };
+        let retries = cfg.reconnect.map_or(DEFAULT_RETRIES, |(r, _)| r);
+        runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, retries, ..Default::default() });
+        let sub = next_id();
+        for (i, v) in videos.iter().enumerate() {
+            let sink: Arc<dyn Sink> =
+                Arc::new(StreamSink { tx: tx.clone(), delay, track: i as u8, format: Mutex::new(None) });
+            if i == 0 {
+                audio.subscribe(0, sink.clone(), sub);
+            }
+            v.subscribe_as(sub, sink);
+        }
+        // every track set up: their first keyframes come together
+        gop.ready.store(true, Ordering::Release);
+        let watch = Watch {
+            key,
+            out,
+            videos: videos.iter().map(Arc::downgrade).collect(),
+            audio: Arc::downgrade(&audio),
+            sub,
+            retries,
+            adapt: None,
+            audio_kbps: audio.key.kbps,
+            frames,
+            stopping: stopping.clone(),
+            abort: abort.clone(),
+            pump,
+        };
+        let watch = std::thread::Builder::new().name("lightair-stream".into()).spawn(move || watch.run()).ok();
+        let mut videos = videos.into_iter();
+        let Some(video) = videos.next() else { return fail("The platform's plan has no video to send.".into()) };
+        let skipped_base = dropped_of(*video.canvas.lock()) + video.skipped.load(Ordering::Relaxed);
+        tracing::info!(id = %cfg.id, server = %StreamProtocol::label(&cfg.server), tracks = plan.video.len(),
+            "own outputs: streaming several encodes in one connection");
+        st.streams.insert(
+            cfg.id,
+            StreamOut { video, extra: videos.collect(), audio, sub, tx, delay, stopping, abort, watch, skipped_base },
+        );
+        Ok(())
+    })
 }
 
 /// Starts `canvas`'s replay buffer (`cfg.canvas` keys it).

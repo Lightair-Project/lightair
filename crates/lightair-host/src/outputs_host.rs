@@ -116,18 +116,23 @@ impl Outputs {
         }
     }
 
-    /// Enhanced Broadcasting (several encodes in one RTMP connection): not available without
-    /// libobs yet.
+    /// Enhanced Broadcasting: several encodes in one RTMP connection, as the platform's `plan`
+    /// says (`canvases[i]`: the canvas video track *i* is made from), made by Lightair's own
+    /// encoders. `cfg.server` and `cfg.key` are the plan's ingest and key.
     pub fn start_multitrack_stream(
         &mut self,
         cfg: &StreamConfig,
         plan: &Multitrack,
         canvases: &[Id],
     ) -> Result<(), String> {
-        let _ = (plan, canvases);
-        let why = "Enhanced Broadcasting isn't available without libobs yet.".to_string();
-        crate::outputs::mark_failed(crate::outputs::OutputKey::Stream(cfg.id), &why);
-        Err(why)
+        #[cfg(target_os = "macos")]
+        return crate::own_outputs::start_multitrack_stream(cfg, plan, canvases);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (plan, canvases);
+            crate::outputs::mark_failed(crate::outputs::OutputKey::Stream(cfg.id), NOT_HERE);
+            Err(NOT_HERE.into())
+        }
     }
 
     /// Which running streams share an encoder: one list of destinations per video encoder.
