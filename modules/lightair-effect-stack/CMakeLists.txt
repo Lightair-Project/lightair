@@ -101,3 +101,30 @@ set_target_properties(lightair-effect-stack PROPERTIES
   MACOSX_BUNDLE_GUI_IDENTIFIER "app.lightair.effect-stack"
   MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
   MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
+
+# The trackers alone, without libobs (faces, segmentation, people, bodies through Core ML and
+# Vision): Lightair's own engine calls their C API directly (lightair-host's tracker.rs). The
+# compiled models sit beside the library, in tracker-models.
+add_library(lightair-tracker SHARED
+  src/tracker/tracker-core.cpp
+  src/tracker/tracker-util.cpp
+  src/tracker/pigment-calib.cpp
+  src/tracker/mediapipe.cpp
+  src/tracker/backend-coreml.mm
+  src/tracker/coreml-common.mm
+  src/tracker/segmenter-coreml.mm
+  src/tracker/person-vision.mm
+  src/tracker/body-mediapipe.cpp
+  src/tracker/body-tracker.cpp
+  src/tracker/body-coreml.mm
+)
+target_compile_definitions(lightair-tracker PRIVATE BEAUTY_TRACKER_COREML)
+target_include_directories(lightair-tracker PRIVATE "${SIMDE_DIR}" src src/tracker)
+target_compile_options(lightair-tracker PRIVATE -Wall -Wno-unused-parameter -Wno-missing-field-initializers)
+target_link_libraries(lightair-tracker PRIVATE "-framework Foundation" "-framework CoreVideo" "-framework CoreGraphics"
+  "-framework Vision" "-framework CoreML" "-framework Accelerate" "-framework CoreMedia")
+set_target_properties(lightair-tracker PROPERTIES INSTALL_NAME_DIR "@rpath")
+add_dependencies(lightair-tracker coreml-models)
+add_custom_command(TARGET lightair-tracker POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E rm -rf "$<TARGET_FILE_DIR:lightair-tracker>/tracker-models"
+  COMMAND "${CMAKE_COMMAND}" -E copy_directory "${COREML_OUT}" "$<TARGET_FILE_DIR:lightair-tracker>/tracker-models")
