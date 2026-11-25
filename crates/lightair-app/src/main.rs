@@ -38,6 +38,7 @@ mod plugin_editor;
 mod plugin_scan;
 mod pngtuber_editor;
 mod outputs_panel;
+mod packages;
 mod permissions;
 mod piair;
 mod platforms;

@@ -214,6 +214,12 @@ fn refusal(refused: &[String]) -> Option<String> {
 impl StudioWindow {
     /// Takes files dropped from Finder or Explorer.
     pub(super) fn drop_files(&mut self, paths: &[PathBuf], to: DropTo, window: &mut Window, cx: &mut Context<Self>) {
+        // packages (.airpkg, .lwidget, a package folder) are installed, not copied in
+        let rest = self.take_package_drop(paths, window, cx);
+        if rest.is_empty() {
+            return;
+        }
+        let paths = rest.as_slice();
         let Some(assets) = self.studio.read(cx).assets_dir() else { return };
         let into = match &to {
             DropTo::Assets(folder) if folder.starts_with(&assets) => folder.clone(),

@@ -123,6 +123,34 @@ pub fn play_pad(studio: &Studio, pad: Option<&Pad>) -> bool {
 /// Colours offered for pads (0xRRGGBB).
 const PAD_COLOURS: &[u32] = &[0x5B8DEF, 0xF5A524, 0x17C964, 0xF31260, 0x9353D3, 0x06B7DB, 0xFF7A45, 0x8A8F98];
 
+/// Adds a pad for each sound file, as one undo step; the first pad brings the soundboard (its
+/// source and its mixer track).
+pub(crate) fn add_pads(studio: &Entity<Studio>, paths: &[std::path::PathBuf], cx: &mut App) {
+    let workspace = studio.read(cx).workspace().clone();
+    let mut commands = Vec::new();
+    if board_source(&workspace).is_none() {
+        let source = Source {
+            id: Id::new(),
+            name: "Soundboard".into(),
+            kind: lightair_obs::soundboard::KIND.into(),
+            settings: json!({}),
+            effects: Vec::new(),
+        };
+        let track = Track::new("Soundboard", source.id);
+        commands.push(Command::AddSource { source });
+        commands.push(Command::AddTrack { track, index: None });
+    }
+    let mut show = workspace.show.clone();
+    for path in paths {
+        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Sound".into());
+        let mut pad = Pad::new(name, path.to_string_lossy());
+        pad.color = PAD_COLOURS[show.pads.len() % PAD_COLOURS.len()];
+        show.pads.push(pad);
+    }
+    commands.push(Command::SetShow { show, label: "Add to the soundboard".into() });
+    exec(studio, Command::Batch { label: "Add to the soundboard".into(), commands }, cx);
+}
+
 pub struct SoundboardPanel {
     studio: Entity<Studio>,
     focus: FocusHandle,
@@ -160,32 +188,7 @@ impl SoundboardPanel {
         let studio = self.studio.clone();
         cx.spawn_in(window, async move |_, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
-            let _ = cx.update(|_, cx| {
-                let workspace = studio.read(cx).workspace().clone();
-                let mut commands = Vec::new();
-                // the first pad brings the soundboard: its source and its mixer track
-                if board_source(&workspace).is_none() {
-                    let source = Source {
-                        id: Id::new(),
-                        name: "Soundboard".into(),
-                        kind: lightair_obs::soundboard::KIND.into(),
-                        settings: json!({}),
-                        effects: Vec::new(),
-                    };
-                    let track = Track::new("Soundboard", source.id);
-                    commands.push(Command::AddSource { source });
-                    commands.push(Command::AddTrack { track, index: None });
-                }
-                let mut show = workspace.show.clone();
-                for path in paths {
-                    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Sound".into());
-                    let mut pad = Pad::new(name, path.to_string_lossy());
-                    pad.color = PAD_COLOURS[show.pads.len() % PAD_COLOURS.len()];
-                    show.pads.push(pad);
-                }
-                commands.push(Command::SetShow { show, label: "Add to the soundboard".into() });
-                exec(&studio, Command::Batch { label: "Add to the soundboard".into(), commands }, cx);
-            });
+            let _ = cx.update(|_, cx| add_pads(&studio, &paths, cx));
         })
         .detach();
     }

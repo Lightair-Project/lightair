@@ -131,6 +131,8 @@ enum Pick {
     Widget(&'static str),
     /// A widget brought in from its files.
     Import,
+    /// A widget from an installed package (an index into `crate::packages::widgets()`).
+    Package(usize),
 }
 
 /// A type as listed: what it adds, its group (and a widget's gallery group), icon, name, what it is.
@@ -179,6 +181,18 @@ fn entries(query: &str, group: Group) -> Vec<Entry> {
                         about: b.about,
                     });
                 }
+            }
+        }
+        for (i, w) in crate::packages::widgets().iter().enumerate() {
+            if matches(query, &[w.name, w.package, "package", "widget"]) {
+                out.push(Entry {
+                    pick: Pick::Package(i),
+                    group: Group::Widgets,
+                    sub: Some("From packages"),
+                    icon: "package",
+                    name: w.name,
+                    about: w.package,
+                });
             }
         }
         if matches(query, &["Import a widget", "StreamElements", "Streamlabs", "custom widget", "lwidget"]) {
@@ -458,6 +472,7 @@ impl StudioWindow {
             Pick::Kind(kind) => self.pick(kind, window, cx),
             Pick::Widget(kind) => self.add_widget(kind, None, window, cx),
             Pick::Import => self.import_widget(window, cx),
+            Pick::Package(i) => self.add_package_widget(i, window, cx),
         }
     }
 

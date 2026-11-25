@@ -43,6 +43,8 @@ mod connections;
 mod console_panel;
 mod panel_window;
 mod live_api;
+mod package_export;
+mod packages;
 mod widget_props;
 mod menus;
 mod modes;
@@ -493,6 +495,8 @@ pub struct StudioWindow {
     palette: Option<palette::Palette>,
     /// The Go Live review sheet, while open.
     go_live_sheet: Option<golive::GoLiveSheet>,
+    /// Packages: the Export as package sheet, and drops of package files (shell/packages.rs).
+    packages: packages::PackagesUi,
     /// A drag-to-select box on the canvas: canvas, start and current point (canvas units), and
     /// whether it adds to the selection (⇧).
     marquee: Option<Marquee>,
@@ -942,6 +946,7 @@ impl StudioWindow {
             safe_vertical: None,
             palette: None,
             go_live_sheet: None,
+            packages: Default::default(),
             marquee: None,
             canvas_menu: None,
             settings_open: false,
@@ -1233,6 +1238,7 @@ impl StudioWindow {
             || self.add_object.is_some()
             || self.effect_sheet.is_some()
             || self.go_live_sheet.is_some()
+            || self.packages.export.is_some()
             || self.source_picker.is_some()
             || self.library_sheet.is_some()
             || self.anchor_sheet.is_some()
@@ -2650,6 +2656,8 @@ impl Render for StudioWindow {
             .on_action(cx.listener(|this, _: &ShowLibrary, _, cx| this.show_place(Place::Library, cx)))
             .on_action(cx.listener(|this, _: &ShowLive, _, cx| this.show_place(Place::Live, cx)))
             .on_action(cx.listener(|this, _: &ShowEditor, _, cx| this.show_place(Place::Editor, cx)))
+            // package files dropped anywhere are installed (shell/packages.rs)
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.drop_on_window(paths.paths(), window, cx)))
             .size_full()
             .flex()
             .flex_col()
@@ -2674,6 +2682,7 @@ impl Render for StudioWindow {
             .children(self.anchor_sheet_overlay(cx))
             .children(self.outputs.update(cx, |o, cx| o.dialog(cx)))
             .children(self.go_live_overlay(cx))
+            .children(self.package_export_overlay(cx))
             .children(self.start_failure_overlay(cx))
             .children(self.plan_warning_overlay(cx))
             .children(self.settings_overlay(cx))

@@ -39,6 +39,7 @@ pub(super) struct DockPanels {
     notes: Entity<crate::show_panel::NotesPanel>,
     rundown: Entity<crate::show_panel::RundownPanel>,
     ptz: Entity<crate::show_panel::PtzPanel>,
+    pub(super) packages: Entity<super::packages::PackagesPanel>,
 }
 
 impl DockPanels {
@@ -67,6 +68,7 @@ impl DockPanels {
         reg!("notes", self.notes);
         reg!("rundown", self.rundown);
         reg!("ptz", self.ptz);
+        reg!("packages", self.packages);
     }
 }
 
@@ -102,6 +104,7 @@ pub(super) fn populate_dock(
             .panel_view(panel_handle(panels.rundown.clone()), cx)
             .panel_view(panel_handle(panels.notes.clone()), cx)
             .panel_view(panel_handle(panels.ptz.clone()), cx)
+            .panel_view(panel_handle(panels.packages.clone()), cx)
             .active_index(match hook.as_deref() {
                 Some(h) if h.starts_with("assets") => 1,
                 Some(h) if h.starts_with("automations") => 2,
@@ -382,6 +385,10 @@ impl StudioWindow {
             notes: cx.new(|cx| crate::show_panel::NotesPanel::new(self.studio.clone(), cx)),
             rundown: cx.new(|cx| crate::show_panel::RundownPanel::new(self.studio.clone(), cx)),
             ptz: cx.new(|cx| crate::show_panel::PtzPanel::new(self.studio.clone(), cx)),
+            packages: {
+                let (shell, studio) = (cx.entity(), self.studio.clone());
+                cx.new(|cx| super::packages::PackagesPanel::new(shell, studio, window, cx))
+            },
         };
         // Every group shows a tab bar, even with one panel, so any panel can be dropped onto
         // any header to join it as a tab (and the canvas gets a header like the rest).

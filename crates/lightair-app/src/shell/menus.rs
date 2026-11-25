@@ -274,10 +274,22 @@ pub(super) fn object_menu(
     if !f.empty {
         menu = menu.separator().menu_with_icon("Fill canvas", ui::icon("maximize"), Box::new(FillCanvas));
     }
+    menu = menu.separator();
     if f.count == 1 {
-        menu = menu.separator().menu_with_icon("Save as prefab", ui::icon("package-plus"), Box::new(SaveAsPrefab));
+        menu = menu.menu_with_icon("Save as prefab", ui::icon("package-plus"), Box::new(SaveAsPrefab));
     }
-    menu
+    let s = shell.clone();
+    menu.item(PopupMenuItem::new("Export as package…").icon(ui::icon("package")).on_click(move |_, window, cx| {
+        if let Some(s) = s.upgrade() {
+            s.update(cx, |w, cx| {
+                let studio = w.studio.read(cx);
+                let from = studio.selected_scene.map(|scene| super::package_export::ExportFrom::Objects(scene, studio.selection()));
+                if let Some(from) = from {
+                    w.open_package_export(from, window, cx);
+                }
+            });
+        }
+    }))
 }
 
 /// The menu for empty space in the Hierarchy or on the canvas.
@@ -321,7 +333,7 @@ pub(super) fn scene_menu(
             }
         }
     };
-    let (s1, s2) = (shell.clone(), shell.clone());
+    let (s1, s2, s4) = (shell.clone(), shell.clone(), shell.clone());
     let menu = menu.item(
         PopupMenuItem::new("Go on air")
             .icon(ui::icon("radio"))
@@ -337,6 +349,11 @@ pub(super) fn scene_menu(
     .item(PopupMenuItem::new("Duplicate").icon(ui::icon("copy-plus")).on_click(move |_, _, cx| {
         if let Some(s) = s2.upgrade() {
             s.update(cx, |w, cx| w.duplicate_scene(scene, cx));
+        }
+    }))
+    .item(PopupMenuItem::new("Export as package…").icon(ui::icon("package")).on_click(move |_, window, cx| {
+        if let Some(s) = s4.upgrade() {
+            s.update(cx, |w, cx| w.open_package_export(super::package_export::ExportFrom::Scene(scene), window, cx));
         }
     }))
     .item(

@@ -701,6 +701,10 @@ impl Studio {
         {
             tracing::error!(%e, "compaction failed");
         }
+        // the packages the show uses, beside it (packages.json, packages-lock.json)
+        if let Some(dir) = self.workspace_dir() {
+            crate::packages::record_show(&dir, self.doc.workspace());
+        }
     }
 
     /// Compacts and waits for it to be on disk (the package writes on its own thread): on quit.

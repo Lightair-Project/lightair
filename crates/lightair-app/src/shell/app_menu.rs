@@ -34,7 +34,10 @@ actions!(
         StudioTakeMenu,
         GoLiveMenu,
         SaveClipMenu,
-        KeyboardShortcuts
+        KeyboardShortcuts,
+        InstallPackage,
+        ExportAsPackage,
+        ShowPackages
     ]
 );
 
@@ -65,6 +68,9 @@ pub fn menus() -> Vec<Menu> {
             act("Add Existing Recordings…", AddExistingRecordings),
             act("Import OBS Scenes…", ImportObsScenes),
             MenuItem::separator(),
+            act("Install Package…", InstallPackage),
+            act("Export as Package…", ExportAsPackage),
+            MenuItem::separator(),
             act("Close Window", CloseWindow),
         ]),
         Menu::new("Edit").items([
@@ -87,6 +93,8 @@ pub fn menus() -> Vec<Menu> {
             act("Library", ShowLibrary),
             act("Live", ShowLive),
             act("Editor", ShowEditor),
+            MenuItem::separator(),
+            act("Packages", ShowPackages),
             MenuItem::separator(),
             MenuItem::submenu(Menu::new("Layout").items([
                 act("Edit", LayoutEdit),
@@ -177,6 +185,9 @@ impl StudioWindow {
                 this.library.update(cx, |l, cx| l.add_existing(window, cx));
             }))
             .on_action(cx.listener(|this, _: &ImportObsScenes, window, cx| this.import_obs(window, cx)))
+            .on_action(cx.listener(|this, _: &InstallPackage, window, cx| this.pick_package_files(window, cx)))
+            .on_action(cx.listener(|this, _: &ExportAsPackage, window, cx| this.export_selection_as_package(window, cx)))
+            .on_action(cx.listener(|this, _: &ShowPackages, window, cx| this.show_packages_panel(window, cx)))
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|_, _: &ZoomWindow, window, _| window.zoom_window()))
