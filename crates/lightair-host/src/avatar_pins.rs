@@ -2,6 +2,9 @@
 //! pins"): an anchor's place in the avatar's picture ([`Spot`]) and the avatar's box on the
 //! canvas ([`Placement`]), and a point of the picture on the canvas ([`on_canvas`]).
 
+use std::collections::HashMap;
+
+use lightair_avatar::vrm::Model;
 use lightair_model::Fit;
 
 /// A point of an avatar something can be pinned to.
@@ -66,4 +69,81 @@ pub fn on_canvas(host: &Placement, w: f32, h: f32, x: f32, y: f32) -> (f32, f32)
     let (lx, ly) = ((x - w / 2.0) * kx, (y - h / 2.0) * ky);
     let (s, c) = host.rot.to_radians().sin_cos();
     (host.cx + lx * c - ly * s, host.cy + lx * s + ly * c)
+}
+
+/// Keys from names, unique: the second "Hair" is `Hair#2`.
+pub fn keyed(names: impl Iterator<Item = String>) -> Vec<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    names
+        .map(|n| {
+            let k = seen.entry(n.clone()).or_insert(0);
+            *k += 1;
+            if *k == 1 { n } else { format!("{n}#{k}") }
+        })
+        .collect()
+}
+
+/// "leftUpperArm" → "Left upper arm".
+fn words(camel: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in camel.chars().enumerate() {
+        if i == 0 {
+            out.extend(c.to_uppercase());
+        } else if c.is_uppercase() {
+            out.push(' ');
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Where a humanoid bone is filed.
+fn humanoid_group(name: &str) -> &'static str {
+    let left = name.starts_with("left");
+    let right = name.starts_with("right");
+    let finger = ["Thumb", "Index", "Middle", "Ring", "Little", "Hand"].iter().any(|f| name.contains(f));
+    if ["head", "neck", "jaw", "leftEye", "rightEye"].contains(&name) {
+        "Head"
+    } else if ["hips", "spine", "chest", "upperChest"].contains(&name) {
+        "Body"
+    } else if finger && left {
+        "Left hand"
+    } else if finger && right {
+        "Right hand"
+    } else if name.contains("Leg") || name.contains("Foot") || name.contains("Toes") {
+        "Legs"
+    } else if left {
+        "Left arm"
+    } else if right {
+        "Right arm"
+    } else {
+        "Body"
+    }
+}
+
+const VRM_GROUPS: [&str; 9] =
+    ["Head", "Body", "Left arm", "Left hand", "Right arm", "Right hand", "Legs", "Other bones", ""];
+
+/// A VRM model's anchors (its bones), with each one's node.
+pub fn vrm_anchors(m: &Model) -> Vec<(Anchor, usize)> {
+    let humanoid: HashMap<usize, &str> = m.humanoid.iter().map(|(name, &n)| (n, name.as_str())).collect();
+    let joints: std::collections::HashSet<usize> = m.skins.iter().flat_map(|s| s.joints.iter().copied()).collect();
+    let bones: Vec<usize> = (0..m.nodes.len()).filter(|n| humanoid.contains_key(n) || joints.contains(n)).collect();
+    let keys = keyed(bones.iter().map(|&n| m.nodes[n].name.clone()));
+    let mut out: Vec<(Anchor, usize)> = bones
+        .iter()
+        .zip(keys)
+        .map(|(&n, key)| {
+            let (label, group) = match humanoid.get(&n) {
+                Some(h) => (words(h), humanoid_group(h).to_string()),
+                None => (m.nodes[n].name.clone(), "Other bones".to_string()),
+            };
+            (Anchor { key, label, group }, n)
+        })
+        .collect();
+    let rank = |g: &str| VRM_GROUPS.iter().position(|x| *x == g).unwrap_or(VRM_GROUPS.len());
+    out.sort_by_key(|(a, n)| (rank(&a.group), *n));
+    out
 }

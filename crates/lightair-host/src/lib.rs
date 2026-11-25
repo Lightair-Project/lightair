@@ -9,6 +9,8 @@ pub mod audio_tap;
 pub mod avatar;
 pub mod avatar_pins;
 #[cfg(target_os = "macos")]
+pub mod avatar_run;
+#[cfg(target_os = "macos")]
 pub mod bridge;
 #[cfg(target_os = "macos")]
 pub mod buffers;

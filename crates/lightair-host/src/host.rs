@@ -62,6 +62,8 @@ enum Need {
     Link,
     /// A phone camera: its streams decoded (macOS).
     Phone,
+    /// An avatar: its camera tracked and its posing published (macOS).
+    Avatar,
     /// An audio input the mixer opens itself: its device setting ("" or "default": the system's).
     Device(String),
     /// Something that has no runtime without libobs yet (what it is, for the log).
@@ -112,7 +114,8 @@ fn need(source: &Source) -> Need {
         kinds::DESKTOP_AUDIO | kinds::APP_AUDIO => Need::Missing("desktop or app sound"),
         crate::phone_camera::KIND if mac => Need::Phone,
         crate::phone_camera::KIND => Need::Missing("phone camera"),
-        "lightair_avatar" => Need::Missing("avatar"),
+        crate::avatar::KIND if mac => Need::Avatar,
+        crate::avatar::KIND => Need::Missing("avatar"),
         "lightair_dslr" => Need::Missing("camera by USB"),
         _ => Need::Nothing,
     }
@@ -180,6 +183,8 @@ enum Runtime {
     Link,
     #[cfg(target_os = "macos")]
     Phone(crate::phone_run::PhoneCamera),
+    #[cfg(target_os = "macos")]
+    Avatar(crate::avatar_run::AvatarRuntime),
 }
 
 /// A media source's playlist: its order and place, and when its file last started (a new file
@@ -522,6 +527,8 @@ impl Host {
                         *was = now;
                     }
                 }
+                #[cfg(target_os = "macos")]
+                Runtime::Avatar(avatar) => avatar.set_shown(showing.contains(id)),
                 #[cfg(any(target_os = "macos", windows))]
                 Runtime::Web { page, shown } => {
                     let now = showing.contains(id);
@@ -574,6 +581,8 @@ impl Host {
             },
             #[cfg(any(target_os = "macos", windows))]
             Some(Runtime::Web { page, .. }) => page.set_options(page_options(s)),
+            #[cfg(target_os = "macos")]
+            Some(Runtime::Avatar(avatar)) => avatar.set_settings(s),
             _ => {}
         }
         matches!(need, Need::Device(_))
@@ -663,6 +672,8 @@ impl Host {
             }
             #[cfg(target_os = "macos")]
             Need::Phone => Runtime::Phone(crate::phone_run::PhoneCamera::new(id)),
+            #[cfg(target_os = "macos")]
+            Need::Avatar => Runtime::Avatar(crate::avatar_run::AvatarRuntime::new(id, s)),
             #[allow(unreachable_patterns)]
             _ => return,
         };
@@ -1052,7 +1063,10 @@ impl Host {
 
     /// An avatar source's status (`None`: avatars don't run without libobs yet).
     pub fn avatar_status(&self, source: Id) -> Option<AvatarStatus> {
-        // posing (and what it reports) isn't here yet: an avatar reads as not loaded
+        #[cfg(target_os = "macos")]
+        if let Some(Runtime::Avatar(avatar)) = self.runtimes.get(&source) {
+            return Some(avatar.status());
+        }
         let avatar =
             self.workspace.as_ref().and_then(|w| w.sources.get(&source)).is_some_and(|s| s.kind == crate::avatar::KIND);
         avatar.then(|| avatar_status_of(&source))
@@ -1064,9 +1078,13 @@ impl Host {
         None
     }
 
-    /// A PNGtuber's push to talk held, or let go (nothing without libobs yet).
-    pub fn avatar_push_to_talk(&self, _source: Id, _held: bool) {
-        not_yet("avatar_push_to_talk");
+    /// A PNGtuber's push to talk held, or let go.
+    pub fn avatar_push_to_talk(&self, source: Id, held: bool) {
+        #[cfg(target_os = "macos")]
+        if let Some(Runtime::Avatar(avatar)) = self.runtimes.get(&source) {
+            avatar.set_push_to_talk(held);
+        }
+        let _ = (source, held);
     }
 
     /// Where an avatar's anchor is in its picture at rest (`None`: not without libobs yet).
@@ -1075,9 +1093,14 @@ impl Host {
         None
     }
 
-    /// Takes the face an avatar sees now as its neutral one (`None`: not without libobs yet).
-    pub fn avatar_calibrate(&self, _source: Id) -> Option<String> {
-        not_yet("avatar_calibrate");
+    /// Takes the face an avatar sees now as its neutral one: the calibration's JSON (`None`: no
+    /// face seen).
+    pub fn avatar_calibrate(&self, source: Id) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        if let Some(Runtime::Avatar(avatar)) = self.runtimes.get(&source) {
+            return avatar.calibrate();
+        }
+        let _ = source;
         None
     }
 
