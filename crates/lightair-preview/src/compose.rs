@@ -1847,6 +1847,8 @@ impl Native {
         // the engine draws looks on a camera's feed, whatever made the picture
         let mut camera = Source::clone(source);
         camera.kind = templates::CAMERA.into();
+        // a face stickers preset's face distortion, for the looks' warp
+        looks::with_sticker_shape(&mut camera);
         let mut frame = lightair_engine::pictures::Frame {
             gpu: &self.gpu,
             cache: &mut self.cache,
