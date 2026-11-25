@@ -30,6 +30,10 @@ lightair-phone-camera = { path = "crates/lightair-phone-camera" }
 # `cargo xtask core-link` builds against the checkout beside this repo (`../lightair-core`) until
 # `cargo xtask core-unlink`; `cargo xtask check` refuses while it's linked.
 lightair-model = { git = "https://github.com/Lightair-Project/lightair-core", rev = "15847875b1550a6405ed2b89babba8462632e71a" }
+lightair-encode = { git = "https://github.com/Lightair-Project/lightair-core", rev = "15847875b1550a6405ed2b89babba8462632e71a" }
+lightair-capture = { git = "https://github.com/Lightair-Project/lightair-core", rev = "15847875b1550a6405ed2b89babba8462632e71a" }
+lightair-packages = { git = "https://github.com/Lightair-Project/lightair-core", rev = "15847875b1550a6405ed2b89babba8462632e71a" }
+lightair-feed = { git = "https://github.com/Lightair-Project/lightair-core", rev = "15847875b1550a6405ed2b89babba8462632e71a" }
 lightair-store = { git = "https://github.com/Lightair-Project/lightair-core", rev = "15847875b1550a6405ed2b89babba8462632e71a" }
 lightair-audio = { git = "https://github.com/Lightair-Project/lightair-core", rev = "15847875b1550a6405ed2b89babba8462632e71a" }
 lightair-render = { git = "https://github.com/Lightair-Project/lightair-core", rev = "15847875b1550a6405ed2b89babba8462632e71a" }

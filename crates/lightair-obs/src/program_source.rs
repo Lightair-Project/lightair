@@ -62,6 +62,8 @@ pub fn publish(canvas: Id, frame: &Buffer) {
         .0
         .get_or_insert_with(HashMap::new)
         .insert(canvas, Published { buffer: frame.clone(), at: Instant::now() });
+    // Lightair's own encoders, when they record or send this canvas
+    crate::own_outputs::frame(canvas, frame);
 }
 
 /// Forgets `canvas`'s picture (its compositor stopped): a standalone source draws nothing new,
@@ -271,10 +273,30 @@ pub(crate) fn resize(canvas: &Canvas) -> bool {
     true
 }
 
-/// Whether something records or streams from `canvas`'s output. Any thread (waits for libobs's
-/// graphics thread to finish a frame at worst; never call it from that thread).
+/// Whether something records or streams from `canvas`'s output, or Lightair's own encoders take
+/// its frames. Any thread (waits for libobs's graphics thread to finish a frame at worst; never
+/// call it from that thread).
 pub fn in_use(canvas: Id) -> bool {
-    OUTS.lock().0.as_ref().and_then(|o| o.get(&canvas)).is_some_and(|out| out.canvas.video_active())
+    crate::own_outputs::uses(canvas)
+        || OUTS.lock().0.as_ref().and_then(|o| o.get(&canvas)).is_some_and(|out| out.canvas.video_active())
+}
+
+/// The canvas whose output gives `video` (`None`: the primary canvas's), if it's one.
+pub(crate) fn canvas_of_video(video: Option<*mut sys::video_t>) -> Option<Id> {
+    let outs = OUTS.lock();
+    let outs = outs.0.as_ref()?;
+    match video {
+        None => outs.iter().find(|(_, o)| o.primary).map(|(id, _)| *id),
+        Some(v) => outs
+            .iter()
+            .find(|(_, o)| unsafe { sys::obs_canvas_get_video(o.canvas.as_ptr()) } == v)
+            .map(|(id, _)| *id),
+    }
+}
+
+/// The size and frame rate `canvas`'s output was made at, if it has one.
+pub(crate) fn output_shape(canvas: Id) -> Option<(u32, u32, u32, u32)> {
+    OUTS.lock().0.as_ref()?.get(&canvas).map(|o| o.shape)
 }
 
 /// The video the outputs of `canvas` take (`None`: the primary canvas), if it has an output.

@@ -41,7 +41,13 @@ block2 = "0.6"
 objc2 = "0.6"
 # the IOSurfaces libobs sources are drawn into for Lightair's own compositor (bridge.rs)
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
-objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVReturn", "objc2-io-surface"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2-io-surface"] }
+# Lightair's own encoders, recording files and senders, fed by its compositor (own_outputs.rs);
+# the compositor's frames copied and scaled into the encoders' buffers
+lightair-encode.workspace = true
+lightair-feed.workspace = true
+lightair-engine.workspace = true
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTPixelTransferSession", "VTSession", "objc2-core-video"] }
 
 # VST3 modules (DLLs) on Windows
 [target.'cfg(windows)'.dependencies]

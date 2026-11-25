@@ -243,7 +243,7 @@ impl OutputsRuntime {
             .min()
     }
 
-    fn update(&self, key: OutputKey, f: impl FnOnce(&mut OutputStatus)) {
+    pub(crate) fn update(&self, key: OutputKey, f: impl FnOnce(&mut OutputStatus)) {
         f(self.status.lock().entry(key).or_default());
     }
 }
@@ -606,6 +606,12 @@ static CLIPS_OUTPUT: Mutex<std::collections::BTreeMap<Id, OutputPtr>> = Mutex::n
 /// The canvas whose buffer saved a clip last.
 static LAST_CLIP: Mutex<Option<(Id, std::time::Instant)>> = Mutex::new(None);
 
+/// `canvas`'s replay buffer saved a clip (one Lightair wrote itself).
+#[cfg(target_os = "macos")]
+pub(crate) fn note_clip_saved(canvas: Id) {
+    *LAST_CLIP.lock() = Some((canvas, std::time::Instant::now()));
+}
+
 unsafe fn proc_call(output: *mut sys::obs_output_t, name: &str, cd: &mut sys::calldata_t) -> bool {
     unsafe {
         let ph = sys::obs_output_get_proc_handler(output);
@@ -964,6 +970,11 @@ impl Outputs {
     /// (`Reconciler::canvas_video`); `None` means the primary canvas. Several canvases can
     /// record at once, each its own output and file.
     pub fn start_recording(&mut self, cfg: &RecordingConfig, video: Option<VideoOutput>) -> Result<(), String> {
+        // Lightair's own encoders and file writer, from the canvas's compositor
+        #[cfg(target_os = "macos")]
+        if let Some(canvas) = crate::own_outputs::takes(video) {
+            return crate::own_outputs::start_recording(cfg, canvas);
+        }
         let video_output = video.map_or(std::ptr::null_mut(), |v| v.0);
         let key = OutputKey::Recording(cfg.canvas);
         if self.recordings.get(&cfg.canvas).is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
@@ -1019,6 +1030,8 @@ impl Outputs {
 
     /// Stops every recording.
     pub fn stop_recording(&mut self) {
+        #[cfg(target_os = "macos")]
+        crate::own_outputs::stop_recordings();
         for (canvas, r) in &self.recordings {
             runtime().update(OutputKey::Recording(*canvas), |s| {
                 if s.state.is_running() {
@@ -1041,7 +1054,14 @@ impl Outputs {
     /// Pauses or resumes every recording. Returns whether they are all now in that state.
     pub fn pause_recording(&mut self, pause: bool) -> bool {
         let active = self.active_recordings();
-        let mut all = !active.is_empty();
+        #[cfg(target_os = "macos")]
+        let own = crate::own_outputs::pause_recordings(pause);
+        #[cfg(not(target_os = "macos"))]
+        let own: Option<bool> = None;
+        if active.is_empty() {
+            return own.unwrap_or(false);
+        }
+        let mut all = own.unwrap_or(true);
         // libobs applies a pause at the next video frame; resuming before it has leaves the
         // encoder waiting forever (and the recording can't stop). Give a fresh pause time.
         if !pause {
@@ -1073,6 +1093,10 @@ impl Outputs {
     /// Ends every recording's current file and continues in a new one, without a gap.
     pub fn split_recording(&mut self) -> bool {
         let mut any = false;
+        #[cfg(target_os = "macos")]
+        {
+            any |= crate::own_outputs::split_recordings();
+        }
         for (_, output) in self.active_recordings() {
             any |= unsafe { split_file(output) };
         }
@@ -1083,6 +1107,10 @@ impl Outputs {
     /// one. Returns false when none can (MKV) or none is running.
     pub fn add_marker(&mut self, name: &str) -> bool {
         let mut any = false;
+        #[cfg(target_os = "macos")]
+        {
+            any |= crate::own_outputs::add_marker(name);
+        }
         for (canvas, output) in self.active_recordings() {
             if unsafe { add_chapter(output, name) } {
                 runtime().update(OutputKey::Recording(canvas), |s| s.markers += 1);
@@ -1103,6 +1131,14 @@ impl Outputs {
         }
         let protocol = StreamProtocol::of(&cfg.server)
             .ok_or_else(|| "Use an rtmp://, rtmps://, srt://, rist:// or https:// (WHIP) address.".to_string())?;
+        // Lightair's own encoders and senders, from the canvas's compositor, where they can
+        // reach the destination (others stay libobs's)
+        #[cfg(target_os = "macos")]
+        if crate::own_outputs::can_stream(cfg)
+            && let Some(canvas) = crate::own_outputs::takes(video)
+        {
+            return crate::own_outputs::start_stream(cfg, canvas);
+        }
         let (service_type, output_type) = match protocol {
             StreamProtocol::Rtmp => ("rtmp_custom", "rtmp_output"),
             StreamProtocol::MpegTs => ("rtmp_custom", "ffmpeg_mpegts_muxer"),
@@ -1333,6 +1369,10 @@ impl Outputs {
 
     /// Which running streams share an encoder: one list of destinations per video encoder.
     pub fn stream_share_groups(&self) -> Vec<Vec<Id>> {
+        #[cfg(target_os = "macos")]
+        let own = crate::own_outputs::share_groups();
+        #[cfg(not(target_os = "macos"))]
+        let own: Vec<Vec<Id>> = Vec::new();
         let mut groups: Vec<(usize, Vec<Id>)> = Vec::new();
         for (id, r) in &self.streams {
             if !runtime().get(OutputKey::Stream(*id)).state.is_running() {
@@ -1343,7 +1383,7 @@ impl Outputs {
                 None => groups.push((r.video as usize, vec![*id])),
             }
         }
-        groups.into_iter().map(|(_, ids)| ids).collect()
+        groups.into_iter().map(|(_, ids)| ids).chain(own).collect()
     }
 
     /// How many distinct video encoders the streams use (for the UI's "N encoders" note).
@@ -1351,12 +1391,19 @@ impl Outputs {
         let mut seen: Vec<usize> = self.streams.values().map(|r| r.video as usize).collect();
         seen.sort_unstable();
         seen.dedup();
+        #[cfg(target_os = "macos")]
+        return seen.len() + crate::own_outputs::stream_encoder_count();
+        #[cfg(not(target_os = "macos"))]
         seen.len()
     }
 
     /// The video encoder a stream uses (diagnostics and tests).
     /// A stream's audio tracks, in order: the libobs mix each encodes (diagnostics, tests).
     pub fn stream_audio_tracks(&self, id: Id) -> Vec<usize> {
+        #[cfg(target_os = "macos")]
+        if let Some(tracks) = crate::own_outputs::stream_audio_tracks(id) {
+            return tracks;
+        }
         let Some(r) = self.streams.get(&id) else { return Vec::new() };
         (0..6)
             .map_while(|k| {
@@ -1367,10 +1414,16 @@ impl Outputs {
     }
 
     pub fn stream_video_encoder(&self, id: Id) -> Option<usize> {
+        #[cfg(target_os = "macos")]
+        if let Some(enc) = crate::own_outputs::stream_video_encoder(id) {
+            return Some(enc);
+        }
         self.streams.get(&id).map(|r| r.video as usize)
     }
 
     pub fn stop_stream(&mut self, id: Id) {
+        #[cfg(target_os = "macos")]
+        crate::own_outputs::stop_stream(id, false);
         if let Some(r) = self.streams.get(&id) {
             runtime().update(OutputKey::Stream(id), |s| {
                 if s.state.is_running() && s.state != OutputState::Stopping {
@@ -1385,12 +1438,16 @@ impl Outputs {
     /// Ends a stream at once, without letting its delay drain (the viewers lose what was still
     /// held back).
     pub fn force_stop_stream(&mut self, id: Id) {
+        #[cfg(target_os = "macos")]
+        crate::own_outputs::stop_stream(id, true);
         if let Some(r) = self.streams.get(&id) {
             unsafe { sys::obs_output_force_stop(r.output) };
         }
     }
 
     pub fn stop_all_streams(&mut self) {
+        #[cfg(target_os = "macos")]
+        crate::own_outputs::stop_all_streams();
         let ids: Vec<Id> = self.streams.keys().copied().collect();
         for id in ids {
             self.stop_stream(id);
@@ -1517,6 +1574,11 @@ impl Outputs {
     /// Starts the replay buffer of one canvas (docs/11-outputs-streaming-recording.md, "Clips"):
     /// `video` is that canvas's video (`None`: the primary). Several canvases keep a buffer each.
     pub fn start_clips(&mut self, cfg: &ClipsConfig, video: Option<VideoOutput>) -> Result<(), String> {
+        // Lightair's own encoders and packet ring, from the canvas's compositor
+        #[cfg(target_os = "macos")]
+        if let Some(canvas) = crate::own_outputs::takes(video) {
+            return crate::own_outputs::start_clips(cfg, canvas);
+        }
         let video_output = video.map_or(std::ptr::null_mut(), |v| v.0);
         let key = OutputKey::Clips(cfg.canvas);
         if self.clips.get(&cfg.canvas).is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
@@ -1545,6 +1607,8 @@ impl Outputs {
 
     /// Stops every replay buffer.
     pub fn stop_clips(&mut self) {
+        #[cfg(target_os = "macos")]
+        crate::own_outputs::stop_clips(None);
         let canvases: Vec<Id> = self.clips.keys().copied().collect();
         for canvas in canvases {
             self.stop_clips_of(canvas);
@@ -1553,6 +1617,8 @@ impl Outputs {
 
     /// Stops one canvas's replay buffer.
     pub fn stop_clips_of(&mut self, canvas: Id) {
+        #[cfg(target_os = "macos")]
+        crate::own_outputs::stop_clips(Some(canvas));
         if let Some(r) = self.clips.get(&canvas) {
             runtime().update(OutputKey::Clips(canvas), |s| {
                 if s.state.is_running() {
@@ -1565,7 +1631,11 @@ impl Outputs {
 
     /// The canvases whose replay buffer exists (running or stopped, not yet dropped).
     pub fn clips_canvases(&self) -> Vec<Id> {
-        self.clips.keys().copied().collect()
+        #[allow(unused_mut)]
+        let mut canvases: Vec<Id> = self.clips.keys().copied().collect();
+        #[cfg(target_os = "macos")]
+        canvases.extend(crate::own_outputs::clips_canvases());
+        canvases
     }
 
     fn drop_clips(&mut self, canvas: Id) {
@@ -1579,6 +1649,10 @@ impl Outputs {
     /// report the files. How many buffers accepted the save.
     pub fn save_clip(&mut self) -> usize {
         let mut saved = 0;
+        #[cfg(target_os = "macos")]
+        {
+            saved += crate::own_outputs::save_clip();
+        }
         for r in self.clips.values() {
             if !unsafe { sys::obs_output_active(r.output) } {
                 continue;
@@ -1596,6 +1670,8 @@ impl Outputs {
 
     /// Updates byte and frame counters for running outputs (called by the stats sampler).
     pub fn sample(&self) {
+        #[cfg(target_os = "macos")]
+        crate::own_outputs::sample();
         let sample = |key: OutputKey, r: &Running| unsafe {
             let (bytes, dropped, total) = (
                 sys::obs_output_get_total_bytes(r.output),
@@ -1625,6 +1701,8 @@ impl Outputs {
 
     /// Stops and releases everything (engine shutdown).
     pub fn shutdown(&mut self) {
+        #[cfg(target_os = "macos")]
+        crate::own_outputs::shutdown();
         for r in self.clips.values() {
             unsafe { sys::obs_output_stop(r.output) };
         }

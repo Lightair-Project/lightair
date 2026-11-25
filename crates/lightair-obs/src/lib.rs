@@ -34,6 +34,8 @@ pub mod obs;
 #[cfg(target_os = "macos")]
 pub mod on_screen;
 pub mod outputs;
+#[cfg(target_os = "macos")]
+mod own_outputs;
 pub mod phone_camera;
 pub mod piair_voice;
 #[cfg(target_os = "macos")]
