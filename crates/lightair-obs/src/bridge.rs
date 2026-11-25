@@ -22,10 +22,8 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
 
 use lightair_model::Id;
-use objc2_core_foundation::CFRetained;
 use parking_lot::Mutex;
 
 use crate::obs::{ObsSource, SourceRef};
@@ -139,24 +137,7 @@ pub fn want(canvas: Id, sources: HashMap<Id, bool>) {
     }
 }
 
-/// A source's picture: a BGRA, IOSurface-backed pixel buffer, colours multiplied by alpha.
-pub struct Picture {
-    pub buffer: Buffer,
-    /// Drawn without the source's libobs filters: its effects aren't in it.
-    pub unfiltered: bool,
-    /// The video time of the libobs frame that drew it: a different value is a new picture
-    /// (buffers are reused).
-    pub serial: u64,
-}
-
-impl Picture {
-    /// The buffer as the renderer takes it.
-    pub fn pixel_buffer(&self) -> Option<lightair_render::texture::PixelBuffer> {
-        let buffer = self.buffer.clone();
-        // SAFETY: the reference made by `clone` is given up to the pixel buffer, which releases it.
-        unsafe { lightair_render::texture::PixelBuffer::from_raw(CFRetained::into_raw(buffer).as_ptr().cast()) }
-    }
-}
+pub use lightair_host::bridge::Picture;
 
 /// The newest finished picture of `source`, if it's wanted and has been drawn. Any thread.
 pub fn picture(source: Id) -> Option<Picture> {
@@ -166,57 +147,16 @@ pub fn picture(source: Id) -> Option<Picture> {
 
 // ---------------------------------------------------------------- avatars
 
-/// What posed an avatar source on libobs's last tick, so the compositor can pose its own drawing
-/// of the same avatar. The libobs source keeps the camera, the trackers, the calibration, the
-/// co-host's face and mood, the mic level and push to talk; the compositor only reads this.
-#[derive(Clone, Debug)]
-pub struct AvatarPosing {
-    /// The face seen, calibrated and mirrored as the avatar's settings say, with the co-host's
-    /// face merged in when this is its avatar; `None`: none seen (the avatar settles).
-    pub face: Option<lightair_avatar::Face>,
-    /// The body seen (a VRM's body tracking; `None` for flat avatars or with the body off).
-    pub body: Option<lightair_avatar::body::BodyFrame>,
-    /// The co-host's mood over the avatar's own expression, and its weight.
-    pub mood: Option<(&'static str, f32)>,
-    /// A PNGtuber's mic track level (dBFS; `-inf` for silence or no mic).
-    pub mic_db: f32,
-    /// A PNGtuber's push to talk is held.
-    pub push_to_talk_held: bool,
-    /// With `show_tracking`: the face's points in the trackers' picture (0..1 across and down).
-    pub view_face: Vec<[f32; 2]>,
-    /// The anchors something is pinned to: each one's place in the avatar's picture at rest and
-    /// now, as the libobs source moves its pinned scene items.
-    pub pins: Vec<(String, crate::avatar_pins::Spot, crate::avatar_pins::Spot)>,
-    /// The avatar's picture size the pins' places are measured in.
-    pub size: (u32, u32),
-    /// When it was published.
-    pub at: Instant,
-}
-
-/// The trackers' picture an avatar source last handed its trackers (with `show_tracking`).
-#[derive(Clone, Debug)]
-pub struct TrackingPicture {
-    /// BGRA, rows `width * 4` bytes apart, top row first.
-    pub bgra: Arc<Vec<u8>>,
-    pub width: u32,
-    pub height: u32,
-}
-
-#[derive(Default)]
-struct AvatarFeed {
-    posing: Option<Arc<AvatarPosing>>,
-    view: Option<TrackingPicture>,
-}
-
-/// Each avatar source's last posing and tracking picture, by libobs source.
-static AVATARS: LazyLock<Mutex<HashMap<usize, AvatarFeed>>> = LazyLock::new(Default::default);
+pub use lightair_host::bridge::{AvatarPosing, TrackingPicture, avatar_posing};
 
 /// The avatar source `source` (libobs's) was posed this tick with `posing`. Its video thread.
 pub(crate) fn set_avatar_posing(source: usize, posing: AvatarPosing) {
     if !own() {
         return;
     }
-    AVATARS.lock().entry(source).or_default().posing = Some(Arc::new(posing));
+    if let Some(id) = crate::obs::doc_id(source as *mut sys::obs_source_t) {
+        lightair_host::bridge::set_avatar_posing(id, posing);
+    }
 }
 
 /// The avatar source `source` handed its trackers this picture (`show_tracking` on). Graphics
@@ -225,8 +165,9 @@ pub(crate) fn set_avatar_view(source: usize, bgra: Arc<Vec<u8>>, size: (u32, u32
     if !own() {
         return;
     }
-    let view = TrackingPicture { bgra, width: size.0, height: size.1 };
-    AVATARS.lock().entry(source).or_default().view = Some(view);
+    if let Some(id) = crate::obs::doc_id(source as *mut sys::obs_source_t) {
+        lightair_host::bridge::set_avatar_view(id, bgra, size);
+    }
 }
 
 /// The avatar source `source` is gone.
@@ -234,18 +175,43 @@ pub(crate) fn forget_avatar(source: usize) {
     if !own() {
         return;
     }
-    // (freed outside the lock)
-    let gone = AVATARS.lock().remove(&source);
-    drop(gone);
+    if let Some(id) = crate::obs::doc_id(source as *mut sys::obs_source_t) {
+        lightair_host::bridge::forget_avatar(id);
+    }
 }
 
-/// The document avatar source `source`'s last posing, and its trackers' picture when it shows
-/// one; `None` before its libobs source has ticked. Any thread.
-pub fn avatar_posing(source: Id) -> Option<(Arc<AvatarPosing>, Option<TrackingPicture>)> {
-    let obs = BRIDGE.sources.lock().get(&source)?.as_ptr() as usize;
-    let feeds = AVATARS.lock();
-    let feed = feeds.get(&obs)?;
-    Some((feed.posing.clone()?, feed.view.clone()))
+/// Hands the compositor libobs's pictures (`lightair_host::bridge::want` and `picture` come
+/// here). Once, at startup.
+pub(crate) fn install() {
+    struct Libobs;
+    impl lightair_host::bridge::Elsewhere for Libobs {
+        fn want(&self, canvas: Id, sources: HashMap<Id, bool>) {
+            want(canvas, sources);
+        }
+        fn picture(&self, source: Id) -> Option<Picture> {
+            picture(source)
+        }
+        fn sound(&self, source: Id, planes: &[&[f32]], rate: u32) {
+            let Ok(name) = std::ffi::CString::new(source.to_string()) else { return };
+            let Some(into) = (unsafe { SourceRef::from_owned(sys::obs_get_source_by_name(name.as_ptr())) }) else {
+                return;
+            };
+            let Some(frames) = planes.first().map(|p| p.len()) else { return };
+            let mut a = sys::obs_source_audio {
+                frames: frames as u32,
+                speakers: if planes.len() >= 2 { sys::SPEAKERS_STEREO } else { sys::SPEAKERS_MONO },
+                format: sys::AUDIO_FORMAT_FLOAT_PLANAR,
+                samples_per_sec: rate,
+                timestamp: crate::clock::now_ns(),
+                ..Default::default()
+            };
+            for (o, p) in a.data.iter_mut().zip(planes) {
+                *o = p.as_ptr() as *const u8;
+            }
+            unsafe { sys::obs_source_output_audio(into.as_ptr(), &a) };
+        }
+    }
+    lightair_host::bridge::set_elsewhere(Box::new(Libobs));
 }
 
 pub use lightair_host::buffers::{bgra_buffer, surface_of};

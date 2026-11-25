@@ -5,17 +5,26 @@
 pub mod access;
 pub mod audio;
 pub mod audio_host;
+pub mod avatar;
+pub mod avatar_pins;
+#[cfg(target_os = "macos")]
+pub mod bridge;
 #[cfg(target_os = "macos")]
 pub mod buffers;
 pub mod clock;
 pub mod devices;
+pub mod displays;
+pub mod engine;
 pub mod face_drive;
 pub mod gpu;
+pub mod host;
+pub mod media;
 #[cfg(target_os = "macos")]
 pub mod media_player;
 pub mod meters;
 pub mod ndi;
 pub mod outputs;
+pub mod outputs_host;
 pub mod phone_camera;
 #[cfg(target_os = "macos")]
 pub mod phone_decode;
@@ -25,6 +34,7 @@ pub mod piair_voice;
 pub mod own_outputs;
 pub mod program;
 pub mod plugins;
+pub mod pointer;
 pub mod rtsp;
 pub mod show;
 pub mod timers;
@@ -40,3 +50,7 @@ pub mod vcam_mac;
 #[cfg(target_os = "macos")]
 pub mod vision;
 pub mod zoom_to;
+
+pub use engine::{Capabilities, Engine, EngineConfig, EngineError, EngineState, Stats, StudioTake, read_stats};
+pub use host::Host as Reconciler;
+pub use outputs_host::{Outputs, VirtualCameraScene};

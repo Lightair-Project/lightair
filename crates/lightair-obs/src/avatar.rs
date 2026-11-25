@@ -31,7 +31,7 @@ use crate::avatar_pins::{Anchor, MeshRest, Spot};
 use crate::obs::{Data, ObsSource};
 use crate::sys;
 
-pub const KIND: &str = "lightair_avatar";
+pub use lightair_host::avatar::KIND;
 
 /// How long the camera keeps running once nothing shows the avatar.
 const LINGER: Duration = Duration::from_secs(2);

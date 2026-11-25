@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use lightair_engine::gpu::Gpu;
 use lightair_model::{Effect, Id, Source};
-use lightair_obs::bridge;
+use lightair_host::bridge;
 use lightair_render::media::Picture;
 use lightair_render::scene::Shot;
 

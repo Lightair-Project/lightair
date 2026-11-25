@@ -78,8 +78,9 @@ use std::time::{Duration, Instant};
 
 use lightair_avatar::source::Input;
 use lightair_model::{Canvas, Fit, Id, Layout, Scene, Source, Stinger, TransitionKind, TransitionSettings, Workspace};
-use lightair_obs::avatar_pins::{Placement, Spot, on_canvas};
-use lightair_obs::{avatar, bridge, program_source};
+use lightair_host::avatar_pins::{Placement, Spot, on_canvas};
+use lightair_host::program as program_source;
+use lightair_host::{avatar, bridge};
 use lightair_render::SharedGpu;
 use lightair_render::media::Picture;
 use lightair_render::scene::{Pictures, SceneRenderer, Shot};
@@ -548,7 +549,7 @@ impl State {
         let looked = keyers && looks::available();
         // Lightair's own pointer and zoom (a screen look, a drawn pointer effect): drawn here on a
         // source with no other effect, else by libobs with its filters
-        let pointed: HashMap<Id, lightair_obs::pointer::Style> = crate::pointer::styles(&base, &shown);
+        let pointed: HashMap<Id, lightair_host::pointer::Style> = crate::pointer::styles(&base, &shown);
         let pointer_here = |source: &Source| {
             !pointed.contains_key(&source.id) || (keyers && !crate::pointer::has_other_effects(source))
         };
@@ -1326,7 +1327,7 @@ impl Pictures for Ready<'_> {
 /// when the compositor draws one on `source` (`pointed`); `on_air`: it counts for the badge.
 fn with_pointer(
     native: Option<&mut Native>,
-    pointed: &HashMap<Id, lightair_obs::pointer::Style>,
+    pointed: &HashMap<Id, lightair_host::pointer::Style>,
     source: &Source,
     buffer: &bridge::Buffer,
     shot: Shot,

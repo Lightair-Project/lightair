@@ -19,16 +19,14 @@
 //!   picture while the switch is on: libobs receives nothing for it.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::CString;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use lightair_model::{Id, Source};
-use lightair_obs::obs::SourceRef;
-use lightair_obs::phone_camera::{Decoder, Pictures};
-use lightair_obs::{bridge, sys};
+use lightair_host::phone_camera::{Decoder, Pictures};
+use lightair_host::bridge;
 use lightair_phone_camera::ts::{Codec, Demuxer, Kind, Unit};
 use objc2_core_foundation::Type;
 use objc2_core_video::{
@@ -185,25 +183,12 @@ impl Slot {
     }
 }
 
-// ---------------------------------------------------------------- libobs's media source
-
-/// The libobs media source of document source `id` (named by the id).
-fn libobs_source(id: Id) -> Option<SourceRef> {
-    let name = CString::new(id.to_string()).ok()?;
-    // SAFETY: the name is a valid C string; libobs gives a new reference (or null)
-    unsafe { SourceRef::from_owned(sys::obs_get_source_by_name(name.as_ptr())) }
-}
-
 // ---------------------------------------------------------------- receiving
 
 /// Receives a link until `stopped` (its sender dropped): binds its port (retrying for a moment
 /// while an earlier receiver of the link lets go of it), listens for SRT, splits what arrives into access units and has them decoded on a thread of
 /// their own.
 fn receive(id: Id, plan: Plan, slot: Arc<Slot>, mut stopped: oneshot::Receiver<()>) {
-    let Some(source) = libobs_source(id) else {
-        tracing::info!(%id, "another computer: no media source to receive for");
-        return;
-    };
     let started = Instant::now();
     let socket = loop {
         match std::net::UdpSocket::bind(("0.0.0.0", plan.port)) {
@@ -225,9 +210,7 @@ fn receive(id: Id, plan: Plan, slot: Arc<Slot>, mut stopped: oneshot::Receiver<(
         return;
     }
     let (units, queued) = mpsc::sync_channel::<Unit>(QUEUE);
-    let decoding = source.clone();
-    let spawned =
-        std::thread::Builder::new().name("lightair-srt-decode".into()).spawn(move || decode(decoding, slot, queued));
+    let spawned = std::thread::Builder::new().name("lightair-srt-decode".into()).spawn(move || decode(id, slot, queued));
     if spawned.is_err() {
         tracing::warn!("another computer: couldn't start the decoder");
         return;
@@ -322,8 +305,8 @@ async fn listen(
 }
 
 /// Decodes a link's access units until receiving stops: pictures into `slot`, sound into the
-/// link's libobs media source. Once a second, libobs's media source is kept from listening.
-fn decode(source: SourceRef, slot: Arc<Slot>, units: mpsc::Receiver<Unit>) {
+/// mixer by the link's id (`bridge::sound`).
+fn decode(id: Id, slot: Arc<Slot>, units: mpsc::Receiver<Unit>) {
     let into = slot;
     let pictures: Pictures = Arc::new(move |image, pts| into.decoded(image, pts));
     let mut decoder = Decoder::new(true, pictures);
@@ -331,8 +314,7 @@ fn decode(source: SourceRef, slot: Arc<Slot>, units: mpsc::Receiver<Unit>) {
         match units.recv_timeout(Duration::from_secs(1)) {
             Ok(unit) => match unit.kind {
                 Kind::Video(codec) => decoder.video(codec == Codec::Hevc, &unit.data, unit.pts, unit.dts),
-                // SAFETY: the source is held for the whole loop
-                Kind::Audio => unsafe { lightair_obs::phone_camera::sound_into(&mut decoder, &unit.data, source.as_ptr()) },
+                Kind::Audio => decoder.sound(&unit.data, &mut |planes, rate| bridge::sound(id, planes, rate)),
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,

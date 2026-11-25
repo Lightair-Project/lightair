@@ -3,16 +3,29 @@
 //! what each timer shows now.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Instant;
 
 use lightair_model::{Id, TransitionSettings, Workspace};
 use parking_lot::Mutex;
 
-/// Whether Lightair's own compositor draws the program (`LIGHTAIR_ENGINE=own`). Read once.
+/// Set by the engine without libobs ([`crate::engine::Engine`]): Lightair's own compositor is
+/// all there is, whatever `LIGHTAIR_ENGINE` says.
+static ALWAYS_OWN: AtomicBool = AtomicBool::new(false);
+
+/// Whether Lightair's own compositor draws the program (`LIGHTAIR_ENGINE=own`, or the engine
+/// without libobs running). Read once.
 pub fn own() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("LIGHTAIR_ENGINE").is_ok_and(|v| v.trim().eq_ignore_ascii_case("own")))
+    ALWAYS_OWN.load(Ordering::Relaxed)
+        || *ON.get_or_init(|| std::env::var("LIGHTAIR_ENGINE").is_ok_and(|v| v.trim().eq_ignore_ascii_case("own")))
+}
+
+/// The engine without libobs is starting: Lightair's own compositor, mixer and outputs from
+/// now on. Call before anything reads [`own`].
+pub fn set_own() {
+    ALWAYS_OWN.store(true, Ordering::Relaxed);
 }
 
 /// Whether a source is a link from another computer (a media source with a `link_port`) that

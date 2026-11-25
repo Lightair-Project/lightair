@@ -827,10 +827,11 @@ fn play(shared: &Shared, asset: &Asset, ring: &mut Ring, run: u64, start: i64) {
                 // (what a feed let go of mid-way didn't take)
                 let rest = &s.data[s.sent * 2..];
                 let at = base_os as i64 + (s.at - base_media) + (s.sent as i64 * 1_000_000_000 / shared.rate.max(1) as i64);
-                if at > 0 && !rest.is_empty() {
-                    if let Some(e) = &shared.elsewhere {
-                        e.audio(rest, shared.rate, at as u64);
-                    }
+                if at > 0
+                    && !rest.is_empty()
+                    && let Some(e) = &shared.elsewhere
+                {
+                    e.audio(rest, shared.rate, at as u64);
                 }
                 sound = None;
                 moved = true;
@@ -928,7 +929,7 @@ impl Frames {
     }
 
     /// The next frame and its time (ms from the file's start); `None` at the end.
-    pub fn next(&mut self) -> Option<(u32, lightair_render::texture::PixelBuffer)> {
+    pub fn next_frame(&mut self) -> Option<(u32, lightair_render::texture::PixelBuffer)> {
         loop {
             let decoded = read_video(&self.output, 0)?;
             let Some(decoded) = decoded else { continue };

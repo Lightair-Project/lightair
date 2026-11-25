@@ -138,7 +138,8 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
     #[cfg(windows)]
     let texture: Option<lightair_web::TextureSink> = {
         let frames = shared.clone();
-        Some(Arc::new(move |surface, _w, _h| frames.put(surface)))
+        // SAFETY: Chromium hands its surface over during its paint
+        Some(Arc::new(move |surface, _w, _h| unsafe { frames.put(surface) }))
     };
     #[cfg(not(windows))]
     let texture = None;

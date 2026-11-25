@@ -2138,8 +2138,7 @@ fn source_settings(source: &lightair_model::Source, drawn: bool) -> serde_json::
 
 /// Whether a source is a screen capture (a display, a window, an app or a game).
 pub(crate) fn is_screen(source: &lightair_model::Source) -> bool {
-    source.kind == lightair_model::kinds::SCREEN
-        || matches!(source.kind.as_str(), "screen_capture" | "display_capture" | "monitor_capture" | "window_capture" | "game_capture")
+    lightair_host::pointer::is_screen(source)
 }
 
 /// Whether a source has the drawn pointer on.

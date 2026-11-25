@@ -22,7 +22,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use lightair_model::{Id, Source};
-use lightair_obs::{bridge, phone_camera};
+use lightair_host::{bridge, phone_camera};
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, Type};
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetIOSurface, CVPixelBufferGetPixelFormatType,

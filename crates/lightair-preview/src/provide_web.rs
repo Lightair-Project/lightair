@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use lightair_model::{Id, Source};
-use lightair_obs::web;
+use lightair_host::web;
 use parking_lot::Mutex;
 
 use crate::providers::{Frame, Provider};

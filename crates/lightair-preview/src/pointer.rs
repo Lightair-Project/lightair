@@ -3,7 +3,7 @@
 //! pointer effect, as libobs's pointer filter draws them (`lightair_obs::pointer`).
 //!
 //! - **One state, two renderers.** The pointer's state (followed on a spring, tilted, faded,
-//!   its shape, the clicks, the follow-zoom's camera) is `lightair_obs::pointer::Pointer`, which
+//!   its shape, the clicks, the follow-zoom's camera) is `lightair_host::pointer::Pointer`, which
 //!   the libobs filter draws from too; each canvas's compositor keeps one per source it draws a
 //!   pointer on, stepped every frame.
 //! - **The pass.** The capture's picture is copied into a texture of the source's own, through
@@ -19,8 +19,8 @@ use std::time::Instant;
 
 use lightair_engine::gpu::Gpu;
 use lightair_model::{Id, Source, Workspace};
-use lightair_obs::bridge;
-use lightair_obs::pointer::{Art, Pointer, Style};
+use lightair_host::bridge;
+use lightair_host::pointer::{Art, Pointer, Style};
 use lightair_render::media::Picture;
 use lightair_render::scene::Shot;
 use lightair_render::shapes::{RES, arrow, crosshair, disc, dot, ibeam, ring};
@@ -249,7 +249,7 @@ pub(crate) fn styles(ws: &Workspace, shown: &HashSet<Id>) -> HashMap<Id, Style> 
     shown
         .iter()
         .filter_map(|id| ws.sources.get(id))
-        .filter_map(|source| Some((source.id, lightair_obs::pointer::style_for(ws, source)?)))
+        .filter_map(|source| Some((source.id, lightair_host::pointer::style_for(ws, source)?)))
         .collect()
 }
 
@@ -261,7 +261,7 @@ pub(crate) fn has_other_effects(source: &Source) -> bool {
 
 /// Whether `e` is the drawn pointer effect (the compositor draws it with the source's pointer).
 pub(crate) fn is_pointer(e: &lightair_model::Effect) -> bool {
-    e.kind == lightair_obs::pointer::KIND || e.kind == lightair_model::catalog::OLD_POINTER_KIND
+    e.kind == lightair_host::pointer::KIND || e.kind == lightair_model::catalog::OLD_POINTER_KIND
 }
 
 impl Pointers {
@@ -270,7 +270,7 @@ impl Pointers {
         self.drawn.retain(|id, _| {
             let kept = keep.contains_key(id);
             if !kept {
-                lightair_obs::pointer::report_zoom(badge_key(*id), None);
+                lightair_host::pointer::report_zoom(badge_key(*id), None);
             }
             kept
         });
@@ -303,9 +303,9 @@ impl Pointers {
         }
         let dt = now.duration_since(drawn.ticked).as_secs_f32().max(1e-3);
         drawn.ticked = now;
-        drawn.pointer.tick(dt, size, || lightair_obs::pointer::frame_of(source));
+        drawn.pointer.tick(dt, size, || lightair_host::pointer::frame_of(source));
         let zoom = drawn.pointer.zoom().filter(|_| on_air && style.badge());
-        lightair_obs::pointer::report_zoom(badge_key(source.id), zoom);
+        lightair_host::pointer::report_zoom(badge_key(source.id), zoom);
         let drawing = drawn.pointer.drawing(size);
         if drawing.view.is_none() && drawing.sprites.iter().all(|s| s.opacity <= 0.001) {
             return None;
@@ -371,7 +371,7 @@ impl Pointers {
                 Art::System => {
                     let p = drawn.pointer.picture()?;
                     if self.system.as_ref().is_none_or(|(serial, _)| *serial != p.serial) {
-                        let side = lightair_obs::pointer::system_side();
+                        let side = lightair_host::pointer::system_side();
                         let group = art_group(device, queue, pass, &p.rgba, side);
                         self.system = Some((p.serial, group));
                     }

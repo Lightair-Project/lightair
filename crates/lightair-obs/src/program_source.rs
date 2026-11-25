@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
-use std::time::{Duration, Instant};
+
 
 use lightair_model::{Canvas, Id};
 use objc2_core_foundation::CFRetained;
@@ -31,58 +31,16 @@ use crate::bridge::surface_of;
 use crate::obs::{CanvasRef, Data, ObsCanvas, ObsSource, SourceRef};
 use crate::sys;
 
-pub use lightair_host::program::{SceneTarget, add_scene_target, publish_scene, remove_scene_target, scene_targets};
+pub use lightair_host::program::{
+    SceneTarget, add_scene_target, in_use, publish_scene, remove_scene_target, scene_targets,
+};
 
 /// The libobs source type.
 pub const ID: &CStr = c"lightair_program";
 
-/// A compositor frame older than this isn't drawn by an output: libobs's picture is instead.
-const STALE: Duration = Duration::from_millis(500);
-
 type Buffer = CFRetained<CVPixelBuffer>;
 
-/// A finished frame and when it was handed over.
-struct Published {
-    buffer: Buffer,
-    at: Instant,
-}
-
-/// The newest finished program picture of each canvas.
-struct Programs(Option<HashMap<Id, Published>>);
-
-// SAFETY: CoreVideo's buffers are reference counted thread-safely, and a finished picture isn't
-// written while it's handed over.
-unsafe impl Send for Programs {}
-unsafe impl Sync for Programs {}
-
-static PROGRAMS: Mutex<Programs> = Mutex::new(Programs(None));
-
-/// Hands `frame` (BGRA, IOSurface-backed, complete on the GPU) over as `canvas`'s newest program
-/// picture. Any thread.
-pub fn publish(canvas: Id, frame: &Buffer) {
-    PROGRAMS
-        .lock()
-        .0
-        .get_or_insert_with(HashMap::new)
-        .insert(canvas, Published { buffer: frame.clone(), at: Instant::now() });
-    // Lightair's own encoders, when they record or send this canvas
-    crate::own_outputs::frame(canvas, frame);
-}
-
-/// Forgets `canvas`'s picture (its compositor stopped): a standalone source draws nothing new,
-/// an output draws libobs's picture.
-pub fn withdraw(canvas: Id) {
-    if let Some(p) = PROGRAMS.lock().0.as_mut() {
-        p.remove(&canvas);
-    }
-}
-
-/// `canvas`'s newest picture; with `fresh`, only one handed over in the last [`STALE`].
-fn newest(canvas: Id, fresh: bool) -> Option<Buffer> {
-    let programs = PROGRAMS.lock();
-    let p = programs.0.as_ref()?.get(&canvas)?;
-    (!fresh || p.at.elapsed() < STALE).then(|| p.buffer.clone())
-}
+pub use lightair_host::program::{newest, publish, withdraw};
 
 /// A private `lightair_program` source drawing `canvas`'s compositor picture (registered with
 /// libobs first if it isn't yet). Engine thread.
@@ -288,12 +246,11 @@ pub(crate) fn resize(canvas: &Canvas) -> bool {
     true
 }
 
-/// Whether something records or streams from `canvas`'s output, or Lightair's own encoders take
-/// its frames. Any thread (waits for libobs's graphics thread to finish a frame at worst; never
+/// Whether something libobs makes records or streams from `canvas`'s output
+/// (`lightair_host::program::in_use` asks). Any thread (waits for libobs's graphics thread to finish a frame at worst; never
 /// call it from that thread).
-pub fn in_use(canvas: Id) -> bool {
-    crate::own_outputs::uses(canvas)
-        || OUTS.lock().0.as_ref().and_then(|o| o.get(&canvas)).is_some_and(|out| out.canvas.video_active())
+fn libobs_in_use(canvas: Id) -> bool {
+    OUTS.lock().0.as_ref().and_then(|o| o.get(&canvas)).is_some_and(|out| out.canvas.video_active())
 }
 
 /// The canvas whose output gives `video` (`None`: the primary canvas's), if it's one.
@@ -561,6 +518,7 @@ unsafe extern "C" fn get_height(data: *mut c_void) -> u32 {
 /// the app lists.
 pub fn register() {
     static DONE: std::sync::Once = std::sync::Once::new();
+    lightair_host::program::set_libobs_in_use(libobs_in_use);
     DONE.call_once(|| unsafe {
         let mut info: sys::obs_source_info = std::mem::zeroed();
         info.id = ID.as_ptr();

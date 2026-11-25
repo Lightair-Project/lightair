@@ -28,7 +28,7 @@ use lightair_engine::hot::Hot;
 use lightair_engine::looks::render::Settings;
 use lightair_engine::{background, clock, looks};
 use lightair_model::{Id, Source};
-use lightair_obs::bridge::{self, FaceTracker};
+use lightair_host::bridge::{self, FaceTracker};
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,

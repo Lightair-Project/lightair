@@ -16,7 +16,6 @@
 //! picture of the source (through its filters, in libobs's own canvases, thumbnails and Studio
 //! mode) stays right with one capture running. [`release`] gives the capture back to the wrapper.
 
-use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -97,33 +96,11 @@ const LINGER: Duration = Duration::from_secs(1);
 /// A BGRA, IOSurface-backed picture.
 pub type Buffer = CFRetained<CVPixelBuffer>;
 
-/// The newest picture of each document source whose capture Lightair's compositor runs itself.
-struct Taken(Option<HashMap<Id, Buffer>>);
-
-// SAFETY: CoreVideo's buffers are reference counted thread-safely, and a captured picture isn't
-// written again once it's handed over.
-unsafe impl Send for Taken {}
-unsafe impl Sync for Taken {}
-
-static TAKEN: Mutex<Taken> = Mutex::new(Taken(None));
-
-/// The compositor captures document source `source` itself, and `buffer` (BGRA, IOSurface-backed)
-/// is its newest picture: the source's wrapper lets its own capture go and draws this instead.
-/// Any thread (a capture's own queue: the lock is held only to swap a reference).
-pub fn publish(source: Id, buffer: &Buffer) {
-    TAKEN.lock().0.get_or_insert_with(HashMap::new).insert(source, buffer.clone());
-}
-
-/// The compositor no longer captures `source`: its wrapper captures it again while it's shown.
-pub fn release(source: Id) {
-    // (the buffer is let go outside the lock)
-    let gone = TAKEN.lock().0.as_mut().and_then(|t| t.remove(&source));
-    drop(gone);
-}
+pub use lightair_host::bridge::{publish_capture as publish, release_capture as release};
 
 /// The compositor's newest picture of `source`, while it captures it.
 fn taken(source: Id) -> Option<Buffer> {
-    TAKEN.lock().0.as_ref()?.get(&source).cloned()
+    lightair_host::bridge::captured(source)
 }
 
 /// The compositor's picture as the wrapper last drew it: a libobs texture over its IOSurface,

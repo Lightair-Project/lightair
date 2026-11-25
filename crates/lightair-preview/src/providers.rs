@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use lightair_model::{Id, Source};
-use lightair_obs::bridge;
+use lightair_host::bridge;
 
 /// One kind of source whose picture is made outside libobs.
 pub trait Provider: Send + Sync {

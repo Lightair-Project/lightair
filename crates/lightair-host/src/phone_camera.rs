@@ -205,6 +205,12 @@ pub struct Feed {
     pub taken: Mutex<Taken>,
 }
 
+impl Default for Feed {
+    fn default() -> Feed {
+        Feed::new()
+    }
+}
+
 impl Feed {
     pub fn new() -> Feed {
         // a free port, found by taking one and letting it go (the decoder binds it next)

@@ -24,8 +24,9 @@ use std::collections::HashMap;
 use glam::{Mat4, Vec3};
 use lightair_avatar::pose::Camera;
 use lightair_avatar::vrm::Model;
-use lightair_model::Fit;
 use parking_lot::Mutex;
+
+pub use lightair_host::avatar_pins::{Placement, Spot, on_canvas};
 
 use crate::avatar2d::Flat;
 use crate::sys;
@@ -184,15 +185,6 @@ pub(crate) fn flat_frame(f: &Flat, framing: lightair_avatar::Framing, aspect: f3
     }
 }
 
-/// An anchor in the avatar's picture: pixels, its turn (radians, clockwise as seen) and its size
-/// (only ever compared with itself at rest).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Spot {
-    pub x: f32,
-    pub y: f32,
-    pub angle: f32,
-    pub scale: f32,
-}
 
 /// The camera's view and projection, as the avatar is drawn.
 pub(crate) fn view_projection(cam: &Camera, aspect: f32) -> Mat4 {
@@ -278,30 +270,6 @@ pub(crate) fn mesh_spot(points: &[[f32; 2]], far: usize, frame: (f32, f32, f32, 
 
 // ------------------------------------------------------------------------------------- pins
 
-/// A box in canvas pixels: its centre, size and rotation (degrees clockwise).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Placement {
-    pub cx: f32,
-    pub cy: f32,
-    pub w: f32,
-    pub h: f32,
-    pub rot: f32,
-    pub fit: Fit,
-}
-
-impl Placement {
-    pub fn of(l: &lightair_model::Layout) -> Placement {
-        Placement {
-            cx: l.x + l.width / 2.0,
-            cy: l.y + l.height / 2.0,
-            w: l.width,
-            h: l.height,
-            rot: l.rotation,
-            fit: l.fit,
-        }
-    }
-}
-
 /// A scene item following an anchor: the item (a reference held), the anchor's key, where the
 /// item sits with the avatar at rest, and where the avatar's own item is.
 pub struct PinTarget {
@@ -341,25 +309,6 @@ pub(crate) fn anchors_pinned(source: usize) -> Vec<String> {
     keys
 }
 
-/// A point of the avatar's picture (`w`×`h`) on the canvas, where its item is.
-pub fn on_canvas(host: &Placement, w: f32, h: f32, x: f32, y: f32) -> (f32, f32) {
-    let (kx, ky) = match host.fit {
-        Fit::Fit => {
-            let k = (host.w / w).min(host.h / h);
-            (k, k)
-        }
-        Fit::Fill => {
-            let k = (host.w / w).max(host.h / h);
-            (k, k)
-        }
-        Fit::Stretch => (host.w / w, host.h / h),
-        Fit::Original => (1.0, 1.0),
-    };
-    let (lx, ly) = ((x - w / 2.0) * kx, (y - h / 2.0) * ky);
-    let (s, c) = host.rot.to_radians().sin_cos();
-    (host.cx + lx * c - ly * s, host.cy + lx * s + ly * c)
-}
-
 /// Moves this avatar's pinned items: `spot` gives an anchor's place at rest and now, in the
 /// avatar's picture (`w`×`h`). (The avatar's tick, after posing.)
 pub(crate) fn apply(source: usize, w: f32, h: f32, spot: impl Fn(&str) -> Option<(Spot, Spot)>) {
@@ -379,7 +328,7 @@ pub(crate) fn apply(source: usize, w: f32, h: f32, spot: impl Fn(&str) -> Option
         unsafe {
             sys::obs_sceneitem_set_pos(t.item, &crate::obs::vec2(x, y));
             sys::obs_sceneitem_set_rot(t.item, t.base.rot + turn.to_degrees());
-            if t.base.fit == Fit::Original {
+            if t.base.fit == lightair_model::Fit::Original {
                 sys::obs_sceneitem_set_scale(t.item, &crate::obs::vec2(ratio, ratio));
             } else {
                 sys::obs_sceneitem_set_bounds(t.item, &crate::obs::vec2(t.base.w * ratio, t.base.h * ratio));

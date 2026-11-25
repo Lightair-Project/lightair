@@ -726,7 +726,7 @@ impl Preview {
     /// follows the primary canvas; another canvas's (`attach_canvas`), that canvas. False when
     /// the switch is off or the compositor couldn't start.
     pub fn compose_program(&self) -> bool {
-        if !lightair_obs::bridge::own() {
+        if !lightair_host::bridge::own() {
             return false;
         }
         let target = match &self.0.shared.canvas {
@@ -778,7 +778,7 @@ impl Preview {
         let old = std::mem::replace(&mut *shared.source.lock(), new);
         drop(old);
         if scene.is_some()
-            && lightair_obs::bridge::own()
+            && lightair_host::bridge::own()
             && crate::compose::start()
             && !self.0.scenes.swap(true, Ordering::Relaxed)
         {
@@ -862,7 +862,7 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     }
     // with Lightair's own compositor libobs also draws each canvas's output canvas, and calls
     // this after each canvas: the preview is drawn after the first (the main canvas, drawn first)
-    if lightair_obs::bridge::own() {
+    if lightair_host::bridge::own() {
         let frame = unsafe { sys::obs_get_video_frame_time() };
         if shared.last_frame.swap(frame, Ordering::Relaxed) == frame {
             return;

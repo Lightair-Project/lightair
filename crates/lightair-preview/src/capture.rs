@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use lightair_capture::{Error, Frame, PixelFormat, VideoSink, camera, screen};
 use lightair_model::{Id, Source, Workspace, catalog, kinds};
-use lightair_obs::{bridge, on_screen};
+use lightair_host::bridge;
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
 use parking_lot::Mutex;
@@ -233,7 +233,7 @@ impl Latest {
         let mut f = self.frame.lock();
         f.0 = false;
         let old = f.1.take();
-        on_screen::release(source);
+        bridge::release_capture(source);
         drop(f);
         drop(old);
     }
@@ -285,7 +285,7 @@ impl VideoSink for Sink {
         if !f.0 {
             return;
         }
-        on_screen::publish(self.source, &buffer);
+        bridge::publish_capture(self.source, &buffer);
         let old = f.1.replace(Captured { buffer, serial });
         drop(f);
         drop(old);
@@ -612,7 +612,7 @@ fn open(source: Id, plan: &Plan, latest: &Arc<Latest>) -> Result<Running, Refuse
             }
             let target = match target {
                 screen::Target::Display(d) if d.is_empty() => screen::Target::Display(
-                    lightair_obs::displays::main_display_uuid().ok_or_else(|| later("no main display"))?,
+                    lightair_host::displays::main_display_uuid().ok_or_else(|| later("no main display"))?,
                 ),
                 t => t.clone(),
             };

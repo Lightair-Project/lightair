@@ -63,7 +63,9 @@ mod mac {
     pub struct Surface(*mut c_void);
 
     impl Surface {
-        pub fn hold(surface: *mut c_void) -> Self {
+        /// # Safety
+        /// `surface` must be a live `IOSurfaceRef`.
+        pub unsafe fn hold(surface: *mut c_void) -> Self {
             unsafe {
                 CFRetain(surface);
                 IOSurfaceIncrementUseCount(surface);
@@ -158,7 +160,7 @@ mod mac {
             // SAFETY: `surface` is Chromium's, live during its paint; it's held below until the
             // copy has run.
             if let Some(copy) = unsafe { lightair_web::copy::copy(surface, &slot.target) } {
-                self.copying.push_back(Copying { copy, buffer: slot.buffer.clone(), _from: Surface::hold(surface) });
+                self.copying.push_back(Copying { copy, buffer: slot.buffer.clone(), _from: unsafe { Surface::hold(surface) } });
             }
             true
         }
@@ -185,7 +187,10 @@ mod mac {
 
     impl Frames {
         /// A new frame (main thread, during Chromium's paint).
-        pub fn put(&self, surface: *mut c_void) {
+        ///
+        /// # Safety
+        /// `surface` must be null or a live `IOSurfaceRef` (Chromium's, during its paint).
+        pub unsafe fn put(&self, surface: *mut c_void) {
             if surface.is_null() {
                 return;
             }
@@ -193,7 +198,7 @@ mod mac {
                 // every copy is still held: the next paint brings this one's picture
                 self.repaint.store(true, Ordering::Relaxed);
             }
-            let held = Surface::hold(surface);
+            let held = unsafe { Surface::hold(surface) };
             // the one it replaces (never drawn) goes back to Chromium
             *self.next.lock() = Some(held);
         }
@@ -207,8 +212,8 @@ mod mac {
                 // the newest frame Chromium painted, copied now; and another asked for, in case
                 // the page has repainted that surface since (one lock at a time: a drawer takes
                 // `shown`, then `next`)
-                let next = self.next.lock().as_ref().map(|s| Surface::hold(s.0));
-                let newest = next.or_else(|| self.shown.lock().as_ref().map(|s| Surface::hold(s.0)));
+                let next = self.next.lock().as_ref().map(|s| unsafe { Surface::hold(s.0) });
+                let newest = next.or_else(|| self.shown.lock().as_ref().map(|s| unsafe { Surface::hold(s.0) }));
                 if let Some(s) = newest {
                     self.copies.lock().start(s.0);
                 }
@@ -353,7 +358,8 @@ impl WebPage {
         #[cfg(target_os = "macos")]
         let texture = texture.or_else(|| {
             let f = frames.clone();
-            Some(Arc::new(move |surface, _w, _h| f.put(surface)) as lightair_web::TextureSink)
+            // SAFETY: Chromium hands its surface over during its paint
+            Some(Arc::new(move |surface, _w, _h| unsafe { f.put(surface) }) as lightair_web::TextureSink)
         });
         #[cfg(target_os = "macos")]
         if crate::show::own() {

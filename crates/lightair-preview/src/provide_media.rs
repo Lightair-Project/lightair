@@ -10,7 +10,7 @@
 //! so is a file with a rotation, which libobs turns as it draws it.
 
 use lightair_model::{Id, Source};
-use lightair_obs::media_source;
+use lightair_host::media_player as media_source;
 
 use crate::providers::{Frame, Provider};
 

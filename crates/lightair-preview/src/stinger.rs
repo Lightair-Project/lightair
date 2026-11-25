@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use lightair_obs::media_source::Frames;
+use lightair_host::media_player::Frames;
 use lightair_render::texture::PixelBuffer;
 use parking_lot::{Condvar, Mutex};
 
@@ -157,7 +157,7 @@ fn read(path: &str, shared: &Shared) {
             }
             continue;
         }
-        let next = frames.as_mut().and_then(Frames::next);
+        let next = frames.as_mut().and_then(Frames::next_frame);
         let mut s = shared.state.lock();
         if s.run != run {
             continue;
