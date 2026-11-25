@@ -739,26 +739,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "bindgen"
-version = "0.72.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
-dependencies = [
- "bitflags 2.13.2",
- "cexpr",
- "clang-sys",
- "itertools 0.13.0",
- "log",
- "prettyplease",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 2.1.3",
- "shlex 1.3.0",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "bit-set"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1020,7 +1000,7 @@ dependencies = [
  "find-msvc-tools",
  "jobserver",
  "libc",
- "shlex 2.0.1",
+ "shlex",
 ]
 
 [[package]]
@@ -1065,15 +1045,6 @@ name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
-
-[[package]]
-name = "cexpr"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
-dependencies = [
- "nom 7.1.3",
-]
 
 [[package]]
 name = "cfg-if"
@@ -1121,17 +1092,6 @@ dependencies = [
  "crypto-common 0.1.7",
  "inout",
  "zeroize",
-]
-
-[[package]]
-name = "clang-sys"
-version = "1.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
-dependencies = [
- "glob",
- "libc",
- "libloading 0.8.9",
 ]
 
 [[package]]
@@ -2824,7 +2784,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.21",
- "windows 0.58.0",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -4451,13 +4411,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
-name = "libobs-sys"
-version = "0.1.0"
-dependencies = [
- "bindgen",
-]
-
-[[package]]
 name = "libredox"
 version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4512,9 +4465,9 @@ dependencies = [
  "libc",
  "lightair-audio",
  "lightair-automation",
+ "lightair-host",
  "lightair-live",
  "lightair-model",
- "lightair-obs",
  "lightair-packages",
  "lightair-phone-camera",
  "lightair-platform",
@@ -4553,7 +4506,7 @@ dependencies = [
 [[package]]
 name = "lightair-audio"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "ebur128",
  "nnnoiseless",
@@ -4563,7 +4516,7 @@ dependencies = [
 [[package]]
 name = "lightair-automation"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4603,7 +4556,7 @@ dependencies = [
 [[package]]
 name = "lightair-capture"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -4628,7 +4581,7 @@ dependencies = [
 [[package]]
 name = "lightair-encode"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "objc2-audio-toolbox",
  "objc2-core-audio-types",
@@ -4646,7 +4599,7 @@ dependencies = [
 [[package]]
 name = "lightair-engine"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "ash",
  "async-trait",
@@ -4690,7 +4643,7 @@ dependencies = [
 [[package]]
 name = "lightair-feed"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "bytes",
  "futures",
@@ -4708,7 +4661,7 @@ dependencies = [
 [[package]]
 name = "lightair-fonts"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "fontdb",
  "serde",
@@ -4718,6 +4671,46 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "ttf-parser",
+]
+
+[[package]]
+name = "lightair-host"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "block2 0.6.2",
+ "chrono",
+ "cpal",
+ "crossbeam-channel",
+ "glam",
+ "hound",
+ "image",
+ "libc",
+ "libloading 0.8.9",
+ "lightair-audio",
+ "lightair-avatar",
+ "lightair-capture",
+ "lightair-encode",
+ "lightair-engine",
+ "lightair-feed",
+ "lightair-model",
+ "lightair-platform",
+ "lightair-render",
+ "lightair-web",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "objc2-video-toolbox",
+ "parking_lot",
+ "rtrb",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+ "uuid",
+ "vst3",
+ "windows 0.62.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4736,7 +4729,7 @@ dependencies = [
 [[package]]
 name = "lightair-live"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4769,63 +4762,18 @@ dependencies = [
 [[package]]
 name = "lightair-model"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "uuid",
-]
-
-[[package]]
-name = "lightair-obs"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "block2 0.6.2",
- "chrono",
- "cpal",
- "crossbeam-channel",
- "glam",
- "hound",
- "image",
- "libc",
- "libloading 0.8.9",
- "libobs-sys",
- "lightair-audio",
- "lightair-avatar",
- "lightair-capture",
- "lightair-encode",
- "lightair-engine",
- "lightair-feed",
- "lightair-model",
- "lightair-phone-camera",
- "lightair-platform",
- "lightair-pngtuber",
- "lightair-render",
- "lightair-store",
- "lightair-web",
- "objc2 0.6.5",
- "objc2-core-foundation",
- "objc2-core-video",
- "objc2-video-toolbox",
- "parking_lot",
- "rtrb",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "vst3",
- "windows 0.62.2",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "lightair-overlay"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "lightair-fonts",
  "lightair-live",
@@ -4840,7 +4788,7 @@ dependencies = [
 [[package]]
 name = "lightair-packages"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "semver",
  "serde",
@@ -4870,7 +4818,7 @@ dependencies = [
 [[package]]
 name = "lightair-platform"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "block2 0.6.2",
  "dirs 6.0.0",
@@ -4885,7 +4833,7 @@ dependencies = [
 [[package]]
 name = "lightair-pngtuber"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "png 0.17.16",
  "serde",
@@ -4908,9 +4856,9 @@ dependencies = [
  "lightair-capture",
  "lightair-engine",
  "lightair-fonts",
+ "lightair-host",
  "lightair-live",
  "lightair-model",
- "lightair-obs",
  "lightair-phone-camera",
  "lightair-render",
  "lightair-widgets",
@@ -4926,7 +4874,6 @@ dependencies = [
  "srt-tokio",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "tungstenite",
  "wgpu",
  "windows 0.62.2",
@@ -4935,7 +4882,7 @@ dependencies = [
 [[package]]
 name = "lightair-remote"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4957,7 +4904,7 @@ dependencies = [
 [[package]]
 name = "lightair-render"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "cosmic-text",
  "lightair-audio",
@@ -4982,7 +4929,7 @@ dependencies = [
 [[package]]
 name = "lightair-store"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "lightair-model",
  "serde",
@@ -5014,7 +4961,7 @@ dependencies = [
 [[package]]
 name = "lightair-widgets"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=16ed53782e648e7c2e12f1b3e2ae95507c6db69b#16ed53782e648e7c2e12f1b3e2ae95507c6db69b"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=26595f5202dc1567a25a386708069e752025f4e8#26595f5202dc1567a25a386708069e752025f4e8"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -6797,16 +6744,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
-name = "prettyplease"
-version = "0.2.37"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
-dependencies = [
- "proc-macro2",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "primal-check"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8358,12 +8295,6 @@ checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
 dependencies = [
  "dirs 5.0.1",
 ]
-
-[[package]]
-name = "shlex"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shlex"
