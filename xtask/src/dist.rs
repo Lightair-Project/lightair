@@ -114,6 +114,10 @@ fn build() -> anyhow::Result<()> {
         &root.join("target/modules/lightair-effect-stack/lightair-effect-stack.plugin"),
         &c.join("PlugIns/lightair-effect-stack.plugin"),
     )?;
+    // the trackers alone (no libobs), which Lightair's own engine calls, and their models
+    let modules = root.join("target/modules/lightair-effect-stack");
+    std::fs::copy(modules.join("liblightair-tracker.dylib"), c.join("Frameworks/liblightair-tracker.dylib"))?;
+    ditto(&modules.join("tracker-models"), &c.join("Resources/tracker-models"))?;
 
     // Chromium
     bundle_chromium(&root, &c, "release", true, ID)?;
