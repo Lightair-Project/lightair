@@ -24,17 +24,14 @@ use std::ffi::{CStr, c_char, c_void};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use lightair_capture::sound::{SoundCapture, Target};
-use lightair_capture::{Sound, SoundSink};
 
 use objc2::msg_send;
 use objc2::rc::autoreleasepool;
 use objc2::runtime::{AnyClass, AnyObject};
 use parking_lot::{Condvar, Mutex};
 
-use crate::audio_host::{InputFeed, SoundFeeder};
 use crate::sys;
 
 /// The libobs source type.
@@ -371,28 +368,19 @@ fn start_tap(source: usize, processes: Option<&[u32]>) -> Result<Tap, String> {
 
 // ------------------------------------------------------------------ the libobs source
 
-#[derive(Clone, PartialEq)]
-struct Settings {
-    app: Option<String>,
-}
+use lightair_host::system_audio::{Settings, SystemSound};
 
 struct Shared {
     source: usize,
     settings: Mutex<Settings>,
     changed: Condvar,
     quit: AtomicBool,
-    /// The mixer feeds itself from this source ([`mixer_captures`]): where its sound goes while
-    /// a track takes it; `None` while none does (and no capture runs).
-    feed: Mutex<Option<InputFeed>>,
-    /// Whether `feed` is set, changed under `settings`'s lock so the thread wakes for it.
-    wanted: AtomicBool,
 }
 
-struct SystemAudio {
-    shared: Arc<Shared>,
-    thread: Option<std::thread::JoinHandle<()>>,
-    /// Registered with the audio engine as feeding itself.
-    mixer: bool,
+/// A system audio source: Lightair's capture into the mixer (`Mixer`), or its own tap into libobs.
+enum SystemAudio {
+    Mixer(SystemSound),
+    Tap { shared: Arc<Shared>, thread: Option<std::thread::JoinHandle<()>> },
 }
 
 /// Whether the mixer takes these sources' sound from Lightair's own capture rather than through
@@ -401,107 +389,6 @@ struct SystemAudio {
 pub fn mixer_captures() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| crate::bridge::own() && std::env::var("LIGHTAIR_LEGACY_AUDIO").map_or(true, |v| v != "1"))
-}
-
-/// What to capture for these settings: everything but Lightair, or one app (none for an app
-/// setting left empty).
-fn target_of(settings: &Settings) -> Option<Target> {
-    match &settings.app {
-        None => Some(Target::System { include_own: false }),
-        Some(bundle) if bundle.is_empty() => None,
-        Some(bundle) => Some(Target::App(bundle.clone())),
-    }
-}
-
-/// The audio engine's side of a source in mixer mode: a track taking it hands over its feed.
-struct Feeder(Arc<Shared>);
-
-impl SoundFeeder for Feeder {
-    fn attach(&self, feed: Option<InputFeed>) {
-        let wanted = feed.is_some();
-        // the old feed (if any) is dropped here, on the engine thread
-        drop(std::mem::replace(&mut *self.0.feed.lock(), feed));
-        let _settings = self.0.settings.lock();
-        self.0.wanted.store(wanted, Ordering::Release);
-        self.0.changed.notify_all();
-    }
-}
-
-/// Where the capture delivers (Core Audio's real-time I/O thread): into the track's feed. Never
-/// waits: while the feed is being swapped, that block is dropped.
-struct Sink(Arc<Shared>);
-
-impl SoundSink for Sink {
-    fn sound(&mut self, sound: &Sound<'_>) {
-        if let Some(mut feed) = self.0.feed.try_lock()
-            && let Some(feed) = feed.as_mut()
-        {
-            feed.push(sound.samples, sound.channels, sound.rate);
-        }
-    }
-
-    fn stopped(&mut self, reason: &str) {
-        tracing::warn!(reason, "system audio: the capture stopped");
-    }
-}
-
-/// How long a capture that failed waits before it's tried again (unless access was refused or
-/// taps aren't supported: those wait for the settings or the track to change).
-const RETRY: Duration = Duration::from_secs(10);
-
-/// Mixer mode: keeps a capture matching the settings running while a track takes the source,
-/// and none otherwise. A settings change starts the capture again into the same feed; an app's
-/// capture follows the app as it quits and opens again by itself.
-fn run_mixer(shared: Arc<Shared>) {
-    let mut capture: Option<SoundCapture> = None;
-    let mut running: Option<Target> = None;
-    // the target that failed, when, and whether only a change gets it tried again
-    let mut failed: Option<(Target, Instant, bool)> = None;
-    loop {
-        if shared.quit.load(Ordering::Acquire) {
-            break;
-        }
-        let settings = shared.settings.lock().clone();
-        let wanted = shared.wanted.load(Ordering::Acquire);
-        let target = if wanted { target_of(&settings) } else { None };
-        if target != running {
-            // one tap at a time: the old one stops before another is made
-            capture = None;
-            running = None;
-            if let Some(t) = &target {
-                let retry = match &failed {
-                    Some((f, at, for_good)) if f == t => !for_good && at.elapsed() >= RETRY,
-                    _ => true,
-                };
-                if retry {
-                    match SoundCapture::start(t, Sink(shared.clone())) {
-                        Ok(c) => {
-                            tracing::info!(of = ?t, format = ?c.format(), "system audio: captured for the mixer");
-                            capture = Some(c);
-                            running = target.clone();
-                            failed = None;
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, of = ?t, "system audio: no capture");
-                            let for_good = matches!(
-                                e,
-                                lightair_capture::Error::Permission(_) | lightair_capture::Error::Unsupported(_)
-                            );
-                            failed = Some((t.clone(), Instant::now(), for_good));
-                        }
-                    }
-                }
-            }
-        }
-        if target.is_none() {
-            failed = None;
-        }
-        let mut s = shared.settings.lock();
-        if *s == settings && shared.wanted.load(Ordering::Acquire) == wanted && !shared.quit.load(Ordering::Acquire) {
-            shared.changed.wait_for(&mut s, Duration::from_secs(2));
-        }
-    }
-    drop(capture);
 }
 
 fn settings_of(settings: *mut sys::obs_data_t) -> Settings {
@@ -566,49 +453,46 @@ unsafe extern "C" fn get_name(_: *mut c_void) -> *const c_char {
 }
 
 unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::obs_source_t) -> *mut c_void {
+    let settings = settings_of(settings);
+    // the mixer takes a document source's sound from Lightair's capture
+    if mixer_captures()
+        && let Some(id) = crate::obs::doc_id(source)
+    {
+        return Box::into_raw(Box::new(SystemAudio::Mixer(SystemSound::new(id, settings)))) as *mut c_void;
+    }
     let shared = Arc::new(Shared {
         source: source as usize,
-        settings: Mutex::new(settings_of(settings)),
+        settings: Mutex::new(settings),
         changed: Condvar::new(),
         quit: AtomicBool::new(false),
-        feed: Mutex::new(None),
-        wanted: AtomicBool::new(false),
     });
-    let mixer = mixer_captures();
-    if mixer {
-        if let Some(id) = crate::obs::doc_id(source) {
-            crate::audio_host::feeds_itself(id, Arc::new(Feeder(shared.clone())));
-        }
-    }
     let thread = {
         let shared = shared.clone();
-        std::thread::Builder::new()
-            .name("lightair-system-audio".into())
-            .spawn(move || if mixer { run_mixer(shared) } else { run(shared) })
-            .ok()
+        std::thread::Builder::new().name("lightair-system-audio".into()).spawn(move || run(shared)).ok()
     };
-    Box::into_raw(Box::new(SystemAudio { shared, thread, mixer })) as *mut c_void
+    Box::into_raw(Box::new(SystemAudio::Tap { shared, thread })) as *mut c_void
 }
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
-    let mut s = unsafe { Box::from_raw(data as *mut SystemAudio) };
-    if s.mixer {
-        if let Some(id) = crate::obs::doc_id(s.shared.source as *mut sys::obs_source_t) {
-            crate::audio_host::feeds_itself_no_more(id);
+    let s = unsafe { Box::from_raw(data as *mut SystemAudio) };
+    if let SystemAudio::Tap { shared, mut thread } = *s {
+        shared.quit.store(true, Ordering::Release);
+        shared.changed.notify_all();
+        if let Some(t) = thread.take() {
+            let _ = t.join();
         }
-        *s.shared.feed.lock() = None;
-    }
-    s.shared.quit.store(true, Ordering::Release);
-    s.shared.changed.notify_all();
-    if let Some(t) = s.thread.take() {
-        let _ = t.join();
     }
 }
 
 unsafe extern "C" fn update(data: *mut c_void, settings: *mut sys::obs_data_t) {
     let s = unsafe { &*(data as *const SystemAudio) };
-    *s.shared.settings.lock() = settings_of(settings);
-    s.shared.changed.notify_all();
+    match s {
+        SystemAudio::Mixer(sound) => sound.set_settings(settings_of(settings)),
+        SystemAudio::Tap { shared, .. } => {
+            *shared.settings.lock() = settings_of(settings);
+            shared.changed.notify_all();
+        }
+    }
 }
 
 /// Registers the source with libobs (once; after the modules load).

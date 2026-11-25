@@ -25,6 +25,8 @@ pub mod program;
 pub mod plugins;
 pub mod rtsp;
 pub mod show;
+#[cfg(target_os = "macos")]
+pub mod system_audio;
 #[cfg(any(target_os = "macos", windows))]
 pub mod web;
 pub mod soundboard;
