@@ -224,7 +224,7 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
     // buffering, made for steady video, would hold it for a second or more)
     unsafe { sys::obs_source_set_async_unbuffered(source, true) };
     #[cfg(target_os = "macos")]
-    let slot = crate::system_audio::mixer_captures().then(|| crate::audio_host::feed_slot(source));
+    let slot = crate::system_audio::mixer_captures().then(|| crate::obs::doc_id(source).map(crate::audio_host::feed_slot)).flatten();
     #[cfg(not(target_os = "macos"))]
     let slot = None;
     let target = Target(Arc::new(Mutex::new(Some(source as usize))), slot);
@@ -253,7 +253,9 @@ unsafe extern "C" fn destroy(data: *mut c_void) {
     let web = unsafe { Box::from_raw(data as *mut Web) };
     // no frame after this
     if let Some(source) = web.target.0.lock().take() {
-        crate::audio_host::feeds_itself_no_more(source as *mut sys::obs_source_t);
+        if let Some(id) = crate::obs::doc_id(source as *mut sys::obs_source_t) {
+            crate::audio_host::feeds_itself_no_more(id);
+        }
     }
     #[cfg(target_os = "macos")]
     FEEDS.lock().retain(|_, f| !std::ptr::eq(f.as_ptr(), Arc::as_ptr(&web.shared)));

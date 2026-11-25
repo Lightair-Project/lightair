@@ -4,6 +4,7 @@
 
 pub mod access;
 pub mod audio;
+pub mod audio_host;
 pub mod clock;
 pub mod devices;
 pub mod gpu;

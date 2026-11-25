@@ -523,7 +523,7 @@ impl Audio {
         }
         // a track of the mixer takes the source's sound itself (a link from another computer
         // with the audio engine): into its feed, not libobs
-        if let Some(slot) = crate::audio_host::slot_of(frames) {
+        if let Some(slot) = crate::obs::doc_id(frames).and_then(crate::audio_host::slot_of) {
             let parts: Vec<&[f32]> = planes.iter().map(|p| &p[..(count as usize).min(p.len())]).collect();
             if slot.push_planar(&parts, self.rate) {
                 return;

@@ -576,7 +576,9 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
     });
     let mixer = mixer_captures();
     if mixer {
-        crate::audio_host::feeds_itself(source, Arc::new(Feeder(shared.clone())));
+        if let Some(id) = crate::obs::doc_id(source) {
+            crate::audio_host::feeds_itself(id, Arc::new(Feeder(shared.clone())));
+        }
     }
     let thread = {
         let shared = shared.clone();
@@ -591,7 +593,9 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let mut s = unsafe { Box::from_raw(data as *mut SystemAudio) };
     if s.mixer {
-        crate::audio_host::feeds_itself_no_more(s.shared.source as *mut sys::obs_source_t);
+        if let Some(id) = crate::obs::doc_id(s.shared.source as *mut sys::obs_source_t) {
+            crate::audio_host::feeds_itself_no_more(id);
+        }
         *s.shared.feed.lock() = None;
     }
     s.shared.quit.store(true, Ordering::Release);

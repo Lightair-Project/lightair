@@ -679,7 +679,7 @@ fn sounds() -> &'static crossbeam_channel::Sender<Sound> {
                 // a track of the mixer takes the wrapper's sound itself: into its feed
                 #[cfg(target_os = "macos")]
                 let fed = !parent.is_null()
-                    && crate::audio_host::slot_of(parent).is_some_and(|slot| {
+                    && crate::obs::doc_id(parent).and_then(crate::audio_host::slot_of).is_some_and(|slot| {
                         let planes: Vec<&[f32]> = s.planes.iter().map(Vec::as_slice).collect();
                         slot.push_planar(&planes, s.samples_per_sec)
                     });
@@ -740,7 +740,9 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
     // the phone's sound straight into a track of the mixer while one takes it
     #[cfg(target_os = "macos")]
     if crate::system_audio::mixer_captures() {
-        crate::audio_host::feed_slot(source);
+        if let Some(id) = crate::obs::doc_id(source) {
+            crate::audio_host::feed_slot(id);
+        }
     }
     unsafe { update(&s as *const Arc<Shared> as *mut c_void, settings) };
     Box::into_raw(Box::new(s)) as *mut c_void
@@ -749,7 +751,9 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let s = unsafe { Box::from_raw(data as *mut Arc<Shared>) };
     #[cfg(target_os = "macos")]
-    crate::audio_host::feeds_itself_no_more(s.source as *mut sys::obs_source_t);
+    if let Some(id) = crate::obs::doc_id(s.source as *mut sys::obs_source_t) {
+        crate::audio_host::feeds_itself_no_more(id);
+    }
     while s.busy.swap(true, Ordering::AcqRel) {
         std::thread::sleep(Duration::from_millis(2));
     }

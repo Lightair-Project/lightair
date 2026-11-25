@@ -1123,7 +1123,9 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         shown: Mutex::new(Shown::default()),
         composited: Mutex::new(Composited::default()),
         on_air_play: Default::default(),
-        feed: crate::system_audio::mixer_captures().then(|| crate::audio_host::feed_slot(source)),
+        feed: crate::system_audio::mixer_captures()
+            .then(|| crate::obs::doc_id(source).map(crate::audio_host::feed_slot))
+            .flatten(),
     });
     // a document's source (named by its id) is found by the compositor
     if crate::bridge::own()
@@ -1147,7 +1149,9 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let mut m = unsafe { Box::from_raw(data as *mut Media) };
-    crate::audio_host::feeds_itself_no_more(m.shared.source());
+    if let Some(id) = crate::obs::doc_id(m.shared.source()) {
+        crate::audio_host::feeds_itself_no_more(id);
+    }
     if crate::bridge::own() {
         let me = Arc::downgrade(&m.shared);
         SOURCES.lock().retain(|_, s| !Weak::ptr_eq(s, &me));

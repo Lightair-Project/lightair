@@ -464,3 +464,17 @@ pub fn property_items_with(source_type: &str, property: &str, settings: &serde_j
     }
     out
 }
+
+/// The document source a libobs source stands for, by the name the reconciler gives it (its
+/// id); `None` for a private or other source.
+pub fn doc_id(source: *mut sys::obs_source_t) -> Option<lightair_model::Id> {
+    if source.is_null() {
+        return None;
+    }
+    let name = unsafe { sys::obs_source_get_name(source) };
+    if name.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().ok()?;
+    serde_json::from_value(serde_json::Value::String(name.to_string())).ok()
+}

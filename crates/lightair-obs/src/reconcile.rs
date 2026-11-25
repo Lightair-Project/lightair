@@ -57,6 +57,8 @@ pub struct Reconciler {
     /// The audio engine playing the mixer (docs/plans/audio-engine.md); started with the first
     /// track. `LIGHTAIR_LEGACY_AUDIO=1` keeps libobs mixing the tracks instead.
     audio: Option<crate::audio_host::AudioHost>,
+    /// libobs's out sources for the mixer's mixes (libobs's outputs and cue monitoring).
+    audio_outs: Option<crate::audio_host::LibobsOuts>,
     /// The direct monitor wanted: output device ("" default) and whether it plays the program
     /// (else the cue mix). Applied whenever the audio engine runs.
     monitor: Option<(String, bool)>,
@@ -418,11 +420,20 @@ impl Reconciler {
             crate::plugins::set_sample_rate(rate);
             let block = self.audio_block.unwrap_or(crate::audio_host::BLOCK);
             self.audio = crate::audio_host::AudioHost::start(rate, block);
+            self.audio_outs = self.audio.as_ref().and_then(|_| crate::audio_host::LibobsOuts::start(rate));
         }
         let Some(host) = self.audio.as_mut() else { return };
         let monitor = self.monitor.clone().map(|(d, program)| (d, if program { lightair_audio::PROGRAM } else { crate::audio::CUE }));
-        if let Err(e) = host.set_headphones(monitor) {
-            tracing::warn!(%e, "direct monitoring unavailable; libobs monitors the cue");
+        let direct = monitor.is_some();
+        let played = match host.set_headphones(monitor) {
+            Ok(()) => direct,
+            Err(e) => {
+                tracing::warn!(%e, "direct monitoring unavailable; libobs monitors the cue");
+                false
+            }
+        };
+        if let Some(outs) = &self.audio_outs {
+            outs.set_cue_monitoring(!played);
         }
         let extras: Vec<(lightair_audio::NodeId, String)> = workspace
             .audio
@@ -437,7 +448,7 @@ impl Reconciler {
         let is_device = |id: &Id| workspace.sources.get(id).is_some_and(|i| i.kind == crate::devices::DEVICE_KIND);
         let stale: Vec<Id> = host.captured().filter(|i| !wanted.contains(i) || is_device(i)).collect();
         for source in stale {
-            host.release(source);
+            crate::audio_host::release(host, source);
         }
         let stale: Vec<Id> = host.open_devices().filter(|i| !wanted.contains(i)).collect();
         for source in stale {
@@ -452,7 +463,7 @@ impl Reconciler {
                     tracing::warn!(%e, device, "couldn't open the audio input");
                 }
             } else if let Some(src) = self.sources.get(source) {
-                host.capture(*source, src);
+                crate::audio_host::capture(host, *source, src);
             }
         }
         host.set(crate::audio::spec(workspace));
@@ -486,6 +497,10 @@ impl Reconciler {
         }
         self.audio_block = Some(frames);
         if self.audio.as_ref().is_some_and(|a| a.block() != frames) {
+            if let Some(host) = self.audio.as_mut() {
+                crate::audio_host::release_all(host);
+            }
+            self.audio_outs = None;
             self.audio = None;
             self.sync_audio(workspace);
         }
@@ -575,8 +590,16 @@ impl Reconciler {
         self.monitor = device.map(|d| (if d == "default" { String::new() } else { d }, program));
         if let Some(host) = self.audio.as_mut() {
             let m = self.monitor.clone().map(|(d, p)| (d, if p { lightair_audio::PROGRAM } else { crate::audio::CUE }));
-            if let Err(e) = host.set_headphones(m) {
-                tracing::warn!(%e, "direct monitoring unavailable; libobs monitors the cue");
+            let direct = m.is_some();
+            let played = match host.set_headphones(m) {
+                Ok(()) => direct,
+                Err(e) => {
+                    tracing::warn!(%e, "direct monitoring unavailable; libobs monitors the cue");
+                    false
+                }
+            };
+            if let Some(outs) = &self.audio_outs {
+                outs.set_cue_monitoring(!played);
             }
         }
     }
@@ -788,7 +811,7 @@ impl Reconciler {
                 // track of the mixer while one takes it
                 #[cfg(target_os = "macos")]
                 if crate::bridge::link_received_by_compositor(source) && crate::system_audio::mixer_captures() {
-                    crate::audio_host::feed_slot(src.as_ptr());
+                    crate::audio_host::feed_slot(source.id);
                 }
                 self.sources.insert(source.id, src);
             }
@@ -814,8 +837,8 @@ impl Reconciler {
         }
         #[cfg(target_os = "macos")]
         crate::bridge::source_removed(id);
-        if let Some(src) = self.sources.get(&id) {
-            crate::audio_host::feeds_itself_no_more(src.as_ptr());
+        if self.sources.contains_key(&id) {
+            crate::audio_host::feeds_itself_no_more(id);
         }
         self.sources.remove(&id);
     }
@@ -1767,7 +1790,11 @@ impl Reconciler {
         for id in ids {
             self.remove_track(id);
         }
-        self.audio = None; // stops the audio thread, releases the captures
+        if let Some(host) = self.audio.as_mut() {
+            crate::audio_host::release_all(host);
+        }
+        self.audio_outs = None;
+        self.audio = None; // stops the audio thread
         unsafe { sys::obs_set_output_source(0, std::ptr::null_mut()) };
         for obs_canvas in self.obs_canvases.values() {
             unsafe { sys::obs_canvas_set_channel(obs_canvas.as_ptr(), 0, std::ptr::null_mut()) };

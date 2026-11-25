@@ -389,7 +389,7 @@ unsafe extern "C" fn get_name(_: *mut c_void) -> *const c_char {
 
 unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::obs_source_t) -> *mut c_void {
     #[cfg(target_os = "macos")]
-    let sound = crate::system_audio::mixer_captures().then(|| crate::audio_host::feed_slot(source));
+    let sound = crate::system_audio::mixer_captures().then(|| crate::obs::doc_id(source).map(crate::audio_host::feed_slot)).flatten();
     #[cfg(not(target_os = "macos"))]
     let sound = None;
     let r = Box::new(Receiver {
@@ -416,7 +416,9 @@ unsafe extern "C" fn update(data: *mut c_void, settings: *mut sys::obs_data_t) {
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let mut r = unsafe { Box::from_raw(data as *mut Receiver) };
-    crate::audio_host::feeds_itself_no_more(r.source);
+    if let Some(id) = crate::obs::doc_id(r.source) {
+        crate::audio_host::feeds_itself_no_more(id);
+    }
     r.stop_thread();
 }
 
