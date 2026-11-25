@@ -48,6 +48,8 @@ mod mac;
 #[cfg(target_os = "macos")]
 mod stinger;
 #[cfg(target_os = "macos")]
+mod slideshow;
+#[cfg(target_os = "macos")]
 mod text;
 #[cfg(target_os = "macos")]
 mod widget_feed;

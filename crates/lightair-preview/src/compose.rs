@@ -25,7 +25,8 @@
 //!   label, counter, subathon timer), from the app's chat hub, the widget server's storage and
 //!   its alert queue (`widget_feed`); and avatars (`avatars::AvatarRenderer`), posed from what
 //!   their libobs sources publish each tick (the face, body, co-host mood, mic and push to talk
-//!   their camera, trackers and calibration give: `bridge::avatar_posing`). Until one is ready
+//!   their camera, trackers and calibration give: `bridge::avatar_posing`); and image
+//!   slideshows, their slides and the switches between them (`slideshow`). Until one is ready
 //!   (an image decoding, a timer before its first tick, an avatar's model loading) libobs's
 //!   picture stands in.
 //! - **Captured here** (`capture`, with `lightair-capture`): screens (displays, windows, apps)
@@ -1570,7 +1571,7 @@ fn made_here(source: &Source) -> bool {
         widgets::KIND => widgets::instance(s).is_some_and(|i| widget_feed::drawn_here(&i)),
         avatar::KIND => s["file"].as_str().is_some_and(|f| !f.is_empty()),
         crate::backdrop::KIND => true,
-        _ => false,
+        _ => crate::slideshow::drawn(source),
     }
 }
 
@@ -1694,6 +1695,11 @@ struct Native {
     pointers: crate::pointer::Pointers,
     /// Freeze, render delay and scroll on the sources drawn here.
     timed: crate::timed::Timed,
+    /// The image slideshows drawn here.
+    slideshows: crate::slideshow::Slideshows,
+    /// The person masks last looked at for presence, by camera: their serials, and whether
+    /// they showed a person.
+    persons: HashMap<Id, ((u64, u64), bool)>,
 }
 
 /// An avatar source drawn here: its renderer (`None`: none could be made, libobs's picture
@@ -1746,6 +1752,8 @@ impl Native {
             avatars: HashMap::new(),
             pointers: Default::default(),
             timed: Default::default(),
+            slideshows: Default::default(),
+            persons: HashMap::new(),
         })
     }
 
@@ -1759,6 +1767,8 @@ impl Native {
             self.keyed.forget_others(&keep);
             self.widgets.retain(|id, _| ws.sources.contains_key(id));
             self.backdrops.retain(|id, _| ws.sources.contains_key(id));
+            self.slideshows.keep(|id| ws.sources.get(&id).is_some_and(|s| crate::slideshow::KINDS.contains(&s.kind.as_str())));
+            self.persons.retain(|id, _| ws.sources.contains_key(id));
             self.avatars.retain(|id, _| ws.sources.get(id).is_some_and(|s| s.kind == avatar::KIND));
             let gone = self.looks.sweep(|id| ws.sources.contains_key(&id), &self.hot, &mut self.program.feeds);
             for feed in gone {
@@ -1786,6 +1796,7 @@ impl Native {
             widgets::KIND => Some(self.widget(source)?),
             avatar::KIND => Some(self.avatar(source)?),
             crate::backdrop::KIND => Some(self.backdrop(source)?),
+            _ if crate::slideshow::drawn(source) => Some(self.slideshows.picture(&self.gpu, source)?),
             _ => None,
         };
         if let Some(shot) = made {
@@ -1832,6 +1843,7 @@ impl Native {
         if !self.looks.push(source, picture, &self.hot, &mut self.program.feeds) {
             return bare();
         }
+        self.person_seen(source.id);
         // the engine draws looks on a camera's feed, whatever made the picture
         let mut camera = Source::clone(source);
         camera.kind = templates::CAMERA.into();
@@ -1845,6 +1857,48 @@ impl Native {
             used: Vec::new(),
         };
         frame.picture(&camera).or_else(bare)
+    }
+
+    /// Whether the newest masks the looks' analysis gave camera `source` show a person (more
+    /// than 1% of the picture, as the Effect Stack's filter counts it): the person mask of a
+    /// background effect, else the multiclass mask's person channel. Published for the effects'
+    /// "No person" hint; nothing is published while there's no mask.
+    fn person_seen(&mut self, source: Id) {
+        let Some(feed) = self.program.feeds.get(&source).and_then(|f| self.hot.feeds.read().get(f).cloned()) else {
+            return;
+        };
+        let Some(v) = feed.video() else { return };
+        let mask = v.mask.lock().clone();
+        let segmentation = if mask.is_none() { v.segmentation.lock().clone() } else { None };
+        let serials = (mask.as_ref().map_or(0, |m| m.serial), segmentation.as_ref().map_or(0, |s| s.serial));
+        if serials == (0, 0) {
+            return;
+        }
+        if let Some((last, seen)) = self.persons.get(&source)
+            && *last == serials
+        {
+            // the same masks: told again, so it stays current
+            bridge::set_person_seen(source, *seen);
+            return;
+        }
+        // every fourth pixel across and down, as the filter counts
+        let count = |bytes: &[u8], (w, h): (u32, u32), step: usize, at: usize| {
+            let (mut hits, mut n) = (0usize, 0usize);
+            for y in (0..h as usize).step_by(4) {
+                for x in (0..w as usize).step_by(4) {
+                    n += 1;
+                    hits += bytes.get((y * w as usize + x) * step + at).is_some_and(|b| *b > 127) as usize;
+                }
+            }
+            n > 0 && hits * 100 > n
+        };
+        let seen = match (&mask, &segmentation) {
+            (Some(m), _) => count(&m.bytes, m.size, 1, 0),
+            (None, Some(s)) => count(&s.rgba, s.size, 4, 3),
+            _ => return,
+        };
+        self.persons.insert(source, (serials, seen));
+        bridge::set_person_seen(source, seen);
     }
 
     /// The frame's GPU work is done: the cameras' feeds let go of their pictures.

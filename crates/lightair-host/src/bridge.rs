@@ -8,6 +8,9 @@
 //!   compositor draws what it can itself.
 //! - **Avatars:** whatever poses an avatar (libobs's avatar source today) publishes its posing by
 //!   document id ([`set_avatar_posing`]), and the compositor poses its own drawing from it.
+//! - **Faces and people seen:** the compositor's effects say whether they see a face
+//!   ([`set_face_seen`]) or a person ([`set_person_seen`]) in a source's picture, for the
+//!   effects' hints.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -210,5 +213,23 @@ pub fn set_face_seen(source: Id, seen: bool) {
 pub fn face_seen(source: Id) -> Option<bool> {
     let faces = FACES.lock();
     let (seen, at) = faces.get(&source)?;
+    (at.elapsed() < std::time::Duration::from_secs(2)).then_some(*seen)
+}
+
+// ---------------------------------------------------------------- people seen
+
+/// Whether the compositor's camera looks see a person in each source's picture (their
+/// segmentation's person mask), and when they last looked.
+static PERSONS: LazyLock<Mutex<HashMap<Id, (bool, Instant)>>> = LazyLock::new(Default::default);
+
+/// The compositor's camera looks looked at `source`'s picture: a person was there or not.
+pub fn set_person_seen(source: Id, seen: bool) {
+    PERSONS.lock().insert(source, (seen, Instant::now()));
+}
+
+/// Whether a person is seen in `source`'s picture (`None`: nothing has looked lately).
+pub fn person_seen(source: Id) -> Option<bool> {
+    let persons = PERSONS.lock();
+    let (seen, at) = persons.get(&source)?;
     (at.elapsed() < std::time::Duration::from_secs(2)).then_some(*seen)
 }
