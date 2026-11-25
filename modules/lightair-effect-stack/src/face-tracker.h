@@ -131,6 +131,22 @@ typedef struct {
 } ft_pigment;
 bool face_tracker_get_pigment(face_tracker_t *ft, ft_pigment *out);
 
+/* For hosts that track and smooth the results themselves (Lightair's own compositor):
+ *
+ * The newest analysed frame's landmarks as the model gave them, before any smoothing. False
+ * until a frame newer than *serial has been analysed; then *serial is that frame's count, and
+ * *found says whether a face was found in it (`face` then holds its points, normalised 0..1,
+ * y down, in the region layout above). *timestamp_ns, *w and *h are the analysed frame's
+ * time and size. */
+bool face_tracker_get_raw(face_tracker_t *ft, uint64_t *serial, ft_face *face, bool *found, uint64_t *timestamp_ns,
+			  uint32_t *w, uint32_t *h);
+/* The newest multiclass mask (take_mask's layout) before temporal smoothing, or with
+ * `person` the person mask (take_person's), copied into `out` when it holds `capacity` bytes.
+ * False when nothing is newer than *serial, or when `out` is too small: *w and *h are set
+ * whenever there is a newer one, so the caller can retry with a larger buffer. */
+bool face_tracker_copy_mask(face_tracker_t *ft, bool person, uint64_t *serial, uint8_t *out, uint64_t capacity,
+			    uint32_t *w, uint32_t *h, uint64_t *timestamp_ns);
+
 /* Running stats for the log: mean analysis time (ms) and fraction of frames re-detected. */
 void face_tracker_stats(face_tracker_t *ft, float *mean_ms, float *detect_ratio);
 

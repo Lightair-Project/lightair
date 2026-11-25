@@ -211,6 +211,12 @@ struct face_tracker {
 	int hist_count = 0, hist_head = 0;
 	uint64_t last_seen_ns = 0;
 	float mean_ms = 0, detect_ratio = 0;
+	/* the newest analysed frame before smoothing (face_tracker_get_raw): its points normalised,
+	 * whether a face was found, its time, its size, and how many frames were analysed */
+	ft_face raw;
+	bool raw_found = false;
+	uint64_t raw_serial = 0, raw_ts = 0;
+	uint32_t raw_w = 0, raw_h = 0;
 
 	/* smoothing state (landmark worker only) */
 	Euro e_cx, e_cy, e_ang, e_scale;
@@ -229,6 +235,11 @@ struct face_tracker {
 	std::vector<uint8_t> person;
 	uint32_t person_w = 0, person_h = 0;
 	uint64_t person_serial = 0;
+	uint64_t person_ts = 0;
+	/* the newest multiclass mask before temporal smoothing (face_tracker_copy_mask) */
+	std::vector<uint8_t> mask_raw;
+	uint32_t mask_raw_w = 0, mask_raw_h = 0;
+	uint64_t mask_raw_serial = 0, mask_raw_ts = 0;
 	std::vector<float> person_luma;   /* the last frame's mean luma per mask tile */
 	std::vector<float> mask_luma, mask_motion; /* the same for the multiclass mask */
 	std::atomic<bool> seg_every{false};  /* segment every new frame (a background effect is on) */
@@ -337,7 +348,21 @@ void face_tracker::run_landmarks()
 			f.skin_valid = sample_skin(f, buf, w * 4, w, h, f.skin_cbcr);
 
 		std::lock_guard<std::mutex> g(res_m);
+		raw_serial++;
+		raw_found = ok;
+		raw_ts = lm.ts;
+		raw_w = (uint32_t)w;
+		raw_h = (uint32_t)h;
 		if (ok) {
+			raw = f;
+			for (int i = 0; i < raw.num_points; i++) {
+				raw.pts[i].x /= w;
+				raw.pts[i].y /= h;
+			}
+			raw.valid = true;
+			raw.present = true;
+			raw.frame_id = lm.id;
+			raw.timestamp_ns = lm.ts;
 			smooth(f, lm.ts);
 			for (int i = 0; i < f.num_points; i++) {
 				f.pts[i].x /= w;
@@ -471,6 +496,11 @@ void face_tracker::run_segmentation()
 		if (ok && mw > 0 && mh > 0) {
 			std::vector<float> mmotion = tile_motion(seg.buf.data(), seg.w, seg.h, mw, mh, mask_luma);
 			std::lock_guard<std::mutex> g(mask_m);
+			mask_raw = m;
+			mask_raw_w = mw;
+			mask_raw_h = mh;
+			mask_raw_ts = seg.ts;
+			mask_raw_serial++;
 			mask_motion.swap(mmotion);
 			bool blend = mask_w == (uint32_t)mw && mask_h == (uint32_t)mh && mask.size() == m.size();
 			if (!blend) {
@@ -507,6 +537,7 @@ void face_tracker::run_segmentation()
 					person_h = ph;
 				}
 				person_serial++;
+				person_ts = seg.ts;
 			}
 		}
 #endif
@@ -723,6 +754,42 @@ extern "C" uint8_t *face_tracker_take_person(face_tracker_t *t, uint64_t *serial
 	*h = t->person_h;
 	*serial = t->person_serial;
 	return copy;
+}
+
+extern "C" bool face_tracker_get_raw(face_tracker_t *t, uint64_t *serial, ft_face *face, bool *found,
+				    uint64_t *timestamp_ns, uint32_t *w, uint32_t *h)
+{
+	std::lock_guard<std::mutex> g(t->res_m);
+	if (!t->raw_serial || t->raw_serial == *serial)
+		return false;
+	*serial = t->raw_serial;
+	*found = t->raw_found;
+	*timestamp_ns = t->raw_ts;
+	*w = t->raw_w;
+	*h = t->raw_h;
+	if (t->raw_found)
+		*face = t->raw;
+	else
+		memset(face, 0, sizeof(*face));
+	return true;
+}
+
+extern "C" bool face_tracker_copy_mask(face_tracker_t *t, bool person, uint64_t *serial, uint8_t *out,
+				      uint64_t capacity, uint32_t *w, uint32_t *h, uint64_t *timestamp_ns)
+{
+	std::lock_guard<std::mutex> g(t->mask_m);
+	const std::vector<uint8_t> &m = person ? t->person : t->mask_raw;
+	uint64_t s = person ? t->person_serial : t->mask_raw_serial;
+	if (m.empty() || s == *serial)
+		return false;
+	*w = person ? t->person_w : t->mask_raw_w;
+	*h = person ? t->person_h : t->mask_raw_h;
+	*timestamp_ns = person ? t->person_ts : t->mask_raw_ts;
+	if (!out || capacity < m.size())
+		return false;
+	memcpy(out, m.data(), m.size());
+	*serial = s;
+	return true;
 }
 
 extern "C" void face_tracker_stats(face_tracker_t *t, float *mean_ms, float *detect_ratio)

@@ -15,6 +15,8 @@ pub mod avatars;
 #[cfg(target_os = "macos")]
 mod compose;
 #[cfg(target_os = "macos")]
+mod looks;
+#[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
 mod stinger;

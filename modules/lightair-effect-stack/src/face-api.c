@@ -6,7 +6,8 @@ GNU General Public License as published by the Free Software Foundation; either 
 the License, or (at your option) any later version.
 */
 
-/* The face tracker, for code outside this module (Lightair's avatars), as libobs global procs:
+/* The face tracker, for code outside this module (Lightair's avatars, Auto-frame, the compositor's
+ * camera looks), as libobs global procs:
  *
  *   lightair_face_tracker_new(out ptr tracker)
  *   lightair_face_tracker_free(in ptr tracker)
@@ -16,6 +17,23 @@ the License, or (at your option) any later version.
  *
  * `data` is a BGRA frame (copied: it may be let go once submit returns); `face` points to an
  * ft_face (face-tracker.h) filled in. `get` may be called from any thread.
+ *
+ * For a host that tracks and smooths the results itself (Lightair's own compositor drawing the
+ * camera looks):
+ *
+ *   lightair_face_tracker_segmentation(in ptr tracker, in bool enabled, in bool fast,
+ *                                      in bool every_frame, in bool person, in int quality)
+ *   lightair_face_tracker_get_raw(in ptr tracker, in int serial, in ptr face, out int new_serial,
+ *                                 out bool found, out int timestamp_ns, out int width,
+ *                                 out int height, out bool ok)
+ *   lightair_face_tracker_copy_mask(in ptr tracker, in bool person, in int serial, in ptr buffer,
+ *                                   in int capacity, out int new_serial, out int width,
+ *                                   out int height, out int timestamp_ns, out bool ok)
+ *
+ * `get_raw` gives the newest analysed frame's points before smoothing (ok false when nothing is
+ * newer than `serial`); `copy_mask` the newest multiclass mask before temporal smoothing (RGBA),
+ * or the person mask (one byte a pixel), copied into `buffer` when `capacity` bytes are enough
+ * (otherwise ok is false with `width` and `height` set, to retry with a larger buffer).
  *
  * The body and hands, alike: lightair_body_tracker_new/free/submit (no timestamp) and
  * lightair_body_tracker_get(in ptr tracker, in ptr body, out bool ok), `body` a bt_body
@@ -71,6 +89,52 @@ static void proc_get(void *unused, calldata_t *cd)
 	calldata_set_bool(cd, "ok", ok);
 }
 
+static void proc_segmentation(void *unused, calldata_t *cd)
+{
+	UNUSED_PARAMETER(unused);
+	face_tracker_t *ft = calldata_ptr(cd, "tracker");
+	if (!ft)
+		return;
+	face_tracker_set_segmentation(ft, calldata_bool(cd, "enabled"));
+	face_tracker_set_segmentation_fast(ft, calldata_bool(cd, "fast"));
+	face_tracker_set_segmentation_every_frame(ft, calldata_bool(cd, "every_frame"));
+	face_tracker_set_person(ft, calldata_bool(cd, "person"), (int)calldata_int(cd, "quality"));
+}
+
+static void proc_get_raw(void *unused, calldata_t *cd)
+{
+	UNUSED_PARAMETER(unused);
+	face_tracker_t *ft = calldata_ptr(cd, "tracker");
+	ft_face *face = calldata_ptr(cd, "face");
+	uint64_t serial = (uint64_t)calldata_int(cd, "serial"), ts = 0;
+	uint32_t w = 0, h = 0;
+	bool found = false;
+	bool ok = ft && face && face_tracker_get_raw(ft, &serial, face, &found, &ts, &w, &h);
+	calldata_set_int(cd, "new_serial", (long long)serial);
+	calldata_set_bool(cd, "found", found);
+	calldata_set_int(cd, "timestamp_ns", (long long)ts);
+	calldata_set_int(cd, "width", w);
+	calldata_set_int(cd, "height", h);
+	calldata_set_bool(cd, "ok", ok);
+}
+
+static void proc_copy_mask(void *unused, calldata_t *cd)
+{
+	UNUSED_PARAMETER(unused);
+	face_tracker_t *ft = calldata_ptr(cd, "tracker");
+	uint8_t *buffer = calldata_ptr(cd, "buffer");
+	long long capacity = calldata_int(cd, "capacity");
+	uint64_t serial = (uint64_t)calldata_int(cd, "serial"), ts = 0;
+	uint32_t w = 0, h = 0;
+	bool ok = ft && face_tracker_copy_mask(ft, calldata_bool(cd, "person"), &serial, buffer,
+					       capacity > 0 ? (uint64_t)capacity : 0, &w, &h, &ts);
+	calldata_set_int(cd, "new_serial", (long long)serial);
+	calldata_set_int(cd, "width", w);
+	calldata_set_int(cd, "height", h);
+	calldata_set_int(cd, "timestamp_ns", (long long)ts);
+	calldata_set_bool(cd, "ok", ok);
+}
+
 static void body_new(void *unused, calldata_t *cd)
 {
 	UNUSED_PARAMETER(unused);
@@ -116,6 +180,19 @@ void face_api_register(void)
 			 proc_submit, NULL);
 	proc_handler_add(ph, "void lightair_face_tracker_get(in ptr tracker, in int frame_id, in ptr face, out bool ok)",
 			 proc_get, NULL);
+	proc_handler_add(ph,
+			 "void lightair_face_tracker_segmentation(in ptr tracker, in bool enabled, in bool fast, "
+			 "in bool every_frame, in bool person, in int quality)",
+			 proc_segmentation, NULL);
+	proc_handler_add(ph,
+			 "void lightair_face_tracker_get_raw(in ptr tracker, in int serial, in ptr face, out int new_serial, "
+			 "out bool found, out int timestamp_ns, out int width, out int height, out bool ok)",
+			 proc_get_raw, NULL);
+	proc_handler_add(ph,
+			 "void lightair_face_tracker_copy_mask(in ptr tracker, in bool person, in int serial, in ptr buffer, "
+			 "in int capacity, out int new_serial, out int width, out int height, out int timestamp_ns, "
+			 "out bool ok)",
+			 proc_copy_mask, NULL);
 	proc_handler_add(ph, "void lightair_body_tracker_new(out ptr tracker)", body_new, NULL);
 	proc_handler_add(ph, "void lightair_body_tracker_free(in ptr tracker)", body_free, NULL);
 	proc_handler_add(ph,

@@ -107,9 +107,9 @@ struct Bridge {
     /// The sources each compositor (by canvas) wants pictures of, each with whether it wants
     /// it without its libobs filters.
     wanted: Mutex<HashMap<Id, HashMap<Id, bool>>>,
-    /// The newest finished picture of each source drawn, and whether it was drawn without its
-    /// filters.
-    latest: Mutex<HashMap<Id, (Buffer, bool)>>,
+    /// The newest finished picture of each source drawn, whether it was drawn without its
+    /// filters, and the libobs frame that drew it.
+    latest: Mutex<HashMap<Id, (Buffer, bool, u64)>>,
     /// Each drawn source's ring (graphics thread only).
     rings: Mutex<HashMap<Id, Ring>>,
 }
@@ -185,6 +185,9 @@ pub struct Picture {
     pub buffer: Buffer,
     /// Drawn without the source's libobs filters: its effects aren't in it.
     pub unfiltered: bool,
+    /// The video time of the libobs frame that drew it: a different value is a new picture
+    /// (buffers are reused).
+    pub serial: u64,
 }
 
 impl Picture {
@@ -198,8 +201,8 @@ impl Picture {
 
 /// The newest finished picture of `source`, if it's wanted and has been drawn. Any thread.
 pub fn picture(source: Id) -> Option<Picture> {
-    let (buffer, unfiltered) = BRIDGE.latest.lock().get(&source)?.clone();
-    Some(Picture { buffer, unfiltered })
+    let (buffer, unfiltered, serial) = BRIDGE.latest.lock().get(&source)?.clone();
+    Some(Picture { buffer, unfiltered, serial })
 }
 
 // ---------------------------------------------------------------- timers
@@ -352,6 +355,8 @@ struct Slot {
     fence: Option<gl::GLsync>,
     /// What's in it was drawn without the source's filters.
     unfiltered: bool,
+    /// The video time of the libobs frame that drew it.
+    frame: u64,
 }
 
 /// A source's buffers at one size. Graphics thread only.
@@ -424,7 +429,7 @@ impl Ring {
         let (w, h) = self.size;
         let buffer = bgra_buffer(w, h)?;
         let surface = surface_of(&buffer)?;
-        let mut slot = Slot { buffer, gl: 0, tex: ptr::null_mut(), fence: None, unfiltered: false };
+        let mut slot = Slot { buffer, gl: 0, tex: ptr::null_mut(), fence: None, unfiltered: false, frame: 0 };
         if self.metal {
             slot.tex = unsafe { sys::gs_texture_create_from_iosurface(surface) };
             if slot.tex.is_null() {
@@ -706,7 +711,7 @@ unsafe extern "C" fn on_rendered(_: *mut c_void) {
         };
         if let Some(i) = unsafe { ring.finished() } {
             let slot = &ring.slots[i];
-            b.latest.lock().insert(*id, (slot.buffer.clone(), slot.unfiltered));
+            b.latest.lock().insert(*id, (slot.buffer.clone(), slot.unfiltered, slot.frame));
         }
         // every buffer in use: this frame of the source is skipped rather than waited for
         let Some(slot) = (unsafe { ring.free_slot(RING + compositors) }) else {
@@ -716,8 +721,218 @@ unsafe extern "C" fn on_rendered(_: *mut c_void) {
         unsafe {
             draw_source(src, skip, w, h, ring.target);
             ring.slots[slot].unfiltered = unfiltered;
+            ring.slots[slot].frame = frame;
             ring.copy(slot);
         }
         release();
     }
+}
+
+// ---------------------------------------------------------------- the camera looks' trackers
+
+/// Points in the faces given to the looks: the face landmark model's 478 (0–467 the mesh,
+/// 468–477 the irises, each iris's centre first).
+pub const FACE_POINTS: usize = 478;
+
+/// The tracker's regions (`ft_region`) the looks' points are taken from.
+const FT_LEFT_PUPIL: usize = 10;
+const FT_RIGHT_PUPIL: usize = 11;
+
+/// The Effect Stack's face tracker and segmentation (Core ML on macOS), for a host that tracks
+/// and smooths their results itself: Lightair's own compositor drawing the camera looks. One per
+/// camera; it analyses BGRA frames on threads of its own and keeps the newest results.
+pub struct FaceTracker {
+    tracker: NonNull<c_void>,
+}
+
+// SAFETY: the tracker's calls lock what they share inside the module; any thread may call them.
+unsafe impl Send for FaceTracker {}
+
+/// One analysed frame's landmarks, before smoothing.
+pub struct RawFace {
+    /// The time it was submitted with.
+    pub time_ns: i64,
+    /// A face was found: `points` holds its [`FACE_POINTS`] points, normalised 0–1, y down.
+    pub found: bool,
+    pub points: Vec<[f32; 2]>,
+    /// The analysed frame's size.
+    pub size: (u32, u32),
+}
+
+/// A mask the tracker made, before temporal smoothing (the multiclass one) or as it keeps it
+/// (the person one).
+pub struct RawMask {
+    pub time_ns: i64,
+    pub bytes: Vec<u8>,
+    pub size: (u32, u32),
+}
+
+impl FaceTracker {
+    /// Whether the Effect Stack module loaded gives what the looks need (its newer procs).
+    pub fn available() -> bool {
+        // a call with no tracker does nothing; it fails only when the proc isn't there
+        crate::avatar::tracker_call(c"lightair_face_tracker_segmentation", |cd| {
+            crate::avatar::set_ptr(cd, c"tracker", ptr::null_mut())
+        })
+        .map(|mut cd| crate::avatar::free_cd(&mut cd))
+        .is_some()
+    }
+
+    /// A new tracker (its models load in the background; frames given meanwhile are dropped).
+    pub fn new() -> Option<FaceTracker> {
+        let mut cd = crate::avatar::tracker_call(c"lightair_face_tracker_new", |_| {})?;
+        let t = crate::avatar::get_ptr(&mut cd, c"tracker");
+        crate::avatar::free_cd(&mut cd);
+        Some(FaceTracker { tracker: NonNull::new(t)? })
+    }
+
+    /// Which analyses run: the segmentation (multiclass, at about 30 a second when `fast`, every
+    /// frame given with `every_frame`, about 15 a second otherwise) and with `person` the finer
+    /// person mask at its quality (0 fast, 1 balanced, 2 accurate).
+    pub fn segmentation(&self, enabled: bool, fast: bool, every_frame: bool, person: Option<u32>) {
+        let t = self.tracker.as_ptr();
+        if let Some(mut cd) = crate::avatar::tracker_call(c"lightair_face_tracker_segmentation", |cd| {
+            crate::avatar::set_ptr(cd, c"tracker", t);
+            set_bool(cd, c"enabled", enabled);
+            set_bool(cd, c"fast", fast);
+            set_bool(cd, c"every_frame", every_frame);
+            set_bool(cd, c"person", person.is_some());
+            crate::avatar::set_int(cd, c"quality", person.unwrap_or(1).min(2) as i64);
+        }) {
+            crate::avatar::free_cd(&mut cd);
+        }
+    }
+
+    /// Gives a BGRA frame to analyse (copied before this returns); false when the tracker is
+    /// still busy with an earlier one (the frame is dropped).
+    ///
+    /// # Safety
+    /// `data` must hold `height` rows of `linesize` bytes, each at least `width` × 4.
+    pub unsafe fn submit(&self, data: *const u8, linesize: usize, width: u32, height: u32, id: u64, time_ns: i64) -> bool {
+        let t = self.tracker.as_ptr();
+        let Some(mut cd) = crate::avatar::tracker_call(c"lightair_face_tracker_submit", |cd| {
+            crate::avatar::set_ptr(cd, c"tracker", t);
+            crate::avatar::set_ptr(cd, c"data", data as *mut c_void);
+            crate::avatar::set_int(cd, c"linesize", linesize as i64);
+            crate::avatar::set_int(cd, c"width", width as i64);
+            crate::avatar::set_int(cd, c"height", height as i64);
+            crate::avatar::set_int(cd, c"frame_id", id as i64);
+            crate::avatar::set_int(cd, c"timestamp_ns", time_ns);
+        }) else {
+            return false;
+        };
+        let sent = crate::avatar::get_bool(&mut cd, c"sent");
+        crate::avatar::free_cd(&mut cd);
+        sent
+    }
+
+    /// The newest analysed frame's landmarks, when one newer than `serial` is there (`serial`
+    /// then becomes its count). The tracker's region layout is turned back into the landmark
+    /// model's order: the mesh's 468 points, then each iris as its centre (the tracker keeps
+    /// only the centres; the looks read only those).
+    pub fn raw_face(&self, serial: &mut u64) -> Option<RawFace> {
+        let t = self.tracker.as_ptr();
+        // SAFETY: plain old data, filled in by the tracker
+        let mut face: Box<crate::avatar::FtFace> = Box::new(unsafe { std::mem::zeroed() });
+        let fp = &mut *face as *mut crate::avatar::FtFace as *mut c_void;
+        let before = *serial;
+        let mut cd = crate::avatar::tracker_call(c"lightair_face_tracker_get_raw", |cd| {
+            crate::avatar::set_ptr(cd, c"tracker", t);
+            crate::avatar::set_int(cd, c"serial", before as i64);
+            crate::avatar::set_ptr(cd, c"face", fp);
+        })?;
+        let ok = crate::avatar::get_bool(&mut cd, c"ok");
+        let found = crate::avatar::get_bool(&mut cd, c"found");
+        let new = get_int(&mut cd, c"new_serial") as u64;
+        let time_ns = get_int(&mut cd, c"timestamp_ns");
+        let size = (get_int(&mut cd, c"width") as u32, get_int(&mut cd, c"height") as u32);
+        crate::avatar::free_cd(&mut cd);
+        if !ok {
+            return None;
+        }
+        *serial = new;
+        let points = if found { landmark_order(&face) } else { None };
+        Some(RawFace { time_ns, found: points.is_some(), points: points.unwrap_or_default(), size })
+    }
+
+    /// The newest multiclass mask (RGBA: R skin, G face skin, B hair, A person) before temporal
+    /// smoothing, or with `person` the person mask (one byte a pixel), when one newer than
+    /// `serial` is there.
+    pub fn raw_mask(&self, person: bool, serial: &mut u64) -> Option<RawMask> {
+        let t = self.tracker.as_ptr();
+        let channels = if person { 1 } else { 4 };
+        // asked first with no room: the size of a newer mask, if there is one
+        let mut bytes: Vec<u8> = Vec::new();
+        for _ in 0..3 {
+            let before = *serial;
+            let (ptr, capacity) = (bytes.as_mut_ptr(), bytes.len());
+            let mut cd = crate::avatar::tracker_call(c"lightair_face_tracker_copy_mask", |cd| {
+                crate::avatar::set_ptr(cd, c"tracker", t);
+                set_bool(cd, c"person", person);
+                crate::avatar::set_int(cd, c"serial", before as i64);
+                crate::avatar::set_ptr(cd, c"buffer", if capacity == 0 { ptr::null_mut() } else { ptr.cast() });
+                crate::avatar::set_int(cd, c"capacity", capacity as i64);
+            })?;
+            let ok = crate::avatar::get_bool(&mut cd, c"ok");
+            let new = get_int(&mut cd, c"new_serial") as u64;
+            let (w, h) = (get_int(&mut cd, c"width") as u32, get_int(&mut cd, c"height") as u32);
+            let time_ns = get_int(&mut cd, c"timestamp_ns");
+            crate::avatar::free_cd(&mut cd);
+            let needed = w as usize * h as usize * channels;
+            if ok {
+                *serial = new;
+                bytes.truncate(needed);
+                return Some(RawMask { time_ns, bytes, size: (w, h) });
+            }
+            if needed == 0 || needed <= bytes.len() {
+                // nothing newer
+                return None;
+            }
+            // a newer mask: asked again with room for it (it may have grown meanwhile)
+            bytes.resize(needed, 0);
+        }
+        None
+    }
+}
+
+impl Drop for FaceTracker {
+    fn drop(&mut self) {
+        let t = self.tracker.as_ptr();
+        if let Some(mut cd) =
+            crate::avatar::tracker_call(c"lightair_face_tracker_free", |cd| crate::avatar::set_ptr(cd, c"tracker", t))
+        {
+            crate::avatar::free_cd(&mut cd);
+        }
+    }
+}
+
+/// The tracker's face (its region layout from the landmark model: the mesh in order, each pupil
+/// one point) as the landmark model's 478 points; `None` without the mesh (a tracker that gives
+/// only a constellation of points).
+fn landmark_order(face: &crate::avatar::FtFace) -> Option<Vec<[f32; 2]>> {
+    let region = |r: usize| {
+        let (s, n) = (face.region_start[r].max(0) as usize, face.region_count[r].max(0) as usize);
+        face.pts.get(s..s + n).unwrap_or(&[])
+    };
+    let mesh = region(crate::avatar::FT_MESH);
+    let (left, right) = (region(FT_LEFT_PUPIL), region(FT_RIGHT_PUPIL));
+    if mesh.len() < 468 || left.is_empty() || right.is_empty() {
+        return None;
+    }
+    let mut points = Vec::with_capacity(FACE_POINTS);
+    points.extend_from_slice(&mesh[..468]);
+    // 468–472 the subject's right iris (the picture's left), 473–477 the left
+    points.extend(std::iter::repeat_n(right[0], 5));
+    points.extend(std::iter::repeat_n(left[0], 5));
+    Some(points)
+}
+
+fn set_bool(cd: *mut sys::calldata_t, name: &std::ffi::CStr, v: bool) {
+    unsafe { sys::calldata_set_data(cd, name.as_ptr(), &v as *const _ as *const c_void, std::mem::size_of::<bool>()) };
+}
+
+fn get_int(cd: &mut sys::calldata_t, name: &std::ffi::CStr) -> i64 {
+    let mut v: i64 = 0;
+    unsafe { sys::calldata_get_data(cd, name.as_ptr(), &mut v as *mut _ as *mut c_void, std::mem::size_of::<i64>()) };
+    v
 }

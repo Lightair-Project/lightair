@@ -29,14 +29,16 @@
 //!   other widgets, avatars, devices, NDI…
 //!
 //! Effects: the compositor draws a source's effects when it can draw all of them: the
-//! renderer's (shader effects, the colour filter, a `.cube` LUT) and the engine's sharpen and
-//! keyers (chroma, colour, luma key), the keyers first in the stack, as they're drawn first
-//! here. Such a source's picture is made bare (the bridge draws it without its libobs
-//! filters), keyed on the GPU, then given to the renderer with its effects. A source with any
-//! other effect (the Effect Stack's looks, the camera studio filter, masks, freeze, scroll…)
-//! is drawn by libobs through all its filters, and the renderer is given it without its effects
-//! so nothing is drawn twice. The renderer does the rest: position, fit, crop, turn, flip,
-//! tilt, shape, opacity, and the switch between scenes.
+//! renderer's (shader effects, the colour filter, a `.cube` LUT), the engine's sharpen and
+//! keyers (chroma, colour, luma key), and the engine's camera looks (the Effect Stack's
+//! beauty, makeup, face shape, light, grade and background effects, with faces and masks from
+//! the module's own models: `looks`); the looks first in the stack, then the keyers, as
+//! they're drawn in that order here. Such a source's picture is made bare (the bridge draws it
+//! without its libobs filters), looked and keyed on the GPU, then given to the renderer with
+//! its effects. A source with any other effect (stickers, camera motion, ambience, masks,
+//! freeze, scroll…) is drawn by libobs through all its filters, and the renderer is given it
+//! without its effects so nothing is drawn twice. The renderer does the rest: position, fit,
+//! crop, turn, flip, tilt, shape, opacity, and the switch between scenes.
 //!
 //! Switches are drawn as libobs draws them: a stinger plays its video (`stinger`, decoded here)
 //! for the video's length, cutting at its cut point; a stinger with no video, and a Scene
@@ -64,6 +66,7 @@ use objc2_core_video::{CVPixelBufferGetIOSurface, kCVPixelFormatType_32BGRA};
 use objc2_metal::{MTLDevice, MTLPixelFormat, MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage};
 use parking_lot::Mutex;
 
+use crate::looks;
 use crate::mac::{Frame, Shared, pixel_buffer};
 use crate::stinger::Player;
 use crate::widget_feed;
@@ -353,6 +356,8 @@ impl State {
             self.native_failed = self.native.is_none();
         }
         let keyers = self.native.is_some();
+        // the camera looks: with the engine's pictures, and a module that gives faces and masks
+        let looked = keyers && looks::available();
         self.missing.retain(|id| shown.contains(id));
         // what libobs is asked for: the sources not made here (bare when the compositor draws
         // all their effects), and those made here whose picture isn't ready
@@ -360,7 +365,7 @@ impl State {
             .iter()
             .filter_map(|id| base.sources.get(id))
             .filter_map(|source| {
-                let effects = effects_drawn(source, keyers);
+                let effects = effects_drawn(source, keyers, looked);
                 let made = keyers && effects && made_here(source) && !self.missing.contains(&source.id);
                 (!made).then_some((source.id, effects))
             })
@@ -384,7 +389,7 @@ impl State {
         }
         for id in &shown {
             let Some(source) = base.sources.get(id) else { continue };
-            let effects = effects_drawn(source, keyers);
+            let effects = effects_drawn(source, keyers, looked);
             if effects
                 && made_here(source)
                 && let Some(native) = self.native.as_mut()
@@ -403,7 +408,10 @@ impl State {
             }
             let Some(picture) = bridge::picture(*id) else { continue };
             let steps = if picture.unfiltered { keying::steps(source) } else { Vec::new() };
-            let shot = if steps.is_empty() {
+            let shot = if picture.unfiltered && looks::has_looks(source) {
+                // its looks (then its keys) drawn by the engine; asked for bare only with them
+                self.native.as_mut().and_then(|n| n.looked(source, &picture))
+            } else if steps.is_empty() {
                 picture.pixel_buffer().map(|b| Shot { size: b.size(), picture: Picture::Buffer(b), premultiplied: true })
             } else {
                 // keyed here; without the keyers it isn't drawn (it wasn't asked for bare)
@@ -474,6 +482,9 @@ impl State {
         // the GPU is done with the sources' buffers and the stinger's frame
         drop(held);
         drop(stinger);
+        if let Some(native) = self.native.as_mut() {
+            native.frame_done();
+        }
         let frame = &drawer.ring.slots[i].buffer;
         for preview in showing {
             preview.feed(frame);
@@ -490,6 +501,9 @@ impl State {
     fn idle(&mut self) {
         if self.wanted.take().is_some() {
             bridge::want(self.canvas, HashMap::new());
+        }
+        if let Some(native) = self.native.as_mut() {
+            native.forget_looks();
         }
         program_source::withdraw(self.canvas);
     }
@@ -781,8 +795,13 @@ impl Pictures for Ready<'_> {
 
 // ---------------------------------------------------------------- pictures made here
 
-/// Whether the compositor makes `source`'s picture itself (when it draws all its effects).
+/// Whether the compositor makes `source`'s picture itself (when it draws all its effects). A
+/// source with camera looks isn't: the engine draws looks on a feed, which is given libobs's bare
+/// picture.
 fn made_here(source: &Source) -> bool {
+    if looks::has_looks(source) {
+        return false;
+    }
     let s = &source.settings;
     match source.kind.as_str() {
         templates::IMAGE => s["file"].as_str().is_some_and(|f| !f.is_empty()),
@@ -797,23 +816,31 @@ fn made_here(source: &Source) -> bool {
 
 /// Whether the compositor draws every effect of `source` that changes its picture: the
 /// renderer's (shader effects, the colour filter, a LUT from a `.cube` file, as
-/// `lightair_render::scene::unsupported` counts them) and, with `keyers`, sharpen and the
-/// keyers, which must come before the renderer's in the stack (they're drawn first here).
-/// Sound effects don't count.
-fn effects_drawn(source: &Source, keyers: bool) -> bool {
-    let mut renderer_seen = false;
+/// `lightair_render::scene::unsupported` counts them); with `keyers`, sharpen and the keyers,
+/// which must come before the renderer's in the stack (they're drawn first here); and with
+/// `looks` too, the camera looks the engine draws (`looks::drawable`), which libobs draws as one
+/// filter at the first one's place: that place must come before any keyer or renderer effect
+/// (they're drawn before the keys here). Sound effects don't count.
+fn effects_drawn(source: &Source, keyers: bool, looks: bool) -> bool {
+    let (mut renderer_seen, mut keyer_seen, mut studio_seen) = (false, false, false);
     for e in source.effects.iter().filter(|e| e.enabled && !e.kind.starts_with("audio.")) {
-        if keying::KINDS.contains(&e.kind.as_str()) {
+        if e.kind.starts_with("studio.") {
+            if !studio_seen && (renderer_seen || keyer_seen) {
+                return false;
+            }
+            studio_seen = true;
+        } else if keying::KINDS.contains(&e.kind.as_str()) {
             if !keyers || renderer_seen {
                 return false;
             }
+            keyer_seen = true;
         } else if renderer_draws(e) {
             renderer_seen = true;
         } else {
             return false;
         }
     }
-    true
+    !studio_seen || (keyers && looks && looks::drawable(source))
 }
 
 /// An effect lightair-render's scene renderer draws.
@@ -846,6 +873,8 @@ struct Native {
     texts_used: HashSet<String>,
     /// The widgets drawn here, by source.
     widgets: HashMap<Id, Widget>,
+    /// The cameras drawn with looks: their feeds (in `hot`, mapped in `program`) and analysis.
+    looks: looks::Hosts,
 }
 
 /// A widget's picture and what it was made from.
@@ -886,6 +915,7 @@ impl Native {
             texts: HashMap::new(),
             texts_used: HashSet::new(),
             widgets: HashMap::new(),
+            looks: looks::Hosts::default(),
         })
     }
 
@@ -898,6 +928,10 @@ impl Native {
             let keep: Vec<Id> = ws.sources.keys().copied().collect();
             self.keyed.forget_others(&keep);
             self.widgets.retain(|id, _| ws.sources.contains_key(id));
+            let gone = self.looks.sweep(|id| ws.sources.contains_key(&id), &self.hot, &mut self.program.feeds);
+            for feed in gone {
+                self.cache.forget_feed(feed);
+            }
             self.sizes.retain(|path, _| {
                 ws.sources.values().any(|s| s.settings["file"].as_str().is_some_and(|f| Path::new(f) == path))
             });
@@ -949,6 +983,45 @@ impl Native {
         Some(shot)
     }
 
+    /// libobs's bare `picture` of `source` through its looks, then its sharpen and keyer passes,
+    /// drawn by the engine from the camera's feed (given the picture here; the faces and masks
+    /// its analysis pushed); the bare picture as it is if that can't be drawn. The buffer must
+    /// be held until the GPU is done.
+    fn looked(&mut self, source: &Source, picture: &bridge::Picture) -> Option<Shot> {
+        let bare = || {
+            picture.pixel_buffer().map(|b| Shot { size: b.size(), picture: Picture::Buffer(b), premultiplied: true })
+        };
+        if !self.looks.push(source, picture, &self.hot, &mut self.program.feeds) {
+            return bare();
+        }
+        // the engine draws looks on a camera's feed, whatever made the picture
+        let mut camera = Source::clone(source);
+        camera.kind = templates::CAMERA.into();
+        let mut frame = lightair_engine::pictures::Frame {
+            gpu: &self.gpu,
+            cache: &mut self.cache,
+            hot: &self.hot,
+            program: &self.program,
+            host_ns: lightair_engine::clock::host_now_ns(),
+            pts_ns: 0,
+            used: Vec::new(),
+        };
+        frame.picture(&camera).or_else(bare)
+    }
+
+    /// The frame's GPU work is done: the cameras' feeds let go of their pictures.
+    fn frame_done(&mut self) {
+        self.looks.frame_done();
+    }
+
+    /// While nothing is drawn: the analyses of cameras not drawn lately stop (a short pause,
+    /// such as a switch libobs draws, keeps them).
+    fn forget_looks(&mut self) {
+        for feed in self.looks.sweep(|_| true, &self.hot, &mut self.program.feeds) {
+            self.cache.forget_feed(feed);
+        }
+    }
+
     /// libobs's bare picture of source `id` (colours multiplied by alpha) through its sharpen and
     /// keyer passes, as a straight-alpha texture. The buffer must be held until the GPU is done.
     fn keyed(&mut self, id: Id, buffer: &bridge::Buffer, steps: &[keying::Step]) -> Option<Shot> {
@@ -997,9 +1070,13 @@ impl Native {
         Some(Shot { picture: Picture::Texture(w.texture.clone()), size: w.size, premultiplied: true })
     }
 
-    /// Drops the made pictures no frame used lately.
+    /// Drops the made pictures no frame used lately, and the looks' hosts of cameras not drawn
+    /// with looks lately.
     fn end_frame(&mut self) {
         self.cache.end_frame();
+        for feed in self.looks.sweep(|_| true, &self.hot, &mut self.program.feeds) {
+            self.cache.forget_feed(feed);
+        }
         if self.texts.len() > 32 {
             let used = std::mem::take(&mut self.texts_used);
             self.texts.retain(|k, _| used.contains(k));
