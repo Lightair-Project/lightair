@@ -103,7 +103,8 @@ impl Outputs {
         #[cfg(target_os = "macos")]
         {
             if !crate::own_outputs::can_stream(cfg) {
-                let why = "This destination isn't available without libobs yet (RIST, MPEG-TS over TCP, AV1, or a second sound track).".to_string();
+                let why =
+                    "This destination isn't available without libobs yet (RIST, MPEG-TS over TCP, or AV1).".to_string();
                 crate::outputs::mark_failed(crate::outputs::OutputKey::Stream(cfg.id), &why);
                 return Err(why);
             }
