@@ -5,6 +5,10 @@
 //! (Lightair Effect Stack), Chromium for web sources, and the command-line tools some features run
 //! (FFmpeg, whisper.cpp) with their libraries. Nothing in it points outside it.
 //!
+//! With `--host` (or `LIGHTAIR_DIST_HOST=1`): the app on Lightair's own engine (lightair-host, the
+//! `host` feature), with nothing of libobs or OBS in it: no libobs, no OBS modules, no Effect
+//! Stack plugin; the trackers alone (`liblightair-tracker.dylib`) and their models.
+//!
 //! Then every piece is signed with a Developer ID (hardened runtime, secure timestamp), inside
 //! out, and the disk image is notarized and stapled when `LIGHTAIR_NOTARY_PROFILE` names a
 //! notarytool keychain profile (`xcrun notarytool store-credentials <name> ...`).
@@ -73,11 +77,22 @@ pub fn dist() -> anyhow::Result<()> {
     result
 }
 
+/// Whether the app to ship runs on Lightair's own engine, without libobs.
+pub fn host() -> bool {
+    std::env::args().any(|a| a == "--host") || std::env::var("LIGHTAIR_DIST_HOST").is_ok_and(|v| v == "1")
+}
+
 fn build() -> anyhow::Result<()> {
     anyhow::ensure!(cfg!(target_os = "macos"), "the shipped app is built on macOS");
     let root = root();
     let version = env!("CARGO_PKG_VERSION");
-    run(Command::new("cargo").current_dir(&root).args(["build", "--release", "-p", "lightair-app", "-p", "lightair-web-helper"]))?;
+    let host = host();
+    let mut cargo = Command::new("cargo");
+    cargo.current_dir(&root).args(["build", "--release", "-p", "lightair-app", "-p", "lightair-web-helper"]);
+    if host {
+        cargo.args(["--no-default-features", "--features", "lightair-app/host"]);
+    }
+    run(&mut cargo)?;
     modules()?;
     let obs = PathBuf::from(std::env::var("OBS_APP").unwrap_or_else(|_| "/Applications/OBS.app".into()));
     let out = root.join("target/dist");
@@ -99,21 +114,23 @@ fn build() -> anyhow::Result<()> {
 
     // libobs, its graphics backends and mux helper, the modules Lightair loads
     let obs_frameworks = obs.join("Contents/Frameworks");
-    ditto(&obs_frameworks.join("libobs.framework"), &c.join("Frameworks/libobs.framework"))?;
-    for lib in ["libobs-opengl.dylib", "libobs-metal.dylib"] {
-        std::fs::copy(obs_frameworks.join(lib), c.join("Frameworks").join(lib))?;
-    }
-    std::fs::copy(obs.join("Contents/MacOS/obs-ffmpeg-mux"), c.join("MacOS/obs-ffmpeg-mux"))?;
-    for module in default_modules(&root)? {
-        let plugin = obs.join("Contents/PlugIns").join(format!("{module}.plugin"));
-        if plugin.exists() {
-            ditto(&plugin, &c.join("PlugIns").join(format!("{module}.plugin")))?;
+    if !host {
+        ditto(&obs_frameworks.join("libobs.framework"), &c.join("Frameworks/libobs.framework"))?;
+        for lib in ["libobs-opengl.dylib", "libobs-metal.dylib"] {
+            std::fs::copy(obs_frameworks.join(lib), c.join("Frameworks").join(lib))?;
         }
+        std::fs::copy(obs.join("Contents/MacOS/obs-ffmpeg-mux"), c.join("MacOS/obs-ffmpeg-mux"))?;
+        for module in default_modules(&root)? {
+            let plugin = obs.join("Contents/PlugIns").join(format!("{module}.plugin"));
+            if plugin.exists() {
+                ditto(&plugin, &c.join("PlugIns").join(format!("{module}.plugin")))?;
+            }
+        }
+        ditto(
+            &root.join("target/modules/lightair-effect-stack/lightair-effect-stack.plugin"),
+            &c.join("PlugIns/lightair-effect-stack.plugin"),
+        )?;
     }
-    ditto(
-        &root.join("target/modules/lightair-effect-stack/lightair-effect-stack.plugin"),
-        &c.join("PlugIns/lightair-effect-stack.plugin"),
-    )?;
     // the trackers alone (no libobs), which Lightair's own engine calls, and their models
     let modules = root.join("target/modules/lightair-effect-stack");
     std::fs::copy(modules.join("liblightair-tracker.dylib"), c.join("Frameworks/liblightair-tracker.dylib"))?;
@@ -133,6 +150,11 @@ fn build() -> anyhow::Result<()> {
     }
 
     gather_libraries(&c, &obs_frameworks, &mut origins)?;
+    if host {
+        // nothing of libobs's came in with anything
+        let obs_in = files(&c).into_iter().find(|p| p.to_string_lossy().contains("libobs"));
+        anyhow::ensure!(obs_in.is_none(), "libobs is in the app built without it: {}", obs_in.unwrap().display());
+    }
 
     // only the app's own Frameworks: no falling back to an installed OBS or Homebrew
     drop_outside_rpaths(&app)?;

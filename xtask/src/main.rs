@@ -184,6 +184,9 @@ fn modules() -> anyhow::Result<()> {
         let build = root.join("target/modules").join(&name);
         let mut configure = Command::new("cmake");
         configure.arg("-S").arg(&dir).arg("-B").arg(&build);
+        // the app without libobs: the modules' libobs parts aren't built (the trackers alone)
+        #[cfg(target_os = "macos")]
+        configure.arg(format!("-DLIGHTAIR_WITH_LIBOBS={}", if dist::host() { "OFF" } else { "ON" }));
         if cfg!(windows) {
             // Visual Studio's generator (Ninja needs a developer prompt for MSVC)
             configure.args(["-A", "x64"]);

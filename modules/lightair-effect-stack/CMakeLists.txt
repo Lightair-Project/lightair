@@ -27,6 +27,11 @@ set(DEPS "${CMAKE_SOURCE_DIR}/.deps")
 # YuNet detection and the multiclass selfie segmenter, converted to .mlpackage
 # (data/models/coreml, made by tools/convert-coreml.py) and compiled into the bundle below.
 
+# Off: the trackers alone (lightair-tracker, for Lightair's own engine), with nothing of
+# libobs's or OBS's.
+option(LIGHTAIR_WITH_LIBOBS "Build the libobs module too" ON)
+
+if(LIGHTAIR_WITH_LIBOBS)
 set(GEN "${CMAKE_BINARY_DIR}/generated")
 file(WRITE "${GEN}/obsconfig.h" "#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n")
 
@@ -73,6 +78,7 @@ foreach(f IN LISTS MODULE_DATA)
   target_sources(lightair-effect-stack PRIVATE "data/${f}")
   set_source_files_properties("data/${f}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/${dir}")
 endforeach()
+endif()
 # Core ML models, compiled to .mlmodelc and copied into Resources/models.
 set(COREML_OUT "${CMAKE_BINARY_DIR}/coreml")
 set(COREML_COMPILED "")
@@ -88,12 +94,15 @@ foreach(m selfie_multiclass_256 face_detection_yunet face_landmarks_478
     COMMAND xcrun coremlcompiler compile "${pkg}" "${COREML_OUT}" > /dev/null
     DEPENDS ${pkg_files} VERBATIM)
   list(APPEND COREML_COMPILED "${COREML_OUT}/${m}.mlmodelc/coremldata.bin")
+  if(LIGHTAIR_WITH_LIBOBS)
   add_custom_command(TARGET lightair-effect-stack POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E rm -rf "$<TARGET_BUNDLE_CONTENT_DIR:lightair-effect-stack>/Resources/models/${m}.mlmodelc"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${COREML_OUT}/${m}.mlmodelc"
             "$<TARGET_BUNDLE_CONTENT_DIR:lightair-effect-stack>/Resources/models/${m}.mlmodelc")
+  endif()
 endforeach()
 add_custom_target(coreml-models DEPENDS ${COREML_COMPILED})
+if(LIGHTAIR_WITH_LIBOBS)
 add_dependencies(lightair-effect-stack coreml-models)
 set_target_properties(lightair-effect-stack PROPERTIES
   BUNDLE TRUE BUNDLE_EXTENSION plugin PREFIX ""
@@ -101,6 +110,7 @@ set_target_properties(lightair-effect-stack PROPERTIES
   MACOSX_BUNDLE_GUI_IDENTIFIER "app.lightair.effect-stack"
   MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
   MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
+endif()
 
 # The trackers alone, without libobs (faces, segmentation, people, bodies through Core ML and
 # Vision): Lightair's own engine calls their C API directly (lightair-host's tracker.rs). The

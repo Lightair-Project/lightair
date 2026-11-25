@@ -60,6 +60,8 @@ enum Need {
     Voice,
     /// A link from another computer the compositor receives: its sound comes through a slot.
     Link,
+    /// A phone camera: its streams decoded (macOS).
+    Phone,
     /// An audio input the mixer opens itself: its device setting ("" or "default": the system's).
     Device(String),
     /// Something that has no runtime without libobs yet (what it is, for the log).
@@ -107,6 +109,7 @@ fn need(source: &Source) -> Need {
         kinds::DESKTOP_AUDIO if mac => Need::SystemSound(None),
         kinds::APP_AUDIO if mac => Need::SystemSound(Some(text(s, "app"))),
         kinds::DESKTOP_AUDIO | kinds::APP_AUDIO => Need::Missing("desktop or app sound"),
+        crate::phone_camera::KIND if mac => Need::Phone,
         crate::phone_camera::KIND => Need::Missing("phone camera"),
         "lightair_avatar" => Need::Missing("avatar"),
         "lightair_dslr" => Need::Missing("camera by USB"),
@@ -172,6 +175,8 @@ enum Runtime {
     },
     /// The sound slot is registered with the mixer by id (`crate::audio_host::feed_slot`).
     Link,
+    #[cfg(target_os = "macos")]
+    Phone(crate::phone_run::PhoneCamera),
 }
 
 /// A scene switch under way: the scenes it draws besides the program until it ends.
@@ -344,10 +349,13 @@ impl Host {
     /// times a second; the app's `cleanup` too.
     pub(crate) fn tick(&mut self) {
         self.timers.tick();
-        #[cfg(any(target_os = "macos", windows))]
-        for rt in self.runtimes.values() {
-            if let Runtime::Web { page, .. } = rt {
-                page.tick();
+        for rt in self.runtimes.values_mut() {
+            match rt {
+                #[cfg(any(target_os = "macos", windows))]
+                Runtime::Web { page, .. } => page.tick(),
+                #[cfg(target_os = "macos")]
+                Runtime::Phone(phone) => phone.tick(),
+                _ => {}
             }
         }
         let mut changed = false;
@@ -608,6 +616,8 @@ impl Host {
                 crate::audio_host::feed_slot(id);
                 Runtime::Link
             }
+            #[cfg(target_os = "macos")]
+            Need::Phone => Runtime::Phone(crate::phone_run::PhoneCamera::new(id)),
             #[allow(unreachable_patterns)]
             _ => return,
         };

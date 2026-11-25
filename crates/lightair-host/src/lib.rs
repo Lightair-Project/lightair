@@ -34,6 +34,8 @@ pub mod outputs_host;
 pub mod phone_camera;
 #[cfg(target_os = "macos")]
 pub mod phone_decode;
+#[cfg(target_os = "macos")]
+pub mod phone_run;
 pub mod phone_units;
 pub mod piair_voice;
 #[cfg(target_os = "macos")]
