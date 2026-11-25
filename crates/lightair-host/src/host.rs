@@ -271,6 +271,8 @@ pub struct Host {
     /// The monitor follows the monitoring device chosen (`crate::monitoring`): no device was
     /// given for direct monitoring, and the mixer is the only way to the headphones.
     monitor_follows: bool,
+    /// What the compositors showed when the runtimes last looked (`crate::show::shown_changes`).
+    shown_changes: u64,
     /// Frames per audio block (`None`: the default).
     audio_block: Option<usize>,
     /// What each source needs, and the runtimes made for it.
@@ -310,6 +312,7 @@ impl Host {
             audio: None,
             monitor: None,
             monitor_follows: false,
+            shown_changes: 0,
             audio_block: None,
             needs: HashMap::new(),
             runtimes: HashMap::new(),
@@ -401,6 +404,12 @@ impl Host {
     /// times a second; the app's `cleanup` too.
     pub(crate) fn tick(&mut self) {
         self.timers.tick();
+        // a preview shows something else: what runs while shown follows
+        let changes = crate::show::shown_changes();
+        if changes != self.shown_changes {
+            self.shown_changes = changes;
+            self.sync_on_air();
+        }
         // the monitoring device chosen changed: the monitor follows it
         if self.monitor_follows
             && let Some((device, program)) = self.monitor.clone()
@@ -546,7 +555,7 @@ impl Host {
             }
         }
         #[cfg(any(target_os = "macos", windows))]
-        let showing: HashSet<Id> = active.union(&self.held).copied().collect();
+        let showing: HashSet<Id> = active.union(&self.held).copied().chain(crate::show::shown()).collect();
         for (id, rt) in self.runtimes.iter_mut() {
             match rt {
                 Runtime::Timer(on_air) => on_air.store(active.contains(id), Ordering::Relaxed),

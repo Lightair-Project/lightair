@@ -558,6 +558,8 @@ impl State {
             }
         }
         let shown = self.doc.shown(&base, canvas.id, &scenes);
+        // (what's shown runs: a web page or an avatar's camera in a preview, not only on air)
+        lightair_host::show::set_shown(canvas.id, &shown);
         if self.native.is_none() && !self.native_failed {
             self.native = Native::new();
             self.native_failed = self.native.is_none();
@@ -815,6 +817,7 @@ impl State {
             native.forget_looks();
         }
         program_source::withdraw(self.canvas);
+        lightair_host::show::set_shown(self.canvas, &HashSet::new());
     }
 
     /// The compositor draws nothing that shows a screen or camera any more: their captures are let

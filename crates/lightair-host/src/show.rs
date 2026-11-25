@@ -159,3 +159,32 @@ pub fn set_live(source: Id, filter: Id, enabled: bool) {
 pub fn live_off() -> Vec<(Id, Id)> {
     LIVE_OFF.lock().clone()
 }
+
+/// The sources each canvas's compositor shows now (the program, scenes in previews, outputs'
+/// scenes), and how many times that has changed.
+static SHOWN: LazyLock<Mutex<HashMap<Id, std::collections::HashSet<Id>>>> = LazyLock::new(Default::default);
+static SHOWN_CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The compositor of `canvas` shows `sources` now (empty: nothing). The compositor's thread.
+pub fn set_shown(canvas: Id, sources: &std::collections::HashSet<Id>) {
+    let mut all = SHOWN.lock();
+    if all.get(&canvas).map_or(sources.is_empty(), |s| s == sources) {
+        return;
+    }
+    if sources.is_empty() {
+        all.remove(&canvas);
+    } else {
+        all.insert(canvas, sources.clone());
+    }
+    SHOWN_CHANGES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Every source a compositor shows now. Any thread.
+pub fn shown() -> std::collections::HashSet<Id> {
+    SHOWN.lock().values().flatten().copied().collect()
+}
+
+/// Counts the changes of what's shown: a different value, something to look at again.
+pub fn shown_changes() -> u64 {
+    SHOWN_CHANGES.load(Ordering::Relaxed)
+}
