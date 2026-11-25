@@ -4500,7 +4500,6 @@ dependencies = [
 name = "lightair-engine"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "base64 0.22.1",
  "block2 0.6.2",
  "chrono",
@@ -4611,10 +4610,8 @@ dependencies = [
 name = "lightair-phone-camera"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "bytes",
  "futures",
- "getrandom 0.3.4",
  "nusb",
  "parking_lot",
  "plist",

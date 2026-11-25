@@ -19,7 +19,6 @@ rtrb = "0.3"
 hound = "3"
 serde_json.workspace = true
 serde.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 crossbeam-channel.workspace = true

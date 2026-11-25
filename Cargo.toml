@@ -21,7 +21,6 @@ lightair-avatar = { path = "crates/lightair-avatar" }
 lightair-moc3 = { path = "crates/lightair-moc3" }
 lightair-inochi2d = { path = "crates/lightair-inochi2d" }
 lightair-preview = { path = "crates/lightair-preview" }
-lightair-ui = { path = "crates/lightair-ui" }
 lightair-web = { path = "crates/lightair-web" }
 lightair-phone-camera = { path = "crates/lightair-phone-camera" }
 
@@ -34,7 +33,6 @@ lightair-model = { git = "https://github.com/Lightair-Project/lightair-core", re
 lightair-store = { git = "https://github.com/Lightair-Project/lightair-core", rev = "eecdc94ed21aa2d8ee63f69a87b838f27fd1c340" }
 lightair-audio = { git = "https://github.com/Lightair-Project/lightair-core", rev = "eecdc94ed21aa2d8ee63f69a87b838f27fd1c340" }
 lightair-render = { git = "https://github.com/Lightair-Project/lightair-core", rev = "eecdc94ed21aa2d8ee63f69a87b838f27fd1c340" }
-lightair-fonts = { git = "https://github.com/Lightair-Project/lightair-core", rev = "eecdc94ed21aa2d8ee63f69a87b838f27fd1c340" }
 lightair-live = { git = "https://github.com/Lightair-Project/lightair-core", rev = "eecdc94ed21aa2d8ee63f69a87b838f27fd1c340" }
 lightair-widgets = { git = "https://github.com/Lightair-Project/lightair-core", rev = "eecdc94ed21aa2d8ee63f69a87b838f27fd1c340" }
 lightair-automation = { git = "https://github.com/Lightair-Project/lightair-core", rev = "eecdc94ed21aa2d8ee63f69a87b838f27fd1c340" }
