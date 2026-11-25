@@ -13,6 +13,8 @@ tracing.workspace = true
 glam = "0.30"
 lightair-moc3.workspace = true
 lightair-inochi2d.workspace = true
+# PNGtubers (.lairava): their file and runtime
+lightair-pngtuber.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 

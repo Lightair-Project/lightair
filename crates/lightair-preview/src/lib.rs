@@ -11,6 +11,8 @@
 mod render;
 
 #[cfg(target_os = "macos")]
+pub mod avatars;
+#[cfg(target_os = "macos")]
 mod compose;
 #[cfg(target_os = "macos")]
 mod mac;

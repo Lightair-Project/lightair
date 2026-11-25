@@ -4583,6 +4583,7 @@ dependencies = [
  "image",
  "lightair-inochi2d",
  "lightair-moc3",
+ "lightair-pngtuber",
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
@@ -4834,7 +4835,10 @@ dependencies = [
 name = "lightair-preview"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
+ "glam",
  "image",
+ "lightair-avatar",
  "lightair-engine",
  "lightair-fonts",
  "lightair-live",

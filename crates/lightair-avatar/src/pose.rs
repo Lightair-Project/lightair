@@ -93,6 +93,9 @@ pub struct Avatar {
     time: f32,
     /// The top of the model (its highest vertex at rest), metres.
     pub top: f32,
+    /// Whether [`Avatar::update`] skins the vertices on the CPU (a GPU renderer skins them
+    /// itself from [`Avatar::world`] and [`Avatar::morph_weights`]).
+    cpu_skin: bool,
 }
 
 fn bone_rot_in(rest_world: Quat, delta: Quat) -> Quat {
@@ -121,6 +124,7 @@ impl Avatar {
             normals,
             time: 0.0,
             top: 1.6,
+            cpu_skin: true,
             model,
         };
         a.skin();
@@ -262,7 +266,33 @@ impl Avatar {
 
         self.world = self.world_from_local();
         self.simulate(dt);
-        self.skin();
+        if self.cpu_skin {
+            self.skin();
+        }
+    }
+
+    /// Whether [`Avatar::update`] morphs and skins the vertices on the CPU into
+    /// [`Avatar::positions`] and [`Avatar::normals`] (on by default). Off, they stay as they were
+    /// at rest and a renderer skins on the GPU from [`Avatar::world`], the skins' inverse bind
+    /// matrices and [`Avatar::morph_weights`].
+    pub fn set_cpu_skinning(&mut self, on: bool) {
+        self.cpu_skin = on;
+    }
+
+    /// A glTF mesh's morph target weights this frame (by target), if any of its targets is in use.
+    pub fn morph_weights(&self, mesh: usize) -> Option<&[f32]> {
+        self.morph.get(&mesh).map(Vec::as_slice)
+    }
+
+    /// A skin's joint matrices this frame (each joint's world matrix times its inverse bind
+    /// matrix), in the skin's joint order: what a vertex's joint indices pick from.
+    pub fn joint_matrices(&self, skin: usize) -> Vec<Mat4> {
+        let Some(skin) = self.model.skins.get(skin) else { return Vec::new() };
+        skin.joints
+            .iter()
+            .zip(&skin.inverse_bind)
+            .map(|(&j, ib)| self.world.get(j).copied().unwrap_or(Mat4::IDENTITY) * *ib)
+            .collect()
     }
 
     fn local_matrix(&self, n: usize) -> Mat4 {

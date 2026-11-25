@@ -6,7 +6,9 @@
 //! - [`uma`]: Umamo puppets (`.uma`), evaluated the way Umamo's runtime does.
 //! - [`rig`]: from face landmarks to the head's turn, eyes, gaze, brows and mouth.
 //! - [`pose`]: a model posed by a face: bones, expressions, look-at, spring bones, then
-//!   skinned and morphed on the CPU, ready to draw.
+//!   skinned and morphed on the CPU, ready to draw (or left to a renderer to skin on the GPU).
+//! - [`source`]: an avatar source's settings, its model read from its file (any of the above, or
+//!   a PNGtuber) and posed each frame, whoever draws it.
 
 pub mod body;
 mod canonical;
@@ -15,6 +17,7 @@ pub mod inochi2d;
 pub mod live2d;
 pub mod pose;
 pub mod rig;
+pub mod source;
 pub mod uma;
 pub mod vrm;
 
