@@ -9,6 +9,7 @@ pub mod clock;
 pub mod devices;
 pub mod gpu;
 pub mod meters;
+pub mod ndi;
 pub mod outputs;
 #[cfg(target_os = "macos")]
 pub mod own_outputs;

@@ -654,6 +654,17 @@ struct MixPacket {
     data: [f32; 2 * la::MAX_BLOCK],
 }
 
+/// The rate the audio engine runs at (0 before it first starts): what taps' blocks are at.
+static RATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The audio engine's rate (what [`tap_mix`]'s blocks are at); 48 kHz before it has started.
+pub fn engine_rate() -> u32 {
+    match RATE.load(Ordering::Relaxed) {
+        0 => 48_000,
+        r => r,
+    }
+}
+
 /// Packets a tap may have waiting (about 0.7 s at 256 frames).
 const TAP_PACKETS: usize = 128;
 
@@ -786,6 +797,7 @@ impl AudioHost {
     /// Starts the engine at `sample_rate`, processing `block` frames at a time.
     pub fn start(sample_rate: u32, block: usize) -> Option<Self> {
         let block = block.clamp(64, la::MAX_BLOCK);
+        RATE.store(sample_rate, Ordering::Relaxed);
         let (engine, renderer) = la::Engine::new(la::GraphSpec::default(), sample_rate);
         let (commands, rt_commands) = rtrb::RingBuffer::new(256);
         let (rt_garbage, garbage) = rtrb::RingBuffer::new(256);
