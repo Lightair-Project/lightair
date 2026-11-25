@@ -106,20 +106,15 @@ fn main() {
     // the chat readers that need a browser (Kick, the signed-in platforms) use Lightair's
     lightair_live::pages::set_host(Arc::new(chat_panel::HiddenPages));
 
-    // The canvas size comes from the workspace's primary canvas; read it before starting libobs.
-    // the one asked for, the one open last, or the default
+    // the workspace: the one asked for, the one open last, or the default
     let workspace_dir = std::env::var_os("LIGHTAIR_PROJECT")
-        // (absolute: on Windows the engine works from libobs's folder once it starts)
         .map(|p| std::path::absolute(&p).unwrap_or_else(|_| PathBuf::from(p)))
         .or_else(|| prefs::load_from(&prefs::path()).last_workspace.filter(|d| lightair_store::is_workspace(d)))
         .unwrap_or_else(|| workspaces_dir().join("Default.lightair"));
-    let canvas = lightair_store::load_snapshot(&workspace_dir)
-        .map(|p| (p.primary_canvas().width, p.primary_canvas().height))
-        .unwrap_or((1920, 1080));
 
-    // This Mac's preferences: the sample rate is fixed once libobs starts.
+    // This machine's preferences: the sample rate is fixed once the engine starts.
     let prefs = prefs::load_from(&prefs::path());
-    // the remote API's password, read while libobs starts (the API answers with the window)
+    // the remote API's password, read while the engine starts (the API answers with the window)
     if prefs.remote.enabled && (prefs.remote.require_password || prefs.remote.lan) && std::env::var_os("LIGHTAIR_REMOTE_OFF").is_none() {
         secrets::read_remote_password_early();
     }
@@ -127,17 +122,10 @@ fn main() {
     let sample_rate = if prefs.sample_rate == 44_100 { 44_100 } else { 48_000 };
     prefs::RUNNING_SAMPLE_RATE.store(sample_rate, std::sync::atomic::Ordering::Relaxed);
     let engine = Arc::new(
-        Engine::start(EngineConfig {
-            canvas,
-            output: canvas,
-            sample_rate,
-            // the shipped app loads it from its PlugIns with the rest
-            extra_plugin_dirs: camera_studio::plugin_dir().filter(|_| camera_studio::bundled_plugins().is_none()).into_iter().collect(),
-            ..Default::default()
-        })
-        .unwrap_or_else(|e| panic!("could not start the engine: {e}")),
+        Engine::start(EngineConfig { sample_rate })
+            .unwrap_or_else(|e| panic!("could not start the engine: {e}")),
     );
-    tracing::info!(version = engine.version, workspace = %workspace_dir.display(), "libobs started");
+    tracing::info!(version = engine.version, workspace = %workspace_dir.display(), "engine started");
     if let Some((name, id)) = prefs.headphones_device.clone() {
         engine.call(move |_| lightair_host::monitoring::set(&name, &id));
     }
@@ -153,7 +141,7 @@ fn main() {
     lightair_platform::devices::allow_ios_screens();
     let preview = Preview::attach();
     // Lightair's own compositor draws the program in the window instead of libobs
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     if lightair_host::bridge::own() && !preview.compose_program() {
         tracing::warn!("LIGHTAIR_ENGINE=own: the compositor didn't start; libobs draws the program");
     }

@@ -1,43 +1,25 @@
-//! The engine without libobs: a thread of its own owning the document host and the outputs
-//! ([`EngineState`]), which the app hands work to ([`Engine::post`], [`Engine::call`]), with the
-//! same shape as the libobs engine's (`lightair-obs`'s `Engine`), so the app can run on either.
+//! The engine: a thread of its own owning the document host and the outputs ([`EngineState`]),
+//! which the app hands work to ([`Engine::post`], [`Engine::call`]).
 //!
 //! Nothing here draws: Lightair's own compositor draws each canvas from what the host publishes
 //! (`crate::show`), the mixer plays the sound (`crate::audio_host`), and Lightair's own encoders
 //! make the recordings and streams (`crate::own_outputs`).
 
-use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{RecvTimeoutError, Sender, bounded, unbounded};
 
-/// How the engine is started. The fields the libobs engine also has are kept so the app sets
-/// them the same way; only the sample rate matters here (the canvases come from the document).
+/// How the engine is started (the canvases, their sizes and rates come from the document).
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// The primary canvas's size before the document says otherwise (unused: the compositor
-    /// takes each canvas's size from the document).
-    pub canvas: (u32, u32),
-    /// The size the primary canvas is output at (unused, as `canvas`).
-    pub output: (u32, u32),
-    /// Frames a second, as a fraction (unused: each canvas has its own rate).
-    pub fps: (u32, u32),
     /// The mixer's sample rate.
     pub sample_rate: u32,
-    /// Directories of libobs modules (unused: nothing loads modules without libobs).
-    pub extra_plugin_dirs: Vec<PathBuf>,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self {
-            canvas: (1920, 1080),
-            output: (1920, 1080),
-            fps: (60, 1),
-            sample_rate: 48_000,
-            extra_plugin_dirs: Vec::new(),
-        }
+        Self { sample_rate: 48_000 }
     }
 }
 
@@ -49,18 +31,11 @@ pub enum EngineError {
     Stopped,
 }
 
-/// What this engine can make, in the libobs engine's terms. Only `encoders` has content: the
-/// encoder ids Lightair's own encoders answer to (`crate::own_outputs`). The other lists are
-/// libobs's types, which don't exist here.
+/// What this engine can make: the encoder ids Lightair's own encoders answer to
+/// (`crate::own_outputs`).
 #[derive(Debug, Clone, Default)]
 pub struct Capabilities {
-    pub sources: Vec<String>,
-    pub filters: Vec<String>,
-    pub transitions: Vec<String>,
     pub encoders: Vec<String>,
-    pub outputs: Vec<String>,
-    pub services: Vec<String>,
-    pub modules: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -142,13 +117,13 @@ impl Engine {
             })
             .map_err(|e| EngineError::Thread(e.to_string()))?;
         ready_rx.recv().map_err(|_| EngineError::Stopped)?;
-        let capabilities = Capabilities { encoders: encoders(), ..Default::default() };
+        let capabilities = Capabilities { encoders: encoders() };
         let version = env!("CARGO_PKG_VERSION").to_string();
         tracing::info!(
             version,
             encoders = capabilities.encoders.len(),
             sample_rate = config.sample_rate,
-            "engine ready (no libobs)"
+            "engine ready"
         );
         Ok(Self { tx: Some(tx), thread: Some(thread), capabilities, version })
     }
@@ -206,7 +181,7 @@ fn shutdown(state: EngineState) {
 }
 
 /// The encoder ids Lightair's own encoders take (macOS: VideoToolbox's H.264, HEVC and ProRes,
-/// Apple's AAC, and Opus for WebRTC), in the libobs ids the app's settings use.
+/// Apple's AAC, and Opus for WebRTC), by the ids the app's settings use.
 fn encoders() -> Vec<String> {
     #[cfg(target_os = "macos")]
     {

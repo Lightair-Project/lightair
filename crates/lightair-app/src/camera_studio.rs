@@ -1,60 +1,26 @@
-//! The effect stack's data (docs/plans/effects-revamp.md): the module bundle and
-//! its preset collections (makeup looks, stickers, lights, grades, ambience, motion). The face effects themselves are in the
-//! catalog (`lightair_model::catalog`); the engine merges them into one `lightair_camera_studio`
-//! filter.
+//! The effect stack's preset collections (docs/plans/effects-revamp.md): makeup looks, stickers,
+//! lights, grades, ambience and motion, built in from the Effect Stack's data
+//! (`modules/lightair-effect-stack/data`). The face effects themselves are in the catalog
+//! (`lightair_model::catalog`); the compositor draws them.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use lightair_model::catalog::Presets;
 use serde_json::{Value, json};
 
-/// Where the Lightair Effect Stack module bundle lives: the app's own `Contents/PlugIns` (the shipped
-/// app, `cargo xtask dist`), or `target/modules/lightair-effect-stack` in development (found from
-/// the executable, also inside the development `Lightair.app`).
-pub fn plugin_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    if let Some(plugins) = bundled_plugins() {
-        return Some(plugins);
-    }
-    // the shipped Windows app: OBS's layout, `bin\64bit\lightair.exe` and `obs-plugins\64bit`
-    if cfg!(windows) {
-        let shipped = exe.parent()?.parent()?.parent()?.join("obs-plugins").join("64bit");
-        if shipped.join("lightair-effect-stack.dll").exists() {
-            return Some(shipped);
-        }
-    }
-    // macOS: the .plugin bundle; Windows: OBS's layout (obs-plugins/64bit, data/obs-plugins)
-    let (dir, module) = if cfg!(windows) {
-        ("modules/lightair-effect-stack/obs-plugins/64bit", "lightair-effect-stack.dll")
-    } else {
-        ("modules/lightair-effect-stack", "lightair-effect-stack.plugin")
-    };
-    exe.ancestors().map(|a| a.join(dir)).find(|dir| dir.join(module).exists())
-}
-
-/// The shipped app's `Contents/PlugIns`, when the module is in it (macOS): libobs loads it with
-/// the app's other modules.
-pub fn bundled_plugins() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let plugins = exe.parent()?.parent()?.join("PlugIns");
-    (cfg!(target_os = "macos") && plugins.join("lightair-effect-stack.plugin").exists()).then_some(plugins)
-}
-
-/// The module's data folder (presets, shaders, models).
-fn data_dir() -> Option<PathBuf> {
-    let dir = plugin_dir()?;
-    Some(if cfg!(windows) {
-        dir.parent()?.parent()?.join("data/obs-plugins/lightair-effect-stack")
-    } else {
-        dir.join("lightair-effect-stack.plugin/Contents/Resources")
-    })
-}
+/// The Effect Stack's preset files, by their names in its data folder.
+const RESOURCES: &[(&str, &str)] = &[
+    ("makeup/presets.json", include_str!("../../../modules/lightair-effect-stack/data/makeup/presets.json")),
+    ("effects.json", include_str!("../../../modules/lightair-effect-stack/data/effects.json")),
+    ("lights.json", include_str!("../../../modules/lightair-effect-stack/data/lights.json")),
+    ("filters.json", include_str!("../../../modules/lightair-effect-stack/data/filters.json")),
+    ("atmosphere.json", include_str!("../../../modules/lightair-effect-stack/data/atmosphere.json")),
+];
 
 fn resource(name: &str) -> Option<Value> {
-    let path = data_dir()?.join(name);
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    let (_, text) = RESOURCES.iter().find(|(n, _)| *n == name)?;
+    serde_json::from_str(text).ok()
 }
 
 /// Preset names by group ("" when a collection has no groups).
