@@ -320,3 +320,97 @@ fn ended(stop: &AtomicBool, control: &Mutex<Control>) {
     c.from_ms = 0;
     c.since = None;
 }
+
+/// A file's frames in order, as fast as they're read (a stinger that AVFoundation can't read:
+/// WebM with its alpha), through the `ffmpeg` tool: straight RGBA, each with its time.
+pub struct Frames {
+    child: Child,
+    out: std::process::ChildStdout,
+    size: (u32, u32),
+    fps: f64,
+    /// Frames read so far, and one read ahead when opening.
+    read: u64,
+    first: Option<Vec<u8>>,
+    pub duration_ms: u32,
+}
+
+impl Frames {
+    /// Opens `path` (`None`: no ffmpeg, or nothing it can read).
+    pub fn open(path: &str) -> Option<Frames> {
+        let probe = lightair_render::media::probe(Path::new(path)).ok()?;
+        let (w, h) = (probe.width, probe.height);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let webm = path.to_ascii_lowercase().ends_with(".webm");
+        // VP9's own decoder keeps the alpha FFmpeg's built-in one drops; VP8 then plain
+        for decoder in [webm.then_some("libvpx-vp9"), webm.then_some("libvpx"), None] {
+            let Some((child, mut out)) = Frames::spawn(path, decoder, (w, h)) else { continue };
+            let mut first = vec![0u8; w as usize * h as usize * 4];
+            if out.read_exact(&mut first).is_ok() {
+                let duration_ms = probe.duration_ms.min(u32::MAX as u64) as u32;
+                return Some(Frames {
+                    child,
+                    out,
+                    size: (w, h),
+                    fps: probe.fps.max(1.0),
+                    read: 0,
+                    first: Some(first),
+                    duration_ms,
+                });
+            }
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            if decoder.is_none() {
+                break;
+            }
+        }
+        None
+    }
+
+    fn spawn(path: &str, decoder: Option<&str>, _size: (u32, u32)) -> Option<(Child, std::process::ChildStdout)> {
+        let ffmpeg = lightair_render::media::ffmpeg().ok()?;
+        let mut cmd = Command::new(ffmpeg);
+        cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-noautorotate"]);
+        if let Some(d) = decoder {
+            cmd.args(["-c:v", d]);
+        }
+        cmd.arg("-i").arg(path);
+        cmd.args(["-map", "0:v:0", "-an", "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = cmd.spawn().ok()?;
+        let out = child.stdout.take()?;
+        Some((child, out))
+    }
+
+    /// The next frame and its time (ms from the file's start); `None` at the end.
+    pub fn next_frame(&mut self) -> Option<(u32, lightair_render::texture::PixelBuffer)> {
+        let (w, h) = self.size;
+        let bytes = match self.first.take() {
+            Some(b) => b,
+            None => {
+                let mut b = vec![0u8; w as usize * h as usize * 4];
+                self.out.read_exact(&mut b).ok()?;
+                b
+            }
+        };
+        let at = (self.read as f64 * 1000.0 / self.fps) as u32;
+        self.read += 1;
+        let buffer = crate::buffers::from_rgba(&bytes, w, h)?;
+        // SAFETY: the buffer's one reference is given up to the pixel buffer, which releases it
+        let pixels = unsafe {
+            lightair_render::texture::PixelBuffer::from_raw(
+                objc2_core_foundation::CFRetained::into_raw(buffer).as_ptr().cast(),
+            )
+        }?;
+        Some((at, pixels))
+    }
+}
+
+impl Drop for Frames {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}

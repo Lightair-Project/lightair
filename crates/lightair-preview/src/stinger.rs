@@ -14,6 +14,33 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use lightair_host::media_player::Frames;
+
+/// A stinger's frames: AVFoundation's, else (WebM with alpha, and what else it can't read)
+/// the `ffmpeg` tool's.
+enum Reader {
+    Av(Frames),
+    Ff(lightair_host::ffmpeg_media::Frames),
+}
+
+impl Reader {
+    fn open(path: &str) -> Option<Reader> {
+        Frames::open(path).map(Reader::Av).or_else(|| lightair_host::ffmpeg_media::Frames::open(path).map(Reader::Ff))
+    }
+
+    fn duration_ms(&self) -> u32 {
+        match self {
+            Reader::Av(f) => f.duration_ms,
+            Reader::Ff(f) => f.duration_ms,
+        }
+    }
+
+    fn next_frame(&mut self) -> Option<(u32, lightair_render::texture::PixelBuffer)> {
+        match self {
+            Reader::Av(f) => f.next_frame(),
+            Reader::Ff(f) => f.next_frame(),
+        }
+    }
+}
 use lightair_render::texture::PixelBuffer;
 use parking_lot::{Condvar, Mutex};
 
@@ -113,7 +140,7 @@ impl Drop for Player {
 fn read(path: &str, shared: &Shared) {
     // the run the open reader is for (none yet)
     let mut reading: Option<u64> = None;
-    let mut frames: Option<Frames> = None;
+    let mut frames: Option<Reader> = None;
     loop {
         let run = {
             let mut s = shared.state.lock();
@@ -135,15 +162,18 @@ fn read(path: &str, shared: &Shared) {
             // from the start, for this run
             reading = Some(run);
             drop(frames.take());
-            frames = Frames::open(path);
+            frames = Reader::open(path);
             let mut s = shared.state.lock();
             match &frames {
                 Some(f) => {
                     s.failed = false;
-                    s.duration_ms = Some(f.duration_ms);
+                    s.duration_ms = Some(f.duration_ms());
                 }
                 None if !s.failed => {
-                    tracing::warn!(path, "compositor: AVFoundation can't read the stinger; libobs plays it");
+                    tracing::warn!(
+                        path,
+                        "compositor: neither AVFoundation nor ffmpeg reads the stinger; libobs plays it"
+                    );
                     s.failed = true;
                     s.ended = true;
                     drop(s);
@@ -157,7 +187,7 @@ fn read(path: &str, shared: &Shared) {
             }
             continue;
         }
-        let next = frames.as_mut().and_then(Frames::next_frame);
+        let next = frames.as_mut().and_then(Reader::next_frame);
         let mut s = shared.state.lock();
         if s.run != run {
             continue;
