@@ -312,6 +312,7 @@ fn run(canvas: Id, stop: &AtomicBool) {
         clock: Instant::now(),
         stingers: HashMap::new(),
         ghost: None,
+        prepared: None,
         stingers_of: 0,
         playing: None,
         views: HashMap::new(),
@@ -366,6 +367,8 @@ struct State {
     stingers: HashMap<String, Player>,
     /// Crop view's ghost: its object's id, its opacity now, and when that last moved.
     ghost: Option<(Id, f32, Instant)>,
+    /// The document as drawn (live switches and makeup LUTs), and what it was made from.
+    prepared: Option<(Arc<Workspace>, Vec<(Id, Id)>, Arc<Workspace>)>,
     /// The workspace they were last kept for.
     stingers_of: usize,
     /// The stinger switch being drawn: when it started, and its video's path.
@@ -473,8 +476,18 @@ impl State {
         let showing: Vec<&Arc<Shared>> = viewers.iter().filter(|v| v.wants_program()).collect();
         // the program is drawn for its previews and the canvas's outputs
         let program = !showing.is_empty() || in_use;
-        // effects switched off live (the eyedropper picking a colour under a key)
-        let base = self.doc.update(&live_off(snapshot.workspace.clone(), &bridge::live_off()));
+        // effects switched off live (the eyedropper picking a colour under a key), and the looks'
+        // makeup LUTs as the renderer's (made once per change of the document)
+        let off = bridge::live_off();
+        let prepared = match &self.prepared {
+            Some((from, was, out)) if Arc::ptr_eq(from, &snapshot.workspace) && *was == off => out.clone(),
+            _ => {
+                let out = with_makeup_luts(live_off(snapshot.workspace.clone(), &off));
+                self.prepared = Some((snapshot.workspace.clone(), off, out.clone()));
+                out
+            }
+        };
+        let base = self.doc.update(&prepared);
         // the scenes previews show in the program's place (those still in the document)
         let wanted: Vec<(Arc<Shared>, SceneView)> =
             scene_views(self.canvas).into_iter().filter(|(_, v)| base.scene(v.scene).is_some()).collect();
@@ -1425,6 +1438,37 @@ fn live_off(ws: Arc<Workspace>, off: &[(Id, Id)]) -> Arc<Workspace> {
                 e.enabled = false;
             }
         }
+    }
+    Arc::new(w)
+}
+
+/// `ws` with each source's looks' makeup LUT (a `.cube` file) drawn by the renderer right
+/// after its looks, at the look's filter amount.
+fn with_makeup_luts(ws: Arc<Workspace>) -> Arc<Workspace> {
+    let luts: Vec<(Id, String, f32)> = ws
+        .sources
+        .values()
+        .filter_map(|s| {
+            let look = lightair_engine::looks::render::Settings::from_source(s)?;
+            let lut = look.makeup.lut.trim().to_string();
+            let amount = if look.enhance_on { look.makeup.filter_amt } else { 0.0 };
+            (lut.to_ascii_lowercase().ends_with(".cube") && amount > 0.0).then_some((s.id, lut, amount))
+        })
+        .collect();
+    if luts.is_empty() {
+        return ws;
+    }
+    let mut w = (*ws).clone();
+    for (id, lut, amount) in luts {
+        let Some(s) = w.sources.get_mut(&id) else { continue };
+        let s = Arc::make_mut(s);
+        let after = s.effects.iter().rposition(|e| e.enabled && e.kind.starts_with("studio.")).map_or(0, |i| i + 1);
+        let e = lightair_model::Effect::new(
+            "Makeup LUT",
+            "clut_filter",
+            serde_json::json!({"image_path": lut, "clut_amount": amount}),
+        );
+        s.effects.insert(after, e);
     }
     Arc::new(w)
 }

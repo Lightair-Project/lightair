@@ -72,7 +72,8 @@ pub(crate) fn drawable(source: &Source) -> bool {
     if !studio.clone().all(|e| drawn_kind(&e.kind)) {
         return false;
     }
-    Settings::from_source(source).is_none_or(|s| s.makeup.lut.is_empty() && !s.show_landmarks)
+    // (the makeup look's LUT is the renderer's: `compose::with_makeup_luts`)
+    Settings::from_source(source).is_none_or(|s| !s.show_landmarks)
 }
 
 /// Whether the Effect Stack module gives what the looks need (asked again every few seconds
