@@ -127,3 +127,17 @@ pub fn clear_timer_texts() {
         TIMER_TEXTS.lock().clear();
     }
 }
+
+/// The object being cropped (scene, canvas, object), shown whole as a faint ghost around its
+/// crop, and whether the ghost is fading out (crop view closing).
+static CROP: Mutex<Option<((Id, Id, Id), bool)>> = Mutex::new(None);
+
+/// Engine thread: crop view for `target` (`None`: none), fading its ghost out or not.
+pub fn set_crop_view(target: Option<(Id, Id, Id)>, fading: bool) {
+    *CROP.lock() = target.map(|t| (t, fading));
+}
+
+/// The object in crop view, and whether its ghost is fading out. Any thread.
+pub fn crop_view() -> Option<((Id, Id, Id), bool)> {
+    *CROP.lock()
+}

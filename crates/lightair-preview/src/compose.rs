@@ -311,6 +311,7 @@ fn run(canvas: Id, stop: &AtomicBool) {
         fed: Vec::new(),
         clock: Instant::now(),
         stingers: HashMap::new(),
+        ghost: None,
         stingers_of: 0,
         playing: None,
         views: HashMap::new(),
@@ -363,6 +364,8 @@ struct State {
     clock: Instant,
     /// The stinger videos the workspace's switches may play, by path, read ahead.
     stingers: HashMap<String, Player>,
+    /// Crop view's ghost: its object's id, its opacity now, and when that last moved.
+    ghost: Option<(Id, f32, Instant)>,
     /// The workspace they were last kept for.
     stingers_of: usize,
     /// The stinger switch being drawn: when it started, and its video's path.
@@ -674,6 +677,8 @@ impl State {
         let ws = self.doc.drawn(kept);
         // objects pinned to avatars, where their anchors are now
         let ws = self.doc.follow_pins(ws, canvas.id, &scenes);
+        // the object being cropped: the rest of its picture as a ghost around the crop
+        let ws = self.crop_ghost(ws, canvas.id, &shots);
         // a stinger switch: the renderer is given the stinger it plays (the scene's own, or the
         // workspace's) and its frame now, held until the GPU is done with it
         let playing = switch.as_ref().and_then(|p| p.stinger.as_ref());
@@ -751,6 +756,43 @@ impl State {
 
     /// Draws nothing: the bridge stops drawing sources for it, and its outputs show libobs's
     /// picture.
+    /// `ws` with a faint copy of the object in crop view under it, whole, where it sits
+    /// uncropped (its picture's size from `shots`); fading in, and out as crop view closes.
+    fn crop_ghost(&mut self, ws: Arc<Workspace>, canvas: Id, shots: &HashMap<Id, Shot>) -> Arc<Workspace> {
+        let Some(((scene, on, object), fading)) = bridge::crop_view().filter(|((_, c, _), _)| *c == canvas) else {
+            self.ghost = None;
+            return ws;
+        };
+        let now = Instant::now();
+        let (ghost, opacity, last) = self.ghost.get_or_insert((Id::new(), 0.0, now));
+        let want = if fading { 0.0 } else { CROP_GHOST };
+        // a quarter of a second either way
+        let step = now.duration_since(*last).as_secs_f32() * 4.0 * CROP_GHOST;
+        *last = now;
+        *opacity = if *opacity < want { (*opacity + step).min(want) } else { (*opacity - step).max(want) };
+        let (ghost, opacity) = (*ghost, *opacity);
+        if opacity <= 0.001 {
+            return ws;
+        }
+        let Some(sc) = ws.scenes.iter().find(|s| s.id == scene) else { return ws };
+        let Some(index) = sc.objects.iter().position(|o| o.id == object) else { return ws };
+        let o = &sc.objects[index];
+        let (Some(layout), Some(size)) = (o.layouts.get(&on), o.source.and_then(|s| shots.get(&s)).map(|s| s.size)) else {
+            return ws;
+        };
+        let mut whole = layout.uncropped((size.0 as f32, size.1 as f32));
+        whole.opacity = layout.opacity * opacity;
+        let mut copy = o.clone();
+        copy.id = ghost;
+        copy.link = None;
+        copy.layouts.insert(on, whole);
+        let mut w = (*ws).clone();
+        if let Some(s) = w.scenes.iter_mut().find(|s| s.id == scene) {
+            Arc::make_mut(s).objects.insert(index, copy);
+        }
+        Arc::new(w)
+    }
+
     fn idle(&mut self) {
         if self.wanted.take().is_some() {
             bridge::want(self.canvas, HashMap::new());
@@ -1365,6 +1407,9 @@ fn with_timed(
     let Native { timed, gpu, .. } = native;
     timed.draw(gpu, source, &shot, buffer, masks).unwrap_or(shot)
 }
+
+/// How much of the cut-away picture shows around the crop while cropping.
+const CROP_GHOST: f32 = 0.42;
 
 /// The pictures object masks cut to this frame, by source: made here, captured or provided
 /// (a source drawn only by libobs can't be one).

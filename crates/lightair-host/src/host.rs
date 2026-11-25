@@ -1279,16 +1279,17 @@ impl Host {
         }
     }
 
-    /// Shows an object whole while it's being cropped (crop mode), or `None` to end it. Kept,
-    /// but not drawn differently yet: the compositor draws the document as it is.
+    /// Shows an object whole while it's being cropped (crop mode), or `None` to end it: the
+    /// compositor draws the rest of its picture as a faint ghost around the crop.
     pub fn set_crop_preview(&mut self, target: Option<(Id, Id, Id)>, _workspace: &Workspace) {
         self.crop_preview = target;
-        not_yet("set_crop_preview");
+        crate::show::set_crop_view(target, false);
     }
 
-    /// Fades the crop view's ghost out (nothing to fade yet).
+    /// Fades the crop view's ghost out (before `set_crop_preview(None)`, so leaving crop view
+    /// doesn't pop).
     pub fn fade_crop_preview(&mut self, _workspace: &Workspace) {
-        not_yet("fade_crop_preview");
+        crate::show::set_crop_view(self.crop_preview, true);
     }
 
     /// Whether a source is running: on air (the program, overlays, a switch, a scene drawn for
