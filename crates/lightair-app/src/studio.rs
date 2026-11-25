@@ -344,11 +344,8 @@ impl Studio {
     /// Brings an older workspace's effects up to date (saved, but not an undo step).
     fn migrate(&mut self) {
         let mut commands = lightair_model::catalog::migrate(self.doc.workspace());
-        // tracks' libobs audio filters: the audio engine runs its own (LIGHTAIR_LEGACY_AUDIO
-        // keeps libobs mixing, so the filters stay)
-        if std::env::var("LIGHTAIR_LEGACY_AUDIO").map_or(true, |v| v != "1") {
-            commands.extend(lightair_model::catalog::migrate_audio(self.doc.workspace()));
-        }
+        // tracks' older audio filters: the audio engine runs its own
+        commands.extend(lightair_model::catalog::migrate_audio(self.doc.workspace()));
         if commands.is_empty() {
             return;
         }

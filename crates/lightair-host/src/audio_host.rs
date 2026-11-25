@@ -4,13 +4,12 @@
 //!   itself (`devices.rs`); a source that makes its own sound (desktop and app audio, media,
 //!   web pages, NDI, links, the phone camera…) registers by its document id with
 //!   [`feeds_itself`] or [`feed_slot`], and the engine hands it an [`InputFeed`] to push into
-//!   while a track takes it. Anything else can fill a ring the engine hands out
-//!   ([`AudioHost::capture_ring`]: libobs's audio-capture callback, while libobs is still there).
+//!   while a track takes it.
 //! - **Engine**: a real-time thread takes a block from each input's ring, runs the
 //!   `lightair-audio` graph, and
 //! - **Out**: hands Program, the mixes and the cue to whoever takes them ([`tap_mix`]: Lightair's
-//!   encoders, the loudness meter, NDI out, libobs's out sources while libobs is there), plays the
-//!   cue or Program on the monitoring device and mixes on devices of their own.
+//!   encoders, the loudness meter, NDI out), plays the cue or Program on the monitoring device
+//!   and mixes on devices of their own.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,10 +30,9 @@ pub const BLOCKS: [usize; 3] = [128, 256, 512];
 pub const OUT_MIXES: usize = 6;
 /// Ring size per input (frames).
 const RING_FRAMES: usize = 48_000;
-/// Buffered before an input starts playing, and the most kept (frames): libobs delivers audio
-/// in packets of 1024 frames, and a busy machine delays them; two packets absorb that.
+/// The engine's output is stamped this far behind real time (frames): about what its inputs
+/// buffer.
 const PRIME: usize = 2_048;
-const MOST: usize = 6_144;
 
 /// Inputs on the audio thread, and how many had audio in the last block (diagnostics).
 pub static RT_INPUTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -51,7 +49,7 @@ pub static SHORTFALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 const FEED_FRAMES: usize = 48_000;
 /// Buffered before a fed input starts playing, and the most kept (frames), at least: a capture
 /// that delivers on Core Audio's I/O cycle (512 frames, often) needs a little more than an
-/// interface opened at the engine's block size, far less than libobs's 1024-frame packets.
+/// interface opened at the engine's block size.
 const FEED_PRIME: usize = 1_024;
 const FEED_MOST: usize = 4_096;
 /// Frames a push takes without allocating (larger blocks grow the buffers once).
@@ -200,7 +198,7 @@ impl FeedSlot {
 
     /// Pushes planar sound into the track's feed ([`InputFeed::push_planar`]). True when the
     /// mixer took it (or it was dropped while the feed was being swapped: never waits); false
-    /// when no track takes the sound, so it goes to libobs as before.
+    /// when no track takes the sound.
     pub fn push_planar(&self, planes: &[&[f32]], rate: u32) -> bool {
         match self.0.try_lock() {
             Some(mut feed) => feed.as_mut().map(|f| f.push_planar(planes, rate)).is_some(),
@@ -250,14 +248,6 @@ fn feeder_of(source: Id) -> Option<Arc<dyn SoundFeeder>> {
     FEEDERS.lock().iter().find(|(s, _)| *s == source).map(|(_, f)| f.clone())
 }
 
-/// How the engine takes an input's sound.
-enum Taken {
-    /// From a ring something else fills ([`AudioHost::capture_ring`]), and what keeps it filling
-    /// (dropped when the input is let go).
-    Ring(#[allow(dead_code)] Box<dyn std::any::Any + Send>),
-    /// From the source itself, through an [`InputFeed`].
-    Fed(Arc<dyn SoundFeeder>),
-}
 
 // ---------------------------------------------------------------- the real-time side
 
@@ -407,7 +397,8 @@ fn monitor_most(block: usize) -> usize {
 
 /// Whether multitrack files are being recorded (for the UI's record state).
 pub static STEMS_RUNNING: AtomicBool = AtomicBool::new(false);
-/// When the first sample of the current multitrack files was played (libobs ns; 0: not yet).
+/// When the first sample of the current multitrack files was played (Lightair's clock, ns; 0:
+/// not yet).
 static STEMS_START_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Samples dropped because a file's writer fell behind (never expected).
 pub static STEM_OVERRUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -640,10 +631,9 @@ fn rt_loop(
 
 // ---------------------------------------------------------------- the mixes, taken
 
-/// Whether the audio engine plays the mixer (`LIGHTAIR_LEGACY_AUDIO=1`: libobs mixes the tracks,
-/// and the mixes are libobs's).
+/// Whether the audio engine plays the mixer: always (nothing else mixes the tracks).
 pub fn mixer_on() -> bool {
-    std::env::var("LIGHTAIR_LEGACY_AUDIO").map_or(true, |v| v != "1")
+    true
 }
 
 /// A block of a mix as the engine made it: its time (Lightair's clock) and stereo frames,
@@ -752,7 +742,7 @@ pub struct MultitrackReport {
     pub files: Vec<std::path::PathBuf>,
     /// Frames in each file.
     pub frames: u64,
-    /// When their first sample played (libobs ns): lines them up with the video file.
+    /// When their first sample played (Lightair's clock, ns): lines them up with the video file.
     pub start_ns: u64,
     pub sample_rate: u32,
 }
@@ -773,7 +763,8 @@ pub struct AudioHost {
     engine: la::Engine,
     commands: rtrb::Producer<ToRt>,
     garbage: rtrb::Consumer<FromRt>,
-    captures: HashMap<Id, Taken>,
+    /// The sources whose sound is taken, each through an [`InputFeed`].
+    captures: HashMap<Id, Arc<dyn SoundFeeder>>,
     mixes: ([Option<la::NodeId>; OUT_MIXES - 1], Option<la::NodeId>),
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -882,32 +873,14 @@ impl AudioHost {
         let rt = RtInput::new(crate::audio::node(input), consumer, 2, prime, most);
         let _ = self.commands.push(ToRt::AddInput(rt));
         feeder.attach(Some(InputFeed::new(producer, self.sample_rate)));
-        self.captures.insert(input, Taken::Fed(feeder));
+        self.captures.insert(input, feeder);
         true
     }
 
-    /// Starts taking `input`'s sound from a ring something else fills (stereo, interleaved, at
-    /// the engine's rate, in packets as large as libobs's): the ring's producer. `keep` is held
-    /// while it's taken and dropped when it's let go (it stops filling then).
-    pub fn capture_ring(&mut self, input: Id, keep: Box<dyn std::any::Any + Send>) -> Option<rtrb::Producer<f32>> {
-        if self.captures.contains_key(&input) {
-            return None;
-        }
-        let (producer, consumer) = rtrb::RingBuffer::new(RING_FRAMES * 2);
-        let rt = RtInput::new(crate::audio::node(input), consumer, 2, PRIME, MOST);
-        let _ = self.commands.push(ToRt::AddInput(rt));
-        self.captures.insert(input, Taken::Ring(keep));
-        Some(producer)
-    }
-
-    /// Stops taking `input`'s sound (a source that feeds the engine itself is told to stop; a
-    /// ring's keeper is dropped).
+    /// Stops taking `input`'s sound (the source is told to stop feeding it).
     pub fn release(&mut self, input: Id) {
-        let Some(taken) = self.captures.remove(&input) else { return };
-        match taken {
-            Taken::Ring(keep) => drop(keep),
-            Taken::Fed(feeder) => feeder.attach(None),
-        }
+        let Some(feeder) = self.captures.remove(&input) else { return };
+        feeder.attach(None);
         let _ = self.commands.push(ToRt::RemoveInput(crate::audio::node(input)));
     }
 
@@ -916,7 +889,7 @@ impl AudioHost {
     }
 
     /// Opens an audio interface for `input`, every channel ("" for the default input). A
-    /// device delivers small, regular buffers: it needs much less buffering than libobs.
+    /// device delivers small, regular buffers: it needs little buffering.
     pub fn open_device(&mut self, input: Id, device: &str) -> Result<u16, String> {
         if self.devices.get(&input).is_some_and(|(d, _)| d == device) {
             return Ok(self.devices[&input].1);
@@ -930,7 +903,7 @@ impl AudioHost {
         let devices = self.device_thread.get_or_insert_with(crate::devices::Devices::start);
         let (producer, consumer) = rtrb::RingBuffer::new(RING_FRAMES * 32);
         let channels = devices.open(input, device, self.sample_rate, producer)?;
-        // two blocks primed: a device's latency is the engine's block, not libobs's packets
+        // two blocks primed: a device's latency is the engine's block
         let rt = RtInput::new(crate::audio::node(input), consumer, channels as usize, self.block * 2, 2_048.max(self.block * 8));
         let _ = self.commands.push(ToRt::AddInput(rt));
         self.devices.insert(input, (device.to_string(), channels));

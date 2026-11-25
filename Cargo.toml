@@ -13,7 +13,6 @@ publish = false
 
 [workspace.dependencies]
 # internal
-libobs-sys = { path = "crates/libobs-sys" }
 lightair-host = { path = "crates/lightair-host" }
 lightair-avatar = { path = "crates/lightair-avatar" }
 # The avatar runtimes, built in from upstream projects (each crate's NOTICE.md): .moc3 models,

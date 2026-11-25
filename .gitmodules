@@ -1,7 +1,3 @@
-[submodule "third_party/obs-studio"]
-	path = third_party/obs-studio
-	url = https://github.com/obsproject/obs-studio.git
-	shallow = true
 [submodule "third_party/simde"]
 	path = third_party/simde
 	url = https://github.com/simd-everywhere/simde.git

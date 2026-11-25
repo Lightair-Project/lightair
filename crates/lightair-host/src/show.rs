@@ -4,33 +4,28 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use lightair_model::{Id, TransitionSettings, Workspace};
 use parking_lot::Mutex;
 
-/// Set by the engine without libobs ([`crate::engine::Engine`]): Lightair's own compositor is
-/// all there is, whatever `LIGHTAIR_ENGINE` says.
+/// Set when the engine starts ([`crate::engine::Engine`]).
 static ALWAYS_OWN: AtomicBool = AtomicBool::new(false);
 
-/// Whether Lightair's own compositor draws the program (`LIGHTAIR_ENGINE=own`, or the engine
-/// without libobs running). Read once.
+/// Whether the engine runs, so Lightair's own compositor draws the program.
 pub fn own() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
     ALWAYS_OWN.load(Ordering::Relaxed)
-        || *ON.get_or_init(|| std::env::var("LIGHTAIR_ENGINE").is_ok_and(|v| v.trim().eq_ignore_ascii_case("own")))
 }
 
-/// The engine without libobs is starting: Lightair's own compositor, mixer and outputs from
-/// now on. Call before anything reads [`own`].
+/// The engine is starting: Lightair's own compositor, mixer and outputs from now on. Call
+/// before anything reads [`own`].
 pub fn set_own() {
     ALWAYS_OWN.store(true, Ordering::Relaxed);
 }
 
 /// Whether a source is a link from another computer (a media source with a `link_port`) that
-/// Lightair's compositor receives itself (with the switch on): the reconciler then gives its
-/// libobs media source no address, so only the compositor's receiver listens on the port.
+/// Lightair's compositor receives itself.
 pub fn link_received_by_compositor(source: &lightair_model::Source) -> bool {
     own()
         && source.kind == "ffmpeg_source"
@@ -72,7 +67,7 @@ pub fn snapshot() -> Option<Arc<Snapshot>> {
     SNAPSHOT.lock().clone()
 }
 
-/// Engine thread, after applying a change: `workspace` is what libobs now shows.
+/// Engine thread, after applying a change: `workspace` is what the show now is.
 pub fn publish(workspace: &Workspace) {
     if !own() {
         return;

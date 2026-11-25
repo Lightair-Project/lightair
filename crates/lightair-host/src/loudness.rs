@@ -174,25 +174,10 @@ pub fn attach(sample_rate: u32, channels: usize) {
     *TAP.lock() = Some(tap);
 }
 
-/// Starts metering sound something else pushes ([`push`]): libobs's mix.
-pub fn attach_pushed(sample_rate: u32, channels: usize) {
-    *STREAM.lock() = Some(Loudness::new(sample_rate, channels));
-}
-
-/// Planar sound of the stream mix, for the meter (never waits for the lock).
-pub fn push(planes: &[&[f32]]) {
-    let Some(mut guard) = STREAM.try_lock() else { return };
-    if let Some(meter) = guard.as_mut() {
-        let n = meter.filters.len().min(planes.len());
-        meter.push(&planes[..n]);
-    }
-}
-
-/// Stops metering; whether it was the mixer's tap (else the pushed sound).
-pub fn detach() -> bool {
-    let tap = TAP.lock().take();
+/// Stops metering.
+pub fn detach() {
+    TAP.lock().take();
     *STREAM.lock() = None;
-    tap.is_some()
 }
 
 /// Loudness of what's being streamed and recorded.
