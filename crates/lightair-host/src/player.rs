@@ -2,9 +2,11 @@
 //! scene. Media calls are safe from any thread.
 //!
 //! Its picture is read straight from the player ([`Player::frame`]); a preview shows none
-//! (`source_ref` gives none). Not yet: its sound in the headphones.
+//! (`source_ref` gives none). Its sound plays on the monitoring device (`crate::monitoring`),
+//! on an output of its own, not through the mixer.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use lightair_model::Id;
 
@@ -14,6 +16,36 @@ use crate::media_player::{MediaPlayer, Settings};
 pub struct Player {
     player: MediaPlayer,
     id: Id,
+    /// The output its sound plays on (closed as it drops).
+    _speaker: Option<crate::devices::Devices>,
+}
+
+/// The player's sound, into the ring its output plays.
+struct Speaker(parking_lot::Mutex<rtrb::Producer<f32>>);
+
+impl crate::media_player::Elsewhere for Speaker {
+    fn audio(&self, interleaved: &[f32], rate: u32, timestamp_ns: u64) {
+        let mut p = self.0.lock();
+        // handed over ahead of time: silence first, so it plays when it's due (what's queued
+        // plays before it)
+        let ahead = timestamp_ns.saturating_sub(crate::clock::now_ns());
+        let due = (ahead as u128 * rate as u128 / 1_000_000_000) as usize * 2;
+        let queued = p.buffer().capacity() - p.slots();
+        let pad = due.saturating_sub(queued).min(p.slots()) & !1;
+        if pad > 0
+            && let Ok(chunk) = p.write_chunk_uninit(pad)
+        {
+            chunk.fill_from_iter(std::iter::repeat(0.0));
+        }
+        let room = p.slots().min(interleaved.len()) & !1;
+        if let Ok(chunk) = p.write_chunk_uninit(room) {
+            chunk.fill_from_iter(interleaved[..room].iter().copied());
+        }
+    }
+
+    fn ended(&self) {}
+
+    fn started(&self) {}
 }
 
 impl Player {
@@ -27,7 +59,23 @@ impl Player {
         };
         let rate = crate::audio_host::engine_rate();
         let id = Id::new();
-        Some(Player { player: MediaPlayer::new(Some(id), settings, rate, true, None), id })
+        // its sound on the monitoring device: half a second of room
+        let (producer, consumer) = rtrb::RingBuffer::new(rate as usize);
+        let devices = crate::devices::Devices::start();
+        let device = crate::monitoring::current().1;
+        let device = if device == "default" { String::new() } else { device };
+        let speaker = match devices.open_output(&device, rate, consumer) {
+            Ok(()) => Some(devices),
+            Err(e) => {
+                tracing::warn!(%e, "the Library's player: no sound");
+                None
+            }
+        };
+        let elsewhere: Option<Arc<dyn crate::media_player::Elsewhere>> =
+            speaker.is_some().then(|| Arc::new(Speaker(parking_lot::Mutex::new(producer))) as Arc<_>);
+        // (not a document's source: no track takes its sound, which goes to the speaker)
+        let player = MediaPlayer::new(Some(id), settings, rate, true, elsewhere);
+        Some(Player { player, id, _speaker: speaker })
     }
 
     /// What a preview shows it as: nothing yet without libobs.

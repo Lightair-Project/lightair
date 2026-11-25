@@ -268,6 +268,9 @@ pub struct Host {
     /// The direct monitor wanted: output device ("" default) and whether it plays the program
     /// (else the cue mix).
     monitor: Option<(String, bool)>,
+    /// The monitor follows the monitoring device chosen (`crate::monitoring`): no device was
+    /// given for direct monitoring, and the mixer is the only way to the headphones.
+    monitor_follows: bool,
     /// Frames per audio block (`None`: the default).
     audio_block: Option<usize>,
     /// What each source needs, and the runtimes made for it.
@@ -306,6 +309,7 @@ impl Host {
             sample_rate,
             audio: None,
             monitor: None,
+            monitor_follows: false,
             audio_block: None,
             needs: HashMap::new(),
             runtimes: HashMap::new(),
@@ -397,6 +401,16 @@ impl Host {
     /// times a second; the app's `cleanup` too.
     pub(crate) fn tick(&mut self) {
         self.timers.tick();
+        // the monitoring device chosen changed: the monitor follows it
+        if self.monitor_follows
+            && let Some((device, program)) = self.monitor.clone()
+        {
+            let chosen = crate::monitoring::current().1;
+            let chosen = if chosen == "default" { String::new() } else { chosen };
+            if chosen != device {
+                self.set_headphones(None, program);
+            }
+        }
         for rt in self.runtimes.values_mut() {
             match rt {
                 #[cfg(any(target_os = "macos", windows))]
@@ -907,7 +921,11 @@ impl Host {
     /// Monitoring straight from the audio engine to an output device (`None`: none).
     /// `program`: hear the stream mix rather than the cue.
     pub fn set_headphones(&mut self, device: Option<String>, program: bool) {
-        self.monitor = device.map(|d| (if d == "default" { String::new() } else { d }, program));
+        // without libobs nothing else plays the cue: the monitoring device chosen, when no
+        // device is given for direct monitoring
+        self.monitor_follows = device.is_none();
+        let device = device.unwrap_or_else(|| crate::monitoring::current().1);
+        self.monitor = Some((if device == "default" { String::new() } else { device }, program));
         let monitor = self.monitor_spec();
         if let Some(host) = self.audio.as_mut()
             && let Err(e) = host.set_headphones(monitor)
