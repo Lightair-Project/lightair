@@ -1402,7 +1402,12 @@ fn effects_drawn(source: &Source, keyers: bool, looks: bool) -> bool {
     for e in
         source.effects.iter().filter(|e| e.enabled && !e.kind.starts_with("audio.") && !crate::pointer::is_pointer(e))
     {
-        if e.kind.starts_with("studio.") {
+        if crate::timed::is_timed(e) {
+            // drawn on the picture as made, keyed and looked, before the renderer's
+            if !keyers || renderer_seen {
+                return false;
+            }
+        } else if e.kind.starts_with("studio.") {
             if !studio_seen && (renderer_seen || keyer_seen) {
                 return false;
             }
@@ -1412,11 +1417,6 @@ fn effects_drawn(source: &Source, keyers: bool, looks: bool) -> bool {
                 return false;
             }
             keyer_seen = true;
-        } else if crate::timed::is_timed(e) {
-            // drawn on the picture as made, keyed and looked, before the renderer's
-            if !keyers || renderer_seen {
-                return false;
-            }
         } else if renderer_draws(e) {
             renderer_seen = true;
         } else {

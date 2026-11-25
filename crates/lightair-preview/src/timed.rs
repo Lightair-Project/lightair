@@ -15,6 +15,9 @@
 //! - **Auto-frame** (`lightair_autoframe`): crops in on the biggest face at a shot size (`shot`
 //!   0 close, 1 medium, 2 wide), no closer than `max_zoom`, easing there at `speed`.
 //!
+//! - **Camera motion** and **Ambience** (`studio.motion`, `studio.ambience`): the camera
+//!   looks' post pass (`crate::post`).
+//!
 //! Faces are found with Apple's Vision on a small copy of the source's picture every third
 //! frame, on a thread of each source's own; a picture made here (not a buffer) has none.
 //!
@@ -117,7 +120,10 @@ fn fs(v: Out) -> @location(0) vec4<f32> {
 
 /// Whether `e` is one of the effects drawn here.
 pub(crate) fn is_timed(e: &Effect) -> bool {
-    matches!(e.kind.as_str(), FREEZE | DELAY | SCROLL | REACT | FACE_BLUR | AUTOFRAME)
+    matches!(
+        e.kind.as_str(),
+        FREEZE | DELAY | SCROLL | REACT | FACE_BLUR | AUTOFRAME | crate::post::MOTION | crate::post::AMBIENCE
+    )
 }
 
 /// The pipelines, made once: a plain copy and one blended over what's there (premultiplied).
@@ -372,6 +378,7 @@ fn framing(face: Option<[f32; 4]>, shot: i64, max_zoom: f32) -> [f32; 4] {
 #[derive(Default)]
 pub(crate) struct Timed {
     pass: Option<Pass>,
+    post: Option<crate::post::Post>,
     states: HashMap<Id, State>,
 }
 
@@ -397,6 +404,7 @@ impl Timed {
         }
         let device = gpu.device();
         let pass = self.pass.get_or_insert_with(|| Pass::new(device));
+        let post = &mut self.post;
         let mut current = match &shot.picture {
             Picture::Texture(t) => t.clone(),
             Picture::Buffer(_) => lightair_engine::gpu::apple::sampled(device, buffer?)?,
@@ -578,6 +586,15 @@ impl Timed {
                         };
                         run(gpu, pass, &out, &[draw]);
                     }
+                }
+                crate::post::MOTION | crate::post::AMBIENCE => {
+                    let params = if e.kind == crate::post::MOTION {
+                        crate::post::Params::motion(&e.settings)
+                    } else {
+                        crate::post::Params::ambience(&e.settings)
+                    };
+                    let Some(params) = params else { continue };
+                    post.get_or_insert_with(|| crate::post::Post::new(device)).draw(gpu, &current, &out, &params);
                 }
                 _ => continue,
             }

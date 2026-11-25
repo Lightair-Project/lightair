@@ -27,8 +27,8 @@ use lightair_engine::gpu::apple::Kept;
 use lightair_engine::hot::Hot;
 use lightair_engine::looks::render::Settings;
 use lightair_engine::{background, clock, looks};
-use lightair_model::{Id, Source};
 use lightair_host::bridge::{self, FaceTracker};
+use lightair_model::{Id, Source};
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
@@ -55,14 +55,20 @@ fn drawn_kind(kind: &str) -> bool {
 
 /// Whether `source` has a look switched on (any `studio.*` effect: the camera studio filter).
 pub(crate) fn has_looks(source: &Source) -> bool {
-    source.effects.iter().any(|e| e.enabled && e.kind.starts_with("studio."))
+    source.effects.iter().any(|e| e.enabled && is_look(&e.kind))
+}
+
+/// A `studio.*` effect the engine's looks draw (camera motion and ambience are the compositor's
+/// own pass: `crate::post`).
+fn is_look(kind: &str) -> bool {
+    kind.starts_with("studio.") && !matches!(kind, crate::post::MOTION | crate::post::AMBIENCE)
 }
 
 /// Whether the engine's looks draw everything `source`'s looks do: beauty, light, the grade and
 /// the background effects, and not the makeup look's own `.cube` LUT or the landmarks overlay
 /// (stickers, camera motion and ambience aren't drawn by the engine either).
 pub(crate) fn drawable(source: &Source) -> bool {
-    let studio = source.effects.iter().filter(|e| e.enabled && e.kind.starts_with("studio."));
+    let studio = source.effects.iter().filter(|e| e.enabled && is_look(&e.kind));
     if !studio.clone().all(|e| drawn_kind(&e.kind)) {
         return false;
     }
