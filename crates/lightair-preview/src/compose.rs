@@ -553,6 +553,16 @@ impl State {
         let pointer_here = |source: &Source| {
             !pointed.contains_key(&source.id) || (keyers && !crate::pointer::has_other_effects(source))
         };
+        // with nothing else to draw a source (no libobs), every source is drawn here, with the
+        // effects the compositor draws (the others are left out)
+        let alone = !bridge::elsewhere();
+        let drawn_here = |source: &Source| {
+            let all = effects_drawn(source, keyers, looked) && pointer_here(source);
+            if !all && alone {
+                skipped_effects(source);
+            }
+            all || alone
+        };
         if let Some(native) = self.native.as_mut() {
             native.pointers.keep(&pointed);
             native.timed.keep(&shown);
@@ -576,7 +586,7 @@ impl State {
             .iter()
             .filter_map(|id| base.sources.get(id))
             .filter_map(|source| {
-                let effects = effects_drawn(source, keyers, looked) && pointer_here(source);
+                let effects = drawn_here(source);
                 let made = keyers && effects && made_here(source) && !self.missing.contains(&source.id);
                 let taken = effects && (captured.contains_key(&source.id) || provided.contains_key(&source.id));
                 (!made && !taken).then_some((source.id, effects))
@@ -599,7 +609,7 @@ impl State {
         }
         for id in &shown {
             let Some(source) = base.sources.get(id) else { continue };
-            let effects = effects_drawn(source, keyers, looked) && pointer_here(source);
+            let effects = drawn_here(source);
             if effects
                 && made_here(source)
                 && let Some(native) = self.native.as_mut()
@@ -1414,6 +1424,15 @@ fn effects_drawn(source: &Source, keyers: bool, looks: bool) -> bool {
         }
     }
     !studio_seen || (keyers && looks && looks::drawable(source))
+}
+
+/// Says once per source that some of its effects aren't drawn (no libobs to draw them).
+fn skipped_effects(source: &Source) {
+    static SAID: std::sync::LazyLock<parking_lot::Mutex<HashSet<Id>>> = std::sync::LazyLock::new(Default::default);
+    if SAID.lock().insert(source.id) {
+        let kinds: Vec<&str> = source.effects.iter().filter(|e| e.enabled).map(|e| e.kind.as_str()).collect();
+        tracing::info!(source = %source.id, name = source.name, ?kinds, "compositor: some of these effects aren't drawn without libobs yet");
+    }
 }
 
 /// An effect lightair-render's scene renderer draws.

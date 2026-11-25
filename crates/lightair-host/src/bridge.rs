@@ -60,6 +60,12 @@ pub fn set_elsewhere(hooks: Box<dyn Elsewhere>) {
     let _ = ELSEWHERE.set(hooks);
 }
 
+/// Whether something else draws sources for the compositor (libobs). Without it the compositor
+/// draws every source it can make itself, with the effects it can draw.
+pub fn elsewhere() -> bool {
+    ELSEWHERE.get().is_some()
+}
+
 /// The compositor for `canvas` wants pictures of `sources` (see [`Elsewhere::want`]).
 pub fn want(canvas: Id, sources: HashMap<Id, bool>) {
     if let Some(e) = ELSEWHERE.get() {
