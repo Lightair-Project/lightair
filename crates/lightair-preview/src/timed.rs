@@ -10,6 +10,13 @@
 //! - **React to sound** (`lightair_audio_react`): with a track's level (`track`, from
 //!   `floor_db` up), the picture grows (`react` 0), fades in (1), glows (2) or shakes (3), by
 //!   `amount`.
+//! - **Face blur** (`lightair_face_blur`): every face Vision finds, pixelated (`style` 0) or
+//!   blurred (1) by `strength`, with `grow` around it.
+//! - **Auto-frame** (`lightair_autoframe`): crops in on the biggest face at a shot size (`shot`
+//!   0 close, 1 medium, 2 wide), no closer than `max_zoom`, easing there at `speed`.
+//!
+//! Faces are found with Apple's Vision on a small copy of the source's picture every third
+//! frame, on a thread of each source's own; a picture made here (not a buffer) has none.
 //!
 //! They're drawn here only while they come before every other picture effect of the source (the
 //! order libobs runs a source's filters in); otherwise libobs draws the source, filters and all.
@@ -27,6 +34,13 @@ pub(crate) const FREEZE: &str = "lightair_freeze";
 pub(crate) const DELAY: &str = "gpu_delay";
 pub(crate) const SCROLL: &str = "scroll_filter";
 pub(crate) const REACT: &str = lightair_model::catalog::AUDIO_REACT_KIND;
+pub(crate) const FACE_BLUR: &str = lightair_model::catalog::FACE_BLUR_KIND;
+pub(crate) const AUTOFRAME: &str = lightair_model::catalog::AUTOFRAME_KIND;
+
+/// The copy of the picture Vision looks at is at most this wide.
+const WATCH_WIDTH: usize = 320;
+/// The most faces blurred.
+const FACES: usize = 6;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// The most copies a delay keeps (half a second at 60 frames a second, and a little more).
@@ -38,7 +52,13 @@ struct Out {
     @location(0) uv: vec2<f32>,
 };
 
-struct P { offset: vec2<f32>, wrap: f32, opacity: f32, scale: f32, gain: f32, pad: vec2<f32> };
+struct P {
+    offset: vec2<f32>, wrap: f32, opacity: f32, scale: f32, gain: f32, pad: vec2<f32>,
+    // face blur: on (1), the block's size in pixels, pixelate (0) or blur (1)
+    mode: f32, block: f32, style: f32, pad2: f32,
+    texel: vec2<f32>, pad3: vec2<f32>,
+    faces: array<vec4<f32>, 6>,
+};
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var picture: texture_2d<f32>;
 @group(0) @binding(2) var linear: sampler;
@@ -52,8 +72,38 @@ fn vs(@builtin(vertex_index) i: u32) -> Out {
     return o;
 }
 
+fn inside_of(uv: vec2<f32>, face: vec4<f32>) -> f32 {
+    if (face.z <= 0.0) { return 0.0; }
+    let c = face.xy + face.zw * 0.5;
+    let d = (uv - c) / max(face.zw * 0.5, vec2<f32>(0.0001));
+    return 1.0 - smoothstep(0.85, 1.0, length(d));
+}
+
+fn hidden(uv: vec2<f32>) -> vec4<f32> {
+    let b = p.texel * p.block;
+    if (p.style < 0.5) {
+        return textureSampleLevel(picture, linear, (floor(uv / b) + 0.5) * b, 0.0);
+    }
+    var sum = vec4<f32>(0.0);
+    for (var x = -3; x <= 3; x++) {
+        for (var y = -3; y <= 3; y++) {
+            sum += textureSampleLevel(picture, linear, uv + vec2<f32>(f32(x), f32(y)) * b * 0.5, 0.0);
+        }
+    }
+    return sum / 49.0;
+}
+
 @fragment
 fn fs(v: Out) -> @location(0) vec4<f32> {
+    if (p.mode > 0.5) {
+        var inside = 0.0;
+        for (var i = 0; i < 6; i++) {
+            inside = max(inside, inside_of(v.uv, p.faces[i]));
+        }
+        let orig = textureSampleLevel(picture, linear, v.uv, 0.0);
+        if (inside <= 0.0) { return orig; }
+        return mix(orig, hidden(v.uv), inside);
+    }
     var uv = (v.uv - vec2<f32>(0.5)) / p.scale + vec2<f32>(0.5) + p.offset;
     if (p.wrap > 0.5) {
         uv = fract(uv);
@@ -67,7 +117,7 @@ fn fs(v: Out) -> @location(0) vec4<f32> {
 
 /// Whether `e` is one of the effects drawn here.
 pub(crate) fn is_timed(e: &Effect) -> bool {
-    matches!(e.kind.as_str(), FREEZE | DELAY | SCROLL | REACT)
+    matches!(e.kind.as_str(), FREEZE | DELAY | SCROLL | REACT | FACE_BLUR | AUTOFRAME)
 }
 
 /// The pipelines, made once: a plain copy and one blended over what's there (premultiplied).
@@ -173,12 +223,30 @@ struct Draw<'a> {
     /// Bigger about its middle (1: as it is), and brighter (1: as it is).
     scale: f32,
     gain: f32,
+    /// Face blur: the faces (x, y, w, h, 0..1; none: nothing hidden), the block's size in
+    /// pixels and the style (0 pixelate, 1 blur), and one pixel in uv.
+    faces: Option<[[f32; 4]; FACES]>,
+    block: f32,
+    style: f32,
+    texel: (f32, f32),
 }
 
 impl<'a> Draw<'a> {
     /// `from` as it is.
     fn copy(from: &'a wgpu::Texture) -> Draw<'a> {
-        Draw { from, offset: (0.0, 0.0), wrap: false, opacity: 1.0, over: false, scale: 1.0, gain: 1.0 }
+        Draw {
+            from,
+            offset: (0.0, 0.0),
+            wrap: false,
+            opacity: 1.0,
+            over: false,
+            scale: 1.0,
+            gain: 1.0,
+            faces: None,
+            block: 1.0,
+            style: 0.0,
+            texel: (0.0, 0.0),
+        }
     }
 }
 
@@ -203,6 +271,101 @@ struct State {
     level: f32,
     reacted: Option<Instant>,
     seed: u32,
+    /// The faces seen (Face blur, Auto-frame), and Auto-frame's view as it moves (x, y, w, h
+    /// in 0..1) and when it last moved.
+    watch: Option<Watch>,
+    view: Option<[f32; 4]>,
+    framed: Option<Instant>,
+}
+
+/// Every face in a source's picture, found by Apple's Vision on a thread of its own from a
+/// small copy of every third picture.
+struct Watch {
+    to: std::sync::mpsc::SyncSender<(Vec<u8>, usize, usize)>,
+    /// The faces found last (x, y, w, h, 0..1 from the top left), and when.
+    found: std::sync::Arc<parking_lot::Mutex<(Vec<[f32; 4]>, Instant)>>,
+    frames: u32,
+}
+
+impl Watch {
+    fn new() -> Option<Watch> {
+        let (to, from) = std::sync::mpsc::sync_channel::<(Vec<u8>, usize, usize)>(1);
+        let found = std::sync::Arc::new(parking_lot::Mutex::new((Vec::new(), Instant::now())));
+        let into = found.clone();
+        std::thread::Builder::new()
+            .name("lightair-faces".into())
+            .spawn(move || {
+                while let Ok((mut bytes, w, h)) = from.recv() {
+                    let faces = lightair_host::vision::faces(&mut bytes, w, h, w * 4);
+                    *into.lock() = (faces, Instant::now());
+                }
+            })
+            .ok()?;
+        Some(Watch { to, found, frames: 0 })
+    }
+
+    /// Hands Vision a small copy of `buffer` (every third time asked; dropped while it's busy).
+    fn look(&mut self, buffer: &bridge::Buffer) {
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
+            CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        };
+        self.frames += 1;
+        if !self.frames.is_multiple_of(3) {
+            return;
+        }
+        let (w, h) = (CVPixelBufferGetWidth(buffer), CVPixelBufferGetHeight(buffer));
+        if w == 0 || h == 0 {
+            return;
+        }
+        let step = w.div_ceil(WATCH_WIDTH).max(1);
+        let (sw, sh) = (w / step, h / step);
+        let mut small = Vec::with_capacity(sw * sh * 4);
+        // SAFETY: the buffer's bytes are read only while it's locked, within its rows
+        unsafe {
+            if CVPixelBufferLockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly) != 0 {
+                return;
+            }
+            let base = CVPixelBufferGetBaseAddress(buffer) as *const u8;
+            let stride = CVPixelBufferGetBytesPerRow(buffer);
+            if !base.is_null() {
+                for y in 0..sh {
+                    let row = std::slice::from_raw_parts(base.add(y * step * stride), w * 4);
+                    for x in 0..sw {
+                        small.extend_from_slice(&row[x * step * 4..x * step * 4 + 4]);
+                    }
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly);
+        }
+        if small.len() == sw * sh * 4 {
+            let _ = self.to.try_send((small, sw, sh));
+        }
+    }
+
+    /// The faces seen lately (none after a moment without any).
+    fn faces(&self) -> Vec<[f32; 4]> {
+        let f = self.found.lock();
+        if f.1.elapsed() < Duration::from_millis(700) { f.0.clone() } else { Vec::new() }
+    }
+}
+
+/// The view that frames `face` (a box in the picture) at `shot`, kept inside the picture.
+fn framing(face: Option<[f32; 4]>, shot: i64, max_zoom: f32) -> [f32; 4] {
+    let Some([fx, fy, fw, fh]) = face else { return [0.0, 0.0, 1.0, 1.0] };
+    // how much of the frame's height the face fills
+    let fill = match shot {
+        0 => 0.45,
+        2 => 0.16,
+        _ => 0.28,
+    };
+    let zoom = (fill / fh.max(0.01)).clamp(1.0, max_zoom);
+    let (vw, vh) = (1.0 / zoom, 1.0 / zoom);
+    // the face a little above the middle (headroom)
+    let (cx, cy) = (fx + fw * 0.5, fy + fh * 0.5 + vh * 0.08);
+    let x = (cx - vw / 2.0).clamp(0.0, 1.0 - vw);
+    let y = (cy - vh / 2.0).clamp(0.0, 1.0 - vh);
+    [x, y, vw, vh]
 }
 
 /// The compositor's effects that work across frames, by source.
@@ -363,6 +526,59 @@ impl Timed {
                     };
                     run(gpu, pass, &out, &[draw]);
                 }
+                FACE_BLUR | AUTOFRAME => {
+                    if state.watch.is_none() {
+                        state.watch = Watch::new();
+                    }
+                    let Some(watch) = state.watch.as_mut() else { continue };
+                    if let Some(b) = buffer {
+                        watch.look(b);
+                    }
+                    let faces = watch.faces();
+                    if e.kind == FACE_BLUR {
+                        // each face's box, grown (hair, ears, chin)
+                        let g = 1.0 + num("grow", 0.3).clamp(0.0, 1.0) as f32;
+                        let strength = num("strength", 0.6).clamp(0.0, 1.0) as f32;
+                        let mut boxes = [[0.0f32; 4]; FACES];
+                        for (b, [x, y, fw, fh]) in boxes.iter_mut().zip(&faces) {
+                            let (cx, cy) = (x + fw / 2.0, y + fh / 2.0);
+                            let (gw, gh) = (fw * g * 1.1, fh * g * 1.25);
+                            *b = [cx - gw / 2.0, cy - gh / 2.0, gw, gh];
+                        }
+                        let draw = Draw {
+                            faces: Some(boxes),
+                            block: 4.0 + strength * (size.0.min(size.1) as f32 / 18.0),
+                            style: num("style", 0.0) as f32,
+                            texel: (1.0 / size.0.max(1) as f32, 1.0 / size.1.max(1) as f32),
+                            ..Draw::copy(&current)
+                        };
+                        run(gpu, pass, &out, &[draw]);
+                    } else {
+                        // the biggest face (the person in front)
+                        let face = faces.into_iter().max_by(|a, b| (a[2] * a[3]).total_cmp(&(b[2] * b[3])));
+                        let want = framing(face, num("shot", 1.0) as i64, num("max_zoom", 2.5).clamp(1.0, 4.0) as f32);
+                        let speed = num("speed", 0.4).clamp(0.05, 1.0) as f32;
+                        let dt = state.framed.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+                        state.framed = Some(now);
+                        let view = state.view.get_or_insert([0.0, 0.0, 1.0, 1.0]);
+                        // eases there; small moves inside a dead zone are left alone (no wobble)
+                        let k = (dt * (0.6 + 4.0 * speed)).min(1.0);
+                        let far = (0..4).map(|i| (want[i] - view[i]).abs()).fold(0.0f32, f32::max);
+                        if far > 0.015 {
+                            for (v, w) in view.iter_mut().zip(want) {
+                                *v += (w - *v) * k;
+                            }
+                        }
+                        let [x, y, w, h] = *view;
+                        // the view's part of the picture, filling it
+                        let draw = Draw {
+                            scale: 1.0 / w.max(0.01),
+                            offset: (x - 0.5 + 0.5 * w, y - 0.5 + 0.5 * h),
+                            ..Draw::copy(&current)
+                        };
+                        run(gpu, pass, &out, &[draw]);
+                    }
+                }
                 _ => continue,
             }
             current = out;
@@ -398,7 +614,25 @@ fn run(gpu: &Gpu, pass: &Pass, target: &wgpu::Texture, draws: &[Draw]) {
     let groups: Vec<wgpu::BindGroup> = draws
         .iter()
         .map(|d| {
-            let values = [d.offset.0, d.offset.1, if d.wrap { 1.0 } else { 0.0 }, d.opacity, d.scale, d.gain, 0.0, 0.0];
+            let mut values = vec![
+                d.offset.0,
+                d.offset.1,
+                if d.wrap { 1.0 } else { 0.0 },
+                d.opacity,
+                d.scale,
+                d.gain,
+                0.0,
+                0.0,
+                if d.faces.is_some() { 1.0 } else { 0.0 },
+                d.block,
+                d.style,
+                0.0,
+                d.texel.0,
+                d.texel.1,
+                0.0,
+                0.0,
+            ];
+            values.extend(d.faces.unwrap_or_default().iter().flatten());
             let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("timed"),
