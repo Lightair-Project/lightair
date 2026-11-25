@@ -9,12 +9,22 @@
 //! lets it go shortly after nothing does (a second: a scene being rebuilt or a transition's
 //! hand-over doesn't restart it). While stopped it keeps its last size, so layouts don't jump.
 //! A camera's sound (capture cards) is passed through.
+//!
+//! With `LIGHTAIR_ENGINE=own`, Lightair's compositor captures some of these sources itself
+//! (`lightair-capture`) and hands each new picture over here ([`publish`]): while it does, the
+//! wrapper runs no capture of its own and draws the compositor's pictures instead, so libobs's
+//! picture of the source (through its filters, in libobs's own canvases, thumbnails and Studio
+//! mode) stays right with one capture running. [`release`] gives the capture back to the wrapper.
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use lightair_model::Id;
+use objc2_core_foundation::CFRetained;
+use objc2_core_video::{CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth};
 use parking_lot::Mutex;
 
 use crate::sys;
@@ -82,6 +92,53 @@ pub(crate) fn with_capture<R>(source: *mut sys::obs_source_t, f: impl FnOnce(*mu
 /// How long a capture keeps running once nothing shows it.
 const LINGER: Duration = Duration::from_secs(1);
 
+// ---------------------------------------------------------------- captures the compositor runs
+
+/// A BGRA, IOSurface-backed picture.
+pub type Buffer = CFRetained<CVPixelBuffer>;
+
+/// The newest picture of each document source whose capture Lightair's compositor runs itself.
+struct Taken(Option<HashMap<Id, Buffer>>);
+
+// SAFETY: CoreVideo's buffers are reference counted thread-safely, and a captured picture isn't
+// written again once it's handed over.
+unsafe impl Send for Taken {}
+unsafe impl Sync for Taken {}
+
+static TAKEN: Mutex<Taken> = Mutex::new(Taken(None));
+
+/// The compositor captures document source `source` itself, and `buffer` (BGRA, IOSurface-backed)
+/// is its newest picture: the source's wrapper lets its own capture go and draws this instead.
+/// Any thread (a capture's own queue: the lock is held only to swap a reference).
+pub fn publish(source: Id, buffer: &Buffer) {
+    TAKEN.lock().0.get_or_insert_with(HashMap::new).insert(source, buffer.clone());
+}
+
+/// The compositor no longer captures `source`: its wrapper captures it again while it's shown.
+pub fn release(source: Id) {
+    // (the buffer is let go outside the lock)
+    let gone = TAKEN.lock().0.as_mut().and_then(|t| t.remove(&source));
+    drop(gone);
+}
+
+/// The compositor's newest picture of `source`, while it captures it.
+fn taken(source: Id) -> Option<Buffer> {
+    TAKEN.lock().0.as_ref()?.get(&source).cloned()
+}
+
+/// The compositor's picture as the wrapper last drew it: a libobs texture over its IOSurface,
+/// made once and rebound to each new surface, and the buffer held while it's drawn. Graphics
+/// thread only (destroyed inside the graphics context).
+struct Drawn {
+    buffer: Option<Buffer>,
+    tex: *mut sys::gs_texture_t,
+    size: (u32, u32),
+}
+
+// SAFETY: the texture is only used inside libobs's graphics context; the buffer is reference
+// counted thread-safely.
+unsafe impl Send for Drawn {}
+
 /// Devices that came back (an iPhone that went away and returned): (unique id, when, as a
 /// count of reconnections). A camera capture of one that's running starts again, as if new:
 /// OBS's own reconnection doesn't always catch an iPhone's return.
@@ -121,6 +178,10 @@ struct Shared {
     reconnections: AtomicU64,
     /// A weak reference to the wrapper: where the capture's sound goes (`sound`).
     weak: usize,
+    /// The document source it plays (its libobs name is the source's id), when it's one.
+    doc: Option<Id>,
+    /// The compositor's picture, while the compositor captures the source.
+    drawn: Mutex<Drawn>,
 }
 
 impl Shared {
@@ -167,6 +228,56 @@ impl Shared {
             }
         }
         self.busy.store(false, Ordering::Release);
+    }
+
+    /// The compositor captures this source itself: its newest picture.
+    fn taken(&self) -> Option<Buffer> {
+        self.doc.and_then(taken)
+    }
+
+    /// Draws the compositor's picture `buffer` at its own size, as the screen capture draws its
+    /// frames (sRGB, blended as the scene asks). Graphics thread.
+    unsafe fn draw_taken(&self, buffer: Buffer) {
+        // (never waits: a size query may hold it)
+        let Some(mut d) = self.drawn.try_lock() else { return };
+        let size = (CVPixelBufferGetWidth(&buffer) as u32, CVPixelBufferGetHeight(&buffer) as u32);
+        if size.0 == 0 || size.1 == 0 {
+            return;
+        }
+        let changed = d.buffer.as_ref().is_none_or(|b| CFRetained::as_ptr(b) != CFRetained::as_ptr(&buffer));
+        if changed {
+            let Some(surface) = crate::bridge::surface_of(&buffer) else { return };
+            unsafe {
+                // the texture follows the newest surface: rebound while the size holds, else made again
+                let rebound = !d.tex.is_null() && d.size == size && sys::gs_texture_rebind_iosurface(d.tex, surface);
+                if !rebound {
+                    if !d.tex.is_null() {
+                        sys::gs_texture_destroy(d.tex);
+                    }
+                    d.tex = sys::gs_texture_create_from_iosurface(surface);
+                }
+            }
+            d.size = size;
+            d.buffer = Some(buffer);
+        }
+        if d.tex.is_null() {
+            return;
+        }
+        self.size.store(((size.0 as u64) << 32) | size.1 as u64, Ordering::Relaxed);
+        unsafe {
+            // an IOSurface is a rectangle texture on OpenGL (Metal has none)
+            let rect = sys::gs_get_device_type() as u32 != sys::GS_DEVICE_METAL;
+            let effect =
+                sys::obs_get_base_effect(if rect { sys::OBS_EFFECT_DEFAULT_RECT } else { sys::OBS_EFFECT_DEFAULT });
+            let image = sys::gs_effect_get_param_by_name(effect, c"image".as_ptr());
+            let srgb = sys::gs_framebuffer_srgb_enabled();
+            sys::gs_enable_framebuffer_srgb(true);
+            sys::gs_effect_set_texture_srgb(image, d.tex);
+            while sys::gs_effect_loop(effect, c"Draw".as_ptr()) {
+                sys::gs_draw_sprite(d.tex, 0, size.0, size.1);
+            }
+            sys::gs_enable_framebuffer_srgb(srgb);
+        }
     }
 
     fn on_worker(self: &Arc<Self>, start: bool) {
@@ -283,6 +394,11 @@ unsafe extern "C" fn get_name(type_data: *mut c_void) -> *const c_char {
 unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::obs_source_t) -> *mut c_void {
     let kind = unsafe { &*(sys::obs_source_get_type_data(source) as *const Kind) };
     unsafe { sys::obs_data_addref(settings) };
+    let name = unsafe { sys::obs_source_get_name(source) };
+    let doc = (!name.is_null())
+        .then(|| unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned())
+        .and_then(|n| uuid::Uuid::parse_str(&n).ok())
+        .map(Id);
     let s = Arc::new(Shared {
         kind,
         source: source as usize,
@@ -293,6 +409,8 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         size: AtomicU64::new(0),
         reconnections: AtomicU64::new(RECONNECTIONS.load(Ordering::Acquire)),
         weak: unsafe { sys::obs_source_get_weak_source(source) } as usize,
+        doc,
+        drawn: Mutex::new(Drawn { buffer: None, tex: std::ptr::null_mut(), size: (0, 0) }),
     });
     Box::into_raw(Box::new(s)) as *mut c_void
 }
@@ -304,6 +422,18 @@ unsafe extern "C" fn destroy(data: *mut c_void) {
         std::thread::sleep(Duration::from_millis(2));
     }
     s.stop();
+    {
+        let mut d = s.drawn.lock();
+        if !d.tex.is_null() {
+            unsafe {
+                sys::obs_enter_graphics();
+                sys::gs_texture_destroy(d.tex);
+                sys::obs_leave_graphics();
+            }
+            d.tex = std::ptr::null_mut();
+        }
+        d.buffer = None;
+    }
     unsafe {
         sys::obs_data_release(s.settings());
         sys::obs_weak_source_release(s.weak as *mut sys::obs_weak_source_t);
@@ -325,6 +455,14 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
     let s = shared(data);
     let shown = unsafe { sys::obs_source_showing(s.source as *mut sys::obs_source_t) };
     let running = s.child.lock().is_some();
+    // the compositor captures it: no capture of its own (it draws the compositor's pictures)
+    if s.taken().is_some() {
+        *s.hidden_since.lock() = None;
+        if running {
+            s.on_worker(false);
+        }
+        return;
+    }
     // its device came back: the capture let go, and made again (next tick) as if new
     if s.kind.access.is_some() {
         let now = RECONNECTIONS.load(Ordering::Acquire);
@@ -356,6 +494,14 @@ unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
 
 unsafe extern "C" fn video_render(data: *mut c_void, _effect: *mut sys::gs_effect_t) {
     let s = shared(data);
+    if let Some(buffer) = s.taken() {
+        unsafe { s.draw_taken(buffer) };
+        return;
+    }
+    // the compositor no longer captures it: its last picture goes back to the capture
+    if let Some(mut d) = s.drawn.try_lock() {
+        d.buffer = None;
+    }
     // (never waits on a capture being made)
     let Some(child) = s.child.try_lock() else { return };
     if let Some(Child(c)) = child.as_ref() {

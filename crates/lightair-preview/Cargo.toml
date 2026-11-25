@@ -37,6 +37,8 @@ objc2-metal = { version = "0.3.2", default-features = false, features = ["std", 
 lightair-avatar.workspace = true
 glam = "0.30"
 bytemuck = "1"
+# screens, windows, apps and cameras captured by Lightair itself (capture.rs)
+lightair-capture.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

@@ -28,8 +28,15 @@
 //!   their camera, trackers and calibration give: `bridge::avatar_posing`). Until one is ready
 //!   (an image decoding, a timer before its first tick, an avatar's model loading) libobs's
 //!   picture stands in.
-//! - **From libobs** (`bridge`), for everything else: captures, cameras, media files, web pages,
-//!   other widgets, devices, NDI…
+//! - **Captured here** (`capture`, with `lightair-capture`): screens (displays, windows, apps)
+//!   and cameras, one capture per source for every canvas, running while a compositor draws a
+//!   scene that shows the source; their frames are drawn straight from the capture's IOSurfaces.
+//!   The source's libobs wrapper runs no capture of its own meanwhile and draws these frames, so
+//!   a source whose effects libobs draws is still captured once. Until a capture's first frame
+//!   (or where it stays libobs's: access not yet given, a capture card with its sound in the same
+//!   stream), libobs's picture stands in.
+//! - **From libobs** (`bridge`), for everything else: media files, web pages, other widgets,
+//!   devices, NDI, Syphon, the phone camera…
 //!
 //! Objects pinned to an avatar's anchors follow them as libobs's pinned items do: each frame the
 //! anchors' places the avatar's libobs source published move the pinned objects' layouts in the
@@ -76,6 +83,7 @@ use objc2_metal::{MTLDevice, MTLPixelFormat, MTLTexture, MTLTextureDescriptor, M
 use parking_lot::Mutex;
 
 use crate::avatars::{AvatarRenderer, TrackingView};
+use crate::capture;
 use crate::looks;
 use crate::mac::{Frame, Shared, pixel_buffer};
 use crate::stinger::Player;
@@ -255,6 +263,8 @@ fn run(canvas: Id, stop: &AtomicBool) {
         native_failed: false,
         missing: HashSet::new(),
         wanted: None,
+        captures: None,
+        captures_of: None,
         fed: Vec::new(),
         clock: Instant::now(),
         stingers: HashMap::new(),
@@ -274,6 +284,7 @@ fn run(canvas: Id, stop: &AtomicBool) {
         }
     }
     state.idle();
+    state.stop_captures();
     state.unfeed(&[]);
 }
 
@@ -296,6 +307,11 @@ struct State {
     missing: HashSet<Id>,
     /// The sources last asked of the bridge, and whether each was asked for without its filters.
     wanted: Option<HashMap<Id, bool>>,
+    /// The screens and cameras the scenes drawn show, as last given to the captures (`None`:
+    /// none asked for).
+    captures: Option<HashMap<Id, capture::Plan>>,
+    /// What those were worked out from: the engine's workspace (by address) and the sources shown.
+    captures_of: Option<(usize, HashSet<Id>)>,
     /// The previews given frames.
     fed: Vec<Weak<Shared>>,
     /// The clock moving effects run on.
@@ -313,10 +329,12 @@ impl State {
     fn tick(&mut self) -> Duration {
         let Some(snapshot) = bridge::snapshot() else {
             self.idle();
+            self.stop_captures();
             return frame_period(None);
         };
         let Some(canvas) = snapshot.workspace.canvas(self.canvas).cloned() else {
             self.idle();
+            self.stop_captures();
             return frame_period(None);
         };
         let period = frame_period(Some(&canvas));
@@ -327,6 +345,7 @@ impl State {
         let showing: Vec<&Arc<Shared>> = viewers.iter().filter(|v| v.wants_program()).collect();
         if showing.is_empty() && !in_use {
             self.idle();
+            self.stop_captures();
             return period;
         }
         let base = self.doc.update(&snapshot.workspace);
@@ -336,7 +355,8 @@ impl State {
         let switch = snapshot.switch.filter(|s| base.program == Some(s.to)).and_then(|s| self.plan(&base, s, now));
         self.played(switch.as_ref().and_then(|p| p.stinger.as_ref().map(|(st, _)| (p.started, st.path.as_str()))));
         if switch.as_ref().is_some_and(|p| p.stand_in) {
-            // libobs draws this switch (a stinger video the compositor can't read)
+            // libobs draws this switch (a stinger video the compositor can't read); the captures
+            // keep running (libobs's wrappers draw their frames), so they don't restart after it
             self.idle();
             self.unfeed(&[]);
             return period;
@@ -359,6 +379,7 @@ impl State {
             }
             if self.drawer.is_none() {
                 self.idle();
+                self.stop_captures();
                 self.unfeed(&[]);
                 return period;
             }
@@ -372,15 +393,24 @@ impl State {
         // the camera looks: with the engine's pictures, and a module that gives faces and masks
         let looked = keyers && looks::available();
         self.missing.retain(|id| shown.contains(id));
-        // what libobs is asked for: the sources not made here (bare when the compositor draws
-        // all their effects), and those made here whose picture isn't ready
+        // the screens and cameras shown, captured here (once for every canvas)
+        self.keep_captures(&snapshot.workspace, &shown);
+        let captured: HashMap<Id, capture::Captured> = self
+            .captures
+            .iter()
+            .flat_map(|plans| plans.keys())
+            .filter_map(|id| Some((*id, capture::frame(*id)?)))
+            .collect();
+        // what libobs is asked for: the sources not made or captured here (bare when the
+        // compositor draws all their effects), and those made here whose picture isn't ready
         let want: HashMap<Id, bool> = shown
             .iter()
             .filter_map(|id| base.sources.get(id))
             .filter_map(|source| {
                 let effects = effects_drawn(source, keyers, looked);
                 let made = keyers && effects && made_here(source) && !self.missing.contains(&source.id);
-                (!made).then_some((source.id, effects))
+                let taken = effects && captured.contains_key(&source.id);
+                (!made && !taken).then_some((source.id, effects))
             })
             .collect();
         if self.wanted.as_ref() != Some(&want) {
@@ -419,18 +449,18 @@ impl State {
                     }
                 }
             }
+            // a screen or camera captured here, every effect drawn here: its frame as captured
+            if effects
+                && let Some(c) = captured.get(id)
+                && let Some(shot) = shot_of(self.native.as_mut(), source, &c.picture())
+            {
+                kept.insert(*id);
+                shots.insert(*id, shot);
+                held.push(c.buffer.clone());
+                continue;
+            }
             let Some(picture) = bridge::picture(*id) else { continue };
-            let steps = if picture.unfiltered { keying::steps(source) } else { Vec::new() };
-            let shot = if picture.unfiltered && looks::has_looks(source) {
-                // its looks (then its keys) drawn by the engine; asked for bare only with them
-                self.native.as_mut().and_then(|n| n.looked(source, &picture))
-            } else if steps.is_empty() {
-                picture.pixel_buffer().map(|b| Shot { size: b.size(), picture: Picture::Buffer(b), premultiplied: true })
-            } else {
-                // keyed here; without the keyers it isn't drawn (it wasn't asked for bare)
-                self.native.as_mut().and_then(|n| n.keyed(source.id, &picture.buffer, &steps))
-            };
-            let Some(shot) = shot else { continue };
+            let Some(shot) = shot_of(self.native.as_mut(), source, &picture) else { continue };
             if picture.unfiltered {
                 kept.insert(*id);
             }
@@ -521,6 +551,35 @@ impl State {
             native.forget_looks();
         }
         program_source::withdraw(self.canvas);
+    }
+
+    /// The compositor draws nothing that shows a screen or camera any more: their captures are let
+    /// go (a second later, unless another canvas's compositor still shows them).
+    fn stop_captures(&mut self) {
+        self.captures_of = None;
+        if self.captures.take().is_some() {
+            capture::want(self.canvas, HashMap::new());
+        }
+    }
+
+    /// Tells the captures which screens and cameras the scenes drawn show (`shown`, in the
+    /// engine's workspace `ws`), when that changes.
+    fn keep_captures(&mut self, ws: &Arc<Workspace>, shown: &HashSet<Id>) {
+        let at = Arc::as_ptr(ws) as usize;
+        if self.captures_of.as_ref().is_some_and(|(a, s)| *a == at && s == shown) {
+            return;
+        }
+        self.captures_of = Some((at, shown.clone()));
+        let plans: HashMap<Id, capture::Plan> = shown
+            .iter()
+            .filter_map(|id| ws.sources.get(id))
+            .filter_map(|source| Some((source.id, capture::Plan::of(source, ws)?)))
+            .collect();
+        if self.captures.as_ref() == Some(&plans) || (self.captures.is_none() && plans.is_empty()) {
+            return;
+        }
+        capture::want(self.canvas, plans.clone());
+        self.captures = (!plans.is_empty()).then_some(plans);
     }
 
     /// Previews given frames that aren't among `viewers` any more: libobs draws them again.
@@ -947,6 +1006,22 @@ impl Pictures for Ready<'_> {
 }
 
 // ---------------------------------------------------------------- pictures made here
+
+/// `source`'s picture from `picture` (libobs's, or a capture's): drawn as it is when it came with
+/// its effects in it or has none the engine draws before the renderer; else (bare) through its
+/// looks, then its keys, by the engine (`None` without the engine's pictures: a bare picture is
+/// asked for only with them). The buffer must be held until the GPU is done.
+fn shot_of(native: Option<&mut Native>, source: &Source, picture: &bridge::Picture) -> Option<Shot> {
+    let steps = if picture.unfiltered { keying::steps(source) } else { Vec::new() };
+    if picture.unfiltered && looks::has_looks(source) {
+        // its looks (then its keys) drawn by the engine
+        native?.looked(source, picture)
+    } else if steps.is_empty() {
+        picture.pixel_buffer().map(|b| Shot { size: b.size(), picture: Picture::Buffer(b), premultiplied: true })
+    } else {
+        native?.keyed(source.id, &picture.buffer, &steps)
+    }
+}
 
 /// Whether the compositor makes `source`'s picture itself (when it draws all its effects). A
 /// source with camera looks isn't: the engine draws looks on a feed, which is given libobs's bare
