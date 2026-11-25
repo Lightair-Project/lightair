@@ -66,6 +66,8 @@ enum Need {
     Avatar,
     /// A camera over USB (libgphoto2's live view, macOS).
     Dslr,
+    /// A media file or stream AVFoundation doesn't play: FFmpeg decodes it (macOS).
+    Ffmpeg,
     /// An audio input the mixer opens itself: its device setting ("" or "default": the system's).
     Device(String),
     /// Something that has no runtime without libobs yet (what it is, for the log).
@@ -107,7 +109,8 @@ fn need(source: &Source) -> Need {
         "ffmpeg_source" if mac && playlist(s) => Need::Media,
         "ffmpeg_source" if playlist(s) => Need::Missing("media playlist"),
         "ffmpeg_source" if mac && native_media(s) => Need::Media,
-        "ffmpeg_source" => Need::Missing("media file AVFoundation doesn't play"),
+        "ffmpeg_source" if mac => Need::Ffmpeg,
+        "ffmpeg_source" => Need::Missing("media file"),
         "lightair_web" if cfg!(any(target_os = "macos", windows)) => Need::Web,
         crate::ndi::KIND => Need::Ndi(text(s, "ndi_name")),
         crate::piair_voice::KIND => Need::Voice,
@@ -193,6 +196,11 @@ enum Runtime {
     Phone(crate::phone_run::PhoneCamera),
     #[cfg(target_os = "macos")]
     Avatar(crate::avatar_run::AvatarRuntime),
+    #[cfg(target_os = "macos")]
+    Ffmpeg {
+        media: crate::ffmpeg_media::FfmpegMedia,
+        active: bool,
+    },
     /// Held for its thread (it stops as it drops).
     #[cfg(target_os = "macos")]
     Dslr {
@@ -542,6 +550,18 @@ impl Host {
                 }
                 #[cfg(target_os = "macos")]
                 Runtime::Avatar(avatar) => avatar.set_shown(showing.contains(id)),
+                #[cfg(target_os = "macos")]
+                Runtime::Ffmpeg { media, active: was } => {
+                    let now = active.contains(id);
+                    if now != *was {
+                        if now {
+                            media.activate();
+                        } else {
+                            media.deactivate();
+                        }
+                        *was = now;
+                    }
+                }
                 #[cfg(any(target_os = "macos", windows))]
                 Runtime::Web { page, shown } => {
                     let now = showing.contains(id);
@@ -596,6 +616,8 @@ impl Host {
             Some(Runtime::Web { page, .. }) => page.set_options(page_options(s)),
             #[cfg(target_os = "macos")]
             Some(Runtime::Avatar(avatar)) => avatar.set_settings(s),
+            #[cfg(target_os = "macos")]
+            Some(Runtime::Ffmpeg { media, .. }) => media.update(crate::ffmpeg_media::Settings::from_json(s)),
             _ => {}
         }
         matches!(need, Need::Device(_))
@@ -687,6 +709,15 @@ impl Host {
             Need::Phone => Runtime::Phone(crate::phone_run::PhoneCamera::new(id)),
             #[cfg(target_os = "macos")]
             Need::Avatar => Runtime::Avatar(crate::avatar_run::AvatarRuntime::new(id, s)),
+            #[cfg(target_os = "macos")]
+            Need::Ffmpeg => Runtime::Ffmpeg {
+                media: crate::ffmpeg_media::FfmpegMedia::new(
+                    id,
+                    crate::ffmpeg_media::Settings::from_json(s),
+                    self.sample_rate,
+                ),
+                active: false,
+            },
             #[cfg(target_os = "macos")]
             Need::Dslr => Runtime::Dslr { _live: crate::dslr::LiveView::start(id) },
             #[allow(unreachable_patterns)]
@@ -935,6 +966,14 @@ impl Host {
                 duration_ms: player.duration_ms(),
             });
         }
+        #[cfg(target_os = "macos")]
+        if let Some(Runtime::Ffmpeg { media, .. }) = self.runtimes.get(&source) {
+            return Some(MediaStatus {
+                state: crate::media::MediaState::from_code(media.state()),
+                time_ms: media.time_ms(),
+                duration_ms: media.duration_ms(),
+            });
+        }
         let _ = source;
         None
     }
@@ -948,6 +987,16 @@ impl Host {
                 MediaAction::Restart => player.restart(),
                 MediaAction::Stop => player.stop(),
                 MediaAction::Seek(ms) => player.set_time_ms(ms),
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(Runtime::Ffmpeg { media, .. }) = self.runtimes.get(&source) {
+            match action {
+                MediaAction::Play => media.play_pause(false),
+                MediaAction::Pause => media.play_pause(true),
+                MediaAction::Restart => media.restart(),
+                MediaAction::Stop => media.stop(),
+                MediaAction::Seek(ms) => media.set_time_ms(ms),
             }
         }
         let _ = (source, action);
@@ -1172,6 +1221,11 @@ impl Host {
             Runtime::Media { player, .. } => {
                 let ((w, h), rotation) = player.natural();
                 let (w, h) = if rotation % 180 == 90 { (h, w) } else { (w, h) };
+                (w > 0 && h > 0).then_some((w, h))
+            }
+            #[cfg(target_os = "macos")]
+            Runtime::Ffmpeg { media, .. } => {
+                let (w, h) = media.size();
                 (w > 0 && h > 0).then_some((w, h))
             }
             #[cfg(any(target_os = "macos", windows))]
