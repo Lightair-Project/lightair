@@ -4551,7 +4551,7 @@ dependencies = [
 [[package]]
 name = "lightair-audio"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "ebur128",
  "nnnoiseless",
@@ -4561,7 +4561,7 @@ dependencies = [
 [[package]]
 name = "lightair-automation"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4601,7 +4601,7 @@ dependencies = [
 [[package]]
 name = "lightair-engine"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "ash",
  "async-trait",
@@ -4645,7 +4645,7 @@ dependencies = [
 [[package]]
 name = "lightair-feed"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "bytes",
  "futures",
@@ -4663,7 +4663,7 @@ dependencies = [
 [[package]]
 name = "lightair-fonts"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "fontdb",
  "serde",
@@ -4691,7 +4691,7 @@ dependencies = [
 [[package]]
 name = "lightair-live"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4724,7 +4724,7 @@ dependencies = [
 [[package]]
 name = "lightair-model"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "serde",
  "serde_json",
@@ -4775,7 +4775,7 @@ dependencies = [
 [[package]]
 name = "lightair-overlay"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "lightair-fonts",
  "lightair-live",
@@ -4807,7 +4807,7 @@ dependencies = [
 [[package]]
 name = "lightair-platform"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "block2 0.6.2",
  "dirs 6.0.0",
@@ -4822,7 +4822,7 @@ dependencies = [
 [[package]]
 name = "lightair-pngtuber"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "png 0.17.16",
  "serde",
@@ -4864,7 +4864,7 @@ dependencies = [
 [[package]]
 name = "lightair-remote"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4886,7 +4886,7 @@ dependencies = [
 [[package]]
 name = "lightair-render"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "cosmic-text",
  "lightair-audio",
@@ -4911,7 +4911,7 @@ dependencies = [
 [[package]]
 name = "lightair-store"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "lightair-model",
  "serde",
@@ -4941,7 +4941,7 @@ dependencies = [
 [[package]]
 name = "lightair-widgets"
 version = "0.1.0"
-source = "git+https://github.com/Lightair-Project/lightair-core?rev=e3ab8d32a1866619263968ebe7fbc1a74c80b7e4#e3ab8d32a1866619263968ebe7fbc1a74c80b7e4"
+source = "git+https://github.com/Lightair-Project/lightair-core?rev=15847875b1550a6405ed2b89babba8462632e71a#15847875b1550a6405ed2b89babba8462632e71a"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
