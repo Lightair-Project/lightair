@@ -163,14 +163,41 @@ unsafe extern "C" fn on_mix(_: *mut std::ffi::c_void, _mix: usize, data: *mut li
     meter.push(&planes);
 }
 
-/// Starts metering the stream mix (mixer 0, what the encoders send). Engine thread.
+/// The mixer's Program, taken for the meter (the audio engine on).
+static TAP: parking_lot::Mutex<Option<crate::audio_host::MixTap>> = parking_lot::Mutex::new(None);
+
+/// Starts metering the stream mix (Program, what the encoders send): straight from the mixer,
+/// or libobs's mix 0 with `LIGHTAIR_LEGACY_AUDIO=1`. Engine thread.
 pub(crate) fn attach(sample_rate: u32, channels: usize) {
     *STREAM.lock() = Some(Loudness::new(sample_rate, channels));
+    if crate::audio_host::mixer_on() {
+        let mut left = Vec::with_capacity(crate::audio_host::BLOCK * 4);
+        let mut right = Vec::with_capacity(crate::audio_host::BLOCK * 4);
+        let tap = crate::audio_host::tap_mix(0, move |interleaved, _| {
+            left.clear();
+            right.clear();
+            for frame in interleaved.chunks_exact(2) {
+                left.push(frame[0]);
+                right.push(frame[1]);
+            }
+            if let Some(meter) = STREAM.lock().as_mut() {
+                let planes: [&[f32]; 2] = [&left, &right];
+                let n = meter.filters.len().min(2);
+                meter.push(&planes[..n]);
+            }
+        });
+        *TAP.lock() = Some(tap);
+        return;
+    }
     unsafe { libobs_sys::obs_add_raw_audio_callback(0, std::ptr::null(), Some(on_mix), std::ptr::null_mut()) };
 }
 
 pub(crate) fn detach() {
-    unsafe { libobs_sys::obs_remove_raw_audio_callback(0, Some(on_mix), std::ptr::null_mut()) };
+    let tap = TAP.lock().take();
+    match tap {
+        Some(tap) => drop(tap),
+        None => unsafe { libobs_sys::obs_remove_raw_audio_callback(0, Some(on_mix), std::ptr::null_mut()) },
+    }
     *STREAM.lock() = None;
 }
 

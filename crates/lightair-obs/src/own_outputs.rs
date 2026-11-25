@@ -8,11 +8,11 @@
 //!   pool (scaled when the encoder's size differs) and encodes it, so the compositor's buffer goes
 //!   back to it at once. While the compositor hands nothing over, the last frame is repeated, so
 //!   a stream never stalls.
-//! - **Sound:** libobs's mixes, which carry the audio engine's Program and mixes
-//!   (`audio_host`'s out sources), are read raw (`audio_output_connect`) and encoded to AAC, or
+//! - **Sound:** the audio engine's Program and mixes come straight from the mixer (`audio_host::tap_mix`; libobs's mixes, read raw with
+//!   `audio_output_connect`, only with `LIGHTAIR_LEGACY_AUDIO=1`) and are encoded to AAC, or
 //!   Opus for WHIP.
-//! - **One clock:** pictures are stamped with libobs's video frame time when they're handed
-//!   over, sound with libobs's audio times; both are `crate::clock`'s, so picture and sound line
+//! - **One clock:** pictures are stamped with the frame time when they're handed over, sound
+//!   with the mixer's block times; both are `crate::clock`'s, so picture and sound line
 //!   up the same way in every file and stream, whatever the compositor's own timing.
 //! - **Sharing:** recordings, destinations and replay buffers whose settings match share one
 //!   video encoder per canvas and one audio encoder per mix.
@@ -690,6 +690,8 @@ struct AudioPipe {
     subs: Mutex<Vec<AudioSub>>,
     packets: AtomicU64,
     connected: AtomicBool,
+    /// The mixer's tap on the mix (the audio engine on), else libobs's mix is connected.
+    tap: Mutex<Option<crate::audio_host::MixTap>>,
 }
 
 unsafe extern "C" fn on_audio(param: *mut c_void, _mix: usize, data: *mut sys::audio_data) {
@@ -724,7 +726,26 @@ impl AudioPipe {
             subs: Mutex::new(Vec::new()),
             packets: AtomicU64::new(0),
             connected: AtomicBool::new(false),
+            tap: Mutex::new(None),
         });
+        // the mixer's own blocks, straight from the audio engine
+        if crate::audio_host::mixer_on() {
+            let weak = Arc::downgrade(&pipe);
+            let tap = crate::audio_host::tap_mix(key.mix, move |samples, ts| {
+                let Some(pipe) = weak.upgrade() else { return };
+                let packets = match pipe.encoder.lock().encode(samples, ts as i64) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::debug!(%e, "own outputs: sound not encoded");
+                        return;
+                    }
+                };
+                pipe.deliver(packets);
+            });
+            *pipe.tap.lock() = Some(tap);
+            pipe.connected.store(true, Ordering::Release);
+            return Ok(pipe);
+        }
         let conversion = sys::audio_convert_info {
             samples_per_sec: SAMPLE_RATE,
             format: sys::AUDIO_FORMAT_FLOAT,
@@ -783,8 +804,18 @@ impl AudioPipe {
         self.subs.lock().iter().filter(|s| s.id != id).count()
     }
 
-    /// Stops taking libobs's sound and sends what the encoder still holds.
+    /// Stops taking the mix's sound and sends what the encoder still holds.
     fn close(&self) {
+        let tap = self.tap.lock().take();
+        if let Some(tap) = tap {
+            // after this, the tap's thread calls into the pipe no more
+            drop(tap);
+            if self.connected.swap(false, Ordering::AcqRel) {
+                let tail = self.encoder.lock().flush().unwrap_or_default();
+                self.deliver(tail);
+            }
+            return;
+        }
         if self.connected.swap(false, Ordering::AcqRel) {
             // after this, libobs calls `on_audio` no more
             unsafe {

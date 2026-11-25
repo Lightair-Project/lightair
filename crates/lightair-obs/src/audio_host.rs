@@ -516,6 +516,7 @@ enum ToRt {
 /// Running state handed back from the audio thread to be freed.
 #[allow(dead_code)] // held only so they're freed on the main side, never on the audio thread
 enum FromRt {
+    Tap(MixTapRt),
     Input(RtInput),
     Multitrack(Vec<MultitrackRt>),
     Monitor(rtrb::Producer<f32>),
@@ -581,6 +582,7 @@ fn rt_loop(
     let mut monitor: Option<(la::NodeId, rtrb::Producer<f32>)> = None;
     let mut extras: Vec<(la::NodeId, rtrb::Producer<f32>)> = Vec::new();
     let mut listens: Vec<ListenRt> = Vec::with_capacity(16);
+    let mut taps: Vec<MixTapRt> = Vec::with_capacity(MOST_TAPS);
     let mut multitrack_paused = false;
     let mut multitrack_started = false;
     let period = Duration::from_secs_f64(block as f64 / sample_rate as f64);
@@ -638,6 +640,27 @@ fn rt_loop(
                     let old = std::mem::replace(&mut extras, e);
                     let _ = garbage.push(FromRt::Extras(old));
                 }
+            }
+        }
+        // mix taps taken or let go of (never waiting: a busy lock is tried again next block)
+        if TAPS_CHANGED.swap(false, Ordering::AcqRel) {
+            match (TAPS_NEW.try_lock(), TAPS_GONE.try_lock()) {
+                (Some(mut new), Some(mut gone)) => {
+                    for id in gone.drain(..) {
+                        if let Some(k) = taps.iter().position(|t| t.id == id) {
+                            let _ = garbage.push(FromRt::Tap(taps.swap_remove(k)));
+                        } else if let Some(k) = new.iter().position(|t| t.id == id) {
+                            // let go of before it was taken (dropped here: not the audio thread's)
+                            new.swap_remove(k);
+                        }
+                    }
+                    while taps.len() < taps.capacity()
+                        && let Some(t) = new.pop()
+                    {
+                        taps.push(t);
+                    }
+                }
+                _ => TAPS_CHANGED.store(true, Ordering::Release),
             }
         }
         // a block from each input
@@ -699,6 +722,21 @@ fn rt_loop(
             };
             unsafe { sys::obs_source_output_audio(src, &audio) };
         };
+        // the mixes, taken (silence for a mix with nothing routed to it)
+        for tap in &mut taps {
+            let out = if tap.mix == 0 { Some(graph.program()) } else { mixes.get(tap.mix - 1).copied().flatten().and_then(|m| graph.mix(m)) };
+            if tap.ring.is_full() {
+                continue;
+            }
+            let mut p = MixPacket { ts, frames: block, data: [0.0; 2 * la::MAX_BLOCK] };
+            if let Some((l, r)) = out {
+                for k in 0..block.min(l.len()).min(r.len()) {
+                    p.data[2 * k] = l[k];
+                    p.data[2 * k + 1] = r[k];
+                }
+            }
+            let _ = tap.ring.push(p);
+        }
         push(outs.0[0], graph.program());
         for (k, mix) in mixes.iter().enumerate() {
             if let Some(out) = mix.and_then(|m| graph.mix(m)) {
@@ -766,6 +804,93 @@ fn rt_loop(
             blocks = ((now - start).as_secs_f64() / period.as_secs_f64()) as u64;
         }
     }
+    // the taps outlive this thread (the engine restarting with another block size)
+    if !taps.is_empty() {
+        TAPS_NEW.lock().extend(taps);
+        TAPS_CHANGED.store(true, Ordering::Release);
+    }
+}
+
+
+// ---------------------------------------------------------------- the mixes, taken
+
+/// Whether the audio engine plays the mixer (`LIGHTAIR_LEGACY_AUDIO=1`: libobs mixes the tracks,
+/// and the mixes are libobs's).
+pub fn mixer_on() -> bool {
+    std::env::var("LIGHTAIR_LEGACY_AUDIO").map_or(true, |v| v != "1")
+}
+
+/// A block of a mix as the engine made it: its time (Lightair's clock) and stereo frames,
+/// interleaved.
+struct MixPacket {
+    ts: u64,
+    frames: usize,
+    data: [f32; 2 * la::MAX_BLOCK],
+}
+
+/// Packets a tap may have waiting (about 0.7 s at 256 frames).
+const TAP_PACKETS: usize = 128;
+
+/// A tap on the audio thread: which mix, and where its blocks go.
+struct MixTapRt {
+    id: u64,
+    mix: usize,
+    ring: rtrb::Producer<MixPacket>,
+}
+
+/// Taps the audio thread hasn't taken yet (new, or kept across an engine restart), and taps
+/// let go of; `TAPS_CHANGED` says to look.
+static TAPS_NEW: Mutex<Vec<MixTapRt>> = Mutex::new(Vec::new());
+static TAPS_GONE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+static TAPS_CHANGED: AtomicBool = AtomicBool::new(false);
+/// The most taps at once.
+const MOST_TAPS: usize = 32;
+
+/// A mix taken as it's made ([`tap_mix`]); dropping it lets go.
+pub struct MixTap {
+    id: u64,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for MixTap {
+    fn drop(&mut self) {
+        TAPS_GONE.lock().push(self.id);
+        TAPS_CHANGED.store(true, Ordering::Release);
+        self.stop.store(true, Ordering::Release);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Takes mix `mix` (0: Program, 1…5: the mixes) from the audio engine as it's made: `f` gets each
+/// block (stereo, interleaved, at the engine's rate) and its time on Lightair's clock, on a
+/// thread of the tap's own (never the audio thread). A mix with nothing routed to it is silence.
+pub fn tap_mix(mix: usize, mut f: impl FnMut(&[f32], u64) + Send + 'static) -> MixTap {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let (ring, mut packets) = rtrb::RingBuffer::<MixPacket>::new(TAP_PACKETS);
+    TAPS_NEW.lock().push(MixTapRt { id, mix, ring });
+    TAPS_CHANGED.store(true, Ordering::Release);
+    let stop = Arc::new(AtomicBool::new(false));
+    let s = stop.clone();
+    let thread = std::thread::Builder::new()
+        .name("lightair-mix-tap".into())
+        .spawn(move || {
+            while !s.load(Ordering::Acquire) {
+                let mut any = false;
+                while let Ok(p) = packets.pop() {
+                    f(&p.data[..p.frames * 2], p.ts);
+                    any = true;
+                }
+                if !any {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        })
+        .ok();
+    MixTap { id, stop, thread }
 }
 
 // ---------------------------------------------------------------- the main side

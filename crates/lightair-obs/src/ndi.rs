@@ -498,8 +498,39 @@ unsafe extern "C" fn on_audio(param: *mut c_void, _mix: usize, data: *mut sys::a
     unsafe { (l.send_send_audio_v2)(s.send, &frame) };
 }
 
+/// The mixer's Program, taken for NDI out (the audio engine on, with Lightair's own outputs).
+static SOUND: Mutex<Option<crate::audio_host::MixTap>> = Mutex::new(None);
+
+/// A block of the mixer's Program (interleaved stereo, at its time) sent over NDI.
+fn send_sound(interleaved: &[f32], ts: u64) {
+    let Some(l) = lib() else { return };
+    let Ok(mut guard) = sender().lock() else { return };
+    let Some(s) = guard.as_mut() else { return };
+    let n = interleaved.len() / 2;
+    if n == 0 {
+        return;
+    }
+    s.audio.clear();
+    s.audio.extend(interleaved.iter().step_by(2));
+    s.audio.extend(interleaved.iter().skip(1).step_by(2));
+    let frame = AudioFrame {
+        sample_rate: s.rate as i32,
+        no_channels: 2,
+        no_samples: n as i32,
+        timecode: if s.timed { (ts / 100) as i64 } else { TIMECODE_SYNTHESIZE },
+        p_data: s.audio.as_mut_ptr(),
+        channel_stride_in_bytes: (n * 4) as i32,
+        p_metadata: std::ptr::null(),
+        timestamp: 0,
+    };
+    unsafe { (l.send_send_audio_v2)(s.send, &frame) };
+}
+
 /// Sends the program out as the NDI source `name` ("" stops it). Call on the engine thread.
 pub fn set_output(name: &str) -> Result<(), String> {
+    // the mixer's sound stops first (its thread waits for the sender's lock: not held here)
+    let sound = SOUND.lock().ok().and_then(|mut s| s.take());
+    drop(sound);
     let running = sender().lock().ok().and_then(|s| s.as_ref().map(|s| (s.output, s.tap)));
     if let Some((output, tap)) = running {
         // the compositor's frames stop first: once the tap is gone nothing sends video
@@ -554,7 +585,13 @@ pub fn set_output(name: &str) -> Result<(), String> {
         *s = Some(Box::new(Sender { send, audio: Vec::new(), fps, rate, output: 0, tap, timed: tap != 0 }));
     }
     if tap != 0 {
-        unsafe { sys::obs_add_raw_audio_callback(0, std::ptr::null(), Some(on_audio), std::ptr::null_mut()) };
+        if crate::audio_host::mixer_on() {
+            if let Ok(mut s) = SOUND.lock() {
+                *s = Some(crate::audio_host::tap_mix(0, send_sound));
+            }
+        } else {
+            unsafe { sys::obs_add_raw_audio_callback(0, std::ptr::null(), Some(on_audio), std::ptr::null_mut()) };
+        }
         tracing::info!(name, "sending the program over NDI (the compositor's frames)");
         return Ok(());
     }
