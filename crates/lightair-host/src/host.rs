@@ -1203,10 +1203,10 @@ impl Host {
         None
     }
 
-    /// Turns one of a source's effects on or off live, leaving the document alone (nothing yet:
-    /// the compositor draws effects from the document).
-    pub fn set_filter_live(&self, _source: Id, _filter: Id, _enabled: bool) {
-        not_yet("set_filter_live");
+    /// Turns one of a source's effects on or off live, leaving the document alone
+    /// (`lightair_model::catalog::STUDIO_ID`: its looks): the compositor draws it so.
+    pub fn set_filter_live(&self, source: Id, filter: Id, enabled: bool) {
+        crate::show::set_live(source, filter, enabled);
     }
 
     // ------------------------------------------------------------ sources

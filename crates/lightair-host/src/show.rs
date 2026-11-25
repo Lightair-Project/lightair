@@ -141,3 +141,21 @@ pub fn set_crop_view(target: Option<(Id, Id, Id)>, fading: bool) {
 pub fn crop_view() -> Option<((Id, Id, Id), bool)> {
     *CROP.lock()
 }
+
+/// Effects switched off live, leaving the document alone (the eyedropper picking a colour
+/// under a key): (source, effect; `lightair_model::catalog::STUDIO_ID` for its looks).
+static LIVE_OFF: Mutex<Vec<(Id, Id)>> = Mutex::new(Vec::new());
+
+/// Switches `source`'s effect `filter` off live (`enabled` false), or back as the document has it.
+pub fn set_live(source: Id, filter: Id, enabled: bool) {
+    let mut off = LIVE_OFF.lock();
+    off.retain(|e| *e != (source, filter));
+    if !enabled {
+        off.push((source, filter));
+    }
+}
+
+/// The effects switched off live. Any thread.
+pub fn live_off() -> Vec<(Id, Id)> {
+    LIVE_OFF.lock().clone()
+}

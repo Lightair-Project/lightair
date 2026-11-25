@@ -473,7 +473,8 @@ impl State {
         let showing: Vec<&Arc<Shared>> = viewers.iter().filter(|v| v.wants_program()).collect();
         // the program is drawn for its previews and the canvas's outputs
         let program = !showing.is_empty() || in_use;
-        let base = self.doc.update(&snapshot.workspace);
+        // effects switched off live (the eyedropper picking a colour under a key)
+        let base = self.doc.update(&live_off(snapshot.workspace.clone(), &bridge::live_off()));
         // the scenes previews show in the program's place (those still in the document)
         let wanted: Vec<(Arc<Shared>, SceneView)> =
             scene_views(self.canvas).into_iter().filter(|(_, v)| base.scene(v.scene).is_some()).collect();
@@ -1406,6 +1407,26 @@ fn with_timed(
     let Some(native) = native else { return shot };
     let Native { timed, gpu, .. } = native;
     timed.draw(gpu, source, &shot, buffer, masks).unwrap_or(shot)
+}
+
+/// `ws` with the effects in `off` (source, effect; `catalog::STUDIO_ID`: its looks) switched
+/// off.
+fn live_off(ws: Arc<Workspace>, off: &[(Id, Id)]) -> Arc<Workspace> {
+    if off.is_empty() {
+        return ws;
+    }
+    let mut w = (*ws).clone();
+    for (source, filter) in off {
+        let Some(s) = w.sources.get_mut(source) else { continue };
+        let s = Arc::make_mut(s);
+        for e in s.effects.iter_mut() {
+            let looks = *filter == lightair_model::catalog::STUDIO_ID && e.kind.starts_with("studio.");
+            if e.id == *filter || looks {
+                e.enabled = false;
+            }
+        }
+    }
+    Arc::new(w)
 }
 
 /// How much of the cut-away picture shows around the crop while cropping.

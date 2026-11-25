@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 
 pub use crate::buffers::{Buffer, bgra_buffer, surface_of};
 pub use crate::show::{
-    Snapshot, Switch, clear_timer_texts, crop_view, link_received_by_compositor, own, publish, set_switch,
+    Snapshot, Switch, clear_timer_texts, crop_view, link_received_by_compositor, live_off, own, publish, set_switch,
     set_timer_text, snapshot, timer_text,
 };
 pub use crate::tracker::{FACE_POINTS, FaceTracker, RawFace, RawMask};
