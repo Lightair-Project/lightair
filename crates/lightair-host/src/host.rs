@@ -1220,10 +1220,29 @@ impl Host {
         }
     }
 
-    /// The choices a source offers for a list setting (none known here yet).
-    pub fn source_options(&self, _source: Id, _property: &str) -> Vec<(String, serde_json::Value)> {
-        not_yet("source_options");
-        Vec::new()
+    /// The choices a source offers for a list setting, by the setting's name as libobs's source
+    /// called it (`crate::kinds::libobs_key`): a screen's displays, windows or apps, a camera's
+    /// devices, a microphone's (or a loopback device's) inputs, the apps whose sound can be
+    /// taken. (label, value).
+    pub fn source_options(&self, source: Id, property: &str) -> Vec<(String, serde_json::Value)> {
+        use serde_json::Value;
+        let kind = self.workspace.as_ref().and_then(|w| w.sources.get(&source)).map(|s| s.kind.clone());
+        let screen = |mode: i64, key: &str| crate::displays::screen_options(mode, key);
+        match (kind.as_deref(), property) {
+            (Some(kinds::SCREEN), "display_uuid" | "monitor_id") => screen(kinds::DISPLAY, "display"),
+            (Some(kinds::SCREEN), "window") => screen(kinds::WINDOW, "window"),
+            (Some(kinds::SCREEN), "application") => screen(kinds::APP, "app"),
+            (Some(kinds::APP_AUDIO), "application" | "window") => screen(kinds::APP, "app"),
+            (Some(kinds::CAMERA), "device" | "video_device_id") => {
+                crate::kinds::cameras().into_iter().map(|(name, id)| (name, Value::from(id))).collect()
+            }
+            (Some(kinds::MIC | kinds::DESKTOP_AUDIO), "device_id" | "device") => {
+                std::iter::once(("Default".to_string(), Value::from("default")))
+                    .chain(crate::devices::input_devices().into_iter().map(|d| (d.name, Value::from(d.id))))
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// Every source's pixel size that's known (media files once open, web pages).
