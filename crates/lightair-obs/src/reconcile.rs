@@ -784,6 +784,12 @@ impl Reconciler {
                 self.source_effects.insert(source.id, chain);
                 #[cfg(target_os = "macos")]
                 crate::bridge::source_added(source.id, &src);
+                // a link the compositor receives: its decoder pushes the sound straight into a
+                // track of the mixer while one takes it
+                #[cfg(target_os = "macos")]
+                if crate::bridge::link_received_by_compositor(source) && crate::system_audio::mixer_captures() {
+                    crate::audio_host::feed_slot(src.as_ptr());
+                }
                 self.sources.insert(source.id, src);
             }
             None => tracing::warn!(kind, name = source.name, "could not create input"),
@@ -808,6 +814,9 @@ impl Reconciler {
         }
         #[cfg(target_os = "macos")]
         crate::bridge::source_removed(id);
+        if let Some(src) = self.sources.get(&id) {
+            crate::audio_host::feeds_itself_no_more(src.as_ptr());
+        }
         self.sources.remove(&id);
     }
 

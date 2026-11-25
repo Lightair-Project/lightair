@@ -331,9 +331,70 @@ pub fn feeds_itself(source: *mut sys::obs_source_t, feeder: Arc<dyn SoundFeeder>
     all.push((source as usize, feeder));
 }
 
-/// Ends [`feeds_itself`] for `source` (it's being freed).
+/// Ends [`feeds_itself`] (or [`feed_slot`]) for `source` (it's being freed). Nothing for a
+/// source that never registered.
 pub fn feeds_itself_no_more(source: *mut sys::obs_source_t) {
     FEEDERS.lock().retain(|(s, _)| *s != source as usize);
+    SLOTS.lock().retain(|(s, _)| *s != source as usize);
+}
+
+/// The feed a track hands a source registered with [`feed_slot`], held for whatever makes the
+/// source's sound (a decoder, a page, a receiver) to push into.
+#[derive(Default)]
+pub struct FeedSlot(Mutex<Option<InputFeed>>);
+
+impl FeedSlot {
+    /// Whether a track takes the sound now.
+    pub fn attached(&self) -> bool {
+        self.0.lock().is_some()
+    }
+
+    /// Pushes planar sound into the track's feed ([`InputFeed::push_planar`]). True when the
+    /// mixer took it (or it was dropped while the feed was being swapped: never waits); false
+    /// when no track takes the sound, so it goes to libobs as before.
+    pub fn push_planar(&self, planes: &[&[f32]], rate: u32) -> bool {
+        match self.0.try_lock() {
+            Some(mut feed) => feed.as_mut().map(|f| f.push_planar(planes, rate)).is_some(),
+            None => true,
+        }
+    }
+
+    /// [`Self::push_planar`] for interleaved sound ([`InputFeed::push`]).
+    pub fn push(&self, samples: &[f32], channels: u32, rate: u32) -> bool {
+        match self.0.try_lock() {
+            Some(mut feed) => feed.as_mut().map(|f| f.push(samples, channels, rate)).is_some(),
+            None => true,
+        }
+    }
+}
+
+impl SoundFeeder for FeedSlot {
+    fn attach(&self, feed: Option<InputFeed>) {
+        // the old feed (if any) is dropped here, on the engine thread
+        drop(std::mem::replace(&mut *self.0.lock(), feed));
+    }
+}
+
+/// Sources registered with [`feed_slot`], by their libobs source.
+static SLOTS: Mutex<Vec<(usize, Arc<FeedSlot>)>> = Mutex::new(Vec::new());
+
+/// Registers `source` as feeding the engine itself ([`feeds_itself`]) through a [`FeedSlot`]
+/// that whatever makes its sound pushes into, and returns the slot. Call when the source is
+/// made, and [`feeds_itself_no_more`] before it's freed.
+pub fn feed_slot(source: *mut sys::obs_source_t) -> Arc<FeedSlot> {
+    let slot = Arc::new(FeedSlot::default());
+    {
+        let mut all = SLOTS.lock();
+        all.retain(|(s, _)| *s != source as usize);
+        all.push((source as usize, slot.clone()));
+    }
+    feeds_itself(source, slot.clone());
+    slot
+}
+
+/// The slot `source` was registered with ([`feed_slot`]), if any.
+pub fn slot_of(source: *mut sys::obs_source_t) -> Option<Arc<FeedSlot>> {
+    SLOTS.lock().iter().find(|(s, _)| *s == source as usize).map(|(_, f)| f.clone())
 }
 
 fn feeder_of(source: *mut sys::obs_source_t) -> Option<Arc<dyn SoundFeeder>> {

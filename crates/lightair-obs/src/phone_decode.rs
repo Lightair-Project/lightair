@@ -521,6 +521,14 @@ impl Audio {
         if count == 0 {
             return;
         }
+        // a track of the mixer takes the source's sound itself (a link from another computer
+        // with the audio engine): into its feed, not libobs
+        if let Some(slot) = crate::audio_host::slot_of(frames) {
+            let parts: Vec<&[f32]> = planes.iter().map(|p| &p[..(count as usize).min(p.len())]).collect();
+            if slot.push_planar(&parts, self.rate) {
+                return;
+            }
+        }
         let mut a = sys::obs_source_audio {
             frames: count,
             speakers: if self.channels >= 2 { sys::SPEAKERS_STEREO } else { sys::SPEAKERS_MONO },

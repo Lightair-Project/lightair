@@ -503,17 +503,7 @@ struct Shared {
     /// that doesn't restart on air (`restart_on_activate` off) still costs nothing off air.
     on_air_play: std::sync::atomic::AtomicU8,
     /// Where the sound goes instead of libobs while a track of the mixer takes it.
-    feed: Mutex<Option<crate::audio_host::InputFeed>>,
-}
-
-/// The audio engine's side of a media source: a track taking its sound hands over the feed.
-struct Fed(Arc<Shared>);
-
-impl crate::audio_host::SoundFeeder for Fed {
-    fn attach(&self, feed: Option<crate::audio_host::InputFeed>) {
-        // the old feed (if any) is dropped here, on the engine thread
-        drop(std::mem::replace(&mut *self.0.feed.lock(), feed));
-    }
+    feed: Option<Arc<crate::audio_host::FeedSlot>>,
 }
 
 impl Shared {
@@ -857,15 +847,16 @@ fn play(shared: &Shared, asset: &Asset, ring: &mut Ring, run: u64, start: i64) {
                 moved = true;
             }
             // a track of the mixer takes the sound: the part due by now, into its feed
+            let fed = shared.feed.as_ref().is_some_and(|slot| slot.attached());
             if state == sys::OBS_MEDIA_STATE_PLAYING
+                && fed
                 && let Some(s) = sound.as_mut()
-                && let Some(feed) = shared.feed.lock().as_mut()
+                && let Some(slot) = shared.feed.as_ref()
             {
                 let total = s.data.len() / 2;
                 let ahead = (now + FED_AHEAD_NS - s.at).max(0) as i128;
                 let due = ((ahead * shared.rate as i128 / 1_000_000_000) as usize).min(total);
-                if due > s.sent {
-                    feed.push(&s.data[s.sent * 2..due * 2], 2, shared.rate);
+                if due > s.sent && slot.push(&s.data[s.sent * 2..due * 2], 2, shared.rate) {
                     s.sent = due;
                     moved = true;
                 }
@@ -874,8 +865,8 @@ fn play(shared: &Shared, asset: &Asset, ring: &mut Ring, run: u64, start: i64) {
                 }
             }
             if state == sys::OBS_MEDIA_STATE_PLAYING
+                && !fed
                 && let Some(s) = sound.as_ref().filter(|s| s.at - now < AUDIO_AHEAD_NS)
-                && shared.feed.lock().is_none()
             {
                 // (what a feed let go of mid-way didn't take)
                 let rest = &s.data[s.sent * 2..];
@@ -1132,11 +1123,8 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         shown: Mutex::new(Shown::default()),
         composited: Mutex::new(Composited::default()),
         on_air_play: Default::default(),
-        feed: Mutex::new(None),
+        feed: crate::system_audio::mixer_captures().then(|| crate::audio_host::feed_slot(source)),
     });
-    if crate::system_audio::mixer_captures() {
-        crate::audio_host::feeds_itself(source, Arc::new(Fed(shared.clone())));
-    }
     // a document's source (named by its id) is found by the compositor
     if crate::bridge::own()
         && !unsafe { sys::obs_obj_is_private(source as *mut c_void) }
@@ -1159,10 +1147,7 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let mut m = unsafe { Box::from_raw(data as *mut Media) };
-    if crate::system_audio::mixer_captures() {
-        crate::audio_host::feeds_itself_no_more(m.shared.source());
-    }
-    *m.shared.feed.lock() = None;
+    crate::audio_host::feeds_itself_no_more(m.shared.source());
     if crate::bridge::own() {
         let me = Arc::downgrade(&m.shared);
         SOURCES.lock().retain(|_, s| !Weak::ptr_eq(s, &me));

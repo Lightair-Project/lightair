@@ -258,7 +258,7 @@ struct Receiver {
     source: *mut sys::obs_source_t,
     name: Mutex<String>,
     /// Where the sound goes instead of libobs while a track of the mixer takes it.
-    sound: Sound,
+    sound: Option<Arc<crate::audio_host::FeedSlot>>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -267,22 +267,6 @@ unsafe impl Send for Receiver {}
 
 struct SrcPtr(*mut sys::obs_source_t);
 unsafe impl Send for SrcPtr {}
-
-type Sound = Arc<Mutex<Option<crate::audio_host::InputFeed>>>;
-
-/// The audio engine's side of a source: a track taking its sound hands over the feed.
-#[cfg(target_os = "macos")]
-struct Fed(Sound);
-
-#[cfg(target_os = "macos")]
-impl crate::audio_host::SoundFeeder for Fed {
-    fn attach(&self, feed: Option<crate::audio_host::InputFeed>) {
-        // the old feed (if any) is dropped here, on the engine thread
-        if let Ok(mut f) = self.0.lock() {
-            drop(std::mem::replace(&mut *f, feed));
-        }
-    }
-}
 
 impl Receiver {
     fn start(&mut self) {
@@ -353,16 +337,12 @@ impl Receiver {
                                 planar.clear();
                                 planar.extend_from_slice(unsafe { std::slice::from_raw_parts(audio.p_data, stride * ch) });
                                 // a track of the mixer takes the sound itself: into its feed
-                                // (a block arriving while the feed is swapped is dropped)
-                                let fed = match sound.try_lock() {
-                                    Ok(mut feed) => feed.as_mut().map(|feed| {
-                                        let planes: Vec<&[f32]> =
-                                            (0..ch.min(2)).map(|c| &planar[c * stride..c * stride + n]).collect();
-                                        feed.push_planar(&planes, audio.sample_rate.max(1) as u32);
-                                    }),
-                                    Err(_) => Some(()),
-                                };
-                                if fed.is_some() {
+                                let fed = sound.as_ref().is_some_and(|slot| {
+                                    let planes: Vec<&[f32]> =
+                                        (0..ch.min(2)).map(|c| &planar[c * stride..c * stride + n]).collect();
+                                    slot.push_planar(&planes, audio.sample_rate.max(1) as u32)
+                                });
+                                if fed {
                                     unsafe { (l.recv_free_audio_v2)(recv, &audio) };
                                     continue;
                                 }
@@ -408,11 +388,10 @@ unsafe extern "C" fn get_name(_: *mut c_void) -> *const c_char {
 }
 
 unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::obs_source_t) -> *mut c_void {
-    let sound: Sound = Arc::new(Mutex::new(None));
     #[cfg(target_os = "macos")]
-    if crate::system_audio::mixer_captures() {
-        crate::audio_host::feeds_itself(source, Arc::new(Fed(sound.clone())));
-    }
+    let sound = crate::system_audio::mixer_captures().then(|| crate::audio_host::feed_slot(source));
+    #[cfg(not(target_os = "macos"))]
+    let sound = None;
     let r = Box::new(Receiver {
         source,
         name: Mutex::new(String::new()),
@@ -437,14 +416,8 @@ unsafe extern "C" fn update(data: *mut c_void, settings: *mut sys::obs_data_t) {
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let mut r = unsafe { Box::from_raw(data as *mut Receiver) };
-    #[cfg(target_os = "macos")]
-    if crate::system_audio::mixer_captures() {
-        crate::audio_host::feeds_itself_no_more(r.source);
-    }
+    crate::audio_host::feeds_itself_no_more(r.source);
     r.stop_thread();
-    if let Ok(mut f) = r.sound.lock() {
-        f.take();
-    }
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -11,7 +11,9 @@
 //!   line saying what it waits for) until pictures come again;
 //! - the phone encodes as its sensor sees and says which way is up: the wrapper turns the
 //!   picture (90° steps) and reports the turned size;
-//! - the phone's microphone is passed through as the wrapper's sound (a mixer track).
+//! - the phone's microphone is passed through as the wrapper's sound (a mixer track); with
+//!   `LIGHTAIR_ENGINE=own` and the audio engine (macOS), straight into the track's feed while a
+//!   track takes it (`audio_host::feed_slot`), not through libobs.
 //!
 //! The app talks to a source's [`Feed`] by the source's id (its libobs name).
 //!
@@ -674,7 +676,18 @@ fn sounds() -> &'static crossbeam_channel::Sender<Sound> {
             for s in rx {
                 let weak = s.to as *mut sys::obs_weak_source_t;
                 let parent = unsafe { sys::obs_weak_source_get_source(weak) };
-                if !parent.is_null() {
+                // a track of the mixer takes the wrapper's sound itself: into its feed
+                #[cfg(target_os = "macos")]
+                let fed = !parent.is_null()
+                    && crate::audio_host::slot_of(parent).is_some_and(|slot| {
+                        let planes: Vec<&[f32]> = s.planes.iter().map(Vec::as_slice).collect();
+                        slot.push_planar(&planes, s.samples_per_sec)
+                    });
+                #[cfg(not(target_os = "macos"))]
+                let fed = false;
+                if fed {
+                    unsafe { sys::obs_source_release(parent) };
+                } else if !parent.is_null() {
                     let mut out = sys::obs_source_audio {
                         frames: s.frames,
                         speakers: s.speakers,
@@ -724,12 +737,19 @@ unsafe extern "C" fn create(settings: *mut sys::obs_data_t, source: *mut sys::ob
         #[cfg(target_os = "macos")]
         drawn: Mutex::new(Drawn { buffer: None, tex: std::ptr::null_mut(), size: (0, 0) }),
     });
+    // the phone's sound straight into a track of the mixer while one takes it
+    #[cfg(target_os = "macos")]
+    if crate::system_audio::mixer_captures() {
+        crate::audio_host::feed_slot(source);
+    }
     unsafe { update(&s as *const Arc<Shared> as *mut c_void, settings) };
     Box::into_raw(Box::new(s)) as *mut c_void
 }
 
 unsafe extern "C" fn destroy(data: *mut c_void) {
     let s = unsafe { Box::from_raw(data as *mut Arc<Shared>) };
+    #[cfg(target_os = "macos")]
+    crate::audio_host::feeds_itself_no_more(s.source as *mut sys::obs_source_t);
     while s.busy.swap(true, Ordering::AcqRel) {
         std::thread::sleep(Duration::from_millis(2));
     }
