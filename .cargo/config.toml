@@ -6,17 +6,16 @@ include = [{ path = "core-link.toml", optional = true }]
 [alias]
 xtask = "run --quiet --package xtask --"
 
-# Inside Lightair.app, libobs and its dependencies live in Contents/Frameworks.
-# Development builds also look in an installed OBS 33 so tests can run outside the bundle
-# (see docs/15-platform-distribution-licensing.md#building).
+# Inside Lightair.app, the libraries it ships (the trackers, the tools' libraries) live in
+# Contents/Frameworks.
 [target.aarch64-apple-darwin]
 rustflags = [
-  "-C", "link-args=-Wl,-rpath,@executable_path/../Frameworks -Wl,-rpath,/Applications/OBS.app/Contents/Frameworks",
+  "-C", "link-args=-Wl,-rpath,@executable_path/../Frameworks",
 ]
 
 [target.x86_64-apple-darwin]
 rustflags = [
-  "-C", "link-args=-Wl,-rpath,@executable_path/../Frameworks -Wl,-rpath,/Applications/OBS.app/Contents/Frameworks",
+  "-C", "link-args=-Wl,-rpath,@executable_path/../Frameworks",
 ]
 
 # Where the CEF crate keeps its pinned Chromium build (fetched once, kept across cleans of the
