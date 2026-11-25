@@ -95,6 +95,7 @@ fn need(source: &Source) -> Need {
         crate::soundboard::KIND if mac => Need::Soundboard,
         crate::soundboard::KIND => Need::Missing("soundboard"),
         "ffmpeg_source" if crate::show::link_received_by_compositor(source) => Need::Link,
+        "ffmpeg_source" if mac && playlist(s) => Need::Media,
         "ffmpeg_source" if playlist(s) => Need::Missing("media playlist"),
         "ffmpeg_source" if mac && native_media(s) => Need::Media,
         "ffmpeg_source" => Need::Missing("media file AVFoundation doesn't play"),
@@ -151,6 +152,8 @@ enum Runtime {
     Media {
         player: crate::media_player::MediaPlayer,
         active: bool,
+        /// Its files played in turn, when it has a playlist.
+        playlist: Option<Playlist>,
     },
     #[cfg(target_os = "macos")]
     Soundboard {
@@ -177,6 +180,25 @@ enum Runtime {
     Link,
     #[cfg(target_os = "macos")]
     Phone(crate::phone_run::PhoneCamera),
+}
+
+/// A media source's playlist: its order and place, and when its file last started (a new file
+/// reads as ended for a moment).
+#[cfg(target_os = "macos")]
+struct Playlist {
+    order: crate::playlists::Order,
+    started: Instant,
+}
+
+/// The player's settings for a playlist's file (never looping one file).
+#[cfg(target_os = "macos")]
+fn playlist_file(file: &str) -> crate::media_player::Settings {
+    crate::media_player::Settings {
+        path: file.to_string(),
+        looping: false,
+        restart_on_activate: false,
+        clear_on_end: false,
+    }
 }
 
 /// A scene switch under way: the scenes it draws besides the program until it ends.
@@ -355,6 +377,19 @@ impl Host {
                 Runtime::Web { page, .. } => page.tick(),
                 #[cfg(target_os = "macos")]
                 Runtime::Phone(phone) => phone.tick(),
+                // a playlist's file ended: the next one
+                #[cfg(target_os = "macos")]
+                Runtime::Media { player, active, playlist: Some(p) } => {
+                    if p.started.elapsed() >= Duration::from_millis(800)
+                        && player.state() == crate::media_player::state::ENDED
+                        && p.order.ended()
+                        && let Some(file) = p.order.file()
+                    {
+                        player.update(playlist_file(file), *active);
+                        player.restart();
+                        p.started = Instant::now();
+                    }
+                }
                 _ => {}
             }
         }
@@ -476,7 +511,7 @@ impl Host {
             match rt {
                 Runtime::Timer(on_air) => on_air.store(active.contains(id), Ordering::Relaxed),
                 #[cfg(target_os = "macos")]
-                Runtime::Media { player, active: was } => {
+                Runtime::Media { player, active: was, .. } => {
                     let now = active.contains(id);
                     if now != *was {
                         if now {
@@ -523,12 +558,20 @@ impl Host {
             return true;
         }
         let s = &source.settings;
-        match self.runtimes.get(&source.id) {
+        match self.runtimes.get_mut(&source.id) {
             Some(Runtime::Timer(_)) => self.timers.configure(source.id, s),
             #[cfg(target_os = "macos")]
-            Some(Runtime::Media { player, active }) => {
-                player.update(crate::media_player::Settings::from_json(s), *active);
-            }
+            Some(Runtime::Media { player, active, playlist }) => match playlist {
+                Some(p) => {
+                    if p.order.follow(s)
+                        && let Some(file) = p.order.file()
+                    {
+                        player.update(playlist_file(file), *active);
+                        p.started = Instant::now();
+                    }
+                }
+                None => player.update(crate::media_player::Settings::from_json(s), *active),
+            },
             #[cfg(any(target_os = "macos", windows))]
             Some(Runtime::Web { page, .. }) => page.set_options(page_options(s)),
             _ => {}
@@ -581,16 +624,18 @@ impl Host {
                 Runtime::Timer(on_air)
             }
             #[cfg(target_os = "macos")]
-            Need::Media => Runtime::Media {
-                player: crate::media_player::MediaPlayer::new(
-                    Some(id),
-                    crate::media_player::Settings::from_json(s),
-                    self.sample_rate,
-                    false,
-                    None,
-                ),
-                active: false,
-            },
+            Need::Media => {
+                let playlist = crate::playlists::Order::of(s).map(|order| Playlist { order, started: Instant::now() });
+                let settings = match playlist.as_ref().and_then(|p| p.order.file()) {
+                    Some(file) => playlist_file(file),
+                    None => crate::media_player::Settings::from_json(s),
+                };
+                Runtime::Media {
+                    player: crate::media_player::MediaPlayer::new(Some(id), settings, self.sample_rate, false, None),
+                    active: false,
+                    playlist,
+                }
+            }
             #[cfg(target_os = "macos")]
             Need::Soundboard => {
                 let settings = crate::media_player::Settings {
@@ -960,14 +1005,27 @@ impl Host {
         false
     }
 
-    /// Moves a playlist `by` files and plays from there (no playlists without libobs yet).
-    pub fn playlist_skip(&self, _source: Id, _by: i64) {
-        not_yet("playlist_skip");
+    /// Moves a playlist `by` files and plays from there.
+    pub fn playlist_skip(&mut self, source: Id, by: i64) {
+        #[cfg(target_os = "macos")]
+        if let Some(Runtime::Media { player, active, playlist: Some(p) }) = self.runtimes.get_mut(&source) {
+            p.order.skip(by);
+            if let Some(file) = p.order.file() {
+                player.update(playlist_file(file), *active);
+                player.restart();
+                p.started = Instant::now();
+            }
+        }
+        let _ = (source, by);
     }
 
-    /// A playlist's place: (from 1, how many, the file playing). No playlists without libobs yet.
-    pub fn playlist_now(&self, _source: Id) -> Option<(usize, usize, String)> {
-        not_yet("playlist_now");
+    /// A playlist's place: (from 1, how many, the file playing).
+    pub fn playlist_now(&self, source: Id) -> Option<(usize, usize, String)> {
+        #[cfg(target_os = "macos")]
+        if let Some(Runtime::Media { playlist: Some(p), .. }) = self.runtimes.get(&source) {
+            return p.order.now();
+        }
+        let _ = source;
         None
     }
 

@@ -36,7 +36,8 @@ impl PhoneCamera {
         // (the previous decoding thread ends once its units stop)
         *self.feed.units.lock() = Some(tx);
         let (id, feed) = (self.id, self.feed.clone());
-        let spawned = std::thread::Builder::new().name("lightair-phone-decode".into()).spawn(move || decode(id, feed, rx));
+        let spawned =
+            std::thread::Builder::new().name("lightair-phone-decode".into()).spawn(move || decode(id, feed, rx));
         if spawned.is_err() {
             tracing::warn!(%id, "phone camera: couldn't start its decoder");
         }
