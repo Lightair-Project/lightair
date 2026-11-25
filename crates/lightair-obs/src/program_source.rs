@@ -82,6 +82,46 @@ fn newest(canvas: Id, fresh: bool) -> Option<Buffer> {
     (!fresh || p.at.elapsed() < STALE).then(|| p.buffer.clone())
 }
 
+// ------------------------------------------------------------------ one scene for an output
+
+/// A scene the compositor draws on its own for an output (the virtual camera's "one scene"), at
+/// its canvas's size, whatever is on air. Its frames go to the outputs under `key` (a feed of
+/// its own, not a canvas's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SceneTarget {
+    pub key: Id,
+    pub scene: Id,
+    /// The canvas the scene is laid out in (whose compositor draws it).
+    pub canvas: Id,
+    /// The most frames a second it's drawn at (numerator, denominator).
+    pub fps: (u32, u32),
+}
+
+static SCENE_TARGETS: Mutex<Vec<SceneTarget>> = Mutex::new(Vec::new());
+
+/// The compositor of `target.canvas` draws `target.scene` for `target.key` from now on.
+pub(crate) fn add_scene_target(target: SceneTarget) {
+    let mut t = SCENE_TARGETS.lock();
+    t.retain(|x| x.key != target.key);
+    t.push(target);
+}
+
+/// Stops drawing the scene for `key`.
+pub(crate) fn remove_scene_target(key: Id) {
+    SCENE_TARGETS.lock().retain(|t| t.key != key);
+}
+
+/// The scenes `canvas`'s compositor draws for outputs. Any thread.
+pub fn scene_targets(canvas: Id) -> Vec<SceneTarget> {
+    SCENE_TARGETS.lock().iter().filter(|t| t.canvas == canvas).copied().collect()
+}
+
+/// Hands `frame` (BGRA, IOSurface-backed, complete on the GPU) over as the newest picture of the
+/// scene drawn for `key`. Any thread.
+pub fn publish_scene(key: Id, frame: &Buffer) {
+    crate::own_outputs::frame(key, frame);
+}
+
 /// A private `lightair_program` source drawing `canvas`'s compositor picture (registered with
 /// libobs first if it isn't yet). Engine thread.
 pub fn create(canvas: Id) -> Option<SourceRef> {

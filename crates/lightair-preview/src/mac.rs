@@ -604,17 +604,7 @@ impl Shared {
 /// The document's scene and canvas `source` shows, when it's a scene the engine made: the
 /// engine names a scene's libobs scene `<scene id>:<canvas id>`.
 fn scene_of(source: *mut sys::obs_source_t) -> Option<(Id, Id)> {
-    if unsafe { sys::obs_scene_from_source(source) }.is_null() {
-        return None;
-    }
-    let name = unsafe { sys::obs_source_get_name(source) };
-    if name.is_null() {
-        return None;
-    }
-    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().ok()?;
-    let (scene, canvas) = name.split_once(':')?;
-    let id = |s: &str| serde_json::from_value::<Id>(serde_json::Value::String(s.to_string())).ok();
-    Some((id(scene)?, id(canvas)?))
+    lightair_obs::bridge::scene_of(source)
 }
 
 /// A retained `CALayer`.

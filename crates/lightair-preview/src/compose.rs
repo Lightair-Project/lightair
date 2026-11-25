@@ -366,13 +366,40 @@ struct State {
     stingers_of: usize,
     /// The stinger switch being drawn: when it started, and its video's path.
     playing: Option<(Instant, String)>,
-    /// The scenes previews show in the program's place, by preview (its address).
-    views: HashMap<usize, View>,
+    /// The scenes previews show in the program's place, and those drawn for outputs.
+    views: HashMap<ViewKey, View>,
 }
 
-/// A scene a preview shows in the program's place, drawn for it.
+/// Whose a view is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ViewKey {
+    /// A preview's (its address).
+    Preview(usize),
+    /// An output's: a scene drawn for it alone (`program_source::SceneTarget`'s key).
+    Output(Id),
+}
+
+/// Where a view's frames go.
+enum ViewTo {
+    Preview(Weak<Shared>),
+    /// Handed to the outputs under this key.
+    Output(Id),
+}
+
+impl ViewTo {
+    /// The preview stops being given frames of this view: libobs draws its scene again.
+    fn unfeed(&self) {
+        if let ViewTo::Preview(w) = self
+            && let Some(preview) = w.upgrade()
+        {
+            preview.unfeed_scene();
+        }
+    }
+}
+
+/// A scene a preview shows in the program's place, or one drawn for an output, drawn for it.
 struct View {
-    preview: Weak<Shared>,
+    to: ViewTo,
     scene: Id,
     /// What the preview showed when this was worked out (`SceneView::generation`).
     generation: u64,
@@ -445,14 +472,17 @@ impl State {
         // the scenes previews show in the program's place (those still in the document)
         let wanted: Vec<(Arc<Shared>, SceneView)> =
             scene_views(self.canvas).into_iter().filter(|(_, v)| base.scene(v.scene).is_some()).collect();
-        self.keep_views(&wanted, &canvas, period);
+        // and those drawn for outputs on their own (the virtual camera's one scene)
+        let targets: Vec<program_source::SceneTarget> =
+            program_source::scene_targets(self.canvas).into_iter().filter(|t| base.scene(t.scene).is_some()).collect();
+        self.keep_views(&wanted, &targets, &canvas, period);
         if !program && self.views.is_empty() {
             self.idle();
             self.stop_captures();
             return period;
         }
         let now = Instant::now();
-        let due: Vec<usize> = self.views.iter().filter(|(_, v)| v.due(now, period)).map(|(k, _)| *k).collect();
+        let due: Vec<ViewKey> = self.views.iter().filter(|(_, v)| v.due(now, period)).map(|(k, _)| *k).collect();
         if !program {
             // only views: the outputs show libobs's picture
             program_source::withdraw(self.canvas);
@@ -639,7 +669,13 @@ impl State {
         // the scenes shown in the program's place that are due, from the same pictures
         for key in &due {
             let Some(view) = self.views.get_mut(key) else { continue };
-            let Some(preview) = view.preview.upgrade() else { continue };
+            let preview = match &view.to {
+                ViewTo::Preview(w) => match w.upgrade() {
+                    Some(p) => Some(p),
+                    None => continue,
+                },
+                ViewTo::Output(_) => None,
+            };
             if view.drawer.as_ref().is_none_or(|d| d.size != view.size) {
                 view.drawer = None;
                 if view.failed == Some(view.size) {
@@ -661,7 +697,11 @@ impl State {
             }
             drawer.ring.handed(i);
             view.drawn = Some(now);
-            preview.feed_scene(&drawer.ring.slots[i].buffer, view.generation);
+            match (&view.to, preview) {
+                (_, Some(preview)) => preview.feed_scene(&drawer.ring.slots[i].buffer, view.generation),
+                (ViewTo::Output(key), None) => program_source::publish_scene(*key, &drawer.ring.slots[i].buffer),
+                (ViewTo::Preview(_), None) => {}
+            }
         }
         // the GPU is done with the sources' buffers and the stinger's frame (each copy above
         // waited for it)
@@ -716,22 +756,32 @@ impl State {
         self.captures = (!plans.is_empty()).then_some(plans);
     }
 
-    /// Keeps a view for each scene shown in the program's place in `wanted`: one no longer
-    /// wanted (its preview inactive, showing something else, or gone) is let go, and libobs
-    /// draws it again; one whose preview shows something new is drawn at the next tick.
-    fn keep_views(&mut self, wanted: &[(Arc<Shared>, SceneView)], canvas: &Canvas, tick: Duration) {
+    /// Keeps a view for each scene shown in the program's place in `wanted`, and for each scene
+    /// drawn for an output in `targets`: one no longer wanted (its preview inactive, showing
+    /// something else, or gone; its output stopped) is let go, and libobs draws a preview's
+    /// again; one whose preview shows something new is drawn at the next tick.
+    fn keep_views(
+        &mut self,
+        wanted: &[(Arc<Shared>, SceneView)],
+        targets: &[program_source::SceneTarget],
+        canvas: &Canvas,
+        tick: Duration,
+    ) {
         self.views.retain(|key, view| {
-            let keep = wanted.iter().any(|(p, _)| Arc::as_ptr(p) as usize == *key);
-            if !keep && let Some(preview) = view.preview.upgrade() {
-                preview.unfeed_scene();
+            let keep = match key {
+                ViewKey::Preview(at) => wanted.iter().any(|(p, _)| Arc::as_ptr(p) as usize == *at),
+                ViewKey::Output(k) => targets.iter().any(|t| t.key == *k),
+            };
+            if !keep {
+                view.to.unfeed();
             }
             keep
         });
         for (preview, shown) in wanted {
             let size = view_size(shown, canvas);
             let period = view_period(shown, size, canvas, tick);
-            let view = self.views.entry(Arc::as_ptr(preview) as usize).or_insert_with(|| View {
-                preview: Arc::downgrade(preview),
+            let view = self.views.entry(ViewKey::Preview(Arc::as_ptr(preview) as usize)).or_insert_with(|| View {
+                to: ViewTo::Preview(Arc::downgrade(preview)),
                 scene: shown.scene,
                 generation: shown.generation,
                 size,
@@ -748,14 +798,34 @@ impl State {
             view.size = size;
             view.period = period;
         }
+        // an output's scene: at the canvas's size, at most at its rate
+        let size = (canvas.width.max(2) & !1, canvas.height.max(2) & !1);
+        for t in targets {
+            let (num, den) = (t.fps.0.max(1) as f64, t.fps.1.max(1) as f64);
+            let period = Duration::from_secs_f64(den / num).max(tick);
+            let view = self.views.entry(ViewKey::Output(t.key)).or_insert_with(|| View {
+                to: ViewTo::Output(t.key),
+                scene: t.scene,
+                generation: 0,
+                size,
+                period,
+                drawn: None,
+                drawer: None,
+                failed: None,
+            });
+            if view.scene != t.scene {
+                view.scene = t.scene;
+                view.drawn = None;
+            }
+            view.size = size;
+            view.period = period;
+        }
     }
 
     /// Draws no scene in the program's place any more: libobs draws them again.
     fn drop_views(&mut self) {
         for (_, view) in self.views.drain() {
-            if let Some(preview) = view.preview.upgrade() {
-                preview.unfeed_scene();
-            }
+            view.to.unfeed();
         }
     }
 

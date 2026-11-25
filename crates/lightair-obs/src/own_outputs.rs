@@ -603,8 +603,20 @@ static TAPS: Mutex<Option<HashMap<u64, TapEntry>>> = Mutex::new(None);
 /// own), at most `max_fps` a second (`None`: every frame), and given to `f` on a thread of the
 /// tap's own; the last picture again while the compositor hands nothing over. Returns the tap,
 /// for [`remove_tap`]. Engine thread.
-pub(crate) fn add_tap(canvas: Id, size: Option<(u32, u32)>, max_fps: Option<u32>, mut f: TapFn) -> Result<u64, String> {
-    let (cw, ch, num, den) = canvas_shape(canvas).ok_or_else(|| "The canvas isn't ready yet.".to_string())?;
+pub(crate) fn add_tap(canvas: Id, size: Option<(u32, u32)>, max_fps: Option<u32>, f: TapFn) -> Result<u64, String> {
+    let shape = canvas_shape(canvas).ok_or_else(|| "The canvas isn't ready yet.".to_string())?;
+    add_tap_on(canvas, shape, size, max_fps, f)
+}
+
+/// [`add_tap`] on the frames handed over under `feed` (a canvas, or a scene drawn for an
+/// output), whose pictures are `shape` (width, height, frame rate).
+fn add_tap_on(
+    feed: Id,
+    (cw, ch, num, den): (u32, u32, u32, u32),
+    size: Option<(u32, u32)>,
+    max_fps: Option<u32>,
+    mut f: TapFn,
+) -> Result<u64, String> {
     let (w, h) = size.unwrap_or((cw, ch));
     let (w, h) = (w.max(2) & !1, h.max(2) & !1);
     let pool = bgra_pool(w, h).ok_or_else(|| "Couldn't make pictures to send.".to_string())?;
@@ -626,9 +638,9 @@ pub(crate) fn add_tap(canvas: Id, size: Option<(u32, u32)>, max_fps: Option<u32>
         skipped: AtomicU32::new(0),
     });
     let id = next_id();
-    add_to_feed(canvas, tap.clone(), (num, den));
+    add_to_feed(feed, tap.clone(), (num, den));
     TAPS.lock().get_or_insert_with(HashMap::new).insert(id, TapEntry { tap, thread: Some(thread) });
-    tracing::info!(%canvas, width = w, height = h, "own outputs: pictures taken from the compositor");
+    tracing::info!(%feed, width = w, height = h, "own outputs: pictures taken from the compositor");
     Ok(id)
 }
 
@@ -1727,6 +1739,9 @@ struct State {
     clips: HashMap<Id, ClipsOut>,
     /// The virtual camera's tap.
     camera: Option<u64>,
+    /// The scene the compositor draws for the virtual camera alone (its "one scene" mode), by
+    /// the key its frames are handed over under.
+    camera_scene: Option<Id>,
     rtsp: Option<RtspOut>,
 }
 
@@ -2439,8 +2454,51 @@ pub(crate) fn start_virtual_camera(canvas: Id) -> Result<(), String> {
     }
 }
 
+/// Starts the virtual camera on one scene (`scene`, laid out in `canvas`) drawn by `canvas`'s
+/// compositor for the camera alone, at the canvas's size, whatever is on air. Its status is
+/// `OutputKey::VirtualCamera`'s.
+pub(crate) fn start_virtual_camera_scene(scene: Id, canvas: Id) -> Result<(), String> {
+    let key = OutputKey::VirtualCamera;
+    if with(|st| st.camera.is_some()) {
+        return Ok(());
+    }
+    let fail = |why: String| {
+        runtime().update(key, |s| s.state = OutputState::Failed(why.clone()));
+        Err(why)
+    };
+    runtime().update(key, |s| *s = OutputStatus { state: OutputState::Starting, ..Default::default() });
+    let Some(shape) = canvas_shape(canvas) else { return fail("The canvas isn't ready yet.".into()) };
+    let mut camera = match crate::vcam::mac::Sink::open() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    let feed = Id::new();
+    let send: TapFn = Box::new(move |picture, pts| camera.send(picture, pts));
+    match add_tap_on(feed, shape, None, Some(crate::vcam::mac::FPS), send) {
+        Ok(id) => {
+            crate::program_source::add_scene_target(crate::program_source::SceneTarget {
+                key: feed,
+                scene,
+                canvas,
+                fps: (shape.2, shape.3),
+            });
+            with(|st| {
+                st.camera = Some(id);
+                st.camera_scene = Some(feed);
+            });
+            runtime().update(key, |s| s.state = OutputState::Active { since: Instant::now() });
+            tracing::info!(%scene, %canvas, "own outputs: the virtual camera shows one scene drawn by the compositor");
+            Ok(())
+        }
+        Err(e) => fail(e),
+    }
+}
+
 /// Stops the virtual camera Lightair sends itself; false when it wasn't running here.
 pub(crate) fn stop_virtual_camera() -> bool {
+    if let Some(feed) = with(|st| st.camera_scene.take()) {
+        crate::program_source::remove_scene_target(feed);
+    }
     let Some(id) = with(|st| st.camera.take()) else { return false };
     runtime().update(OutputKey::VirtualCamera, |s| {
         if s.state.is_running() {

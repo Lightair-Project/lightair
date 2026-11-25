@@ -1463,14 +1463,24 @@ impl Outputs {
         video: Option<VideoOutput>,
         scene: Option<VirtualCameraScene>,
     ) -> Result<(), String> {
-        // Lightair's own: the canvas's compositor frames sent to the camera extension (one scene
-        // stays libobs's: the compositor draws canvases' programs only)
+        // Lightair's own: the canvas's compositor frames sent to the camera extension, or one
+        // scene its compositor draws for the camera alone
         #[cfg(target_os = "macos")]
-        if scene.is_none()
-            && let Some(canvas) = crate::own_outputs::takes(video)
-        {
-            self.drop_virtual_camera();
-            return crate::own_outputs::start_virtual_camera(canvas);
+        if crate::own_outputs::enabled() {
+            match scene.as_ref().map(|sc| crate::bridge::scene_of(sc.source)) {
+                None => {
+                    if let Some(canvas) = crate::own_outputs::takes(video) {
+                        self.drop_virtual_camera();
+                        return crate::own_outputs::start_virtual_camera(canvas);
+                    }
+                }
+                Some(Some((scene, canvas))) => {
+                    self.drop_virtual_camera();
+                    return crate::own_outputs::start_virtual_camera_scene(scene, canvas);
+                }
+                // a scene the reconciler didn't make: libobs draws it
+                Some(None) => {}
+            }
         }
         if self.virtual_camera.as_ref().is_some_and(|r| unsafe { sys::obs_output_active(r.output) }) {
             return Ok(());
