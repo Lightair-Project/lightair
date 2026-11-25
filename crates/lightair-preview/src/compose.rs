@@ -401,6 +401,10 @@ impl State {
             .flat_map(|plans| plans.keys())
             .filter_map(|id| Some((*id, capture::frame(*id)?)))
             .collect();
+        // the sources a provider makes (web pages, NDI, Syphon…), told what's shown here
+        let shown_sources: Vec<&Source> = shown.iter().filter_map(|id| base.sources.get(id).map(|s| &**s)).collect();
+        crate::providers::want(canvas.id, &shown_sources);
+        let provided: HashMap<Id, bridge::Picture> = crate::providers::frames(&shown_sources);
         // what libobs is asked for: the sources not made or captured here (bare when the
         // compositor draws all their effects), and those made here whose picture isn't ready
         let want: HashMap<Id, bool> = shown
@@ -409,7 +413,7 @@ impl State {
             .filter_map(|source| {
                 let effects = effects_drawn(source, keyers, looked);
                 let made = keyers && effects && made_here(source) && !self.missing.contains(&source.id);
-                let taken = effects && captured.contains_key(&source.id);
+                let taken = effects && (captured.contains_key(&source.id) || provided.contains_key(&source.id));
                 (!made && !taken).then_some((source.id, effects))
             })
             .collect();
@@ -457,6 +461,16 @@ impl State {
                 kept.insert(*id);
                 shots.insert(*id, shot);
                 held.push(c.buffer.clone());
+                continue;
+            }
+            // a source a provider makes, every effect drawn here: its picture as provided
+            if effects
+                && let Some(p) = provided.get(id)
+                && let Some(shot) = shot_of(self.native.as_mut(), source, p)
+            {
+                kept.insert(*id);
+                shots.insert(*id, shot);
+                held.push(p.buffer.clone());
                 continue;
             }
             let Some(picture) = bridge::picture(*id) else { continue };
@@ -560,6 +574,8 @@ impl State {
         if self.captures.take().is_some() {
             capture::want(self.canvas, HashMap::new());
         }
+        // and the providers' sources: nothing shown here now
+        crate::providers::want(self.canvas, &[]);
     }
 
     /// Tells the captures which screens and cameras the scenes drawn show (`shown`, in the
