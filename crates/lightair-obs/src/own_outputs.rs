@@ -53,7 +53,7 @@ use lightair_encode::{
 use lightair_engine::whip::WhipSender;
 use lightair_feed::net::Bind;
 use lightair_feed::ts::{AudioConfig, Muxer, NalFormat, VideoCodec as TsCodec};
-use lightair_feed::{RtmpSender, RtmpTarget, SrtSender};
+use lightair_feed::{RtmpSender, RtmpTarget, RtmpVideo, SrtSender};
 use lightair_model::Id;
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{CVPixelBuffer, CVPixelBufferPool};
@@ -1218,8 +1218,11 @@ struct Stats {
 }
 
 impl Out {
-    fn parameter_sets(&self, sets: &[Vec<u8>]) {
+    fn parameter_sets(&self, format: &VideoFormat) {
+        let sets = &format.parameter_sets;
         match self {
+            // HEVC over Enhanced RTMP takes the `hvcC` record as the encoder made it
+            Out::Rtmp(s) if matches!(format.codec, VideoCodec::Hevc { .. }) => s.config_record(&format.config),
             Out::Rtmp(s) => s.parameter_sets(sets),
             Out::Srt(s) => s.lock().mux.parameter_sets(sets.to_vec()),
             Out::Udp(s) => s.lock().mux.parameter_sets(sets.to_vec()),
@@ -1333,7 +1336,8 @@ impl Out {
 }
 
 enum Item {
-    Sets(Vec<Vec<u8>>),
+    /// The picture's format (its parameter sets and decoder configuration record) from now on.
+    Format(Arc<VideoFormat>),
     Video(Arc<Pkt>),
     Audio(Arc<Pkt>),
     End,
@@ -1353,7 +1357,7 @@ impl Sink for StreamSink {
             let mut f = self.format.lock();
             if f.as_ref().is_none_or(|x| !Arc::ptr_eq(x, format)) {
                 *f = Some(format.clone());
-                let _ = self.tx.send((due, Item::Sets(format.parameter_sets.clone())));
+                let _ = self.tx.send((due, Item::Format(format.clone())));
             }
         }
         let _ = self.tx.send((due, Item::Video(packet.clone())));
@@ -1380,7 +1384,7 @@ fn pump(rx: Receiver<(Instant, Item)>, out: Arc<Out>, base_ns: i64, abort: Arc<A
             std::thread::sleep((due - now).min(Duration::from_millis(50)));
         }
         match item {
-            Item::Sets(sets) => out.parameter_sets(&sets),
+            Item::Format(format) => out.parameter_sets(&format),
             Item::Video(p) => {
                 out.video(&p, us(p.pts), us(p.dts));
                 frames.fetch_add(1, Ordering::Relaxed);
@@ -2075,16 +2079,17 @@ pub(crate) fn add_marker(name: &str) -> bool {
     !running.is_empty()
 }
 
-/// Whether Lightair sends to this destination itself: RTMP(S) with H.264 and no second sound
-/// track, SRT and UDP (MPEG-TS) with H.264 or HEVC, WHIP with H.264. Others stay libobs's for
-/// now: RTMP with HEVC or AV1 (enhanced RTMP) or a VOD track, RIST and MPEG-TS over TCP.
+/// Whether Lightair sends to this destination itself: RTMP(S) with H.264, or HEVC over Enhanced
+/// RTMP, and no second sound track; SRT and UDP (MPEG-TS) with H.264 or HEVC; WHIP with H.264.
+/// Others stay libobs's for now: RTMP with AV1 (no encoder of Lightair's makes it) or a VOD
+/// track, RIST and MPEG-TS over TCP.
 pub(crate) fn can_stream(cfg: &StreamConfig) -> bool {
     let server = cfg.server.trim().to_ascii_lowercase();
     let codec = video_codec(&cfg.encoders.video_encoder);
     match StreamProtocol::of(&server) {
         Some(StreamProtocol::Rtmp) => {
             (server.starts_with("rtmp://") || server.starts_with("rtmps://"))
-                && codec == VideoCodec::H264
+                && matches!(codec, VideoCodec::H264 | VideoCodec::Hevc { .. })
                 && cfg.vod_mix.is_none()
         }
         Some(StreamProtocol::MpegTs) => {
@@ -2132,7 +2137,8 @@ pub(crate) fn start_stream(cfg: &StreamConfig, canvas: Id) -> Result<(), String>
                     },
                     None => None,
                 };
-                match RtmpSender::start(RtmpTarget { url: server, key: cfg.key.clone(), bind }) {
+                let video = if matches!(codec, VideoCodec::Hevc { .. }) { RtmpVideo::Hevc } else { RtmpVideo::Avc };
+                match RtmpSender::start_with(RtmpTarget { url: server, key: cfg.key.clone(), bind }, video) {
                     Ok(s) => {
                         s.audio_config(SAMPLE_RATE, CHANNELS as u8);
                         s.set_bitrate(enc.video_bitrate_kbps + enc.audio_bitrate_kbps);
