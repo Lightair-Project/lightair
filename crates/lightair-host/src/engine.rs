@@ -225,8 +225,8 @@ fn encoders() -> Vec<String> {
     Vec::new()
 }
 
-/// Frame statistics. Lightair's compositor keeps no engine-wide frame counters yet, so these are
-/// zeros (no frames counted, none lagged). Any thread.
+/// Frame statistics: the primary canvas's compositor frames. Any thread.
 pub fn read_stats() -> Stats {
-    Stats::default()
+    let (active_fps, average_frame_time_ms, total_frames, lagged_frames) = crate::program::frame_stats();
+    Stats { active_fps, average_frame_time_ms, total_frames, lagged_frames }
 }

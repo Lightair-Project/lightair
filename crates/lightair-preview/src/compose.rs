@@ -449,6 +449,7 @@ impl State {
     /// Draws a frame of the program, and of the scenes previews show in its place, if one is
     /// wanted; the time until the next.
     fn tick(&mut self) -> Duration {
+        let started = Instant::now();
         let Some(snapshot) = bridge::snapshot() else {
             self.idle();
             self.stop_captures();
@@ -698,6 +699,7 @@ impl State {
                     }
                 }
                 program_source::publish(canvas.id, &frame);
+                lightair_host::program::count_frame(canvas.id, started.elapsed(), period);
             }
         }
         // the scenes shown in the program's place that are due, from the same pictures

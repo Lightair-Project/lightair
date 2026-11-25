@@ -165,3 +165,54 @@ pub use frames::in_use;
 pub fn primary_canvas() -> Option<Id> {
     crate::show::snapshot().and_then(|s| s.workspace.canvases.first().map(|c| c.id))
 }
+
+// ------------------------------------------------------------------ the primary canvas's frames
+
+/// Counts of the primary canvas's compositor frames, for the stats.
+#[derive(Default)]
+struct Counts {
+    total: u32,
+    /// Frames that took longer to draw than their period.
+    lagged: u32,
+    /// How long a frame takes to draw (ms), smoothed.
+    average_ms: f64,
+    /// When the frames of the last second were drawn.
+    recent: std::collections::VecDeque<std::time::Instant>,
+}
+
+static COUNTS: Mutex<Option<Counts>> = Mutex::new(None);
+
+/// The compositor drew a frame of `canvas`'s program in `took` (its period `period`): counted
+/// for the primary canvas. The compositor's thread.
+pub fn count_frame(canvas: Id, took: std::time::Duration, period: std::time::Duration) {
+    if primary_canvas() != Some(canvas) {
+        return;
+    }
+    let now = std::time::Instant::now();
+    let mut c = COUNTS.lock();
+    let c = c.get_or_insert_with(Counts::default);
+    c.total = c.total.wrapping_add(1);
+    if took > period {
+        c.lagged = c.lagged.wrapping_add(1);
+    }
+    let ms = took.as_secs_f64() * 1000.0;
+    c.average_ms = if c.total == 1 { ms } else { c.average_ms * 0.95 + ms * 0.05 };
+    c.recent.push_back(now);
+    while c.recent.front().is_some_and(|t| now.duration_since(*t) > std::time::Duration::from_secs(1)) {
+        c.recent.pop_front();
+    }
+}
+
+/// The primary canvas's frames: frames a second now, how long one takes to draw (ms), how many
+/// so far, and how many took longer than their period.
+pub fn frame_stats() -> (f64, f64, u32, u32) {
+    let c = COUNTS.lock();
+    let Some(c) = c.as_ref() else { return (0.0, 0.0, 0, 0) };
+    let fps = match (c.recent.front(), c.recent.back()) {
+        (Some(a), Some(b)) if c.recent.len() > 1 && b > a => {
+            (c.recent.len() - 1) as f64 / b.duration_since(*a).as_secs_f64()
+        }
+        _ => 0.0,
+    };
+    (fps, c.average_ms, c.total, c.lagged)
+}
