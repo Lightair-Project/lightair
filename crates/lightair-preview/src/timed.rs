@@ -7,6 +7,9 @@
 //! - **Render delay** (`gpu_delay`): the picture `delay_ms` ago, from a ring of copies.
 //! - **Scroll** (`scroll_filter`): the picture moving `speed_x`, `speed_y` pixels a second,
 //!   wrapping round with `loop` (on by default), else moving off and leaving it transparent.
+//! - **React to sound** (`lightair_audio_react`): with a track's level (`track`, from
+//!   `floor_db` up), the picture grows (`react` 0), fades in (1), glows (2) or shakes (3), by
+//!   `amount`.
 //!
 //! They're drawn here only while they come before every other picture effect of the source (the
 //! order libobs runs a source's filters in); otherwise libobs draws the source, filters and all.
@@ -15,14 +18,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use lightair_engine::gpu::Gpu;
-use lightair_model::{Effect, Id, Source};
 use lightair_host::bridge;
+use lightair_model::{Effect, Id, Source};
 use lightair_render::media::Picture;
 use lightair_render::scene::Shot;
 
 pub(crate) const FREEZE: &str = "lightair_freeze";
 pub(crate) const DELAY: &str = "gpu_delay";
 pub(crate) const SCROLL: &str = "scroll_filter";
+pub(crate) const REACT: &str = lightair_model::catalog::AUDIO_REACT_KIND;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// The most copies a delay keeps (half a second at 60 frames a second, and a little more).
@@ -34,7 +38,7 @@ struct Out {
     @location(0) uv: vec2<f32>,
 };
 
-struct P { offset: vec2<f32>, wrap: f32, opacity: f32 };
+struct P { offset: vec2<f32>, wrap: f32, opacity: f32, scale: f32, gain: f32, pad: vec2<f32> };
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var picture: texture_2d<f32>;
 @group(0) @binding(2) var linear: sampler;
@@ -50,19 +54,20 @@ fn vs(@builtin(vertex_index) i: u32) -> Out {
 
 @fragment
 fn fs(v: Out) -> @location(0) vec4<f32> {
-    var uv = v.uv + p.offset;
+    var uv = (v.uv - vec2<f32>(0.5)) / p.scale + vec2<f32>(0.5) + p.offset;
     if (p.wrap > 0.5) {
         uv = fract(uv);
     } else if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
         return vec4<f32>(0.0);
     }
-    return textureSampleLevel(picture, linear, uv, 0.0) * p.opacity;
+    let c = textureSampleLevel(picture, linear, uv, 0.0);
+    return vec4<f32>(min(c.rgb * p.gain, vec3<f32>(c.a)), c.a) * p.opacity;
 }
 "#;
 
 /// Whether `e` is one of the effects drawn here.
 pub(crate) fn is_timed(e: &Effect) -> bool {
-    matches!(e.kind.as_str(), FREEZE | DELAY | SCROLL)
+    matches!(e.kind.as_str(), FREEZE | DELAY | SCROLL | REACT)
 }
 
 /// The pipelines, made once: a plain copy and one blended over what's there (premultiplied).
@@ -165,6 +170,16 @@ struct Draw<'a> {
     wrap: bool,
     opacity: f32,
     over: bool,
+    /// Bigger about its middle (1: as it is), and brighter (1: as it is).
+    scale: f32,
+    gain: f32,
+}
+
+impl<'a> Draw<'a> {
+    /// `from` as it is.
+    fn copy(from: &'a wgpu::Texture) -> Draw<'a> {
+        Draw { from, offset: (0.0, 0.0), wrap: false, opacity: 1.0, over: false, scale: 1.0, gain: 1.0 }
+    }
 }
 
 /// A source's state across frames.
@@ -183,6 +198,11 @@ struct State {
     moved: Option<Instant>,
     /// What each effect draws into, in turn.
     outs: Vec<wgpu::Texture>,
+    /// React to sound: the level as it moves (0..1: up at once, down slowly), when it last
+    /// moved, and the shake's random numbers.
+    level: f32,
+    reacted: Option<Instant>,
+    seed: u32,
 }
 
 /// The compositor's effects that work across frames, by source.
@@ -248,12 +268,7 @@ impl Timed {
                     let fade = num("fade", 0.0).clamp(0.0, 1.0) as f32;
                     if state.frozen.as_ref().is_none_or(|(t, _)| (t.width(), t.height()) != size) {
                         let held = take(&mut state.spare, device, size);
-                        run(
-                            gpu,
-                            pass,
-                            &held,
-                            &[Draw { from: &current, offset: (0.0, 0.0), wrap: false, opacity: 1.0, over: false }],
-                        );
+                        run(gpu, pass, &held, &[Draw::copy(&current)]);
                         state.frozen = Some((held, now));
                     }
                     let (held, since) = state.frozen.as_ref()?;
@@ -263,27 +278,16 @@ impl Timed {
                     }
                     let mut draws = Vec::new();
                     if fade > 0.0 {
-                        draws.push(Draw { from: &current, offset: (0.0, 0.0), wrap: false, opacity: 1.0, over: false });
+                        draws.push(Draw::copy(&current));
                     }
-                    draws.push(Draw {
-                        from: held,
-                        offset: (0.0, 0.0),
-                        wrap: false,
-                        opacity: 1.0 - fade,
-                        over: fade > 0.0,
-                    });
+                    draws.push(Draw { opacity: 1.0 - fade, over: fade > 0.0, ..Draw::copy(held) });
                     run(gpu, pass, &out, &draws);
                 }
                 DELAY => {
                     let delay = Duration::from_millis(num("delay_ms", 0.0).clamp(0.0, 500.0) as u64);
                     // this frame's picture into the ring
                     let copy = take(&mut state.spare, device, size);
-                    run(
-                        gpu,
-                        pass,
-                        &copy,
-                        &[Draw { from: &current, offset: (0.0, 0.0), wrap: false, opacity: 1.0, over: false }],
-                    );
+                    run(gpu, pass, &copy, &[Draw::copy(&current)]);
                     state.delayed.push_back((now, copy));
                     // the newest copy at least `delay` old; older ones go back to the spare ones
                     while state.delayed.len() > 1 && now.duration_since(state.delayed[1].0) >= delay {
@@ -297,15 +301,9 @@ impl Timed {
                         }
                     }
                     let (_, shown) = state.delayed.front()?;
-                    run(
-                        gpu,
-                        pass,
-                        &out,
-                        &[Draw { from: shown, offset: (0.0, 0.0), wrap: false, opacity: 1.0, over: false }],
-                    );
+                    run(gpu, pass, &out, &[Draw::copy(shown)]);
                 }
-                _ => {
-                    // scroll
+                SCROLL => {
                     let dt = state.moved.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
                     state.moved = Some(now);
                     let (sx, sy) = (num("speed_x", 50.0) as f32, num("speed_y", 0.0) as f32);
@@ -317,8 +315,55 @@ impl Timed {
                         state.scrolled.1 %= size.1.max(1) as f32;
                     }
                     let offset = (-state.scrolled.0 / size.0.max(1) as f32, -state.scrolled.1 / size.1.max(1) as f32);
-                    run(gpu, pass, &out, &[Draw { from: &current, offset, wrap, opacity: 1.0, over: false }]);
+                    run(gpu, pass, &out, &[Draw { offset, wrap, ..Draw::copy(&current) }]);
                 }
+                REACT => {
+                    let track = e.settings.get("track").and_then(serde_json::Value::as_str).unwrap_or("");
+                    let floor = num("floor_db", -40.0) as f32;
+                    let floor = if floor < -1.0 { floor } else { -40.0 };
+                    let amount = num("amount", 0.5).clamp(0.0, 1.0) as f32;
+                    let db = serde_json::from_value::<Id>(serde_json::Value::String(track.to_string()))
+                        .ok()
+                        .and_then(|t| lightair_host::meters::meters().get(t))
+                        .map(|c| {
+                            let l = c.levels();
+                            if l.age > 0.5 {
+                                f32::NEG_INFINITY
+                            } else {
+                                l.peak.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                            }
+                        })
+                        .unwrap_or(f32::NEG_INFINITY);
+                    let target = if db.is_finite() { ((db - floor) / -floor).clamp(0.0, 1.0) } else { 0.0 };
+                    // up at once, down over about a fifth of a second
+                    let dt = state.reacted.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+                    state.reacted = Some(now);
+                    state.level = if target > state.level {
+                        target
+                    } else {
+                        state.level + (target - state.level) * (dt * 6.0).min(1.0)
+                    };
+                    let k = state.level * amount;
+                    let draw = match num("react", 0.0) as i64 {
+                        // grows from its middle
+                        0 => Draw { scale: 1.0 + 0.35 * k, ..Draw::copy(&current) },
+                        1 => Draw { opacity: ((1.0 - amount) + k).clamp(0.0, 1.0), ..Draw::copy(&current) },
+                        2 => Draw { gain: 1.0 + 1.5 * k, ..Draw::copy(&current) },
+                        _ => {
+                            state.seed = state.seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                            let a = (state.seed >> 16) as f32 / 65_536.0;
+                            let b = (state.seed & 0xffff) as f32 / 65_536.0;
+                            let r = 0.03 * size.0.min(size.1) as f32 * k;
+                            let px = ((a - 0.5) * 2.0 * r, (b - 0.5) * 2.0 * r);
+                            Draw {
+                                offset: (-px.0 / size.0.max(1) as f32, -px.1 / size.1.max(1) as f32),
+                                ..Draw::copy(&current)
+                            }
+                        }
+                    };
+                    run(gpu, pass, &out, &[draw]);
+                }
+                _ => continue,
             }
             current = out;
         }
@@ -353,7 +398,7 @@ fn run(gpu: &Gpu, pass: &Pass, target: &wgpu::Texture, draws: &[Draw]) {
     let groups: Vec<wgpu::BindGroup> = draws
         .iter()
         .map(|d| {
-            let values = [d.offset.0, d.offset.1, if d.wrap { 1.0 } else { 0.0 }, d.opacity];
+            let values = [d.offset.0, d.offset.1, if d.wrap { 1.0 } else { 0.0 }, d.opacity, d.scale, d.gain, 0.0, 0.0];
             let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("timed"),
