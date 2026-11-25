@@ -9,8 +9,16 @@ pub mod clock;
 pub mod devices;
 pub mod gpu;
 pub mod meters;
+pub mod outputs;
+#[cfg(target_os = "macos")]
+pub mod own_outputs;
+pub mod program;
 pub mod plugins;
+pub mod rtsp;
+pub mod show;
 pub mod soundboard;
+#[cfg(target_os = "macos")]
+pub mod vcam_mac;
 #[cfg(target_os = "macos")]
 pub mod vision;
 pub mod zoom_to;

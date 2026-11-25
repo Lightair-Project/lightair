@@ -21,10 +21,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use lightair_model::{Id, TransitionSettings, Workspace};
+use lightair_model::Id;
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType};
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetIOSurface, kCVPixelBufferIOSurfacePropertiesKey,
@@ -35,24 +35,14 @@ use parking_lot::Mutex;
 use crate::obs::{ObsSource, SourceRef};
 use crate::sys;
 
+pub use lightair_host::show::{
+    Snapshot, Switch, clear_timer_texts, link_received_by_compositor, own, publish, set_switch, set_timer_text,
+    snapshot, timer_text,
+};
+
 /// Buffers per source besides one for each compositor drawing it (which may hold one until its
 /// next frame): the one handed on, one the GPU is filling, and one free.
 const RING: usize = 3;
-
-/// Whether Lightair's own compositor draws the program (`LIGHTAIR_ENGINE=own`). Read once.
-pub fn own() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("LIGHTAIR_ENGINE").is_ok_and(|v| v.trim().eq_ignore_ascii_case("own")))
-}
-
-/// Whether a source is a link from another computer (a media source with a `link_port`) that
-/// Lightair's compositor receives itself (with the switch on): the reconciler then gives its
-/// libobs media source no address, so only the compositor's receiver listens on the port.
-pub fn link_received_by_compositor(source: &lightair_model::Source) -> bool {
-    own()
-        && source.kind == "ffmpeg_source"
-        && source.settings["link_port"].as_u64().is_some_and(|p| u16::try_from(p).is_ok())
-}
 
 /// The document scene and canvas a libobs scene stands for, from the name the reconciler gives
 /// it (`<scene id>:<canvas id>`); `None` for any other source.
@@ -68,57 +58,6 @@ pub fn scene_of(source: *mut sys::obs_source_t) -> Option<(Id, Id)> {
     let (scene, canvas) = name.split_once(':')?;
     let id = |s: &str| serde_json::from_value::<Id>(serde_json::Value::String(s.to_string())).ok();
     Some((id(scene)?, id(canvas)?))
-}
-
-// ---------------------------------------------------------------- the document
-
-/// A scene switch under way: what the compositor needs to draw it.
-#[derive(Debug, Clone, Copy)]
-pub struct Switch {
-    pub from: Id,
-    pub to: Id,
-    pub settings: TransitionSettings,
-    pub started: Instant,
-}
-
-impl Switch {
-    /// How far through it is at `now` (0..1; 1 once it's over).
-    pub fn progress(&self, now: Instant) -> f32 {
-        let ms = now.saturating_duration_since(self.started).as_secs_f32() * 1000.0;
-        (ms / self.settings.duration_ms.max(1) as f32).clamp(0.0, 1.0)
-    }
-}
-
-/// The document as the engine last applied it.
-pub struct Snapshot {
-    pub workspace: Arc<Workspace>,
-    /// The switch the last program change started (cleared by a cut).
-    pub switch: Option<Switch>,
-}
-
-static SNAPSHOT: Mutex<Option<Arc<Snapshot>>> = Mutex::new(None);
-static SWITCH: Mutex<Option<Switch>> = Mutex::new(None);
-
-/// The document as the engine last applied it (`None` before the first change, or with the
-/// switch off). The lock is held only to clone an `Arc`.
-pub fn snapshot() -> Option<Arc<Snapshot>> {
-    SNAPSHOT.lock().clone()
-}
-
-/// Engine thread, after applying a change: `workspace` is what libobs now shows.
-pub(crate) fn publish(workspace: &Workspace) {
-    if !own() {
-        return;
-    }
-    let switch = *SWITCH.lock();
-    *SNAPSHOT.lock() = Some(Arc::new(Snapshot { workspace: Arc::new(workspace.clone()), switch }));
-}
-
-/// Engine thread, when the program changes: the switch it starts (`None`: a cut).
-pub(crate) fn set_switch(switch: Option<Switch>) {
-    if own() {
-        *SWITCH.lock() = switch;
-    }
 }
 
 // ---------------------------------------------------------------- sources
@@ -181,8 +120,7 @@ pub(crate) fn clear() {
     let gone = std::mem::take(&mut *BRIDGE.sources.lock());
     drop(gone);
     BRIDGE.latest.lock().clear();
-    *SWITCH.lock() = None;
-    *SNAPSHOT.lock() = None;
+    lightair_host::show::clear();
 }
 
 /// The compositor for `canvas` wants pictures of `sources` from the next frame on (replacing
@@ -228,40 +166,6 @@ impl Picture {
 pub fn picture(source: Id) -> Option<Picture> {
     let (buffer, unfiltered, serial) = BRIDGE.latest.lock().get(&source)?.clone();
     Some(Picture { buffer, unfiltered, serial })
-}
-
-// ---------------------------------------------------------------- timers
-
-/// What each timer shows now (the engine's timers write it once a second, while the switch is
-/// on), so the compositor can draw them itself.
-static TIMER_TEXTS: LazyLock<Mutex<HashMap<Id, String>>> = LazyLock::new(Default::default);
-
-/// The text the timer `source` shows now, once its first tick has made one.
-pub fn timer_text(source: Id) -> Option<String> {
-    TIMER_TEXTS.lock().get(&source).cloned()
-}
-
-/// The engine's timers: `source` now shows `text` (`None`: the timer is gone).
-pub(crate) fn set_timer_text(source: Id, text: Option<&str>) {
-    if !own() {
-        return;
-    }
-    let mut texts = TIMER_TEXTS.lock();
-    match text {
-        Some(t) => {
-            texts.insert(source, t.to_string());
-        }
-        None => {
-            texts.remove(&source);
-        }
-    }
-}
-
-/// The engine's timers were all removed.
-pub(crate) fn clear_timer_texts() {
-    if own() {
-        TIMER_TEXTS.lock().clear();
-    }
 }
 
 // ---------------------------------------------------------------- avatars

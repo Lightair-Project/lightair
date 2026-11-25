@@ -31,6 +31,8 @@ use crate::bridge::surface_of;
 use crate::obs::{CanvasRef, Data, ObsCanvas, ObsSource, SourceRef};
 use crate::sys;
 
+pub use lightair_host::program::{SceneTarget, add_scene_target, publish_scene, remove_scene_target, scene_targets};
+
 /// The libobs source type.
 pub const ID: &CStr = c"lightair_program";
 
@@ -82,46 +84,6 @@ fn newest(canvas: Id, fresh: bool) -> Option<Buffer> {
     (!fresh || p.at.elapsed() < STALE).then(|| p.buffer.clone())
 }
 
-// ------------------------------------------------------------------ one scene for an output
-
-/// A scene the compositor draws on its own for an output (the virtual camera's "one scene"), at
-/// its canvas's size, whatever is on air. Its frames go to the outputs under `key` (a feed of
-/// its own, not a canvas's).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SceneTarget {
-    pub key: Id,
-    pub scene: Id,
-    /// The canvas the scene is laid out in (whose compositor draws it).
-    pub canvas: Id,
-    /// The most frames a second it's drawn at (numerator, denominator).
-    pub fps: (u32, u32),
-}
-
-static SCENE_TARGETS: Mutex<Vec<SceneTarget>> = Mutex::new(Vec::new());
-
-/// The compositor of `target.canvas` draws `target.scene` for `target.key` from now on.
-pub(crate) fn add_scene_target(target: SceneTarget) {
-    let mut t = SCENE_TARGETS.lock();
-    t.retain(|x| x.key != target.key);
-    t.push(target);
-}
-
-/// Stops drawing the scene for `key`.
-pub(crate) fn remove_scene_target(key: Id) {
-    SCENE_TARGETS.lock().retain(|t| t.key != key);
-}
-
-/// The scenes `canvas`'s compositor draws for outputs. Any thread.
-pub fn scene_targets(canvas: Id) -> Vec<SceneTarget> {
-    SCENE_TARGETS.lock().iter().filter(|t| t.canvas == canvas).copied().collect()
-}
-
-/// Hands `frame` (BGRA, IOSurface-backed, complete on the GPU) over as the newest picture of the
-/// scene drawn for `key`. Any thread.
-pub fn publish_scene(key: Id, frame: &Buffer) {
-    crate::own_outputs::frame(key, frame);
-}
-
 /// A private `lightair_program` source drawing `canvas`'s compositor picture (registered with
 /// libobs first if it isn't yet). Engine thread.
 pub fn create(canvas: Id) -> Option<SourceRef> {
@@ -149,7 +111,7 @@ struct Outs(Option<HashMap<Id, Out>>);
 static OUTS: Mutex<Outs> = Mutex::new(Outs(None));
 
 fn shape(canvas: &Canvas) -> (u32, u32, u32, u32) {
-    (canvas.width.max(2) & !1, canvas.height.max(2) & !1, canvas.fps_num.max(1), canvas.fps_den.max(1))
+    lightair_host::program::shape_of(canvas)
 }
 
 /// Engine thread: makes `canvas`'s output (replacing one it had). `libobs` is the canvas's own
@@ -188,6 +150,7 @@ fn make(canvas: Id, (w, h, num, den): (u32, u32, u32, u32), libobs: CanvasRef, p
         .0
         .get_or_insert_with(HashMap::new)
         .insert(canvas, Out { canvas: out, source, shape: (w, h, num, den), primary });
+    share_shapes();
 }
 
 /// An output taken down while libobs's main video is reset, and what makes it again.
@@ -210,6 +173,7 @@ pub(crate) fn take_down() -> Option<Vec<TakenDown>> {
     }
     let gone: Vec<(Id, Out)> = map.drain().collect();
     drop(outs);
+    share_shapes();
     let mut taken = Vec::with_capacity(gone.len());
     for (canvas, out) in gone {
         taken.push(TakenDown { canvas, shape: out.shape, primary: out.primary });
@@ -239,14 +203,14 @@ pub(crate) fn bring_back(
 
 /// `canvas`'s shape as an output takes it (even sizes, a frame rate of at least 1/1).
 pub(crate) fn shape_of(canvas: &Canvas) -> (u32, u32, u32, u32) {
-    shape(canvas)
+    lightair_host::program::shape_of(canvas)
 }
 
 /// The primary canvas's output, kept from the document before, given to `canvas`; the canvas
 /// it was given before, if there was one.
 fn adopt(canvas: &Canvas) -> Option<Id> {
-    let mut outs = OUTS.lock();
-    let outs = outs.0.as_mut()?;
+    let mut guard = OUTS.lock();
+    let outs = guard.0.as_mut()?;
     let old = outs.iter().find(|(_, o)| o.primary).map(|(id, _)| *id)?;
     let mut out = outs.remove(&old)?;
     if let Some(p) = program_of(&out.source) {
@@ -259,6 +223,8 @@ fn adopt(canvas: &Canvas) -> Option<Id> {
         set_size(&out.source, (w, h));
     }
     outs.insert(canvas.id, out);
+    drop(guard);
+    share_shapes();
     Some(old)
 }
 
@@ -269,6 +235,7 @@ pub(crate) fn detach(canvas: Id) {
     if let Some(out) = gone {
         release(out);
     }
+    share_shapes();
 }
 
 /// Engine thread: removes every output but the primary canvas's (another workspace), which
@@ -284,6 +251,7 @@ pub(crate) fn detach_all() {
     for out in gone {
         release(out);
     }
+    share_shapes();
 }
 
 /// Engine thread, shutting down (after the outputs have stopped): removes every output.
@@ -292,6 +260,7 @@ pub(crate) fn shutdown() {
     for out in gone.into_iter().flat_map(|o| o.into_values()) {
         release(out);
     }
+    share_shapes();
 }
 
 fn release(out: Out) {
@@ -314,6 +283,8 @@ pub(crate) fn resize(canvas: &Canvas) -> bool {
     }
     out.shape = wanted;
     set_size(&out.source, (w, h));
+    drop(outs);
+    share_shapes();
     true
 }
 
@@ -338,9 +309,12 @@ pub(crate) fn canvas_of_video(video: Option<*mut sys::video_t>) -> Option<Id> {
     }
 }
 
-/// The size and frame rate `canvas`'s output was made at, if it has one.
-pub(crate) fn output_shape(canvas: Id) -> Option<(u32, u32, u32, u32)> {
-    OUTS.lock().0.as_ref()?.get(&canvas).map(|o| o.shape)
+/// Tells Lightair's outputs the shape of each canvas's output (they size their encoders by it
+/// when the canvas is gone from the document: another workspace opened).
+fn share_shapes() {
+    let shapes: Vec<(Id, (u32, u32, u32, u32))> =
+        OUTS.lock().0.as_ref().map(|o| o.iter().map(|(id, out)| (*id, out.shape)).collect()).unwrap_or_default();
+    lightair_host::program::set_output_shapes(shapes);
 }
 
 /// The video the outputs of `canvas` take (`None`: the primary canvas), if it has an output.
