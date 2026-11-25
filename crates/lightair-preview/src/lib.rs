@@ -60,6 +60,8 @@ mod readback;
 #[cfg(windows)]
 mod layer;
 #[cfg(windows)]
+pub mod win_gpu;
+#[cfg(windows)]
 pub use layer::Layer;
 
 #[cfg(target_os = "macos")]

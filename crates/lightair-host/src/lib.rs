@@ -14,6 +14,9 @@ pub mod avatar_run;
 pub mod bridge;
 #[cfg(target_os = "macos")]
 pub mod buffers;
+#[cfg(windows)]
+#[path = "buffers_win.rs"]
+pub mod buffers;
 pub mod clock;
 pub mod devices;
 pub mod displays;
