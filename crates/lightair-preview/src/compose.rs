@@ -1401,7 +1401,10 @@ fn renderer_draws(e: &lightair_model::Effect) -> bool {
     let cube = || {
         e.settings.get("image_path").and_then(|p| p.as_str()).is_some_and(|p| p.to_ascii_lowercase().ends_with(".cube"))
     };
-    e.kind.starts_with("fx.") || e.kind == "color_filter_v2" || (e.kind == "clut_filter" && cube())
+    e.kind.starts_with("fx.")
+        || e.kind == "color_filter_v2"
+        || (e.kind == "clut_filter" && cube())
+        || lightair_render::scene::wgsl_of(e).is_some()
 }
 
 /// The pictures made here, with `lightair-engine`'s pictures (decoded images and GIFs, colours),
