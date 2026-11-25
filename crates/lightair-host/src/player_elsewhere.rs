@@ -1,5 +1,5 @@
-//! The Library's player where Lightair has no media player of its own yet (Windows without
-//! libobs): nothing opens, and opening says so in the log once.
+//! The Library's player where Lightair has no media player of its own yet (Windows): nothing
+//! opens, and opening says so in the log once.
 
 use std::path::Path;
 
@@ -14,7 +14,7 @@ impl Player {
     /// Opens nothing here yet: `None`, said in the log once.
     pub fn open(path: &Path) -> Option<Player> {
         static SAID: std::sync::Once = std::sync::Once::new();
-        SAID.call_once(|| tracing::warn!(?path, "not yet: the Library's player on this platform without libobs"));
+        SAID.call_once(|| tracing::warn!(?path, "not yet: the Library's player on this platform"));
         None
     }
 

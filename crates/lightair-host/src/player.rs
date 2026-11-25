@@ -78,7 +78,7 @@ impl Player {
         Some(Player { player, id, _speaker: speaker })
     }
 
-    /// What a preview shows it as: nothing yet without libobs.
+    /// What a preview shows it as: nothing yet (the Library draws the player's frames itself).
     pub fn source_ref(&self) -> Option<(Id, Id)> {
         None
     }

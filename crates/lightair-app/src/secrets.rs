@@ -75,7 +75,7 @@ pub fn remote_password() -> Option<String> {
     Some(p)
 }
 
-/// The remote API's password, read on a thread of its own as the app starts (while libobs
+/// The remote API's password, read on a thread of its own as the app starts (while the engine
 /// starts), so the API answers as soon as the window is up rather than a credential read later.
 static EARLY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 

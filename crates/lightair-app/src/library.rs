@@ -274,7 +274,7 @@ impl Library {
     fn close_player(&mut self, cx: &mut Context<Self>) {
         if let Some(p) = self.playing.take() {
             p.preview.set_source(None);
-            // the source goes on the engine thread, with libobs's other work
+            // the player goes on the engine thread, with the engine's other work
             let player = p.player;
             self.studio.read(cx).engine().post(move |_| drop(player));
         }

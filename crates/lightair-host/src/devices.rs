@@ -1,6 +1,6 @@
 //! Audio interfaces, captured directly (CoreAudio on macOS, WASAPI on Windows, through cpal): every channel of a device, so
 //! an 8-input interface is eight mics (docs/plans/audio-engine.md, "Inputs and outputs").
-//! libobs's own device capture mixes a device down to stereo; this doesn't.
+//! Every channel of a device is its own input: nothing mixes it down to stereo.
 //!
 //! cpal's streams live on one thread of their own; the engine opens and closes them there.
 
@@ -15,7 +15,7 @@ pub const DEVICE_KIND: &str = lightair_model::kinds::AUDIO_DEVICE;
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceInfo {
     /// What settings store: the device's own id (CoreAudio's UID, WASAPI's endpoint id), the
-    /// same one libobs uses. Two identical interfaces have different ids; renaming one in the
+    /// same one OBS stores. Two identical interfaces have different ids; renaming one in the
     /// system's settings doesn't change it.
     pub id: String,
     /// What it's called (shown, never looked up by).

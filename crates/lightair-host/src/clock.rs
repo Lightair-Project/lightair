@@ -1,7 +1,6 @@
 //! Lightair's clock: the host's monotonic clock in nanoseconds (`mach_absolute_time` on macOS,
 //! the performance counter on Windows, `CLOCK_MONOTONIC` elsewhere), which captures, decoders,
-//! the mixer and the encoders all stamp with. It's the clock libobs's `os_gettime_ns` read too,
-//! so times from either agree while both are in use.
+//! the mixer and the encoders all stamp with.
 
 /// Nanoseconds on the host clock.
 pub fn now_ns() -> u64 {

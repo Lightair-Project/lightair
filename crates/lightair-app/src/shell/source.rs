@@ -60,7 +60,7 @@ fn value_text(v: &Value) -> String {
     v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())
 }
 
-/// Turns libobs's labels into titles: "[App] Window title" for windows, "Name: WxH @ x,y" for
+/// Turns the system's labels into titles: "[App] Window title" for windows, "Name: WxH @ x,y" for
 /// displays. Drops placeholders, and the windows `hide` says to (Lightair's and the system's:
 /// [`lightair_platform::apps::hide_window`]). (`key` is the portable setting.)
 pub(super) fn choices(key: &str, options: &[(String, Value)], hide: impl Fn(&Value) -> bool) -> Vec<Choice> {
@@ -114,7 +114,7 @@ impl StudioWindow {
         if !refresh && let Some(list) = cached {
             return list;
         }
-        // the setting's name in the platform's libobs source
+        // the setting's name as the platform's lists of displays, windows and cameras know it
         let obs_key = self
             .studio
             .read(cx)

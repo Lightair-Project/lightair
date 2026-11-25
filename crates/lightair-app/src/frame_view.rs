@@ -7,8 +7,8 @@ use lightair_preview::Frame;
 
 #[cfg(target_os = "macos")]
 pub fn frame(f: Frame) -> FrameElement {
-    // GPUI draws NV12 surfaces only; libobs's Metal renderer (LIGHTAIR_GRAPHICS) hands over
-    // BGRA frames, converted once per frame here
+    // GPUI draws NV12 surfaces only; the compositor hands over BGRA frames, converted once per
+    // frame here
     match lightair_preview::nv12(&f) {
         Some(f) => FrameElement::Surface(Box::new(surface(f))),
         None => FrameElement::Empty(Box::new(div())),

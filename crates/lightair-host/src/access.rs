@@ -13,11 +13,10 @@ pub enum Media {
     Camera,
 }
 
-/// The access a libobs source type needs, if any.
+/// The access a source kind needs, if any.
 pub fn needed_by(kind: &str) -> Option<Media> {
     match kind {
-        // (Lightair's own device inputs are a placeholder in libobs: the mixer opens the device,
-        // and holds back there)
+        // (Lightair's own device inputs: the mixer opens the device, and holds back there)
         "coreaudio_input_capture" => Some(Media::Microphone),
         "macos-avcapture" | "macos-avcapture-fast" | "av_capture_input" | "av_capture_input_v2" => Some(Media::Camera),
         _ => None,

@@ -42,9 +42,9 @@ lightair-automation = { git = "https://github.com/Lightair-Project/lightair-core
 lightair-remote = { git = "https://github.com/Lightair-Project/lightair-core", rev = "16ed53782e648e7c2e12f1b3e2ae95507c6db69b" }
 lightair-platform = { git = "https://github.com/Lightair-Project/lightair-core", rev = "16ed53782e648e7c2e12f1b3e2ae95507c6db69b" }
 lightair-pngtuber = { git = "https://github.com/Lightair-Project/lightair-core", rev = "16ed53782e648e7c2e12f1b3e2ae95507c6db69b" }
-# the faces lightair-render draws text with (the compositor gives it the ones libobs's text finds)
+# the faces lightair-render draws text with (the compositor gives it the system's)
 lightair-fonts = { git = "https://github.com/Lightair-Project/lightair-core", rev = "16ed53782e648e7c2e12f1b3e2ae95507c6db69b" }
-# Lightair's own engine: the compositor's native pictures and the keyers (macOS, LIGHTAIR_ENGINE=own)
+# Lightair's own engine: the compositor's native pictures and the keyers
 lightair-engine = { git = "https://github.com/Lightair-Project/lightair-core", rev = "16ed53782e648e7c2e12f1b3e2ae95507c6db69b" }
 
 anyhow = "1"

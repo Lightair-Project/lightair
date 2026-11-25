@@ -99,7 +99,7 @@ fn main() {
     // Chromium's library before any other thread exists (lightair_web::preload)
     lightair_web::preload();
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("LIGHTAIR_LOG").unwrap_or_else(|_| "info,libobs=warn".into()))
+        .with_env_filter(std::env::var("LIGHTAIR_LOG").unwrap_or_else(|_| "info".into()))
         .init();
     // Chromium's profile (cookies: platforms signed in to) kept with Lightair's data
     lightair_web::set_profile_dir(lightair_platform::paths::data_dir().join("Chromium"));
@@ -140,10 +140,10 @@ fn main() {
     // iPhones and iPads by USB, among the cameras
     lightair_platform::devices::allow_ios_screens();
     let preview = Preview::attach();
-    // Lightair's own compositor draws the program in the window instead of libobs
+    // Lightair's own compositor draws the program in the window
     #[cfg(any(target_os = "macos", windows))]
     if lightair_host::bridge::own() && !preview.compose_program() {
-        tracing::warn!("LIGHTAIR_ENGINE=own: the compositor didn't start; libobs draws the program");
+        tracing::warn!("the compositor didn't start: the program's preview stays empty");
     }
 
     gpui_kit::application().with_assets(assets::Assets).run(move |cx: &mut App| {

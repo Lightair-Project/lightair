@@ -1,29 +1,6 @@
 //! What the phone camera's direct decoders share (macOS: VideoToolbox, `phone_decode.rs`;
 //! Windows: Media Foundation, `phone_decode_win.rs`): splitting the phone's units (Annex B
-//! access units, ADTS frames), BT.709 for libobs, and the private async source decoded frames
-//! go into.
-
-
-
-/// BT.709 YCbCr to RGB, as libobs takes it (rows of [y, cb, cr, 1]), and the ranges.
-pub fn bt709(full: bool) -> ([f32; 16], [f32; 3], [f32; 3]) {
-    if full {
-        (
-            [1.0, 0.0, 1.5748, -0.7874, 1.0, -0.1873, -0.4681, 0.3277, 1.0, 1.8556, 0.0, -0.9278, 0.0, 0.0, 0.0, 1.0],
-            [0.0; 3],
-            [1.0; 3],
-        )
-    } else {
-        (
-            [
-                1.1644, 0.0, 1.7927, -0.9729, 1.1644, -0.2132, -0.5329, 0.3015, 1.1644, 2.1124, 0.0, -1.1334, 0.0, 0.0,
-                0.0, 1.0,
-            ],
-            [16.0 / 255.0; 3],
-            [235.0 / 255.0, 240.0 / 255.0, 240.0 / 255.0],
-        )
-    }
-}
+//! access units, ADTS frames).
 
 /// The NAL units of an Annex B access unit, without their start codes.
 // (Windows hands its decoder Annex B as it is)

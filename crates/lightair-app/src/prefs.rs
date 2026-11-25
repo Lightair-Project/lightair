@@ -20,7 +20,7 @@ pub struct Preferences {
     /// "Listen in headphones" device: (name, id); `None`: the system default.
     #[serde(alias = "monitor_device")]
     pub headphones_device: Option<(String, String)>,
-    /// Monitor straight from the audio engine (a few ms) rather than through libobs (~100 ms).
+    /// Monitor on the headphones device chosen, straight from the audio engine (a few ms).
     #[serde(alias = "direct_monitor")]
     pub low_latency_headphones: bool,
     /// The monitor plays the stream mix rather than the cued tracks.
@@ -144,7 +144,7 @@ impl Default for Preferences {
     }
 }
 
-/// The sample rate libobs started with (a change applies next launch).
+/// The sample rate the engine started with (a change applies next launch).
 pub static RUNNING_SAMPLE_RATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(48_000);
 
 /// The loudness target, for the mixer's readout.

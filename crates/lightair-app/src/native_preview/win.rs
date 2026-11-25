@@ -3,7 +3,7 @@
 //! GPUI shows its window through a DirectComposition swap chain with alpha; the patched GPUI
 //! (third_party/gpui-pre-windows) puts an "underlay" visual below it. Here the underlay holds the
 //! window's background, the canvas well, and in the well one visual per canvas showing a swap
-//! chain that libobs's graphics thread presents the preview to (`lightair_preview::Layer`). GPUI
+//! chain that the compositor's frames are presented to (`lightair_preview::Layer`). GPUI
 //! leaves the well transparent, so the picture shows through, and a new frame redraws nothing
 //! of the UI: the counterpart of the macOS Core Animation preview.
 
@@ -272,8 +272,8 @@ impl NativePreview {
         }
     }
 
-    /// Places the pictures again when a swap chain changed size since (libobs's thread resizes
-    /// it to the size it's shown at, a frame after it's asked): called on a timer, cheap. Shows
+    /// Places the pictures again when a swap chain changed size since (it's resized to the
+    /// frames presented to it, a frame after they change): called on a timer, cheap. Shows
     /// the Editor player's new swap chain (the renderer made one: it shows once committed).
     pub fn refit(&mut self) {
         if self.pictures.values().any(|p| p.layer.size() != p.sized) {

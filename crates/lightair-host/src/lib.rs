@@ -1,6 +1,6 @@
-//! Lightair's engine without libobs: what the desktop runs its show on. It grows as the libobs
-//! engine (`lightair-obs`) shrinks: each part moves here once nothing in it needs libobs, and
-//! `lightair-obs` re-exports it until it's gone (docs/plans/no-libobs.md).
+//! Lightair's engine: what the desktop runs its show on. The engine thread and the document host
+//! (a runtime per source), the mixer, devices, plug-ins, meters, Lightair's own outputs and what
+//! the compositor (`lightair-preview`) reads of the show.
 
 pub mod access;
 pub mod audio;
@@ -27,7 +27,7 @@ pub mod face_drive;
 pub mod ffmpeg_media;
 #[cfg(any(target_os = "macos", windows))]
 pub mod frames;
-pub mod gpu;
+
 pub mod host;
 pub mod kinds;
 pub mod loudness;

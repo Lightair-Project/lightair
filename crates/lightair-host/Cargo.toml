@@ -1,6 +1,6 @@
 [package]
 name = "lightair-host"
-description = "Lightair's engine without libobs: the mixer, devices, plug-ins, meters and the parts of the show that need no libobs"
+description = "Lightair's engine: the document host, the mixer, devices, plug-ins, meters and Lightair's own outputs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

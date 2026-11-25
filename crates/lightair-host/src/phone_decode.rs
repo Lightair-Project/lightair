@@ -9,8 +9,8 @@
 //! VideoToolbox takes.
 //!
 //! The decoding is [`Decoder`], which hands each picture to whoever made it (Lightair's
-//! compositor, as BGRA IOSurfaces, or libobs's phone wrapper in lightair-obs) and each block of
-//! sound to a function of the caller's (a track's feed in the mixer, or libobs); in
+//! compositor, as BGRA IOSurfaces) and each block of sound to a function of the caller's (a
+//! track's feed in the mixer); in
 //! `lightair-preview` it also decodes another computer's stream received over SRT.
 
 use std::ffi::c_void;
@@ -230,7 +230,7 @@ unsafe extern "C" fn decoded(
 }
 
 /// What a decompression session is asked to make: BGRA in IOSurfaces Metal can use (for
-/// Lightair's compositor), rather than the decoder's own choice (NV12, for libobs).
+/// Lightair's compositor), rather than the decoder's own choice (NV12).
 fn bgra_attributes() -> CFRetained<CFDictionary<CFString, CFType>> {
     let empty: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(&[], &[]);
     let format = CFNumber::new_i32(FOURCC_BGRA as i32);
@@ -481,8 +481,8 @@ fn delimiter(hevc: bool, nal: &[u8]) -> bool {
 }
 
 /// H.264 or HEVC and AAC decoded by VideoToolbox and AudioToolbox, unit by unit as they come.
-/// Pictures go to the [`Pictures`] it was made with, in decoding order; sound into a libobs
-/// source. Used on one thread (its sessions stay there).
+/// Pictures go to the [`Pictures`] it was made with, in decoding order; sound to the caller's
+/// function. Used on one thread (its sessions stay there).
 pub struct Decoder {
     video: Option<Video>,
     audio: Option<Audio>,

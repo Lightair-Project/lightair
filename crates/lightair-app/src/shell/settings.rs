@@ -258,7 +258,7 @@ impl StudioWindow {
     /// Tells the audio engine where and what to monitor, from the preferences.
     fn apply_headphones(&self, cx: &mut Context<Self>) {
         let p = &self.prefs;
-        // the device by its id (the same one libobs's monitoring uses)
+        // the device by its id
         let device = p.low_latency_headphones.then(|| p.headphones_device.clone().map_or(String::new(), |(_, id)| id));
         let program = p.headphones_hear_program;
         self.studio.read(cx).engine().call(move |s| s.reconciler.set_headphones(device, program));
@@ -1719,7 +1719,6 @@ impl StudioWindow {
 
     fn about_page(&self, cx: &mut Context<Self>) -> Div {
         let studio = self.studio.read(cx);
-        let libobs = studio.engine().version.clone();
         let folders = [
             ("Workspace", studio.workspace_dir()),
             ("Recordings", Some(studio.recording_folder())),
@@ -1731,11 +1730,7 @@ impl StudioWindow {
             where_ = where_.child(row(label, shown.as_deref(), reveal_button(("reveal", i), dir)));
         }
         pages()
-            .child(group("Lightair").child(row("Version", None, value(env!("CARGO_PKG_VERSION")))).child(row(
-                "libobs",
-                Some("The OBS engine Lightair runs on."),
-                value(&libobs),
-            )))
+            .child(group("Lightair").child(row("Version", None, value(env!("CARGO_PKG_VERSION")))))
             .child(where_)
             .child(self.updates_group(cx))
     }

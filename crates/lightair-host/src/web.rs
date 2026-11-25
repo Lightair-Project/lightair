@@ -34,8 +34,7 @@ mod mac {
     /// its next frame, one being copied into, one free.
     const RING: usize = 6;
 
-    /// How long after the compositor last took a frame libobs still leaves the page undrawn
-    /// (less than an output's wait before it falls back to libobs's own picture).
+    /// How long after the compositor last took a frame the page still counts as drawn by it.
     const TAKEN_FOR: Duration = Duration::from_millis(250);
 
     /// What [`now`] counts from.
@@ -174,14 +173,14 @@ mod mac {
     pub struct Frames {
         /// Painted, not yet drawn.
         next: Mutex<Option<Surface>>,
-        /// What libobs's drawing shows now (kept in use while it does).
+        /// What a drawer of the frames shows now (kept in use while it does).
         shown: Mutex<Option<Surface>>,
         /// Copies for Lightair's own compositor, made while it wants the page.
         copies: Mutex<Copies>,
         wanted: AtomicBool,
         /// The page should paint again (the compositor has no copy of what it shows).
         repaint: AtomicBool,
-        /// When the compositor last took a frame to draw in libobs's place ([`now`]; 0: never).
+        /// When the compositor last took a frame to draw ([`now`]; 0: never).
         taken: AtomicU64,
     }
 
@@ -226,8 +225,8 @@ mod mac {
         }
 
         /// The newest finished copy of the page's frame, and a count that changes with each new
-        /// one. `take`: the compositor draws it in libobs's place, so libobs stops drawing the page
-        /// for as long as frames keep being taken.
+        /// one. `take`: the compositor draws it, and counts as drawing the page for as long as
+        /// frames keep being taken.
         pub fn frame(&self, take: bool) -> Option<(crate::buffers::Buffer, u64)> {
             let latest = {
                 let mut copies = self.copies.lock();
@@ -245,13 +244,13 @@ mod mac {
             self.repaint.swap(false, Ordering::Relaxed)
         }
 
-        /// Whether the compositor draws the page in libobs's place now.
+        /// Whether the compositor draws the page now.
         pub fn taken(&self) -> bool {
             let at = self.taken.load(Ordering::Relaxed);
             at != 0 && now().saturating_sub(at) < TAKEN_FOR.as_nanos() as u64
         }
 
-        /// For a drawer (libobs): the newest painted frame not drawn yet.
+        /// For a drawer other than the compositor: the newest painted frame not drawn yet.
         pub fn take_next(&self) -> Option<Surface> {
             self.next.lock().take()
         }
@@ -298,8 +297,7 @@ pub use mac::{Feed, Frames, Surface, feed};
 // ---------------------------------------------------------------------------------------------
 // The page
 
-/// Where a page's frames and sound go besides the compositor and the mixer (libobs's web source,
-/// while libobs is there).
+/// Where a page's frames and sound go besides the compositor and the mixer.
 pub trait Elsewhere: Send + Sync {
     /// A frame painted into memory (where Chromium can't share textures).
     fn frame(&self, bgra: &[u8], width: u32, height: u32);

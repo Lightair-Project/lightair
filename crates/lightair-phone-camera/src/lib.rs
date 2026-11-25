@@ -1,9 +1,9 @@
 //! A phone as a camera layer (docs/07-scenes-layers-canvas.md, LY-16; lightair-live's docs/05 §6),
-//! the parts that don't need libobs or the UI:
+//! the parts that don't need the engine or the UI:
 //!
 //! - [`srt`]: the listener phones send their MPEG-TS to over Wi-Fi (SRT, the phone calling, AES-128
 //!   with a passphrase per session), each stream handed on as UDP datagrams to this machine's
-//!   decoder (libobs's FFmpeg has no SRT; `lightair_obs::phone_camera` decodes from UDP).
+//!   decoder (`lightair_host::phone_camera`).
 //!
 //! - [`link`]: the USB link (Lightair Live's `lightair_link::usb`): control tunnelled to the
 //!   phones' TLS port, media on its own channel; reached through [`usbmux`] (iPhones), [`aoa`]

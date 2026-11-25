@@ -1,6 +1,6 @@
-//! An avatar source's tracking without libobs: the compositor draws and poses the model
-//! (`lightair-preview`'s avatars); this runs what poses it and publishes each frame's posing by
-//! the source's id (`crate::bridge::set_avatar_posing`), as libobs's avatar source did.
+//! An avatar source's tracking: the compositor draws and poses the model (`lightair-preview`'s
+//! avatars); this runs what poses it and publishes each frame's posing by the source's id
+//! (`crate::bridge::set_avatar_posing`).
 //!
 //! - **The camera**: the source's own capture (lightair-capture), running while something shows
 //!   the avatar and a moment after (`LINGER`). Each frame goes to the trackers as it comes.

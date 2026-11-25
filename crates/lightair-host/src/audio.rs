@@ -56,7 +56,8 @@ fn band(r: &Reader, n: usize) -> Band {
     Band { on: r.flag(&k("on")), kind, freq: r.num(&k("freq")), gain_db: r.num(&k("gain")), q: r.num(&k("q")) }
 }
 
-/// An effect's engine params; `None` for kinds the engine doesn't run (older libobs filters).
+/// An effect's engine params; `None` for kinds the engine doesn't run (older filters, as OBS
+/// named them).
 pub fn params(e: &Effect) -> Option<Params> {
     let def = catalog::def(&e.kind)?;
     let r = Reader { def, s: &e.settings };

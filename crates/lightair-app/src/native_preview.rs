@@ -3,8 +3,8 @@
 //! GPUI redraws its whole window whenever anything in it moves, so a live picture drawn by GPUI
 //! cost a full redraw 60 times a second. Instead a view of Lightair's own sits below GPUI's in
 //! the window: its layer paints the window's background, the canvas well, and in it one layer per
-//! canvas showing that canvas's preview frames (handed over by the preview straight from libobs's
-//! graphics thread, `Preview::set_layer`). The window is transparent where nothing is painted,
+//! canvas showing that canvas's preview frames (handed over by the preview straight from the
+//! compositor's thread, `Preview::set_layer`). The window is transparent where nothing is painted,
 //! and GPUI leaves the canvas well unpainted, so the picture shows through; everything GPUI draws
 //! (selection, guides, menus, any panel over the canvas) is drawn over it as before.
 

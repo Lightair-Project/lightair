@@ -61,7 +61,7 @@ pub enum Look {
 }
 
 struct State {
-    /// The co-host's avatar (its source's libobs name, which is the model Id).
+    /// The co-host's avatar (its source's Id, as text).
     target: Option<String>,
     /// The voice's mouth as it was played: when, open 0..1, wide -1..1.
     voice: VecDeque<(Instant, f32, f32)>,

@@ -1,5 +1,5 @@
-//! Media files and streams AVFoundation doesn't play (WebM, MKV, AVI, a network stream…), without
-//! libobs (macOS): decoded by the `ffmpeg` tool Lightair ships (`lightair_render::media::ffmpeg`),
+//! Media files and streams AVFoundation doesn't play (WebM, MKV, AVI, a network stream…) (macOS):
+//! decoded by the `ffmpeg` tool Lightair ships (`lightair_render::media::ffmpeg`),
 //! in real time, while the source is on air. Two processes per run: the pictures (raw RGBA,
 //! published by the source's id for the compositor: [`crate::frames`]) and the sound (float PCM
 //! at the mixer's rate, into its feed by id).

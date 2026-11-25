@@ -1,6 +1,6 @@
-//! The document host: the Lightair document as it runs without libobs. It takes the same
-//! patches the libobs reconciler takes (`lightair_model::diff`), on the engine thread, and keeps
-//! what the document needs running besides Lightair's own compositor:
+//! The document host: the Lightair document as it runs. It takes the document's patches
+//! (`lightair_model::diff`) on the engine thread, and keeps what the document needs running
+//! besides Lightair's own compositor:
 //!
 //! - **The show:** the workspace as last applied, published for the compositors
 //!   (`crate::show::publish`) after every change, and the scene switch each program change
@@ -15,9 +15,9 @@
 //!   another computer. Whether each is on air follows the program, the overlays, a switch under
 //!   way and the scenes drawn for outputs alone.
 //!
-//! What has no runtime without libobs yet (avatars' posing, phone cameras' decoding, playlists,
-//! media files AVFoundation can't play) is logged once per kind; the methods that would reach it
-//! return nothing.
+//! What has no runtime yet on a platform (on Windows: the soundboard, media files, desktop and
+//! app sound, phone cameras, a camera over USB) is logged once per kind; the methods that would
+//! reach it return nothing.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -70,7 +70,7 @@ enum Need {
     Ffmpeg,
     /// An audio input the mixer opens itself: its device setting ("" or "default": the system's).
     Device(String),
-    /// Something that has no runtime without libobs yet (what it is, for the log).
+    /// Something that has no runtime yet (what it is, for the log).
     Missing(&'static str),
 }
 
@@ -132,7 +132,7 @@ fn need(source: &Source) -> Need {
     }
 }
 
-/// A web page source's page, from its settings (the libobs source's defaults where unset).
+/// A web page source's page, from its settings (the page source's defaults where unset).
 #[cfg(any(target_os = "macos", windows))]
 fn page_options(s: &serde_json::Value) -> lightair_web::PageOptions {
     let int = |k: &str, default: i64| s[k].as_i64().unwrap_or(default);
@@ -235,19 +235,10 @@ struct Under {
     ends: Instant,
 }
 
-/// Logs once that `what` isn't available without libobs yet.
-fn not_yet(what: &'static str) {
-    static SEEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
-    let mut seen = SEEN.lock();
-    if !seen.contains(&what) {
-        seen.push(what);
-        tracing::debug!(what, "not available without libobs yet");
-    }
-}
 
 // ---------------------------------------------------------------- the host
 
-/// The document host, owned by the engine thread (the libobs engine's `Reconciler`).
+/// The document host, owned by the engine thread (the app calls it the `reconciler`).
 pub struct Host {
     /// The transition the next program change uses instead of its scene's or the workspace's
     /// (a phone's `staging.take` with a transition), used once.
@@ -681,7 +672,7 @@ impl Host {
             Need::Nothing | Need::Device(_) => return,
             Need::Missing(what) => {
                 if self.missing_logged.insert(*what) {
-                    tracing::info!(what, kind = source.kind, "no runtime for this kind of source without libobs yet");
+                    tracing::info!(what, kind = source.kind, "no runtime for this kind of source yet");
                 }
                 return;
             }
@@ -805,7 +796,7 @@ impl Host {
                 }
                 None => {
                     if !host.capture(*source) && self.silent_logged.insert(*source) {
-                        tracing::debug!(%source, "a track's source doesn't feed the mixer without libobs");
+                        tracing::debug!(%source, "a track's source doesn't feed the mixer");
                     }
                 }
             }
@@ -930,8 +921,8 @@ impl Host {
     /// Monitoring straight from the audio engine to an output device (`None`: none).
     /// `program`: hear the stream mix rather than the cue.
     pub fn set_headphones(&mut self, device: Option<String>, program: bool) {
-        // without libobs nothing else plays the cue: the monitoring device chosen, when no
-        // device is given for direct monitoring
+        // nothing else plays the cue: the monitoring device chosen, when no device is given for
+        // direct monitoring
         self.monitor_follows = device.is_none();
         let device = device.unwrap_or_else(|| crate::monitoring::current().1);
         self.monitor = Some((if device == "default" { String::new() } else { device }, program));
@@ -1152,7 +1143,7 @@ impl Host {
         out
     }
 
-    /// An avatar source's status (`None`: avatars don't run without libobs yet).
+    /// An avatar source's status (`None`: not an avatar).
     pub fn avatar_status(&self, source: Id) -> Option<AvatarStatus> {
         #[cfg(any(target_os = "macos", windows))]
         if let Some(Runtime::Avatar(avatar)) = self.runtimes.get(&source) {
@@ -1163,11 +1154,6 @@ impl Host {
         avatar.then(|| avatar_status_of(&source))
     }
 
-    /// A model drawn on its own for a library picture (`None`: not without libobs yet).
-    pub fn avatar_snapshot_source(&self, _file: &str, _framing: &str) -> Option<Id> {
-        not_yet("avatar_snapshot_source");
-        None
-    }
 
     /// A PNGtuber's push to talk held, or let go.
     pub fn avatar_push_to_talk(&self, source: Id, held: bool) {
@@ -1244,8 +1230,8 @@ impl Host {
         }
     }
 
-    /// The choices a source offers for a list setting, by the setting's name as libobs's source
-    /// called it (`crate::kinds::libobs_key`): a screen's displays, windows or apps, a camera's
+    /// The choices a source offers for a list setting, by the setting's name as the platform's
+    /// lists know it (`crate::kinds::libobs_key`): a screen's displays, windows or apps, a camera's
     /// devices, a microphone's (or a loopback device's) inputs, the apps whose sound can be
     /// taken. (label, value).
     pub fn source_options(&self, source: Id, property: &str) -> Vec<(String, serde_json::Value)> {
@@ -1353,8 +1339,8 @@ impl Host {
         self.canvas_ref(canvas)
     }
 
-    /// What the document holds as the libobs engine counted it: (sources, scenes in each canvas,
-    /// objects with a source in each canvas). For tests and diagnostics.
+    /// What the document holds: (sources, scenes in each canvas, objects with a source in each
+    /// canvas). For tests and diagnostics.
     pub fn counts(&self) -> (usize, usize, usize) {
         let Some(ws) = &self.workspace else { return (0, 0, 0) };
         let canvases = ws.canvases.len();

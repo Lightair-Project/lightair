@@ -1,7 +1,7 @@
 //! Audio level telemetry (docs/03-architecture.md, "Runtime and telemetry flow").
 //!
-//! libobs volume meters call back on the audio thread; each callback writes into a lock-free
-//! [`MeterCell`]. The UI reads the cells once per frame while a meter is visible. Nothing here
+//! The mixer's meters write on the audio thread into a lock-free [`MeterCell`] per track. The
+//! UI reads the cells once per frame while a meter is visible. Nothing here
 //! allocates or locks on the audio thread.
 
 use std::collections::HashMap;
@@ -77,7 +77,7 @@ fn epoch() -> Instant {
     *EPOCH.get_or_init(Instant::now)
 }
 
-/// Meter cells by track id. One bank per process, like libobs itself.
+/// Meter cells by track id. One bank per process.
 #[derive(Default)]
 pub struct MeterBank {
     cells: RwLock<HashMap<Id, Arc<MeterCell>>>,
@@ -105,7 +105,7 @@ pub fn meters() -> &'static MeterBank {
     BANK.get_or_init(MeterBank::default)
 }
 
-/// dB → linear amplitude multiplier for libobs volume.
+/// dB → linear amplitude multiplier.
 pub fn db_to_mul(db: f32) -> f32 {
     if db.is_finite() { 10f32.powf(db / 20.0) } else { 0.0 }
 }

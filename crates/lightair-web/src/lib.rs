@@ -67,8 +67,8 @@ pub fn set_cookies(list: Vec<CookieSpec>, done: impl FnOnce(usize) + Send + 'sta
 
 static PROFILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// The GPU Chromium renders on (Windows: an adapter LUID, "high,low"): the one libobs draws
-/// with, so the textures it shares open on libobs's device (on a laptop with two GPUs Chromium
+/// The GPU Chromium renders on (Windows: an adapter LUID, "high,low"): the one Lightair draws
+/// with, so the textures it shares open on Lightair's device (on a laptop with two GPUs Chromium
 /// could otherwise pick the other).
 static GPU_ADAPTER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -237,7 +237,7 @@ pub fn available() -> bool {
 }
 
 /// Loads Chromium's library now, while this is the only thread. On macOS Chromium's allocator
-/// takes over the process's memory zone as its library loads; loaded later, with libobs's threads
+/// takes over the process's memory zone as its library loads; loaded later, with other threads
 /// already allocating, a free racing the takeover crashed it now and then at startup. Call first
 /// thing in `main` (cheap: the library is mapped, nothing starts).
 pub fn preload() {

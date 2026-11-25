@@ -72,7 +72,7 @@ fn fill(m: &mut Machine) {
         CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IDXGIAdapter1, IDXGIFactory1,
         IDXGIFactory6,
     };
-    // the graphics processor Windows ranks first for performance (the one libobs renders on)
+    // the graphics processor Windows ranks first for performance (the one Lightair draws on)
     let gpu = || -> Option<Gpu> {
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1().ok()? };
         let f6: IDXGIFactory6 = windows::core::Interface::cast(&factory).ok()?;

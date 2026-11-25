@@ -1,7 +1,7 @@
 //! The Phone camera layer's picture and sound (docs/07-scenes-layers-canvas.md, LY-16;
 //! lightair-live's docs/05 §6). A phone in Lightair Live's Camera mode sends MPEG-TS over SRT;
-//! the app receives it (`lightair-phone-camera`) and hands each datagram to a UDP port on this
-//! machine, where a private `ffmpeg_source` decodes it (libobs's FFmpeg has no SRT of its own).
+//! the app receives it (`lightair-phone-camera`) and hands each unit to the source's [`Feed`],
+//! where this machine's decoder takes it (macOS: VideoToolbox, `phone_decode`).
 //!
 //! `lightair_phone_camera` wraps that decoder:
 //!
@@ -11,18 +11,14 @@
 //!   line saying what it waits for) until pictures come again;
 //! - the phone encodes as its sensor sees and says which way is up: the wrapper turns the
 //!   picture (90° steps) and reports the turned size;
-//! - the phone's microphone is passed through as the wrapper's sound (a mixer track); with
-//!   `LIGHTAIR_ENGINE=own` and the audio engine (macOS), straight into the track's feed while a
-//!   track takes it (`audio_host::feed_slot`), not through libobs.
+//! - the phone's microphone goes straight into the track's feed while a track takes it
+//!   (`audio_host::feed_slot`).
 //!
 //! The app talks to a source's [`Feed`] by the source's id. The feeds, their timing and the
-//! decoder live here; libobs's wrapper source (the placeholder, drawing the pictures where libobs
-//! shows the source) is lightair-obs's `phone_camera`.
+//! decoder live here.
 //!
-//! With `LIGHTAIR_ENGINE=own` (macOS), Lightair's compositor takes a feed's pictures while it
-//! shows the source ([`Feed::take`]): the decoder makes BGRA IOSurfaces and hands each to the
-//! compositor instead of copying it into libobs, and the wrapper draws those same surfaces
-//! (turned upright) where libobs still shows the source. The sound goes the same way either way.
+//! Lightair's compositor takes a feed's pictures while it shows the source ([`Feed::take`]): the
+//! decoder makes BGRA IOSurfaces (macOS) and hands each to the compositor.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -37,7 +33,7 @@ use parking_lot::Mutex;
 #[cfg(target_os = "macos")]
 pub use crate::phone_decode::{Decoder, Pictures};
 
-/// The workspace kind (and libobs id) of a Phone camera source.
+/// The workspace kind of a Phone camera source.
 pub const KIND: &str = "lightair_phone_camera";
 
 /// How long a feed may bring nothing before the placeholder shows (the phone dropped).
@@ -74,8 +70,8 @@ pub struct Unit {
     pub data: Vec<u8>,
 }
 
-/// Whether this platform decodes phone feeds itself (macOS: VideoToolbox, `Feed::push`), not
-/// through libobs's media source over UDP (`Feed::addr`).
+/// Whether this platform decodes phone feeds itself (macOS: VideoToolbox, `Feed::push`), rather
+/// than over UDP (`Feed::addr`).
 pub const DECODES_DIRECTLY: bool = cfg!(any(target_os = "macos", windows));
 
 /// How long a frame took to get somewhere, over the last few seconds (milliseconds).
@@ -157,9 +153,9 @@ fn now_us() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_micros() as u64 + 1
 }
 
-/// What takes a feed's pictures instead of libobs (Lightair's compositor): each decoded picture
+/// What takes a feed's pictures (Lightair's compositor): each decoded picture
 /// (BGRA, IOSurface-backed, borrowed for the call) and the clockwise degrees that turn it
-/// upright. It answers whether it took the picture; one it didn't take goes to libobs.
+/// upright. It answers whether it took the picture; one it didn't take isn't drawn.
 #[cfg(target_os = "macos")]
 pub type Taker = Arc<dyn Fn(&objc2_core_video::CVPixelBuffer, u32) -> bool + Send + Sync>;
 
@@ -290,8 +286,8 @@ impl Feed {
         }
     }
 
-    /// Lightair's compositor takes this feed's pictures (`Some`), or gives them back to libobs
-    /// (`None`). Pictures are BGRA IOSurfaces only with `LIGHTAIR_ENGINE=own`.
+    /// Lightair's compositor takes this feed's pictures (`Some`), or lets them go (`None`).
+    /// Pictures are BGRA IOSurfaces.
     #[cfg(target_os = "macos")]
     pub fn take(&self, taker: Option<Taker>) {
         let mut t = self.taken.lock();
@@ -301,7 +297,7 @@ impl Feed {
         t.taker = taker;
     }
 
-    /// A decoded picture, offered to the compositor: whether it took it (else it goes to libobs).
+    /// A decoded picture, offered to the compositor: whether it took it.
     #[cfg(target_os = "macos")]
     pub fn offer(&self, image: &objc2_core_video::CVPixelBuffer) -> bool {
         use objc2_core_foundation::Type;
@@ -318,7 +314,7 @@ impl Feed {
         // (called outside the lock: the taker may turn the picture, or give the feed back)
         let took = taker(image, self.rotation());
         let mut t = self.taken.lock();
-        // (kept only while still taken: given back meanwhile, the wrapper draws libobs's again)
+        // (kept only while still taken)
         t.newest = (took && t.taker.is_some()).then(|| image.retain());
         took
     }
@@ -329,7 +325,7 @@ impl Feed {
         self.taken.try_lock()?.newest.clone()
     }
 
-    /// The decoder handed a frame to libobs: it's drawn next time the layer draws.
+    /// The decoder handed a frame on: it's counted drawn the next time it's drawn (`on_draw`).
     pub fn shown_next(&self, pts_90k: u64) {
         self.undrawn.store(pts_90k + 1, Ordering::Release);
     }

@@ -1,6 +1,6 @@
 [package]
 name = "lightair-phone-camera"
-description = "A phone as a camera layer: Lightair Live's SRT feed received and handed to libobs on this machine, and phones reached over USB (usbmuxd, AOA)"
+description = "A phone as a camera layer: Lightair Live's SRT feed received and handed to the engine on this machine, and phones reached over USB (usbmuxd, AOA)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

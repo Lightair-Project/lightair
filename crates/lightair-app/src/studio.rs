@@ -236,7 +236,8 @@ pub struct Studio {
     /// Clips announced so far (to report each new one once).
     /// Clips saved so far by each canvas's buffer that were announced.
     clips_seen: HashMap<Id, u32>,
-    /// Frames libobs lagged since the previous stats sample (health is about now, not startup).
+    /// Frames the compositor lagged since the previous stats sample (health is about now, not
+    /// startup).
     pub recent_lagged: u32,
     /// Destinations to start again once they've stopped (a restart from the Outputs panel).
     restart: Vec<Id>,
@@ -812,8 +813,7 @@ impl Studio {
     }
 
     /// Windows: installs the virtual camera (Windows asks for administrator approval):
-    /// Lightair's (Windows 11), used from the next start of the camera; OBS's elsewhere, there
-    /// from Lightair's next start (libobs lists its outputs as it loads its modules).
+    /// Lightair's (Windows 11), used from the next start of the camera.
     pub fn install_virtual_camera(&mut self, cx: &mut Context<Self>) {
         if let Err(e) = lightair_host::vcam::install() {
             tracing::warn!(%e, "virtual camera install");
@@ -998,8 +998,8 @@ impl Studio {
                 split_minutes: settings.split_minutes,
                 container,
                 encoders: crate::encoding::for_recording(&self.engine.capabilities.encoders, &settings, shape),
-                // the engine plays the first five mixes into libobs mixes 1-5, in mixer order
-                extra_mixes: settings.file_mixes.iter().filter_map(|m| crate::encoding::libobs_mix(&workspace, *m)).collect(),
+                // the mixer hands its first five mixes over as 1-5, in mixer order
+                extra_mixes: settings.file_mixes.iter().filter_map(|m| crate::encoding::output_mix(&workspace, *m)).collect(),
             };
             self.engine.post(move |s| {
                 let video = s.reconciler.canvas_video(canvas);
@@ -1448,7 +1448,7 @@ impl Studio {
             vod_mix: d
                 .vod_mix
                 .filter(|_| crate::platforms::takes_vod_track(d))
-                .and_then(|m| crate::encoding::libobs_mix(workspace, m)),
+                .and_then(|m| crate::encoding::output_mix(workspace, m)),
         };
         let (canvas, id) = (d.canvas, d.id);
         let engine = self.engine.clone();

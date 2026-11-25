@@ -87,8 +87,8 @@ const LEAD: usize = RATE as usize * 3 / 20;
 static QUEUE: Mutex<Option<Queue>> = Mutex::new(None);
 /// Voice sources alive (no source: nothing would play it).
 static ALIVE: AtomicUsize = AtomicUsize::new(0);
-/// The voice source that plays PiAir's speech (the active AI co-host's, by its source Id, the
-/// libobs name); the others stay silent. `None`: none plays.
+/// The voice source that plays PiAir's speech (the active AI co-host's, by its source Id as
+/// text); the others stay silent. `None`: none plays.
 static ACTIVE: Mutex<Option<String>> = Mutex::new(None);
 
 /// Which voice source plays the speech: the active co-host's (its source Id).
@@ -338,7 +338,7 @@ impl Mouth {
     }
 }
 
-/// Where a voice's blocks go when no track of the mixer takes them (libobs's source).
+/// Where a voice's blocks go when no track of the mixer takes them.
 pub trait Elsewhere: Send + Sync {
     /// A 10 ms block of mono speech at 48 kHz, shown at `timestamp_ns` (Lightair's clock).
     fn block(&self, block: &[f32], timestamp_ns: u64);

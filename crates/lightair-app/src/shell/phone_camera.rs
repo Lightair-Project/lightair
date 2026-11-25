@@ -300,7 +300,7 @@ impl lightair_phone_camera::Feeds for Host {
         if kind != UnitKind::Aac {
             feed.arrived(unit.pts);
         }
-        // macOS: decoded in the engine straight away (elsewhere libobs reads the UDP port)
+        // macOS: decoded in the engine straight away (elsewhere a decoder reads the UDP port)
         if DECODES_DIRECTLY {
             feed.push(Unit { kind, pts: unit.pts, data: unit.data });
         }

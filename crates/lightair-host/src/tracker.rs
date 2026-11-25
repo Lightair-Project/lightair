@@ -1,4 +1,4 @@
-//! The Effect Stack's trackers without libobs (macOS): `liblightair-tracker.dylib`, the face
+//! The Effect Stack's trackers (macOS): `liblightair-tracker.dylib`, the face
 //! tracker and segmentation (Core ML and Vision) built alone from the module's sources, called
 //! through its C API (`face-tracker.h`). Loaded from the app's Frameworks (a bundle) or the
 //! module's build folder (development), with the compiled models beside it (`tracker-models`).

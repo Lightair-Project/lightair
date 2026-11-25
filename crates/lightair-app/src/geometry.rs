@@ -1,6 +1,6 @@
 //! Canvas geometry for the editor (docs/07-scenes-objects-canvas.md, "Canvas"): rotated boxes,
-//! hit-testing, and resize/crop computed in the object's own frame. libobs turns a object around
-//! its box centre, clockwise for positive degrees (y points down).
+//! hit-testing, and resize/crop computed in the object's own frame. The compositor turns an
+//! object around its box centre, clockwise for positive degrees (y points down).
 
 use lightair_model::{Crop, Layout, ShapeKind};
 

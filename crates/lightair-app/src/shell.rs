@@ -1470,7 +1470,7 @@ impl StudioWindow {
                 // Lightair's own compositor draws the canvas's program, as it does its outputs
                 #[cfg(target_os = "macos")]
                 if lightair_host::bridge::own() && !preview.compose_program() {
-                    tracing::warn!(canvas = f.name, "LIGHTAIR_ENGINE=own: the compositor didn't start; libobs draws the canvas");
+                    tracing::warn!(canvas = f.name, "the compositor didn't start: the canvas's preview stays empty");
                 }
                 self.previews.insert(id, preview);
             }
@@ -3503,7 +3503,7 @@ impl StudioWindow {
         Some(frame)
     }
 
-    /// Keeps libobs showing the object being cropped whole (crop mode), or not.
+    /// Keeps the compositor showing the object being cropped whole (crop mode), or not.
     fn sync_crop_preview(&mut self, cx: &mut Context<Self>) {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();

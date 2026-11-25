@@ -7,7 +7,7 @@
 
 <p align="center">
   <b>Record it, zoom it, edit it, and go live.</b><br>
-  App demos with zooms that follow your clicks, every screen, camera and mic in its own file, a real editor, and a live studio on the engine inside OBS.
+  App demos with zooms that follow your clicks, every screen, camera and mic in its own file, a real editor, and a live studio on Lightair's own engine.
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
   <img src="site/assets/editor-zoom.webp" alt="Lightair's Editor: a Studio take of an app on a gradient backdrop, a 2× zoom selected on the zoom track with its settings, the screen, backdrop, mic and music on their own tracks" width="100%">
 </p>
 
-Lightair is one app for app demos, podcasts and streams. Record a **Studio take** and it keeps the pointer, clicks and keys as data, so it can zoom where you clicked and redraw the pointer smooth; it keeps every screen, camera and mic in a file of its own; and its **Editor** cuts it all on a real timeline. The same app is a full live studio. Underneath is **libobs**, the engine inside OBS Studio, with an interface written in **Rust** on **GPUI**.
+Lightair is one app for app demos, podcasts and streams. Record a **Studio take** and it keeps the pointer, clicks and keys as data, so it can zoom where you clicked and redraw the pointer smooth; it keeps every screen, camera and mic in a file of its own; and its **Editor** cuts it all on a real timeline. The same app is a full live studio. Underneath is Lightair's own engine (a GPU compositor, a real-time mixer and the system's hardware encoders), with an interface written in **Rust** on **GPUI**.
 
 ## Download
 
@@ -54,7 +54,7 @@ Lightair updates itself (Settings › About), and never installs an update while
 - One show, several **formats**: landscape, vertical, square or 4:5 canvases with their own layouts, auto-reframed, edited side by side, with platform safe areas.
 - Transitions: Cut, Fade, **Move** (layers glide to their new places), Slide, Wipe, Dip and Stinger, plus Studio mode with Take.
 - Cameras, screens, windows and apps, images, video, text, countdowns and clocks, and full Chromium browser layers.
-- **Effects** on a camera, face-aware (the Lightair Effect Stack): skin, makeup, segmentation and looks, on Core ML (macOS) and DirectML (Windows). Colour correction, keying and the rest on any layer, plus OBS filter plugins.
+- **Effects** on a camera, face-aware (the Lightair Effect Stack): skin, makeup, segmentation and looks, on Core ML (macOS). Colour correction, keying and the rest on any layer.
 - Import your OBS scene collections.
 
 **Sound right**
@@ -86,17 +86,17 @@ Lightair updates itself (Settings › About), and never installs an update while
 
 ## Build from source
 
-You need Rust (stable), and on macOS Xcode with **OBS Studio 33.0.0** in `/Applications` (development builds use its `libobs.framework`; set `OBS_APP` for another place). Lightair's own libobs is OBS's official build, unmodified.
+You need Rust (stable), and on macOS Xcode, CMake and Ninja (the Effect Stack's face trackers).
 
 ```bash
 git clone https://github.com/Lightair-Project/lightair.git && cd lightair
 git submodule update --init --depth 1
-cargo xtask modules   # the Lightair Effect Stack module
+cargo xtask modules   # the Lightair Effect Stack's face trackers
 cargo xtask bundle    # target/debug/Lightair.app
 open target/debug/Lightair.app
 ```
 
-On Windows, install OBS 33.0.0 and point `OBS_DIR` at it, then `cargo xtask dev` and `cargo run` (see [docs/plans/windows.md](docs/plans/windows.md)). `cargo xtask tidy` frees `target/` space (incremental caches and stale hashed copies; `--dry-run` first). `cargo xtask` lists everything else: `test`, `precommit`, `dist` (the signed release build) and more. Releases are cut by tagging: see [docs/releasing.md](docs/releasing.md).
+On Windows, `cargo xtask dev` and `cargo run` (the Windows app is still being moved onto Lightair's own engine). `cargo xtask tidy` frees `target/` space (incremental caches and stale hashed copies; `--dry-run` first). `cargo xtask` lists everything else: `test`, `precommit`, `dist` (the signed release build) and more. Releases are cut by tagging: see [docs/releasing.md](docs/releasing.md).
 
 ## Learn more
 
@@ -107,4 +107,4 @@ On Windows, install OBS 33.0.0 and point `OBS_DIR` at it, then `cargo xtask dev`
 
 ## License
 
-GPL-3.0-or-later; see [LICENSE](LICENSE). Lightair is built on libobs (GPL-2.0-or-later) and GPUI and gpui-kit (Apache-2.0); see [docs/15](docs/15-platform-distribution-licensing.md#licensing).
+GPL-3.0-or-later; see [LICENSE](LICENSE). Lightair is built on GPUI and gpui-kit (Apache-2.0); see [docs/15](docs/15-platform-distribution-licensing.md#licensing).

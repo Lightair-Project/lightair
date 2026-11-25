@@ -82,7 +82,7 @@ pub(super) fn is_media(kind: &str) -> bool {
     kind == "ffmpeg_source" || kind == "vlc_source"
 }
 
-/// libobs colours are 0xAABBGGRR.
+/// Colours in source settings are 0xAABBGGRR (as OBS stores them).
 pub(super) fn abgr(rgb: u32) -> u32 {
     0xFF00_0000 | ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF)
 }
@@ -93,7 +93,7 @@ pub(super) fn rgb_of(abgr: u32) -> u32 {
 /// Swatches offered for text and colour objects (RGB).
 pub(super) const PALETTE: &[u32] = &[0xFFFFFF, 0x0B0B0F, 0xFF4A3B, 0xFFB020, 0x2BD67B, 0x3B82F6, 0x8B5CF6, 0xF472B6];
 
-/// `settings` with `key` set (a merged copy: the reconciler updates libobs from the whole object).
+/// `settings` with `key` set (a merged copy: the engine updates the source from the whole object).
 fn with(settings: &Value, key: &str, value: Value) -> Value {
     let mut s = settings.clone();
     if !s.is_object() {

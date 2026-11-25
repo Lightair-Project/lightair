@@ -1,4 +1,4 @@
-//! From settings to encoders (docs/11-outputs-streaming-recording.md, "Encoding"): which libobs
+//! From settings to encoders (docs/11-outputs-streaming-recording.md, "Encoding"): which
 //! encoder a choice means on this machine, the size it encodes at, and what Automatic picks for
 //! a destination.
 
@@ -9,7 +9,7 @@ use lightair_host::outputs::{
 
 use crate::platforms;
 
-/// The libobs encoder for a choice, among those this machine has; hardware H.264 (then x264)
+/// The encoder id for a choice, among those this machine has; hardware H.264 (then x264)
 /// when the choice isn't available.
 pub fn encoder_id(available: &[String], choice: VideoEncoder) -> String {
     let h264 = || first_available(available, H264_ENCODERS).unwrap_or_else(|| "obs_x264".into());
@@ -78,7 +78,7 @@ pub fn for_stream(caps: &[String], workspace: &Workspace, d: &Destination) -> En
         keyint_sec: e.keyframe_s.max(1),
         scaled: scaled(canvas, e.height),
         // its sound: a mix, or the master
-        audio_mix: d.audio_mix.and_then(|m| libobs_mix(workspace, m)).unwrap_or(0),
+        audio_mix: d.audio_mix.and_then(|m| output_mix(workspace, m)).unwrap_or(0),
         // dynamic bitrate is RTMP's: the others handle congestion themselves
         adaptive: d.options.adaptive_bitrate
             && matches!(StreamProtocol::of(&d.server), Some(StreamProtocol::Rtmp)),
@@ -128,9 +128,10 @@ pub fn matched_to(workspace: &Workspace, d: &Destination, source: &Destination) 
     out
 }
 
-/// The libobs mix a mixer mix plays into: the audio engine plays the first five mixes, in mixer
-/// order, into libobs mixes 1–5 (0 is Program, the master); `None` past those or when gone.
-pub fn libobs_mix(workspace: &Workspace, mix: lightair_model::Id) -> Option<usize> {
+/// The mix an output takes for a mixer mix: the mixer hands its first five mixes over, in mixer
+/// order, as 1–5 (0 is Program, the master: `audio_host::tap_mix`); `None` past those or when
+/// gone.
+pub fn output_mix(workspace: &Workspace, mix: lightair_model::Id) -> Option<usize> {
     workspace.audio.mixes.iter().position(|m| m.id == mix).filter(|&k| k < 5).map(|k| k + 1)
 }
 

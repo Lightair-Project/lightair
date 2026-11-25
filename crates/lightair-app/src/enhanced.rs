@@ -27,7 +27,7 @@ pub struct Request {
     max_video_tracks: Option<u32>,
     vod_track: bool,
     rtmps: bool,
-    /// The encoders libobs has here.
+    /// The encoders Lightair has here.
     encoders: Vec<String>,
 }
 

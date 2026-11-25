@@ -16,7 +16,7 @@ pub struct Connected {
 impl Connected {
     /// Asks the system. Not on the UI thread, nor the engine's: listing cameras takes a
     /// while (DirectShow: 150–550 ms), and the UI waits on the engine's thread for little things
-    /// all the time (libobs lists them from any thread, as OBS's own dialogs do).
+    /// all the time.
     pub fn now() -> Connected {
         let mics = lightair_host::devices::input_devices().into_iter().map(|d| (d.id, d.name)).collect();
         // (name, id)

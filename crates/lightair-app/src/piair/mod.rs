@@ -1833,8 +1833,8 @@ impl Drop for Listener {
 
 /// A track's sound to hear (mono, [`lightair_host::audio_host::LISTEN_RATE`]): from Lightair's
 /// mixer, after the track's effects and before its fader, silent while `muted` (a mic or audio
-/// interface is captured by the mixer itself: its libobs source is only a placeholder with no
-/// sound). With no mixer running, from the libobs source (the tap is then held with it).
+/// interface is captured by the mixer itself). Otherwise from the source's own tap
+/// (`audio_tap::Tap::open_source`, held with it: silence for a source the mixer doesn't take).
 fn track_sound(
     engine: &std::sync::Arc<lightair_host::Engine>,
     track: Id,

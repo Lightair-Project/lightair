@@ -1,6 +1,6 @@
 //! A Studio take's video (docs/plans/screen-studio.md, 4.2): each screen and camera in the
 //! program recorded to a file of its own, at its own size, as fragmented MP4 (a take that stops
-//! abruptly keeps what was written). Without libobs (macOS): each source's frames as the
+//! abruptly keeps what was written). On macOS: each source's frames as the
 //! compositor captures them (`crate::bridge::publish_capture`) go to a recording of Lightair's
 //! own, keyed by a feed of the take's.
 //!
@@ -70,7 +70,7 @@ impl StudioTake {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (sources, folder, fps, outputs, encoders);
-            Err("Studio takes without libobs are recorded on macOS only for now.".into())
+            Err("Studio takes are recorded on macOS only for now.".into())
         }
         #[cfg(target_os = "macos")]
         {

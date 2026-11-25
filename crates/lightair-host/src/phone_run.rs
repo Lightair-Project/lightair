@@ -1,4 +1,4 @@
-//! A Phone camera source without libobs (macOS): each stream the phone sends (a new feed
+//! A Phone camera source (macOS): each stream the phone sends (a new feed
 //! generation) gets a decoder of its own, on a thread of its own. Its pictures go to the feed,
 //! which the compositor's phone provider takes them from; its microphone goes into the mixer by
 //! the source's id (a track takes it like any other source).

@@ -1,8 +1,8 @@
 //! Countdown, stopwatch and clock objects (docs/07-scenes-objects-canvas.md, "Timer"). The
 //! document holds a `lightair_timer` source whose settings are text style plus timer settings;
 //! its text is worked out once a second ([`Timers::tick`]) and drawn by Lightair's compositor
-//! (`show::timer_text`), and by libobs's text source through a [`TimerOut`] while libobs is
-//! there. Where a timer is (running, paused, ended) is runtime state, never in the document or
+//! (`show::timer_text`); a [`TimerOut`] is told the text and asked whether the object is on air.
+//! Where a timer is (running, paused, ended) is runtime state, never in the document or
 //! undo history.
 
 use std::collections::HashMap;
@@ -12,8 +12,7 @@ use lightair_model::Id;
 use parking_lot::Mutex;
 use serde_json::Value;
 
-/// Where a timer's text goes besides the compositor, and whether its object is on air (libobs's
-/// text source while libobs is there).
+/// Where a timer's text goes besides the compositor, and whether its object is on air.
 pub trait TimerOut: Send {
     /// The timer shows `text` now.
     fn text(&self, text: &str);
@@ -22,8 +21,6 @@ pub trait TimerOut: Send {
 }
 
 pub const TIMER_KIND: &str = "lightair_timer";
-/// The libobs source that draws a timer.
-pub const TIMER_SOURCE: &str = "text_ft2_source_v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerMode {

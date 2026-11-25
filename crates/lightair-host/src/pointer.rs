@@ -22,8 +22,8 @@
 //! captures: its display, or its window where the window is now (read a few times a second);
 //! the main display when that can't be told (`capture_frame`).
 //!
-//! The state lives here (`Pointer`, `Style`, the clicks, the badge); libobs's filter
-//! (lightair-obs) and the compositor (lightair-preview) draw from it.
+//! The state lives here (`Pointer`, `Style`, the clicks, the badge); the compositor
+//! (lightair-preview) draws from it.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -308,8 +308,8 @@ fn hots() -> [(f32, f32); 3] {
 }
 
 /// A drawn pointer's state, stepped each frame ([`Pointer::tick`]): where it is (followed on a
-/// spring), how it's turned and faded, its shape, and the follow-zoom's camera. libobs's filter
-/// and Lightair's compositor both draw from it ([`Pointer::drawing`]).
+/// spring), how it's turned and faded, its shape, and the follow-zoom's camera. Lightair's
+/// compositor draws from it ([`Pointer::drawing`]).
 pub struct Pointer {
     look: Style,
     /// Followed position (display points), its velocity, the tilt.
@@ -639,7 +639,8 @@ pub fn frame_of(source: &lightair_model::Source) -> Option<(f32, f32, f32, f32)>
     }
 }
 
-/// Whether `source` is a screen capture (the document's kind, or libobs's own kinds).
+/// Whether `source` is a screen capture (the document's kind, or the platform kinds an older or
+/// imported document names).
 pub fn is_screen(source: &lightair_model::Source) -> bool {
     source.kind == lightair_model::kinds::SCREEN
         || matches!(

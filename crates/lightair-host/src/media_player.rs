@@ -9,8 +9,8 @@
 //! Lightair's compositor draws the frame each player shows ([`picture`], which picks the frame
 //! due on the player's clock), so pause, seek, looping and the end follow it. A track taking the
 //! source's sound gets it straight into the mixer, each part pushed as it comes due on the media
-//! clock; sound no track takes, the end and a restart go to the player's [`Elsewhere`] (libobs's
-//! source, while libobs is there).
+//! clock; sound no track takes, the end and a restart go to the player's [`Elsewhere`] (the
+//! Library's player, say).
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, CString, c_void};
@@ -29,7 +29,7 @@ use parking_lot::{Condvar, Mutex};
 
 
 
-/// How far ahead of the clock sound is handed to libobs (it buffers it by timestamp).
+/// How far ahead of the clock sound no track takes is handed on (it's buffered by timestamp).
 const AUDIO_AHEAD_NS: i64 = 150_000_000;
 /// How far ahead of the clock sound is pushed into the mixer's feed: about what the feed keeps
 /// buffered (1024 frames), so it's heard when it's due.
@@ -38,15 +38,15 @@ const FED_AHEAD_NS: i64 = 20_000_000;
 const QUEUE: usize = 4;
 /// Time to decode the first frames before the clock starts.
 const PREROLL_NS: u64 = 60_000_000;
-/// Frames libobs may still be drawing from: kept (in use) for a few frames after replaced.
+/// Frames a drawer may still be drawing from: kept (in use) for a few frames after replaced.
 const HELD: usize = 3;
 /// With Lightair's own compositor: more surfaces, for the frames its canvases may still be
 /// drawing from (each holds one until the GPU has finished with it).
 const COMPOSITOR_HELD: usize = 4;
 
 
-/// A media state code, numbered as OBS's media states are (libobs's source hands them on as
-/// they are).
+/// A media state code, numbered as OBS's media states are (what the app and the remote API
+/// read).
 pub type MediaStateCode = u32;
 
 /// The media states.
@@ -62,7 +62,7 @@ pub mod state {
     pub const ERROR: MediaStateCode = 7;
 }
 
-/// Where a player tells what happens besides the compositor and the mixer (libobs's source).
+/// Where a player tells what happens besides the compositor and the mixer (the Library's player).
 pub trait Elsewhere: Send + Sync {
     /// Sound no track of the mixer took: stereo, interleaved, at `rate`, shown at
     /// `timestamp_ns` (Lightair's clock), handed over ahead of time.
@@ -244,7 +244,7 @@ unsafe fn dictionary(pairs: &[(*const AnyObject, *const AnyObject)]) -> *mut Any
 // ------------------------------------------------------------------ frames
 
 /// One of a source's own BGRA IOSurfaces (a retained `CVPixelBuffer`) that decoded frames are
-/// converted into, with a texture libobs makes over it once. In use while anything but the
+/// converted into. In use while anything but the
 /// reader's ring holds it (queued, or on screen and the frames just before it).
 pub struct Slot {
     pub id: u64,
@@ -392,8 +392,7 @@ pub enum Next {
     Clear,
 }
 
-/// What the source shows now, for Lightair's own compositor (`LIGHTAIR_ENGINE=own`): set on
-/// libobs's clock as libobs's own drawing is, whether libobs draws the source or not.
+/// What the source shows now, for Lightair's own compositor: set on Lightair's clock.
 #[derive(Default)]
 struct Composited {
     /// The frame shown (`None` before the first one, or once cleared).
@@ -448,19 +447,19 @@ impl Control {
 }
 
 pub struct Shared {
-    /// Where the end, a restart and sound no track takes are told (libobs's source).
+    /// Where the end, a restart and sound no track takes are told.
     elsewhere: Option<Arc<dyn Elsewhere>>,
     rate: u32,
     control: Mutex<Control>,
     wake: Condvar,
     queue: Mutex<VecDeque<Frame>>,
     next: Mutex<Option<Next>>,
-    /// What the compositor draws (only kept with `LIGHTAIR_ENGINE=own`).
+    /// What the compositor draws.
     composited: Mutex<Composited>,
     /// Off air, it waits to play (0 no, 1 from the start, 2 on from where it paused): a file
     /// that doesn't restart on air (`restart_on_activate` off) still costs nothing off air.
     on_air_play: std::sync::atomic::AtomicU8,
-    /// Where the sound goes instead of libobs while a track of the mixer takes it.
+    /// Where the sound goes while a track of the mixer takes it.
     feed: Option<Arc<crate::audio_host::FeedSlot>>,
 }
 
@@ -957,8 +956,7 @@ impl Drop for Frames {
 
 // ------------------------------------------------------------------ what each source shows, for the compositor
 
-/// The document's media sources this source type plays, by document id (only with
-/// `LIGHTAIR_ENGINE=own`).
+/// The document's media sources this source type plays, by document id.
 static SOURCES: LazyLock<Mutex<HashMap<Id, Weak<Shared>>>> = LazyLock::new(Default::default);
 
 
@@ -977,7 +975,7 @@ pub fn plays(source: Id) -> bool {
 }
 
 /// The frame the document media source `source` shows now, picked on its clock (so pause, seek, looping, a new file and the end follow the source).
-/// `None` before its first frame, and for a file with a rotation (libobs turns it as it draws).
+/// `None` before its first frame, and for a file with a rotation (not turned upright here).
 /// The surface isn't written again while the buffer is held. Any thread.
 pub fn picture(source: Id) -> Option<Picture> {
     let shared = SOURCES.lock().get(&source)?.upgrade()?;
@@ -1123,7 +1121,7 @@ impl MediaPlayer {
         tick(&self.shared);
     }
 
-    /// For a drawer (libobs): what to show next, once picked.
+    /// For a drawer other than the compositor: what to show next, once picked.
     pub fn take_next(&self) -> Option<Next> {
         self.shared.next.lock().take()
     }

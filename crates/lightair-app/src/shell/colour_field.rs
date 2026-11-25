@@ -83,7 +83,7 @@ pub(super) fn css(c: Hsla) -> String {
     }
 }
 
-/// libobs's 0xAABBGGRR.
+/// Source settings' 0xAABBGGRR.
 pub(super) fn abgr(c: Hsla) -> u32 {
     let (rgb, a) = rgb_alpha(c);
     (((a.clamp(0.0, 1.0) * 255.0).round() as u32) << 24) | ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | (rgb >> 16)
