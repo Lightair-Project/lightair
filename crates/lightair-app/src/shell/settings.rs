@@ -1535,7 +1535,6 @@ impl StudioWindow {
             ("twitch", "Twitch", "title and category; chat; delete, timeouts and bans"),
             ("kick", "Kick", "title and category; chat; timeouts and bans"),
             ("x", "X", "going live with your title when you stream, ending it after; chat (X's approval needed)"),
-            ("spotify", "Spotify", "what's playing on any of your devices, for Now playing"),
         ] {
             let account = lightair_live::oauth::account(provider);
             let available = lightair_live::oauth::available(provider);
@@ -1544,12 +1543,12 @@ impl StudioWindow {
                 (Some(n), _, _) => n.clone(),
                 (None, Some((_, who)), _) => format!("Signed in as {who}"),
                 (None, None, true) => "Not signed in".to_string(),
-                (None, None, false) => "No app in this copy: use your own".to_string(),
+                (None, None, false) => "Not in this copy of Lightair".to_string(),
             };
             let tip = if available {
                 format!("Signed in, as with OBS, Lightair uses {name}'s own API for {does}.")
             } else {
-                format!("No {name} app in this copy of Lightair: register your own (docs/official-apis.md) and choose Use your own app; meanwhile the signed-in pages are used.")
+                format!("This copy of Lightair was built without its {name} app (docs/official-apis.md); the signed-in pages are used instead.")
             };
             official = official.child(row_status(
                 name,
@@ -1563,31 +1562,6 @@ impl StudioWindow {
                         d.child(Button::new(SharedString::from(format!("oauth-in-{provider}"))).label("Sign in").xsmall().outline().disabled(!available || busy).on_click(cx.listener(
                             move |this, _, _, cx| this.official_sign_in(provider, cx),
                         )))
-                    })
-                    // the person's own registered app (docs/official-apis.md): its id, and secret
-                    .when(account.is_none(), |d| {
-                        let own = lightair_live::oauth::has_own_app(provider);
-                        d.child(
-                            Button::new(SharedString::from(format!("oauth-app-{provider}")))
-                                .label(if own { "Your app ✓" } else { "Use your own app" })
-                                .xsmall()
-                                .ghost()
-                                .dropdown_menu(move |menu, _, _| {
-                                    let menu = menu
-                                        .item(PopupMenuItem::new("Paste its client ID").on_click(move |_, _, cx| own_app_paste(provider, "id", cx)))
-                                        .when(lightair_live::oauth::wants_secret(provider) || provider == "x", |m| {
-                                            m.item(PopupMenuItem::new("Paste its client secret").on_click(move |_, _, cx| own_app_paste(provider, "secret", cx)))
-                                        });
-                                    if own {
-                                        menu.separator().item(PopupMenuItem::new("Forget your app").on_click(move |_, _, _| {
-                                            lightair_live::oauth::set_own_app(provider, "id", "");
-                                            lightair_live::oauth::set_own_app(provider, "secret", "");
-                                        }))
-                                    } else {
-                                        menu
-                                    }
-                                }),
-                        )
                     })
                     .when(account.is_some(), |d| {
                         d.child(Button::new(SharedString::from(format!("oauth-out-{provider}"))).label("Sign out").xsmall().ghost().on_click(cx.listener(
@@ -2063,14 +2037,6 @@ fn reveal_button(id: impl Into<ElementId>, dir: Option<std::path::PathBuf>) -> A
             })
             .into_any_element(),
         None => div().into_any_element(),
-    }
-}
-
-/// Copies the person's own app's id or secret from the clipboard (never shown again).
-fn own_app_paste(provider: &str, part: &str, cx: &mut App) {
-    let text = cx.read_from_clipboard().and_then(|c| c.text()).map(|t| t.trim().to_string()).unwrap_or_default();
-    if !text.is_empty() && !text.contains(char::is_whitespace) {
-        lightair_live::oauth::set_own_app(provider, part, &text);
     }
 }
 
