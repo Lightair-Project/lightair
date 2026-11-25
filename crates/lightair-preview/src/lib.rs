@@ -14,6 +14,8 @@ mod render;
 #[cfg(target_os = "macos")]
 pub mod avatars;
 #[cfg(target_os = "macos")]
+mod backdrop;
+#[cfg(target_os = "macos")]
 mod capture;
 #[cfg(target_os = "macos")]
 mod pointer;

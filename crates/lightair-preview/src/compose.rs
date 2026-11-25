@@ -1383,6 +1383,7 @@ fn made_here(source: &Source) -> bool {
         // the built-in widgets the native widgets draw, once the app has given what they show
         widgets::KIND => widgets::instance(s).is_some_and(|i| widget_feed::drawn_here(&i)),
         avatar::KIND => s["file"].as_str().is_some_and(|f| !f.is_empty()),
+        crate::backdrop::KIND => true,
         _ => false,
     }
 }
@@ -1494,6 +1495,8 @@ struct Native {
     /// Text and timers drawn here, by what decides their picture (`text::key`), and the ones
     /// this frame used.
     texts: HashMap<String, (wgpu::Texture, (u32, u32))>,
+    /// Backdrops as drawn, by source (drawn again when their settings change).
+    backdrops: HashMap<Id, (crate::backdrop::Params, wgpu::Texture)>,
     texts_used: HashSet<String>,
     /// The widgets drawn here, by source.
     widgets: HashMap<Id, Widget>,
@@ -1550,6 +1553,7 @@ impl Native {
             sources_of: 0,
             sizes: HashMap::new(),
             texts: HashMap::new(),
+            backdrops: HashMap::new(),
             texts_used: HashSet::new(),
             widgets: HashMap::new(),
             looks: looks::Hosts::default(),
@@ -1568,6 +1572,7 @@ impl Native {
             let keep: Vec<Id> = ws.sources.keys().copied().collect();
             self.keyed.forget_others(&keep);
             self.widgets.retain(|id, _| ws.sources.contains_key(id));
+            self.backdrops.retain(|id, _| ws.sources.contains_key(id));
             self.avatars.retain(|id, _| ws.sources.get(id).is_some_and(|s| s.kind == avatar::KIND));
             let gone = self.looks.sweep(|id| ws.sources.contains_key(&id), &self.hot, &mut self.program.feeds);
             for feed in gone {
@@ -1594,6 +1599,7 @@ impl Native {
             templates::TEXT => Some(self.text(&source.settings, source.settings["text"].as_str().unwrap_or(""))?),
             widgets::KIND => Some(self.widget(source)?),
             avatar::KIND => Some(self.avatar(source)?),
+            crate::backdrop::KIND => Some(self.backdrop(source)?),
             _ => None,
         };
         if let Some(shot) = made {
@@ -1679,6 +1685,17 @@ impl Native {
 
     /// A text object's picture (`settings` showing `text`), drawn as libobs's text source draws
     /// it; `None` when it draws nothing.
+    /// A backdrop's picture, drawn again when its settings change.
+    fn backdrop(&mut self, source: &Source) -> Option<Shot> {
+        let params = crate::backdrop::Params::of(&source.settings);
+        if self.backdrops.get(&source.id).is_none_or(|(p, _)| *p != params) {
+            let texture = self.gpu.texture(&params.draw(), (params.width, params.height));
+            self.backdrops.insert(source.id, (params, texture));
+        }
+        let (p, texture) = self.backdrops.get(&source.id)?;
+        Some(Shot { picture: Picture::Texture(texture.clone()), size: (p.width, p.height), premultiplied: true })
+    }
+
     fn text(&mut self, settings: &serde_json::Value, text: &str) -> Option<Shot> {
         let key = crate::text::key(settings, text);
         if !self.texts.contains_key(&key) {
