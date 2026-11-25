@@ -25,7 +25,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use lightair_model::{Id, Patch, Source, TransitionKind, TransitionSettings, Workspace, kinds};
-use parking_lot::Mutex;
 
 use crate::audio_host::{AudioHost, MultitrackReport};
 use crate::media::{MediaAction, MediaStatus};
@@ -172,7 +171,7 @@ enum Runtime {
     #[cfg(target_os = "macos")]
     Soundboard {
         player: crate::media_player::MediaPlayer,
-        playing: Mutex<(String, bool)>,
+        playing: parking_lot::Mutex<(String, bool)>,
     },
     #[cfg(any(target_os = "macos", windows))]
     Web {
@@ -704,7 +703,7 @@ impl Host {
                 };
                 Runtime::Soundboard {
                     player: crate::media_player::MediaPlayer::new(Some(id), settings, self.sample_rate, false, None),
-                    playing: Mutex::new((String::new(), false)),
+                    playing: parking_lot::Mutex::new((String::new(), false)),
                 }
             }
             #[cfg(any(target_os = "macos", windows))]
