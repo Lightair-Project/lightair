@@ -318,6 +318,24 @@ impl ObsCanvas {
         NonNull::new(unsafe { sys::obs_canvas_create(cstr(name).as_ptr(), &mut ovi, flags) }).map(Self)
     }
 
+    /// A private canvas (not listed among libobs's canvases) with these `flags`: sources shown
+    /// on it activate only with `ACTIVATE`, its sound is mixed only with `MIX_AUDIO`.
+    pub fn create_private(name: &str, width: u32, height: u32, fps_num: u32, fps_den: u32, flags: u32) -> Option<Self> {
+        let mut ovi = canvas_video_info(width, height, fps_num, fps_den);
+        NonNull::new(unsafe { sys::obs_canvas_create_private(cstr(name).as_ptr(), &mut ovi, flags) }).map(Self)
+    }
+
+    /// Resizes the canvas; false while something records or streams from it.
+    pub fn try_reset(&self, width: u32, height: u32, fps_num: u32, fps_den: u32) -> bool {
+        let mut ovi = canvas_video_info(width, height, fps_num, fps_den);
+        unsafe { sys::obs_canvas_reset_video(self.as_ptr(), &mut ovi) }
+    }
+
+    /// Whether something records or streams from the canvas's video.
+    pub fn video_active(&self) -> bool {
+        unsafe { sys::obs_canvas_video_active(self.as_ptr()) }
+    }
+
     pub fn as_ptr(&self) -> *mut sys::obs_canvas_t {
         self.0.as_ptr()
     }

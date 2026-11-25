@@ -6,7 +6,15 @@
 //! (`lightair_engine::testing`), which sets the switch before anything reads it.
 
 #[cfg(target_os = "macos")]
+mod audio;
+#[cfg(target_os = "macos")]
+mod outputs;
+#[cfg(target_os = "macos")]
+mod overlays;
+#[cfg(target_os = "macos")]
 mod program;
+#[cfg(target_os = "macos")]
+mod record;
 #[cfg(target_os = "macos")]
 mod switch;
 
@@ -49,31 +57,42 @@ mod common {
         [img[i], img[i + 1], img[i + 2]]
     }
 
-    /// The newest frame `preview` has had since this was last asked, at the canvas's size (one
-    /// at another size isn't returned).
-    fn next_frame(preview: &Preview, seen: &mut u64) -> Option<Rgba> {
+    /// The newest frame `preview` has had since this was last asked, at `size` (one at another
+    /// size isn't returned).
+    fn next_frame(preview: &Preview, seen: &mut u64, size: (u32, u32)) -> Option<Rgba> {
         let n = preview.frames();
         if n == *seen {
             return None;
         }
         *seen = n;
         let frame = preview.latest_frame()?;
-        if frame_size(&frame) != (W as usize, H as usize) {
+        let want = (size.0 as usize, size.1 as usize);
+        if frame_size(&frame) != want {
             return None;
         }
-        let (w, h, rgba) = frame_rgba(&frame, W as usize)?;
-        ((w, h) == (W as usize, H as usize)).then_some(rgba)
+        let (w, h, rgba) = frame_rgba(&frame, want.0)?;
+        ((w, h) == want).then_some(rgba)
     }
 
     /// Waits (up to `within`) for a frame at the canvas's size that `ok` accepts, then gives
     /// the one a few frames later (every picture in it by then). `Err` carries the last frame
     /// seen at that size, if any.
     pub fn until(preview: &Preview, within: Duration, ok: impl Fn(&[u8]) -> bool) -> Result<Rgba, Option<Rgba>> {
+        until_at(preview, (W, H), within, ok)
+    }
+
+    /// [`until`] for a canvas of another size: frames at `size` only.
+    pub fn until_at(
+        preview: &Preview,
+        size: (u32, u32),
+        within: Duration,
+        ok: impl Fn(&[u8]) -> bool,
+    ) -> Result<Rgba, Option<Rgba>> {
         let end = Instant::now() + within;
         let mut seen = preview.frames();
         let (mut last, mut good) = (None, 0);
         while Instant::now() < end {
-            if let Some(f) = next_frame(preview, &mut seen) {
+            if let Some(f) = next_frame(preview, &mut seen, size) {
                 good = if ok(&f) { good + 1 } else { 0 };
                 last = Some(f);
                 if good >= 3 {
@@ -90,7 +109,7 @@ mod common {
         let end = Instant::now() + long;
         let (mut seen, mut out) = (preview.frames(), Vec::new());
         while Instant::now() < end {
-            if let Some(f) = next_frame(preview, &mut seen) {
+            if let Some(f) = next_frame(preview, &mut seen, (W, H)) {
                 out.push(f);
             }
             std::thread::sleep(Duration::from_millis(2));

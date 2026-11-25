@@ -34,9 +34,9 @@ use parking_lot::Mutex;
 use crate::obs::{ObsSource, SourceRef};
 use crate::sys;
 
-/// Buffers per source: the one handed on, one the compositor may still be drawing from, one
-/// the GPU is filling, and one free.
-const RING: usize = 4;
+/// Buffers per source besides one for each compositor drawing it (which may hold one until its
+/// next frame): the one handed on, one the GPU is filling, and one free.
+const RING: usize = 3;
 
 /// Whether Lightair's own compositor draws the program (`LIGHTAIR_ENGINE=own`). Read once.
 pub fn own() -> bool {
@@ -426,14 +426,15 @@ impl Ring {
         done
     }
 
-    /// A slot nothing else holds (neither handed on nor drawn from by the compositor) and the
-    /// GPU isn't filling; a new one while the ring isn't full. Inside libobs's graphics context.
-    unsafe fn free_slot(&mut self) -> Option<usize> {
+    /// A slot nothing else holds (neither handed on nor drawn from by a compositor) and the GPU
+    /// isn't filling; a new one while the ring has fewer than `most`. Inside libobs's graphics
+    /// context.
+    unsafe fn free_slot(&mut self, most: usize) -> Option<usize> {
         let free =
             (0..self.slots.len()).find(|&i| !self.pending.contains(&i) && self.slots[i].buffer.retain_count() == 1);
         match free {
             Some(i) => Some(i),
-            None if self.slots.len() < RING => unsafe { self.add_slot() },
+            None if self.slots.len() < most => unsafe { self.add_slot() },
             None => None,
         }
     }
@@ -515,11 +516,22 @@ unsafe fn draw_source(source: *mut sys::obs_source_t, w: u32, h: u32, target: *m
 
 // ---------------------------------------------------------------- graphics thread
 
-/// Runs on libobs's graphics thread after each frame (graphics context held): hands on the
-/// copies the GPU has finished and draws each wanted source into a free buffer.
+/// Runs on libobs's graphics thread after each canvas's frame is drawn (graphics context held);
+/// once a frame, the first time: hands on the copies the GPU has finished and draws each wanted
+/// source into a free buffer.
 unsafe extern "C" fn on_rendered(_: *mut c_void) {
+    // every canvas's frame calls it; the sources are drawn once
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+    let frame = unsafe { sys::obs_get_video_frame_time() };
+    if LAST.swap(frame, std::sync::atomic::Ordering::Relaxed) == frame {
+        return;
+    }
     let b = &*BRIDGE;
-    let wanted: HashSet<Id> = b.wanted.lock().values().flatten().copied().collect();
+    // each source, and how many compositors want it
+    let mut wanted: HashMap<Id, usize> = HashMap::new();
+    for id in b.wanted.lock().values().flatten() {
+        *wanted.entry(*id).or_default() += 1;
+    }
     let mut rings = b.rings.lock();
     if wanted.is_empty() && rings.is_empty() {
         return;
@@ -527,14 +539,14 @@ unsafe extern "C" fn on_rendered(_: *mut c_void) {
     // the sources stay alive while drawn: the engine thread waits to remove one
     let sources = b.sources.lock();
     rings.retain(|id, ring| {
-        let keep = wanted.contains(id) && sources.contains_key(id);
+        let keep = wanted.contains_key(id) && sources.contains_key(id);
         if !keep {
             unsafe { ring.destroy() };
             b.latest.lock().remove(id);
         }
         keep
     });
-    for id in &wanted {
+    for (id, &compositors) in &wanted {
         let Some(src) = sources.get(id) else { continue };
         let src = src.as_ptr();
         let (w, h) = unsafe { (sys::obs_source_get_width(src), sys::obs_source_get_height(src)) };
@@ -555,7 +567,7 @@ unsafe extern "C" fn on_rendered(_: *mut c_void) {
             b.latest.lock().insert(*id, ring.slots[i].buffer.clone());
         }
         // every buffer in use: this frame of the source is skipped rather than waited for
-        let Some(slot) = (unsafe { ring.free_slot() }) else { continue };
+        let Some(slot) = (unsafe { ring.free_slot(RING + compositors) }) else { continue };
         unsafe {
             draw_source(src, w, h, ring.target);
             ring.copy(slot);

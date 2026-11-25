@@ -493,6 +493,9 @@ pub(crate) struct Shared {
     /// Lightair's own compositor is giving this preview its frames of the program
     /// (`Preview::compose_program`): libobs draws only a source shown instead of the program.
     fed: AtomicBool,
+    /// The libobs frame last drawn (its time): with Lightair's own compositor libobs draws more
+    /// canvases than it shows, and the preview is drawn once a frame.
+    last_frame: AtomicU64,
 }
 
 impl Shared {
@@ -601,8 +604,8 @@ pub struct Preview(Arc<Handle>);
 
 struct Handle {
     shared: Arc<Shared>,
-    /// Lightair's own compositor, drawing the program for this preview (`compose_program`).
-    compositor: Mutex<Option<crate::compose::Compositor>>,
+    /// Lightair's own compositor gives this preview its frames (`compose_program`).
+    composed: AtomicBool,
 }
 
 impl Preview {
@@ -628,24 +631,38 @@ impl Preview {
             own_size: AtomicBool::new(false),
             layer: Mutex::new(None),
             fed: AtomicBool::new(false),
+            last_frame: AtomicU64::new(u64::MAX),
         });
         unsafe { sys::obs_add_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&shared) as *mut c_void) };
-        Self(Arc::new(Handle { shared, compositor: Mutex::new(None) }))
+        Self(Arc::new(Handle { shared, composed: AtomicBool::new(false) }))
     }
 
-    /// Shows the primary canvas's program as Lightair's own compositor draws it
-    /// (`lightair-render`, `LIGHTAIR_ENGINE=own`) instead of libobs: libobs's frames until its
-    /// first one, and whenever a source is shown in the program's place. For the main canvas's
-    /// preview (`attach`); false for another canvas's, or when the compositor couldn't start.
+    /// Shows the canvas's program as Lightair's own compositor draws it (`lightair-render`,
+    /// `LIGHTAIR_ENGINE=own`) instead of libobs: libobs's frames until its first one, and
+    /// whenever a source is shown in the program's place. The main canvas's preview (`attach`)
+    /// follows the primary canvas; another canvas's (`attach_canvas`), that canvas. False when
+    /// the switch is off or the compositor couldn't start.
     pub fn compose_program(&self) -> bool {
-        if self.0.shared.canvas.is_some() {
+        if !lightair_engine::bridge::own() {
             return false;
         }
-        let mut compositor = self.0.compositor.lock();
-        if compositor.is_none() {
-            *compositor = crate::compose::Compositor::start(self.0.shared.clone());
+        let target = match &self.0.shared.canvas {
+            None => crate::compose::Target::Primary,
+            // the engine names a canvas's libobs canvas by the canvas's id
+            Some(c) => {
+                let name = unsafe { sys::obs_canvas_get_name(c.0) };
+                if name.is_null() {
+                    return false;
+                }
+                crate::compose::Target::Canvas(unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned())
+            }
+        };
+        if !crate::compose::start() {
+            return false;
         }
-        compositor.is_some()
+        crate::compose::watch(target, &self.0.shared);
+        self.0.composed.store(true, Ordering::Relaxed);
+        true
     }
 
     /// Renders at this pixel size (e.g. the on-screen size of the canvas view, rounded to even).
@@ -709,8 +726,10 @@ impl Preview {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        // its thread stops before the preview goes
-        self.compositor.lock().take();
+        // the compositor gives it no more frames
+        if self.composed.load(Ordering::Relaxed) {
+            crate::compose::unwatch(&self.shared);
+        }
         unsafe {
             sys::obs_remove_main_rendered_callback(Some(on_rendered), Arc::as_ptr(&self.shared) as *mut c_void);
             if let Some(mut pool) = self.shared.pool.lock().take() {
@@ -732,6 +751,14 @@ unsafe extern "C" fn on_rendered(param: *mut c_void) {
     let shared = unsafe { &*(param as *const Shared) };
     if !shared.active.load(Ordering::Relaxed) {
         return;
+    }
+    // with Lightair's own compositor libobs also draws each canvas's output canvas, and calls
+    // this after each canvas: the preview is drawn after the first (the main canvas, drawn first)
+    if lightair_engine::bridge::own() {
+        let frame = unsafe { sys::obs_get_video_frame_time() };
+        if shared.last_frame.swap(frame, Ordering::Relaxed) == frame {
+            return;
+        }
     }
     // the compositor draws the program (a source shown in its place is still libobs's)
     if shared.fed.load(Ordering::Relaxed) && shared.source.lock().is_none() {

@@ -276,6 +276,16 @@ pub fn runtime() -> &'static OutputsRuntime {
 #[derive(Clone, Copy)]
 pub struct VideoOutput(pub(crate) *mut sys::video_t);
 
+/// The primary canvas's video, for outputs given no canvas: its output canvas, showing Lightair's
+/// own compositor's picture, with `LIGHTAIR_ENGINE=own` (macOS); libobs's main canvas otherwise.
+pub(crate) fn primary_video() -> *mut sys::video_t {
+    #[cfg(target_os = "macos")]
+    if let Some(video) = crate::program_source::video(None) {
+        return video;
+    }
+    unsafe { sys::obs_get_video() }
+}
+
 // ---------------------------------------------------------------- configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Container {
@@ -775,7 +785,7 @@ pub fn primary_skipped_frames() -> u32 {
         if !sys::obs_initialized() {
             return 0;
         }
-        let video = sys::obs_get_video();
+        let video = primary_video();
         if video.is_null() { 0 } else { sys::video_output_get_skipped_frames(video) }
     }
 }
@@ -838,7 +848,7 @@ unsafe fn create_encoders(
             return Err(format!("Couldn't create the audio encoder ({}).", cfg.audio_encoder));
         }
         // The canvas's canvas (main canvas when null), scaled when asked.
-        sys::obs_encoder_set_video(video, if video_output.is_null() { sys::obs_get_video() } else { video_output });
+        sys::obs_encoder_set_video(video, if video_output.is_null() { primary_video() } else { video_output });
         if let Some((w, h)) = cfg.scaled {
             sys::obs_encoder_set_scaled_size(video, w & !1, h & !1);
         }
@@ -1435,7 +1445,7 @@ impl Outputs {
                 runtime().update(key, |s| s.state = OutputState::Failed(err.clone()));
                 return Err(err);
             }
-            let video_output = video.map_or_else(|| sys::obs_get_video(), |v| v.0);
+            let video_output = video.map_or_else(primary_video, |v| v.0);
             sys::obs_output_set_media(output, video_output, sys::obs_get_audio());
             let signal_param = Box::into_raw(Box::new(key));
             let handler = sys::obs_output_get_signal_handler(output);

@@ -477,8 +477,16 @@ unsafe fn shutdown(state: EngineState) {
     crate::loudness::detach();
     let EngineState { sources, scenes, mut reconciler, mut outputs, studio_take } = state;
     outputs.shutdown();
+    // NDI sends the primary canvas's output canvas with Lightair's own compositor: it stops
+    // before the canvas goes
+    #[cfg(target_os = "macos")]
+    if crate::bridge::own() {
+        let _ = crate::ndi::set_output("");
+    }
     drop(studio_take);
     reconciler.clear();
+    #[cfg(target_os = "macos")]
+    crate::program_source::shutdown();
     drop(scenes);
     drop(sources);
     let mut idle_rounds = 0;

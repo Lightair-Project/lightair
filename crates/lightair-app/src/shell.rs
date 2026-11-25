@@ -1456,7 +1456,13 @@ impl StudioWindow {
             let id = f.id;
             let canvas = self.studio.read(cx).engine().call(move |s| s.reconciler.canvas_ref(id));
             if let Some(canvas) = canvas {
-                self.previews.insert(id, Preview::attach_canvas(canvas));
+                let preview = Preview::attach_canvas(canvas);
+                // Lightair's own compositor draws the canvas's program, as it does its outputs
+                #[cfg(target_os = "macos")]
+                if lightair_engine::bridge::own() && !preview.compose_program() {
+                    tracing::warn!(canvas = f.name, "LIGHTAIR_ENGINE=own: the compositor didn't start; libobs draws the canvas");
+                }
+                self.previews.insert(id, preview);
             }
         }
     }

@@ -337,6 +337,9 @@ struct Sender {
     audio: Vec<f32>,
     fps: (i32, i32),
     rate: u32,
+    /// The libobs output whose frames are sent (an `obs_output_t`, as a number); 0 when they come
+    /// from libobs's main canvas directly.
+    output: usize,
 }
 
 unsafe impl Send for Sender {}
@@ -400,10 +403,16 @@ unsafe extern "C" fn on_audio(param: *mut c_void, _mix: usize, data: *mut sys::a
 
 /// Sends the program out as the NDI source `name` ("" stops it). Call on the engine thread.
 pub fn set_output(name: &str) -> Result<(), String> {
-    let running = sender().lock().map(|s| s.is_some()).unwrap_or(false);
-    if running {
+    let running = sender().lock().ok().and_then(|s| s.as_ref().map(|s| s.output));
+    if let Some(output) = running {
         unsafe {
-            sys::obs_remove_raw_video_callback(Some(on_video), std::ptr::null_mut());
+            #[cfg(target_os = "macos")]
+            if output != 0 {
+                stop_output(output as *mut sys::obs_output_t);
+            }
+            if output == 0 {
+                sys::obs_remove_raw_video_callback(Some(on_video), std::ptr::null_mut());
+            }
             sys::obs_remove_raw_audio_callback(0, Some(on_audio), std::ptr::null_mut());
         }
         if let Ok(mut s) = sender().lock()
@@ -427,9 +436,6 @@ pub fn set_output(name: &str) -> Result<(), String> {
     let fps = if unsafe { sys::obs_get_video_info(&mut ovi) } { (ovi.fps_num as i32, ovi.fps_den.max(1) as i32) } else { (60, 1) };
     let mut ai = sys::obs_audio_info::default();
     let rate = if unsafe { sys::obs_get_audio_info(&mut ai) } { ai.samples_per_sec } else { 48_000 };
-    if let Ok(mut s) = sender().lock() {
-        *s = Some(Box::new(Sender { send, audio: Vec::new(), fps, rate }));
-    }
     let conversion = sys::video_scale_info {
         format: sys::VIDEO_FORMAT_BGRA,
         width: ovi.output_width,
@@ -437,16 +443,112 @@ pub fn set_output(name: &str) -> Result<(), String> {
         range: sys::VIDEO_RANGE_FULL,
         colorspace: sys::VIDEO_CS_709,
     };
+    if let Ok(mut s) = sender().lock() {
+        *s = Some(Box::new(Sender { send, audio: Vec::new(), fps, rate, output: 0 }));
+    }
+    // the primary canvas's output canvas (Lightair's own compositor's picture) when there is one
+    #[cfg(target_os = "macos")]
+    let output = crate::program_source::video(None).map_or(std::ptr::null_mut(), |video| unsafe { start_output(video, &conversion) });
+    #[cfg(not(target_os = "macos"))]
+    let output: *mut sys::obs_output_t = std::ptr::null_mut();
+    if let Ok(mut s) = sender().lock()
+        && let Some(s) = s.as_mut()
+    {
+        s.output = output as usize;
+    }
     unsafe {
-        sys::obs_add_raw_video_callback(&conversion, Some(on_video), std::ptr::null_mut());
+        if output.is_null() {
+            sys::obs_add_raw_video_callback(&conversion, Some(on_video), std::ptr::null_mut());
+        }
         sys::obs_add_raw_audio_callback(0, std::ptr::null(), Some(on_audio), std::ptr::null_mut());
     }
     tracing::info!(name, "sending the program over NDI");
     Ok(())
 }
 
-/// Registers the NDI source with libobs (once; after startup).
+// ---------------------------------------------------------------------------------------------
+// macOS, with `LIGHTAIR_ENGINE=own`: the output that sends the primary canvas's output canvas
+// (Lightair's own compositor's picture) instead of libobs's main canvas
+
+#[cfg(target_os = "macos")]
+const OUTPUT_ID: &CStr = c"lightair_ndi_output";
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn out_name(_: *mut c_void) -> *const c_char {
+    c"NDI".as_ptr()
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn out_create(_: *mut sys::obs_data_t, output: *mut sys::obs_output_t) -> *mut c_void {
+    Box::into_raw(Box::new(output as usize)) as *mut c_void
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn out_destroy(data: *mut c_void) {
+    drop(unsafe { Box::from_raw(data as *mut usize) });
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn out_start(data: *mut c_void) -> bool {
+    let output = unsafe { *(data as *const usize) } as *mut sys::obs_output_t;
+    unsafe { sys::obs_output_can_begin_data_capture(output, 0) && sys::obs_output_begin_data_capture(output, 0) }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn out_stop(data: *mut c_void, _: u64) {
+    let output = unsafe { *(data as *const usize) } as *mut sys::obs_output_t;
+    unsafe { sys::obs_output_end_data_capture(output) };
+}
+
+/// An output sending `video`'s frames, converted to `conversion`, started (null if it couldn't).
+#[cfg(target_os = "macos")]
+unsafe fn start_output(video: *mut sys::video_t, conversion: &sys::video_scale_info) -> *mut sys::obs_output_t {
+    unsafe {
+        let output = sys::obs_output_create(OUTPUT_ID.as_ptr(), c"NDI".as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
+        if output.is_null() {
+            return output;
+        }
+        sys::obs_output_set_media(output, video, sys::obs_get_audio());
+        sys::obs_output_set_video_conversion(output, conversion);
+        if !sys::obs_output_start(output) {
+            tracing::warn!("NDI: the output didn't start; sending libobs's own picture");
+            sys::obs_output_release(output);
+            return std::ptr::null_mut();
+        }
+        output
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn stop_output(output: *mut sys::obs_output_t) {
+    unsafe {
+        sys::obs_output_stop(output);
+        sys::obs_output_release(output);
+    }
+}
+
+/// Registers the NDI source and sending output with libobs (once; after startup).
 pub fn register() {
+    #[cfg(target_os = "macos")]
+    static OUTPUT: std::sync::Once = std::sync::Once::new();
+    #[cfg(target_os = "macos")]
+    OUTPUT.call_once(|| {
+        if !crate::bridge::own() {
+            return;
+        }
+        let info = sys::obs_output_info {
+            id: OUTPUT_ID.as_ptr(),
+            flags: sys::OBS_OUTPUT_VIDEO,
+            get_name: Some(out_name),
+            create: Some(out_create),
+            destroy: Some(out_destroy),
+            start: Some(out_start),
+            stop: Some(out_stop),
+            raw_video: Some(on_video),
+            ..Default::default()
+        };
+        unsafe { sys::obs_register_output_s(&info, std::mem::size_of::<sys::obs_output_info>()) };
+    });
     static DONE: std::sync::Once = std::sync::Once::new();
     DONE.call_once(|| unsafe {
         let mut info: sys::obs_source_info = std::mem::zeroed();

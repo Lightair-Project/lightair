@@ -664,10 +664,53 @@ impl Reconciler {
         if let Some(program) = self.program {
             self.land(Some(program));
         }
+        // the outputs take Lightair's own compositor's picture (`LIGHTAIR_ENGINE=own`)
+        #[cfg(target_os = "macos")]
+        if crate::bridge::own()
+            && let Some(libobs) = self.canvas_ref(canvas.id)
+        {
+            crate::program_source::attach(canvas, libobs, Some(canvas.id) == self.primary_canvas);
+        }
     }
 
     fn resize_canvas(&mut self, canvas: &Canvas) {
+        // the outputs record or stream the canvas's output canvas, which can't change size
+        // meanwhile: neither does the canvas (as libobs refuses for its own canvases)
+        #[cfg(target_os = "macos")]
+        if crate::program_source::in_use(canvas.id) {
+            tracing::warn!(canvas = canvas.name, "couldn't resize the canvas (is something recording or live?)");
+            return;
+        }
         if Some(canvas.id) == self.primary_canvas {
+            // the outputs' own canvases go first and come back after (see `take_down`)
+            #[cfg(target_os = "macos")]
+            let taken = match crate::program_source::take_down() {
+                Some(taken) => taken,
+                None => {
+                    tracing::warn!(canvas = canvas.name, "couldn't resize the canvas (is something recording or live?)");
+                    return;
+                }
+            };
+            self.reset_main_video(canvas);
+            #[cfg(target_os = "macos")]
+            {
+                let resized = Some((canvas.id, crate::program_source::shape_of(canvas)));
+                crate::program_source::bring_back(taken, resized, |id| self.canvas_ref(id));
+                return;
+            }
+        } else if let Some(obs_canvas) = self.obs_canvases.get(&canvas.id) {
+            obs_canvas.reset(canvas.width, canvas.height, canvas.fps_num, canvas.fps_den);
+        }
+        #[cfg(target_os = "macos")]
+        if !crate::program_source::resize(canvas) {
+            tracing::warn!(canvas = canvas.name, "couldn't resize the canvas's output (is something recording or live?)");
+        }
+    }
+
+    /// Resets libobs's main video to `canvas`'s size and frame rate (refused, with a warning,
+    /// while something records or streams from it).
+    fn reset_main_video(&self, canvas: &Canvas) {
+        {
             // The main video can be reset while nothing records or streams from it.
             unsafe {
                 let mut ovi = std::mem::zeroed::<sys::obs_video_info>();
@@ -687,12 +730,12 @@ impl Reconciler {
                     tracing::warn!(code, "couldn't resize the main canvas (is something recording or live?)");
                 }
             }
-        } else if let Some(obs_canvas) = self.obs_canvases.get(&canvas.id) {
-            obs_canvas.reset(canvas.width, canvas.height, canvas.fps_num, canvas.fps_den);
         }
     }
 
     fn remove_canvas(&mut self, id: Id) {
+        #[cfg(target_os = "macos")]
+        crate::program_source::detach(id);
         self.finish_move();
         self.transitions.remove(&id);
         self.overlays.retain(|(c, _), _| *c != id);
@@ -1006,7 +1049,13 @@ impl Reconciler {
     }
 
     /// The canvas's video output, for encoders recording or streaming a canvas.
+    /// With `LIGHTAIR_ENGINE=own` (macOS) it's the canvas's output canvas, showing Lightair's own
+    /// compositor's picture.
     pub fn canvas_video(&self, canvas: Id) -> Option<crate::outputs::VideoOutput> {
+        #[cfg(target_os = "macos")]
+        if let Some(video) = crate::program_source::video(Some(canvas)) {
+            return Some(crate::outputs::VideoOutput(video));
+        }
         if Some(canvas) == self.primary_canvas {
             return Some(crate::outputs::VideoOutput(unsafe { sys::obs_get_video() }));
         }
@@ -1723,6 +1772,8 @@ impl Reconciler {
         self.masks.clear();
         self.items.clear();
         self.scenes.clear();
+        #[cfg(target_os = "macos")]
+        crate::program_source::detach_all();
         self.obs_canvases.clear();
         self.canvases.clear();
         #[cfg(target_os = "macos")]

@@ -468,7 +468,7 @@ pub fn set(on: bool, available_encoders: &[String]) -> Result<(), String> {
         if video.is_null() || audio.is_null() {
             return Err("Couldn't make the encoders".into());
         }
-        sys::obs_encoder_set_video(video, sys::obs_get_video());
+        sys::obs_encoder_set_video(video, crate::outputs::primary_video());
         sys::obs_encoder_set_audio(audio, sys::obs_get_audio());
         let output = sys::obs_output_create(c"lightair_rtsp".as_ptr(), c"rtsp".as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
         if output.is_null() {
