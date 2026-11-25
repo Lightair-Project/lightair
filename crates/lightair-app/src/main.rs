@@ -3,10 +3,6 @@
 // Windows: a window app, no console (development builds keep theirs, for the log)
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-// Without libobs, lightair-host stands where lightair-obs did (the same names, ids for its refs).
-#[cfg(not(feature = "libobs"))]
-extern crate lightair_host as lightair_obs;
-
 mod activity_panel;
 mod assets;
 mod automations_panel;
@@ -57,8 +53,6 @@ mod midi_map;
 mod ptz;
 mod keys;
 mod secrets;
-#[cfg(feature = "libobs")]
-mod selftest;
 mod shell;
 mod starter;
 mod storage;
@@ -77,7 +71,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::*;
-use lightair_obs::{Engine, EngineConfig};
+use lightair_host::{Engine, EngineConfig};
 use lightair_preview::Preview;
 
 use crate::shell::StudioWindow;
@@ -145,7 +139,7 @@ fn main() {
     );
     tracing::info!(version = engine.version, workspace = %workspace_dir.display(), "libobs started");
     if let Some((name, id)) = prefs.headphones_device.clone() {
-        engine.call(move |_| lightair_obs::monitoring::set(&name, &id));
+        engine.call(move |_| lightair_host::monitoring::set(&name, &id));
     }
     let monitor = prefs.low_latency_headphones.then(|| prefs.headphones_device.clone().map_or(String::new(), |(_, id)| id));
     let program = prefs.headphones_hear_program;
@@ -155,18 +149,12 @@ fn main() {
         // before the engine starts: nothing to restart
         s.reconciler.set_audio_block(block, &lightair_model::Workspace::new(""));
     });
-    // the self-tests drive libobs's sources
-    #[cfg(feature = "libobs")]
-    if let Ok(what) = std::env::var("LIGHTAIR_SELFTEST") {
-        selftest::run(&engine, &what);
-        return;
-    }
     // iPhones and iPads by USB, among the cameras
     lightair_platform::devices::allow_ios_screens();
     let preview = Preview::attach();
     // Lightair's own compositor draws the program in the window instead of libobs
     #[cfg(target_os = "macos")]
-    if lightair_obs::bridge::own() && !preview.compose_program() {
+    if lightair_host::bridge::own() && !preview.compose_program() {
         tracing::warn!("LIGHTAIR_ENGINE=own: the compositor didn't start; libobs draws the program");
     }
 
@@ -175,12 +163,12 @@ fn main() {
         // a camera (an iPhone's above all) that comes back: its captures start again
         lightair_platform::devices::watch_cameras(|uid| {
             tracing::debug!(%uid, "camera connected");
-            lightair_obs::on_screen::device_reconnected(&uid);
+            lightair_host::on_screen::device_reconnected(&uid);
         });
         // VST3 plugins are made, edited and torn down on this thread
         // (GPUI's foreground executor: the main thread on both platforms)
         let (jobs, mut queue) = futures_channel::mpsc::unbounded::<Box<dyn FnOnce() + Send>>();
-        lightair_obs::plugins::set_main_thread(move |job| {
+        lightair_host::plugins::set_main_thread(move |job| {
             let _ = jobs.unbounded_send(job);
         });
         cx.foreground_executor()

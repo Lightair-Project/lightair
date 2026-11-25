@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use gpui_kit::*;
 use lightair_model::{Command, Id, Layout, Object, Scene, Source, Track, Workspace};
-use lightair_obs::outputs::{OutputKey, OutputState, runtime};
+use lightair_host::outputs::{OutputKey, OutputState, runtime};
 use lightair_preview::Preview;
 use lightair_remote::{ApiError, Call, Config, ErrorKind, Handler, Reply, Server};
 use serde_json::{Value, json};
@@ -812,7 +812,7 @@ impl StudioWindow {
                 let src = source_by(&w, need(p, "source")?)?.id;
                 let st = self.studio.read(cx).engine().call(move |e| e.reconciler.media_status(src));
                 let st = st.ok_or_else(|| ApiError::invalid("not a media source"))?;
-                use lightair_obs::media::MediaState as M;
+                use lightair_host::media::MediaState as M;
                 let state = match st.state {
                     M::None => "none",
                     M::Playing => "playing",
@@ -826,7 +826,7 @@ impl StudioWindow {
                 Ok(json!({"state": state, "time_ms": st.time_ms, "duration_ms": st.duration_ms}))
             }
             "media.action" => {
-                use lightair_obs::media::MediaAction as A;
+                use lightair_host::media::MediaAction as A;
                 let src = source_by(&w, need(p, "source")?)?.id;
                 let action = match need(p, "action")? {
                     "play" => A::Play,
@@ -1165,7 +1165,7 @@ impl StudioWindow {
             "lagged_last_second": studio.recent_lagged,
             // Frames the encoders were too slow for on the primary canvas (OBS's "skipped frames
             // due to encoding lag"); the recording's own drop count is `record_dropped_frames`.
-            "output_skipped_frames": lightair_obs::outputs::primary_skipped_frames(),
+            "output_skipped_frames": lightair_host::outputs::primary_skipped_frames(),
             "output_total_frames": s.total_frames,
             "output_dropped_network": runtime()
                 .streams()
@@ -1234,7 +1234,7 @@ impl StudioWindow {
     /// `audio.add`: a sound source with its mixer track (no object: sound has no picture).
     fn remote_audio_add(&mut self, who: &str, p: &Value, cx: &mut Context<Self>) -> Reply {
         let (kind, name, settings) = match text(p, "kind").unwrap_or("microphone") {
-            "microphone" | "mic" => (lightair_obs::devices::DEVICE_KIND, "Mic", json!({"device": text(p, "device").unwrap_or("")})),
+            "microphone" | "mic" => (lightair_host::devices::DEVICE_KIND, "Mic", json!({"device": text(p, "device").unwrap_or("")})),
             "desktop" | "desktop_audio" => (lightair_model::kinds::DESKTOP_AUDIO, "Desktop audio", json!({})),
             "app" | "app_audio" => (lightair_model::kinds::APP_AUDIO, "App audio", json!({"app": text(p, "app").unwrap_or("")})),
             k => return Err(ApiError::invalid(format!("no sound kind {k} (microphone, desktop, app)"))),
@@ -1309,7 +1309,7 @@ impl StudioWindow {
                 let size = size_in(&s, w.width as f32, w.height as f32);
                 NewSource { kind: "color_source_v3".into(), settings: s, size, sound: false, name: "Colour".into() }
             }
-            "browser" | "web" | "browser_source" | lightair_obs::web::KIND => {
+            "browser" | "web" | "browser_source" | lightair_host::web::KIND => {
                 let url = s.get("url").and_then(Value::as_str).ok_or_else(|| ApiError::invalid("a browser needs settings.url"))?;
                 s["url"] = super::object_props::web_address(url).into();
                 defaults(&mut s, json!({"width": 1920, "height": 1080, "fps": 30}));
@@ -1318,7 +1318,7 @@ impl StudioWindow {
                 }
                 let host = s["url"].as_str().unwrap_or("").split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or("Browser").to_string();
                 let size = size_in(&s, 1920.0, 1080.0);
-                NewSource { kind: lightair_obs::web::KIND.into(), settings: s, size, sound: true, name: host }
+                NewSource { kind: lightair_host::web::KIND.into(), settings: s, size, sound: true, name: host }
             }
             "display" | "window" | "app" | "screen_capture" | "display_capture" | "window_capture" | lightair_model::kinds::SCREEN => {
                 use lightair_model::kinds::{APP, DISPLAY, WINDOW};
@@ -1330,7 +1330,7 @@ impl StudioWindow {
                 let key = super::screen_pick::key_of(mode);
                 let value = match s.get(key).cloned() {
                     Some(v) => v,
-                    None if mode == DISPLAY => lightair_obs::displays::main_display_uuid().map(Value::from).unwrap_or(Value::Null),
+                    None if mode == DISPLAY => lightair_host::displays::main_display_uuid().map(Value::from).unwrap_or(Value::Null),
                     None => return Err(ApiError::invalid(format!("say which {key}: settings.{key} from list_capture_targets"))),
                 };
                 let mut settings = super::screen_pick::settings(mode, &value);
@@ -1348,7 +1348,7 @@ impl StudioWindow {
                 let device = match s.get("device").and_then(Value::as_str) {
                     Some(d) => d.to_string(),
                     None => {
-                        let cams = self.studio.read(cx).engine().call(|_| lightair_obs::kinds::cameras());
+                        let cams = self.studio.read(cx).engine().call(|_| lightair_host::kinds::cameras());
                         cams.first().map(|(_, id)| id.clone()).ok_or_else(|| ApiError::state("no camera found"))?
                     }
                 };
@@ -1365,15 +1365,15 @@ impl StudioWindow {
                 let (w, h) = b.size;
                 let instance = lightair_widgets::Instance::new(&wk, None);
                 let settings = json!({"url": instance.address(), "width": w, "height": h, "fps": 30, "widget": instance});
-                NewSource { kind: lightair_obs::web::KIND.into(), settings, size: (w as f32, h as f32), sound: b.sound, name: b.name.into() }
+                NewSource { kind: lightair_host::web::KIND.into(), settings, size: (w as f32, h as f32), sound: b.sound, name: b.name.into() }
             }
-            "timer" | lightair_obs::timers::TIMER_KIND => {
+            "timer" | lightair_host::timers::TIMER_KIND => {
                 defaults(&mut s, json!({
                     "mode": "countdown", "seconds": 300, "autostart": true,
                     "font": {"face": crate::ui::TEXT_FACE, "size": 160, "flags": 1},
                     "color1": 0xFFFFFFFFu32, "color2": 0xFFFFFFFFu32,
                 }));
-                NewSource { kind: lightair_obs::timers::TIMER_KIND.into(), settings: s, size: (560.0, 200.0), sound: false, name: "Countdown".into() }
+                NewSource { kind: lightair_host::timers::TIMER_KIND.into(), settings: s, size: (560.0, 200.0), sound: false, name: "Countdown".into() }
             }
             other => {
                 let size = size_in(&s, 1280.0, 720.0);
@@ -1540,7 +1540,7 @@ fn resident_bytes() -> u64 {
 }
 
 /// `capture.targets`: what a display, window, app, camera or microphone capture can show.
-fn capture_targets(p: &Value, engine: &Arc<lightair_obs::Engine>) -> Reply {
+fn capture_targets(p: &Value, engine: &Arc<lightair_host::Engine>) -> Reply {
     use lightair_model::kinds::{APP, DISPLAY, WINDOW};
     let kind = p.get("kind").and_then(Value::as_str).unwrap_or("display");
     let items: Vec<Value> = match kind {
@@ -1552,13 +1552,13 @@ fn capture_targets(p: &Value, engine: &Arc<lightair_obs::Engine>) -> Reply {
             };
             let key = super::screen_pick::key_of(mode);
             // the system's list fills in a moment after the first ask
-            let mut options = lightair_obs::displays::screen_options(mode, key);
+            let mut options = lightair_host::displays::screen_options(mode, key);
             for _ in 0..4 {
                 if !options.is_empty() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(250));
-                options = lightair_obs::displays::screen_options(mode, key);
+                options = lightair_host::displays::screen_options(mode, key);
             }
             let hide = |v: &Value| {
                 lightair_platform::apps::hide_window(&v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string()))
@@ -1569,11 +1569,11 @@ fn capture_targets(p: &Value, engine: &Arc<lightair_obs::Engine>) -> Reply {
                 .collect()
         }
         "camera" => engine
-            .call(|_| lightair_obs::kinds::cameras())
+            .call(|_| lightair_host::kinds::cameras())
             .into_iter()
             .map(|(name, id)| json!({"title": name, "settings": {"device": id}}))
             .collect(),
-        "microphone" | "mic" => lightair_obs::devices::input_devices()
+        "microphone" | "mic" => lightair_host::devices::input_devices()
             .into_iter()
             .map(|d| json!({"title": d.name, "detail": if d.default { "default" } else { "" }, "settings": {"device": d.name}}))
             .collect(),

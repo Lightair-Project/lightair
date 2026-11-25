@@ -14,14 +14,13 @@ publish = false
 [workspace.dependencies]
 # internal
 libobs-sys = { path = "crates/libobs-sys" }
-lightair-obs = { path = "crates/lightair-obs" }
 lightair-host = { path = "crates/lightair-host" }
 lightair-avatar = { path = "crates/lightair-avatar" }
 # The avatar runtimes, built in from upstream projects (each crate's NOTICE.md): .moc3 models,
 # and Inochi2D and nijilive puppets.
 lightair-moc3 = { path = "crates/lightair-moc3" }
 lightair-inochi2d = { path = "crates/lightair-inochi2d" }
-lightair-preview = { path = "crates/lightair-preview", default-features = false }
+lightair-preview = { path = "crates/lightair-preview" }
 lightair-web = { path = "crates/lightair-web" }
 lightair-phone-camera = { path = "crates/lightair-phone-camera" }
 

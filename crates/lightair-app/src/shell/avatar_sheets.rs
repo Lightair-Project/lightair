@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-#[cfg(any(feature = "libobs", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::Sizable;
@@ -22,7 +22,7 @@ use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_model::{Command, Id, Layout, Object, Source};
-use lightair_obs::avatar_pins::{Placement, on_canvas};
+use lightair_host::avatar_pins::{Placement, on_canvas};
 use serde_json::{Value, json};
 
 use super::StudioWindow;
@@ -74,7 +74,7 @@ pub(super) fn with_pin(
     settings: &Value,
     object: Id,
     key: Option<&str>,
-    at: Option<lightair_obs::avatar_pins::Spot>,
+    at: Option<lightair_host::avatar_pins::Spot>,
 ) -> Value {
     let mut s = if settings.is_object() { settings.clone() } else { json!({}) };
     if !s["pins"].is_object() {
@@ -141,70 +141,8 @@ impl StudioWindow {
         cx.notify();
     }
 
-    /// Takes the next queued library picture from the model's file, one at a time: a private
-    /// avatar source draws it (once loaded) into a preview that's read back.
-    #[cfg(feature = "libobs")]
-    fn next_picture(&mut self, cx: &mut Context<Self>) {
-        if self.picture_busy {
-            return;
-        }
-        let Some(entry) = self.picture_queue.pop_front() else { return };
-        let Some(e) = self.avatar_library.get(entry).cloned() else { return self.next_picture(cx) };
-        let framing = if lib::kind_of(&e.file) == "PNGtuber" {
-            "full".to_string()
-        } else {
-            e.look["framing"].as_str().unwrap_or("bust").to_string()
-        };
-        let engine = self.studio.read(cx).engine().clone();
-        let file = e.file.clone();
-        let Some(src) = engine.call(move |s| s.reconciler.avatar_snapshot_source(&file, &framing)) else {
-            return self.next_picture(cx);
-        };
-        self.picture_busy = true;
-        let preview = lightair_preview::Preview::attach();
-        preview.set_own_size(true);
-        preview.set_size(Some(picture_size(1080, 1080)));
-        preview.set_source(Some(src.clone()));
-        cx.spawn(async move |this, cx| {
-            let start = Instant::now();
-            // loaded (a big model takes a few seconds), then a few frames drawn
-            let mut seen_at = None;
-            let frame = loop {
-                cx.background_executor().timer(Duration::from_millis(150)).await;
-                let status = lightair_obs::avatar::status_of(&src);
-                if !status.error.is_empty() || start.elapsed() > Duration::from_secs(20) {
-                    break None;
-                }
-                if status.loaded && seen_at.is_none() {
-                    seen_at = Some(preview.frames());
-                }
-                if seen_at.is_some_and(|f| preview.frames() >= f + 8)
-                    && let Some(f) = preview.latest_frame()
-                {
-                    break Some(f);
-                }
-            };
-            drop(preview);
-            let png = frame.as_ref().and_then(picture_png);
-            let _ = this.update(cx, |this, cx| {
-                match png {
-                    Some(png) => {
-                        this.avatar_library.set_picture(entry, &png);
-                        this.avatar_library.save();
-                    }
-                    None => tracing::warn!(%entry, "no library picture: the model didn't load"),
-                }
-                this.picture_busy = false;
-                this.next_picture(cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     /// Takes the next queued library picture from the model's file, one at a time: the
     /// compositor's avatar renderer draws it at rest, off screen, in the background.
-    #[cfg(not(feature = "libobs"))]
     fn next_picture(&mut self, cx: &mut Context<Self>) {
         if self.picture_busy {
             return;
@@ -350,24 +288,8 @@ impl StudioWindow {
         Some((source, i.settings.clone()))
     }
 
-    /// Takes a picture of an avatar for its library entry (it must be on screen).
-    #[cfg(feature = "libobs")]
-    fn take_avatar_picture(&mut self, source: Id, entry: Id, cx: &mut Context<Self>) {
-        self.avatar_pictures.insert(entry);
-        let engine = self.studio.read(cx).engine().clone();
-        let Some(src) = engine.call(move |e| e.reconciler.source_ref(source)) else {
-            return;
-        };
-        let (sw, sh) = src.size();
-        let preview = lightair_preview::Preview::attach();
-        preview.set_own_size(true);
-        preview.set_size(Some(picture_size(sw, sh)));
-        preview.set_source(Some(src));
-        self.read_avatar_picture(preview, entry, cx);
-    }
-
-    /// Without libobs: the avatar drawn at rest, off screen, with its source's settings.
-    #[cfg(not(feature = "libobs"))]
+    /// Takes a picture of an avatar for its library entry: the avatar drawn at rest, off screen,
+    /// with its source's settings.
     fn take_avatar_picture(&mut self, source: Id, entry: Id, cx: &mut Context<Self>) {
         self.avatar_pictures.insert(entry);
         let workspace = self.studio.read(cx).workspace().clone();
@@ -377,33 +299,6 @@ impl StudioWindow {
         cx.spawn(async move |this, cx| {
             let png = cx.background_executor().spawn(async move { picture_at_rest(&settings) }).await;
             let Some(png) = png else { return };
-            let _ = this.update(cx, |this, cx| {
-                this.avatar_library.set_picture(entry, &png);
-                this.avatar_library.save();
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Reads `preview` back once it has drawn a few frames: the library picture of `entry`.
-    #[cfg(feature = "libobs")]
-    fn read_avatar_picture(&mut self, preview: lightair_preview::Preview, entry: Id, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let start = Instant::now();
-            let frame = loop {
-                cx.background_executor().timer(Duration::from_millis(100)).await;
-                if preview.frames() >= 6
-                    && let Some(f) = preview.latest_frame()
-                {
-                    break Some(f);
-                }
-                if start.elapsed() > Duration::from_secs(4) {
-                    break None;
-                }
-            };
-            drop(preview);
-            let Some(png) = frame.as_ref().and_then(picture_png) else { return };
             let _ = this.update(cx, |this, cx| {
                 this.avatar_library.set_picture(entry, &png);
                 this.avatar_library.save();
@@ -792,7 +687,7 @@ impl StudioWindow {
         avatar_source: Id,
         key: Option<&str>,
         cx: &App,
-    ) -> Option<lightair_obs::avatar_pins::Spot> {
+    ) -> Option<lightair_host::avatar_pins::Spot> {
         let key = key?.to_string();
         self.studio.read(cx).engine().call(move |e| e.reconciler.avatar_anchor_rest(avatar_source, &key, None))
     }
@@ -1171,32 +1066,15 @@ pub(super) fn expression_keys(workspace: &lightair_model::Workspace) -> Vec<(Id,
 /// avatar stretched into it. Retaken when the library opens.
 const OLD_PICTURE: (u32, u32) = (320, 180);
 
-/// The size a library picture is drawn at: the avatar's own shape, its long side 360.
-#[cfg_attr(not(feature = "libobs"), allow(dead_code))]
-fn picture_size(w: u32, h: u32) -> (u32, u32) {
-    let (w, h) = (w.max(1) as f32, h.max(1) as f32);
-    let k = 360.0 / w.max(h);
-    ((w * k).round() as u32, (h * k).round() as u32)
-}
-
-/// A frame as a PNG picture for the library: at most 360 wide, cut to what's drawn when the
-/// background is see-through.
-#[cfg_attr(not(feature = "libobs"), allow(dead_code))]
-fn picture_png(frame: &lightair_preview::Frame) -> Option<Vec<u8>> {
-    let (w, h, rgba) = lightair_preview::frame_rgba(frame, 360)?;
-    png_of(image::RgbaImage::from_raw(w as u32, h as u32, rgba)?)
-}
-
-/// No library pictures of avatars here yet without libobs: the compositor's avatar renderer runs
-/// on macOS only.
-#[cfg(all(not(feature = "libobs"), not(target_os = "macos")))]
+/// No library pictures of avatars here yet: the compositor's avatar renderer runs on macOS only.
+#[cfg(not(target_os = "macos"))]
 fn picture_at_rest(_settings: &Value) -> Option<Vec<u8>> {
     None
 }
 
 /// An avatar's model (`settings`: an avatar source's) drawn at rest by the compositor's renderer,
 /// as a library picture; `None` when it doesn't load (in 20 seconds). Off the UI thread.
-#[cfg(all(not(feature = "libobs"), target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn picture_at_rest(settings: &Value) -> Option<Vec<u8>> {
     use lightair_render::media::Picture;
     let mut r = lightair_preview::avatars::AvatarRenderer::new(settings).ok()?;

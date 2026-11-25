@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use super::StudioWindow;
 use crate::ui::{self, tok};
 
-pub(super) const KIND: &str = lightair_obs::avatar::KIND;
+pub(super) const KIND: &str = lightair_host::avatar::KIND;
 
 /// An expression as the Inspector shows it, readably: a VRM's preset names capitalised ("happy"
 /// → "Happy"); a model's parameter names without "Param", in words, a side last
@@ -307,7 +307,7 @@ impl StudioWindow {
     /// bars. What's pinned to it stays where it was on its anchor (each pin re-measured for the new
     /// picture). One undo step.
     pub(super) fn set_avatar_shape(&mut self, source: Id, (w, h): (u32, u32), cx: &mut Context<Self>) {
-        use lightair_obs::avatar_pins::{Placement, Spot, on_canvas};
+        use lightair_host::avatar_pins::{Placement, Spot, on_canvas};
         let workspace = self.studio.read(cx).workspace().clone();
         let engine = self.studio.read(cx).engine().clone();
         let Some(settings) = workspace.sources.get(&source).map(|i| i.settings.clone()) else { return };

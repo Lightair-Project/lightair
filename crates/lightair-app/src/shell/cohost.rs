@@ -9,8 +9,8 @@ use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use lightair_obs::avatar::KIND;
-use lightair_obs::{face_drive, piair_voice};
+use lightair_host::avatar::KIND;
+use lightair_host::{face_drive, piair_voice};
 use lightair_model::{Command, Id, Layout, Object, Source, Track};
 use serde_json::{Value, json};
 

@@ -1033,7 +1033,7 @@ impl StudioWindow {
         let instance = lightair_widgets::Instance::new("custom", Some(custom));
         let mut settings = json!({"url": instance.address(), "width": w, "height": h, "fps": 30, "widget": instance});
         settings[pk::MARK] = pk::mark(id, version);
-        self.add_placed_object(name, lightair_obs::web::KIND, settings, (w as f32, h as f32), (0.5, 0.5), true, cx);
+        self.add_placed_object(name, lightair_host::web::KIND, settings, (w as f32, h as f32), (0.5, 0.5), true, cx);
         if self.add_object.is_some() {
             self.close_add_object(window, cx);
         }

@@ -4,7 +4,7 @@
 //! console lists them (shell/console_panel).
 
 use lightair_model::{Command, Id, Workspace, kinds};
-use lightair_obs::outputs::{OutputKey, OutputState, runtime};
+use lightair_host::outputs::{OutputKey, OutputState, runtime};
 
 /// The devices connected now: (id, name).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -18,9 +18,9 @@ impl Connected {
     /// while (DirectShow: 150–550 ms), and the UI waits on the engine's thread for little things
     /// all the time (libobs lists them from any thread, as OBS's own dialogs do).
     pub fn now() -> Connected {
-        let mics = lightair_obs::devices::input_devices().into_iter().map(|d| (d.id, d.name)).collect();
+        let mics = lightair_host::devices::input_devices().into_iter().map(|d| (d.id, d.name)).collect();
         // (name, id)
-        let cameras = lightair_obs::kinds::cameras().into_iter().map(|(name, id)| (id, name)).collect();
+        let cameras = lightair_host::kinds::cameras().into_iter().map(|(name, id)| (id, name)).collect();
         Connected { mics, cameras }
     }
 }
@@ -50,7 +50,7 @@ pub fn is_mic(kind: &str) -> bool {
 /// What a microphone source is called for `device`: System Default for the system's (which
 /// follows whatever the OS uses, so it's never missing), else the device's `name`.
 pub fn mic_name(device: &str, name: &str) -> String {
-    if lightair_obs::devices::is_system_default(device) { crate::mixer::SYSTEM_DEFAULT.to_string() } else { name.to_string() }
+    if lightair_host::devices::is_system_default(device) { crate::mixer::SYSTEM_DEFAULT.to_string() } else { name.to_string() }
 }
 
 /// Points `source` at another device (`settings`), and names it after the device. The tracks
@@ -81,7 +81,7 @@ pub fn look(w: &Workspace, connected: Option<&Connected>) -> Vec<Attention> {
                 continue;
             }
             let (missing, camera) = match s.kind.as_str() {
-                k if is_mic(k) => (!lightair_obs::devices::is_system_default(device) && !c.mics.iter().any(|(id, _)| id == device), false),
+                k if is_mic(k) => (!lightair_host::devices::is_system_default(device) && !c.mics.iter().any(|(id, _)| id == device), false),
                 kinds::CAMERA => (!c.cameras.iter().any(|(id, _)| id == device), true),
                 _ => continue,
             };

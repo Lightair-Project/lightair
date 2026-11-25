@@ -27,7 +27,7 @@ fn file_key(kind: &str) -> Option<&'static str> {
     match kind {
         "image_source" => Some("file"),
         "ffmpeg_source" => Some("local_file"),
-        lightair_obs::avatar::KIND => Some("file"),
+        lightair_host::avatar::KIND => Some("file"),
         _ => None,
     }
 }
@@ -121,7 +121,7 @@ impl StudioWindow {
             .workspace()
             .sources
             .get(&source)
-            .and_then(|i| lightair_obs::kinds::libobs_key(&i.kind, key))
+            .and_then(|i| lightair_host::kinds::libobs_key(&i.kind, key))
             .unwrap_or(key);
         // asked in the background: a camera's devices take DirectShow a while, and the engine
         // may be busy (opening a camera): what's known meanwhile, then a redraw with the list
@@ -145,7 +145,7 @@ impl StudioWindow {
 
     fn replace_file(&mut self, source: Id, key: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         // an avatar's model: only the formats Lightair loads
-        let avatar = self.studio.read(cx).workspace().sources.get(&source).is_some_and(|i| i.kind == lightair_obs::avatar::KIND);
+        let avatar = self.studio.read(cx).workspace().sources.get(&source).is_some_and(|i| i.kind == lightair_host::avatar::KIND);
         let picked = if avatar {
             crate::file_pick::pick(crate::file_pick::AVATAR, cx)
         } else {
@@ -220,7 +220,7 @@ impl StudioWindow {
     pub(super) fn source_section(&self, source: &Source, cx: &mut Context<Self>) -> Option<AnyElement> {
         let id = source.id;
         if let Some(key) = file_key(&source.kind) {
-            let avatar = source.kind == lightair_obs::avatar::KIND;
+            let avatar = source.kind == lightair_host::avatar::KIND;
             let path = source.settings[key].as_str().unwrap_or("");
             let name =
                 std::path::Path::new(path).file_name().map_or("No file".into(), |n| n.to_string_lossy().into_owned());

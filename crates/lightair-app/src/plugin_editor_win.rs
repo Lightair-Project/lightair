@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use lightair_obs::plugins::vst3::{Vst3Plugin, Vst3View};
+use lightair_host::plugins::vst3::{Vst3Plugin, Vst3View};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{

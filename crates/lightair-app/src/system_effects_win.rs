@@ -32,17 +32,6 @@ pub fn set_backgrounds_on(_: bool) -> bool {
     false
 }
 
-#[cfg_attr(not(feature = "libobs"), allow(dead_code, reason = "the self-tests use it"))]
-pub fn camera_backgrounds(_: &str) -> Option<(bool, bool)> {
-    None
-}
-
 pub fn set_background_colour(_: [u8; 3]) -> bool {
     false
-}
-
-/// Whether background replacement is on: Windows has none.
-#[cfg_attr(not(feature = "libobs"), allow(dead_code, reason = "the self-tests use it"))]
-pub fn backgrounds_on() -> Option<bool> {
-    None
 }

@@ -7,12 +7,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use lightair_model::catalog::{self, Presets};
+use lightair_model::catalog::Presets;
 use serde_json::{Value, json};
-
-/// The libobs filter all face effects run on.
-#[cfg_attr(not(feature = "libobs"), allow(dead_code))]
-pub const KIND: &str = catalog::STUDIO_FILTER;
 
 /// Where the Lightair Effect Stack module bundle lives: the app's own `Contents/PlugIns` (the shipped
 /// app, `cargo xtask dist`), or `target/modules/lightair-effect-stack` in development (found from

@@ -20,7 +20,7 @@ pub struct Choose {
     pub suffixes: &'static [&'static str],
 }
 
-/// The avatar formats Lightair loads (`lightair_obs::avatar`).
+/// The avatar formats Lightair loads (`lightair_host::avatar`).
 pub const AVATAR: Choose = Choose {
     title: "Choose an avatar",
     message: "VRM (.vrm, or .glb with VRM data) · Live2D (.model3.json) · Inochi2D (.inp, .inx) · Umamo (.uma) · PNGtuber (.lairava)",

@@ -1,18 +1,12 @@
 [package]
 name = "lightair-preview"
-description = "Canvas preview bridge: libobs renders into IOSurfaces that the UI draws with zero copy"
+description = "Lightair's compositor and canvas previews: frames drawn on the GPU into IOSurfaces (macOS) or shared textures (Windows) that the UI shows with zero copy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[features]
-default = ["libobs"]
-# libobs draws what the compositor doesn't, and previews when the compositor is off
-libobs = ["dep:lightair-obs"]
-
 [dependencies]
-lightair-obs = { workspace = true, optional = true }
 lightair-host.workspace = true
 lightair-model.workspace = true
 tracing.workspace = true
@@ -64,10 +58,3 @@ windows = { version = "0.62", features = [
     "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Threading",
 ] }
-
-[dev-dependencies]
-lightair-model.workspace = true
-lightair-render.workspace = true
-serde_json.workspace = true
-tracing-subscriber.workspace = true
-image = { version = "0.25", default-features = false, features = ["png"] }

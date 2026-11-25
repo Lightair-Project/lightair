@@ -1,22 +1,15 @@
 //! The portable preview path (Windows today; any platform without a zero-copy one): frames are
-//! BGRA pixels in memory, shown by the UI as images ([`CpuFrame`]).
-//!
-//! - With libobs (`obs`): libobs renders the canvas into a render target, and each frame is
-//!   read back (on Windows the window's preview is presented into a swap chain instead).
-//! - Without libobs (`own`): the frames come from Lightair's own compositor, once it runs on
-//!   this platform (it runs on macOS only today: docs/plans/no-libobs.md, step 10).
+//! BGRA pixels in memory, shown by the UI as images ([`CpuFrame`]). They come from Lightair's
+//! own compositor (`own`); on Windows the window's preview is presented into a swap chain
+//! instead (`Layer`).
 
 use std::sync::Arc;
 
-#[cfg(feature = "libobs")]
-mod obs;
-#[cfg(feature = "libobs")]
-pub use obs::Preview;
-
-#[cfg(not(feature = "libobs"))]
 mod own;
-#[cfg(not(feature = "libobs"))]
 pub use own::Preview;
+// what Lightair's own compositor feeds
+#[cfg(windows)]
+pub(crate) use own::{SceneView, Shared};
 
 /// A finished preview frame: BGRA pixels, top row first.
 pub struct CpuFrame {

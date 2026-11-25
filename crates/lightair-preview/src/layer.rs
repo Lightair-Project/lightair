@@ -1,12 +1,11 @@
 //! Windows: the preview presented straight into a DirectComposition swap chain (the window's
 //! canvas picture, under its UI), with no copy through memory and no redraw of the UI.
 //!
-//! With libobs the swap chain belongs to libobs's own D3D11 device: each frame the graphics
-//! thread copies the preview's render target into the back buffer (a GPU copy) and presents
-//! without waiting. Without libobs it belongs to the device Lightair's own pictures are made on
+//! The swap chain belongs to the device Lightair's own pictures are made on
 //! (`lightair_host::buffers::device`), and each frame of Lightair's own compositor (a shared
-//! texture) is copied in the same way ([`Layer::present_buffer`]). The app shows the swap chain
-//! in a composition visual under GPUI's (`native_preview`).
+//! texture) is copied into its back buffer (a GPU copy) and presented without waiting
+//! ([`Layer::present_buffer`]). The app shows the swap chain in a composition visual under
+//! GPUI's (`native_preview`).
 //!
 //! Never waiting matters: the thread that presents draws the program for the outputs too, so a
 //! present that blocked (the compositor busy, say while a display capture starts up and Windows
@@ -17,13 +16,9 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(feature = "libobs")]
-use lightair_obs::sys;
 use parking_lot::Mutex;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Resource, ID3D11Texture2D};
-#[cfg(feature = "libobs")]
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
@@ -46,18 +41,13 @@ pub struct Layer {
     size: AtomicU64,
     /// The back buffers' format (the presenting thread).
     format: Mutex<DXGI_FORMAT>,
-    /// The size the picture is shown at (pixels, packed; 0: not known): frames are rendered at
-    /// it (up to the canvas's own size), so the compositor shows them as they are. On a laptop
-    /// whose screen hangs off the other GPU, each frame crosses between the GPUs: a third of the
-    /// width is a ninth of the copying.
+    /// The size the picture is shown at (pixels, packed; 0: not known).
     wanted: AtomicU64,
     /// Serialises presenting with dropping.
     lock: Mutex<()>,
-    /// Without libobs: the device the swap chain is on, and the pictures made on another device
-    /// (of the same adapter) opened on it, each kept while its picture lives.
-    #[cfg(not(feature = "libobs"))]
+    /// The device the swap chain is on, and the pictures made on another device (of the same
+    /// adapter) opened on it, each kept while its picture lives.
     device: ID3D11Device,
-    #[cfg(not(feature = "libobs"))]
     opened: Mutex<Vec<(std::sync::Weak<lightair_host::buffers::Shared>, ID3D11Texture2D)>>,
 }
 
@@ -71,27 +61,10 @@ unsafe impl Sync for Layer {}
 const START: u32 = 16;
 const FLAGS: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 /// Pictures from another device kept opened at most (a compositor's ring of output buffers).
-#[cfg(not(feature = "libobs"))]
 const OPENED: usize = 8;
 
 impl Layer {
-    /// A swap chain on libobs's device (libobs must be running on Direct3D 11).
-    #[cfg(feature = "libobs")]
-    pub fn new() -> Option<Self> {
-        unsafe {
-            sys::obs_enter_graphics();
-            let device = sys::gs_get_device_obj();
-            let layer = ID3D11Device::from_raw_borrowed(&device).and_then(Self::on);
-            sys::obs_leave_graphics();
-            if layer.is_none() {
-                tracing::warn!("couldn't make a composition swap chain for the preview");
-            }
-            layer
-        }
-    }
-
     /// A swap chain on the device Lightair's own pictures are made on.
-    #[cfg(not(feature = "libobs"))]
     pub fn new() -> Option<Self> {
         let layer = lightair_host::buffers::device().and_then(|d| Self::on(&d));
         if layer.is_none() {
@@ -117,9 +90,7 @@ impl Layer {
             format: Mutex::new(DXGI_FORMAT_B8G8R8A8_UNORM),
             wanted: AtomicU64::new(0),
             lock: Mutex::new(()),
-            #[cfg(not(feature = "libobs"))]
             device: device.clone(),
-            #[cfg(not(feature = "libobs"))]
             opened: Mutex::new(Vec::new()),
         })
     }
@@ -155,12 +126,6 @@ impl Layer {
         self.wanted.store(packed, Ordering::Relaxed);
     }
 
-    /// What `show_at` asked for, if anything.
-    #[cfg(feature = "libobs")]
-    pub(crate) fn shown_at(&self) -> Option<(u32, u32)> {
-        let p = self.wanted.load(Ordering::Relaxed);
-        (p != 0).then_some(((p >> 32) as u32, p as u32))
-    }
 
     /// The back buffers' size in pixels (the picture's visual scales it to its place).
     pub fn size(&self) -> (u32, u32) {
@@ -168,35 +133,15 @@ impl Layer {
         ((p >> 32) as u32, p as u32)
     }
 
-    /// Whether `tex` can be presented as it is (8-bit BGRA or RGBA: the formats a composition
-    /// swap chain takes, and a copy keeps).
-    #[cfg(feature = "libobs")]
-    pub(crate) unsafe fn can_present(&self, tex: *mut sys::gs_texture_t) -> bool {
-        format_of(unsafe { sys::gs_texture_get_color_format(tex) }).is_some()
-    }
 
     /// Whether the swap chain can take a frame now, without `Present` waiting.
     fn can_take(&self) -> bool {
         self.ready.is_invalid() || unsafe { WaitForSingleObject(self.ready, 0) } == WAIT_OBJECT_0
     }
 
-    /// Copies `tex` (a `w`×`h` render target of libobs's) into the back buffer and presents it,
-    /// never waiting: when the compositor hasn't taken the last frame yet, this one is skipped.
-    /// Graphics thread, inside libobs's graphics context. Whether it was presented.
-    #[cfg(feature = "libobs")]
-    pub(crate) unsafe fn present(&self, tex: *mut sys::gs_texture_t, w: u32, h: u32) -> bool {
-        unsafe {
-            let Some(format) = format_of(sys::gs_texture_get_color_format(tex)) else { return false };
-            let src = sys::gs_texture_get_obj(tex);
-            let Some(src) = ID3D11Resource::from_raw_borrowed(&src) else { return false };
-            self.present_resource(src, format, w, h)
-        }
-    }
-
     /// Copies one of Lightair's own pictures (a frame of its compositor, finished on the GPU)
-    /// into the back buffer and presents it, never waiting, as [`Layer::present`]. Whether it
-    /// was presented.
-    #[cfg(not(feature = "libobs"))]
+    /// into the back buffer and presents it, never waiting: when the compositor hasn't taken the
+    /// last frame yet, this one is skipped. Whether it was presented.
     pub(crate) fn present_buffer(&self, buffer: &lightair_host::buffers::Buffer) -> bool {
         let Some(texture) = self.texture_of(buffer) else { return false };
         let Ok(src) = texture.cast::<ID3D11Resource>() else { return false };
@@ -206,7 +151,6 @@ impl Layer {
 
     /// `buffer`'s texture on the swap chain's device: its own, or opened from its handle (once
     /// per buffer).
-    #[cfg(not(feature = "libobs"))]
     fn texture_of(&self, buffer: &lightair_host::buffers::Buffer) -> Option<ID3D11Texture2D> {
         if buffer.device().as_raw() == self.device.as_raw() {
             return Some(buffer.texture().clone());
@@ -276,14 +220,6 @@ impl Drop for Layer {
     }
 }
 
-#[cfg(feature = "libobs")]
-fn format_of(format: sys::gs_color_format) -> Option<DXGI_FORMAT> {
-    match format {
-        sys::GS_BGRA => Some(DXGI_FORMAT_B8G8R8A8_UNORM),
-        sys::GS_RGBA => Some(DXGI_FORMAT_R8G8B8A8_UNORM),
-        _ => None,
-    }
-}
 
 fn pack(w: u32, h: u32) -> u64 {
     ((w as u64) << 32) | h as u64

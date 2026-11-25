@@ -583,7 +583,7 @@ fn meter_thread(shared: std::sync::Arc<parking_lot::Mutex<HashMap<Id, MeterJob>>
         let now = std::time::Instant::now();
         quietly(|| {
             for (id, job) in jobs.iter_mut() {
-                let levels = lightair_obs::meters::meters().get(*id).map(|c| c.levels());
+                let levels = lightair_host::meters::meters().get(*id).map(|c| c.levels());
                 let sh = &mut job.shown;
                 let dt = now.duration_since(sh.last).as_secs_f32().min(0.1);
                 sh.last = now;

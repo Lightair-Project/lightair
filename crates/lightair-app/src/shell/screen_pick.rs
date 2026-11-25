@@ -7,16 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use lightair_model::kinds::{APP, DISPLAY, WINDOW};
-use lightair_obs::Engine;
-#[cfg(feature = "libobs")]
-use lightair_obs::obs::ObsSource;
-/// A display's capture for its thumbnail: libobs's source (shown through a preview), or
-/// Lightair's own small capture.
-#[cfg(feature = "libobs")]
-type ThumbCapture = ObsSource;
-#[cfg(not(feature = "libobs"))]
-type ThumbCapture = lightair_obs::displays::Capture;
-use lightair_preview::{Frame, Preview};
+use lightair_host::Engine;
+/// A display's capture for its thumbnail: Lightair's own small capture.
+type ThumbCapture = lightair_host::displays::Capture;
+use lightair_preview::Frame;
 use parking_lot::Mutex;
 use serde_json::Value;
 
@@ -45,7 +39,6 @@ struct Found {
 /// A display's thumbnail.
 #[derive(Default)]
 pub(super) struct Thumb {
-    preview: Option<Preview>,
     capture: Option<ThumbCapture>,
     /// Its picture's size, once known (the capture's own).
     pub size: Option<(u32, u32)>,
@@ -53,19 +46,13 @@ pub(super) struct Thumb {
 
 impl Thumb {
     /// The live picture, once the capture has one.
-    #[cfg(feature = "libobs")]
-    pub fn frame(&self) -> Option<Frame> {
-        self.preview.as_ref().filter(|_| self.size.is_some()).and_then(|p| p.latest_frame())
-    }
-
-    /// The live picture, once the capture has one.
-    #[cfg(all(not(feature = "libobs"), target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     pub fn frame(&self) -> Option<Frame> {
         self.capture.as_ref().and_then(|c| c.latest())
     }
 
-    /// No thumbnails of displays here yet without libobs (`displays::screen_capture` makes none).
-    #[cfg(all(not(feature = "libobs"), not(target_os = "macos")))]
+    /// No thumbnails of displays here yet (`displays::screen_capture` makes none).
+    #[cfg(not(target_os = "macos"))]
     pub fn frame(&self) -> Option<Frame> {
         None
     }
@@ -90,8 +77,8 @@ pub(super) fn key_of(mode: i64) -> &'static str {
     }
 }
 
-/// `w × h` fitted in [`THUMB`] (even numbers).
-#[cfg_attr(not(feature = "libobs"), allow(dead_code))]
+/// `w × h` fitted in [`THUMB`] (even numbers). Lightair's capture fits its thumbnails itself.
+#[cfg_attr(not(test), allow(dead_code))]
 fn fit((w, h): (u32, u32)) -> (u32, u32) {
     let s = (THUMB.0 as f32 / w.max(1) as f32).min(THUMB.1 as f32 / h.max(1) as f32).min(1.0);
     (((w as f32 * s) as u32).max(2), ((h as f32 * s) as u32).max(2))
@@ -107,13 +94,13 @@ impl ScreenPick {
             .name("lightair-screen-pick".into())
             .spawn(move || {
                 let key = key_of(mode);
-                let options = lightair_obs::displays::screen_options(mode, key);
+                let options = lightair_host::displays::screen_options(mode, key);
                 let hide = |v: &Value| {
                     lightair_platform::apps::hide_window(
                         &v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string()),
                     )
                 };
-                let main = lightair_obs::displays::main_display_uuid();
+                let main = lightair_host::displays::main_display_uuid();
                 let items: Vec<Item> = super::source::choices(key, &options, |v| mode != DISPLAY && hide(v))
                     .into_iter()
                     .map(|c| {
@@ -134,13 +121,10 @@ impl ScreenPick {
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    #[cfg(feature = "libobs")]
-                    let capture = lightair_obs::displays::screen_capture(mode, key, &item.value, &item.title);
-                    #[cfg(not(feature = "libobs"))]
-                    let capture = lightair_obs::displays::screen_capture(&item.value, THUMB);
+                    let capture = lightair_host::displays::screen_capture(&item.value, THUMB);
                     let mut f = f.lock();
                     if stop.load(Ordering::Relaxed) {
-                        // the picker has gone: let it go where libobs's other work happens
+                        // the picker has gone: let it go on the engine thread
                         eng.post(move |_| drop(capture));
                         break;
                     }
@@ -162,32 +146,11 @@ impl ScreenPick {
             }
             self.thumbs.resize_with(f.items.len(), Thumb::default);
             for (thumb, capture) in self.thumbs.iter_mut().zip(f.captures.iter_mut()) {
-                #[cfg(not(feature = "libobs"))]
                 if let Some(c) = capture.take() {
-                    thumb.capture = Some(c);
-                }
-                #[cfg(feature = "libobs")]
-                if let Some(c) = capture.take() {
-                    let preview = Preview::attach();
-                    preview.set_own_size(true);
-                    preview.set_size(Some(THUMB));
-                    preview.set_source(c.new_ref());
-                    thumb.preview = Some(preview);
                     thumb.capture = Some(c);
                 }
             }
         }
-        #[cfg(feature = "libobs")]
-        for thumb in &mut self.thumbs {
-            let (Some(c), Some(preview)) = (&thumb.capture, &thumb.preview) else { continue };
-            let (w, h) = (c.width(), c.height());
-            if w > 0 && h > 0 && thumb.size != Some((w, h)) {
-                // drawn in its own shape
-                preview.set_size(Some(fit((w, h))));
-                thumb.size = Some((w, h));
-            }
-        }
-        #[cfg(not(feature = "libobs"))]
         for thumb in &mut self.thumbs {
             let Some(c) = &thumb.capture else { continue };
             let (w, h) = c.size();
@@ -203,13 +166,11 @@ impl Drop for ScreenPick {
         self.cancel.store(true, Ordering::Relaxed);
         let mut captures: Vec<ThumbCapture> = vec![];
         for thumb in &mut self.thumbs {
-            if let Some(p) = thumb.preview.take() {
-                p.set_source(None);
-            }
             captures.extend(thumb.capture.take());
         }
         captures.extend(self.found.lock().captures.iter_mut().filter_map(Option::take));
-        // the captures go on the engine thread, with libobs's other work
+        // the captures go on the engine thread
+
         self.engine.post(move |_| drop(captures));
     }
 }

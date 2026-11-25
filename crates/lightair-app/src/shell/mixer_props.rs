@@ -320,7 +320,7 @@ impl StudioWindow {
                         // also on a device of its own (a second pair of headphones, a room speaker)
                         let stale = self.output_devices.borrow().as_ref().is_none_or(|(at, _)| at.elapsed().as_secs() > 5);
                         if stale {
-                            let list = self.studio.read(cx).engine().call(|_| lightair_obs::monitoring::devices());
+                            let list = self.studio.read(cx).engine().call(|_| lightair_host::monitoring::devices());
                             *self.output_devices.borrow_mut() = Some((std::time::Instant::now(), list));
                         }
                         let devices = self.output_devices.borrow().as_ref().map(|(_, l)| l.clone()).unwrap_or_default();

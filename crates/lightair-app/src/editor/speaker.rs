@@ -56,7 +56,7 @@ impl Speaker {
     fn open(seq: &Sequence, from_ms: u64, limit_ms: Option<u64>) -> Option<Speaker> {
         // the headphones chosen in Settings (by their id), else the system's output
         let chosen = crate::prefs::load_from(&crate::prefs::path()).headphones_device.map(|(_, id)| id).unwrap_or_default();
-        let device = lightair_obs::devices::find_output(&chosen).or_else(|| lightair_obs::devices::find_output(""))?;
+        let device = lightair_host::devices::find_output(&chosen).or_else(|| lightair_host::devices::find_output(""))?;
         let config = device.default_output_config().ok()?;
         let (rate, channels) = (config.sample_rate(), config.channels() as usize);
         // a snippet's length and its fades, in frames

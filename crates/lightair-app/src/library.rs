@@ -18,7 +18,7 @@ use gpui_kit::component::Sizable;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_model::Id;
-use lightair_obs::player::Player;
+use lightair_host::player::Player;
 use lightair_preview::Preview;
 use lightair_store::recordings::{self, Index, Item, Kind};
 
@@ -969,17 +969,16 @@ impl Library {
             p.preview.set_size(Some(((w as f32 * scale) as u32, (h as f32 * scale) as u32)));
         }
         let status = p.player.status();
-        let playing = status.state == lightair_obs::media::MediaState::Playing;
+        let playing = status.state == lightair_host::media::MediaState::Playing;
         let fraction =
             if status.duration_ms > 0 { (status.time_ms as f32 / status.duration_ms as f32).clamp(0.0, 1.0) } else { 0.0 };
         let bar = p.bar.clone();
-        #[cfg(feature = "libobs")]
-        let frame = p.preview.latest_frame();
-        // (without libobs, straight from the player)
-        #[cfg(all(not(feature = "libobs"), target_os = "macos"))]
+        // straight from the player
+        #[cfg(target_os = "macos")]
         let frame = p.player.frame();
-        #[cfg(all(not(feature = "libobs"), not(target_os = "macos")))]
+        #[cfg(not(target_os = "macos"))]
         let frame = p.preview.latest_frame();
+
         let sound_only = w == 0 || h == 0;
         Some(
             div()

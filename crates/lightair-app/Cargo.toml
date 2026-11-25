@@ -14,19 +14,13 @@ path = "src/main.rs"
 # Windows: the icon and version information in lightair.exe
 embed-resource = "3"
 
-[features]
-default = ["libobs"]
-# the engine on libobs (today's build)
-libobs = ["dep:lightair-obs", "lightair-preview/libobs"]
-# the engine without libobs: lightair-host in lightair-obs's place (docs/plans/no-libobs.md)
-host = ["dep:lightair-host"]
 
 [dependencies]
 # automation triggers (triggers.rs): MIDI inputs, game controllers
 midir = "0.11"
 gilrs = "0.11"
-lightair-obs = { workspace = true, optional = true }
-lightair-host = { workspace = true, optional = true }
+# the engine: the document host, the mixer, Lightair's own outputs
+lightair-host.workspace = true
 lightair-automation.workspace = true
 lightair-live.workspace = true
 lightair-widgets.workspace = true

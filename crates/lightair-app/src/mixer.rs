@@ -12,7 +12,7 @@ use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_model::{AudioMix, Bus, Command, Effect, Id, Source, Master, MixerStrip, Workspace, Route, Send, Track, kinds};
-use lightair_obs::meters::meters;
+use lightair_host::meters::meters;
 use serde_json::json;
 
 use crate::studio::Studio;
@@ -60,13 +60,13 @@ pub fn template_command(workspace: &lightair_model::Workspace, t: lightair_model
         Template::Music => 2,
         _ => u16::MAX,
     };
-    let devices = lightair_obs::devices::input_devices();
+    let devices = lightair_host::devices::input_devices();
     let mics = devices
         .iter()
         .filter(|d| d.channels >= least)
         .max_by_key(|d| d.channels)
-        .map(|d| Mics { kind: lightair_obs::devices::DEVICE_KIND.into(), device: d.id.clone(), name: d.name.clone(), channels: d.channels })
-        .unwrap_or(Mics { kind: lightair_obs::devices::DEVICE_KIND.into(), device: String::new(), name: SYSTEM_DEFAULT.into(), channels: 1 });
+        .map(|d| Mics { kind: lightair_host::devices::DEVICE_KIND.into(), device: d.id.clone(), name: d.name.clone(), channels: d.channels })
+        .unwrap_or(Mics { kind: lightair_host::devices::DEVICE_KIND.into(), device: String::new(), name: SYSTEM_DEFAULT.into(), channels: 1 });
     lightair_model::templates::apply(workspace, t, &mics)
 }
 
@@ -370,7 +370,7 @@ impl MixerPanel {
             .child(entry("add-mic", "mic", "Audio input", "Any mic or audio interface").on_click(cx.listener(
                 |this, _, _, cx| {
                     // captured by the engine directly (low latency)
-                    this.add_track(SYSTEM_DEFAULT, lightair_obs::devices::DEVICE_KIND, json!({"device": ""}), voice_clarity(), cx)
+                    this.add_track(SYSTEM_DEFAULT, lightair_host::devices::DEVICE_KIND, json!({"device": ""}), voice_clarity(), cx)
                 },
             )))
             .child(entry("add-desktop", "volume-2", "Desktop audio", EVERYTHING).on_click(cx.listener(
@@ -1442,7 +1442,7 @@ impl MixerPanel {
                         };
                         let mut menu = menu.item(PopupMenuItem::label("Microphones and interfaces"));
                         let mut devices = vec![(String::new(), SYSTEM_DEFAULT.to_string())];
-                        devices.extend(lightair_obs::devices::input_devices().into_iter().map(|d| {
+                        devices.extend(lightair_host::devices::input_devices().into_iter().map(|d| {
                             let n = if d.channels == 1 { "1 input".to_string() } else { format!("{} inputs", d.channels) };
                             (d.id.clone(), format!("{} · {n}", d.name))
                         }));
@@ -1494,7 +1494,7 @@ impl MixerPanel {
 /// Stream loudness (EBU R128): short-term and integrated, against the common −14 LUFS target.
 /// Click to start integrated loudness over.
 fn loudness_readout<T: 'static>(cx: &mut Context<T>) -> Option<impl IntoElement> {
-    let r = lightair_obs::loudness::stream_loudness()?;
+    let r = lightair_host::loudness::stream_loudness()?;
     let show = |v: f64| if v.is_finite() { format!("{v:.1}") } else { "—".into() };
     // Against the loudness target (Settings › Audio): within 2 LU is on target; well below
     // sounds quiet; above gets turned down by the platform.
@@ -1528,7 +1528,7 @@ fn loudness_readout<T: 'static>(cx: &mut Context<T>) -> Option<impl IntoElement>
                 .build(w, cx)
             })
             .on_click(cx.listener(|_, _, _, cx| {
-                lightair_obs::loudness::reset_stream_loudness();
+                lightair_host::loudness::reset_stream_loudness();
                 cx.notify();
             })),
     )
@@ -2246,9 +2246,9 @@ impl TrackSource {
     fn of(i: &Source) -> Self {
         match i.kind.as_str() {
             // ("default", as some were saved, is the system's too)
-            lightair_obs::devices::DEVICE_KIND => {
+            lightair_host::devices::DEVICE_KIND => {
                 let d = i.settings["device"].as_str().unwrap_or("");
-                TrackSource::Device(if lightair_obs::devices::is_system_default(d) { String::new() } else { d.into() })
+                TrackSource::Device(if lightair_host::devices::is_system_default(d) { String::new() } else { d.into() })
             }
             kinds::APP_AUDIO => TrackSource::App(i.settings["app"].as_str().unwrap_or("").into()),
             kinds::DESKTOP_AUDIO => TrackSource::Desktop,
@@ -2260,8 +2260,8 @@ impl TrackSource {
     fn source(&self, app_name: &str) -> (String, &'static str, serde_json::Value) {
         match self {
             TrackSource::Device(d) => (
-                lightair_obs::devices::device_name(d).unwrap_or_else(|| SYSTEM_DEFAULT.into()),
-                lightair_obs::devices::DEVICE_KIND,
+                lightair_host::devices::device_name(d).unwrap_or_else(|| SYSTEM_DEFAULT.into()),
+                lightair_host::devices::DEVICE_KIND,
                 json!({ "device": d }),
             ),
             TrackSource::Desktop => ("Desktop audio".into(), kinds::DESKTOP_AUDIO, json!({})),
@@ -2357,7 +2357,7 @@ fn strip_views(p: &Workspace) -> Vec<StripView> {
         let i = p.sources.get(&t.source)?;
         let current = TrackSource::of(i);
         let (icon, label) = match &current {
-            TrackSource::Device(d) => ("mic", lightair_obs::devices::device_name(d).unwrap_or_else(|| SYSTEM_DEFAULT.into())),
+            TrackSource::Device(d) => ("mic", lightair_host::devices::device_name(d).unwrap_or_else(|| SYSTEM_DEFAULT.into())),
             TrackSource::Desktop => ("volume-2", "Desktop audio".into()),
             TrackSource::App(b) if b.is_empty() => ("app-window", "Pick an app".into()),
             TrackSource::App(_) => ("app-window", i.name.clone()),

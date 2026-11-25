@@ -105,7 +105,7 @@ macro_rules! panel_traits {
 
 /// The soundboard's source in `w`, if it has one.
 pub fn board_source(w: &Workspace) -> Option<Id> {
-    w.sources.values().find(|s| s.kind == lightair_obs::soundboard::KIND).map(|s| s.id)
+    w.sources.values().find(|s| s.kind == lightair_host::soundboard::KIND).map(|s| s.id)
 }
 
 /// Plays `pad` on the workspace's soundboard (`None`: stops it). Used by the panel, the remote
@@ -132,7 +132,7 @@ pub(crate) fn add_pads(studio: &Entity<Studio>, paths: &[std::path::PathBuf], cx
         let source = Source {
             id: Id::new(),
             name: "Soundboard".into(),
-            kind: lightair_obs::soundboard::KIND.into(),
+            kind: lightair_host::soundboard::KIND.into(),
             settings: json!({}),
             effects: Vec::new(),
         };

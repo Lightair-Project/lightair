@@ -389,7 +389,7 @@ impl StudioWindow {
     fn pick(&mut self, kind: Kind, window: &mut Window, cx: &mut Context<Self>) {
         match kind {
             Kind::Camera => {
-                self.camera_devices = self.studio.read(cx).engine().call(|_| lightair_obs::kinds::cameras());
+                self.camera_devices = self.studio.read(cx).engine().call(|_| lightair_host::kinds::cameras());
                 self.add_object_step(Step::Cameras, window, cx);
                 return;
             }
@@ -427,7 +427,7 @@ impl StudioWindow {
                     .studio
                     .read(cx)
                     .engine()
-                    .call(|_| lightair_obs::shared_video::senders());
+                    .call(|_| lightair_host::shared_video::senders());
                 if let Some(a) = &mut self.add_object {
                     a.shared = list;
                     a.ndi = false;
@@ -437,8 +437,8 @@ impl StudioWindow {
             }
             Kind::Link => self.add_link(cx),
             Kind::Dslr => {
-                if self.studio.read(cx).engine().call(|_| lightair_obs::dslr::available()) {
-                    self.add_placed_object("Camera over USB", lightair_obs::dslr::KIND, serde_json::json!({}), (1920.0, 1080.0), (0.5, 0.5), false, cx);
+                if self.studio.read(cx).engine().call(|_| lightair_host::dslr::available()) {
+                    self.add_placed_object("Camera over USB", lightair_host::dslr::KIND, serde_json::json!({}), (1920.0, 1080.0), (0.5, 0.5), false, cx);
                 } else {
                     self.studio.update(cx, |s, cx| {
                         s.issue = Some("A camera over USB needs libgphoto2 (on a Mac: brew install libgphoto2), then add it again".into());
@@ -447,7 +447,7 @@ impl StudioWindow {
                 }
             }
             Kind::Ndi => {
-                let list = self.studio.read(cx).engine().call(|_| lightair_obs::ndi::sources());
+                let list = self.studio.read(cx).engine().call(|_| lightair_host::ndi::sources());
                 if let Some(a) = &mut self.add_object {
                     a.shared = list.into_iter().map(|n| (n.clone(), n)).collect();
                     a.ndi = true;
@@ -544,7 +544,7 @@ impl StudioWindow {
         let settings =
             serde_json::json!({"url": instance.address(), "width": w, "height": h, "fps": 30, "widget": instance});
         let (place, sound) = builtin.map_or(((0.5, 0.5), true), |b| (b.place, b.sound));
-        self.add_placed_object(&name, lightair_obs::web::KIND, settings, (w as f32, h as f32), place, sound, cx);
+        self.add_placed_object(&name, lightair_host::web::KIND, settings, (w as f32, h as f32), place, sound, cx);
         self.close_add_object(window, cx);
     }
 
@@ -645,7 +645,7 @@ impl StudioWindow {
             .unwrap_or("Browser")
             .to_string();
         let settings = serde_json::json!({"url": url, "width": w, "height": h, "fps": 30});
-        self.add_source_object(&name, lightair_obs::web::KIND, settings, (w as f32, h as f32), cx);
+        self.add_source_object(&name, lightair_host::web::KIND, settings, (w as f32, h as f32), cx);
         self.close_add_object(window, cx);
     }
 
@@ -1060,7 +1060,7 @@ impl StudioWindow {
                 let mut body = list();
                 if shared.is_empty() {
                     body = body.child(match ndi {
-                        true if !self.studio.read(cx).engine().call(|_| lightair_obs::ndi::available()) => empty_state(
+                        true if !self.studio.read(cx).engine().call(|_| lightair_host::ndi::available()) => empty_state(
                             "network",
                             "NDI isn't installed".into(),
                             "Install NDI Tools (free, from ndi.video), then open this again",
@@ -1079,12 +1079,12 @@ impl StudioWindow {
                     grid = grid.child(tile(("shared", i), if ndi { "network" } else { "share-2" }, name.clone(), Some(label.into()), None, None).on_click(
                         cx.listener(move |this, _, window, cx| {
                             if ndi {
-                                this.add_placed_object(&name, lightair_obs::ndi::KIND, serde_json::json!({"ndi_name": id}), (1920.0, 1080.0), (0.5, 0.5), true, cx);
+                                this.add_placed_object(&name, lightair_host::ndi::KIND, serde_json::json!({"ndi_name": id}), (1920.0, 1080.0), (0.5, 0.5), true, cx);
                             } else {
                                 this.add_source_object(
                                     &name,
-                                    lightair_obs::shared_video::KIND,
-                                    lightair_obs::shared_video::settings(&id, &name),
+                                    lightair_host::shared_video::KIND,
+                                    lightair_host::shared_video::settings(&id, &name),
                                     (1920.0, 1080.0),
                                     cx,
                                 );

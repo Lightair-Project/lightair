@@ -249,9 +249,9 @@ impl StudioWindow {
             None => "Plugin effect".into(),
         };
         let warning: Option<SharedString> = def.filter(|_| on && !system).and_then(|d| match d.needs {
-            _ if d.kind == catalog::PLUGIN_KIND => match lightair_obs::plugins::status(eid) {
-                lightair_obs::plugins::Status::Failed(why) => Some(format!("Plugin unavailable: {why}").into()),
-                lightair_obs::plugins::Status::Loading => Some("Loading the plugin…".into()),
+            _ if d.kind == catalog::PLUGIN_KIND => match lightair_host::plugins::status(eid) {
+                lightair_host::plugins::Status::Failed(why) => Some(format!("Plugin unavailable: {why}").into()),
+                lightair_host::plugins::Status::Loading => Some("Loading the plugin…".into()),
                 _ => None,
             },
             Needs::Face if presence.face == Some(false) => Some("No face in view".into()),
@@ -938,7 +938,7 @@ impl StudioWindow {
     /// being picked for is switched off meanwhile, so a key colour is picked from the picture
     /// before the key (on air, the picture stays as viewers see it).
     fn pick_colour(&mut self, iid: Owner, eid: Id, key: &'static str, cx: &mut Context<Self>) {
-        use lightair_obs::outputs::runtime;
+        use lightair_host::outputs::runtime;
         let workspace = self.studio.read(cx).workspace().clone();
         let Some((_, effects)) = iid.find(&workspace) else { return };
         let Some(effect) = effects.iter().find(|e| e.id == eid) else { return };
@@ -1133,7 +1133,7 @@ impl StudioWindow {
     pub(super) fn add_plugin(
         &mut self,
         owner: Owner,
-        info: &lightair_obs::plugins::PluginInfo,
+        info: &lightair_host::plugins::PluginInfo,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1149,16 +1149,16 @@ impl StudioWindow {
         cx.spawn(async move |this, cx| {
             for _ in 0..100 {
                 cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
-                match lightair_obs::plugins::status(eid) {
-                    lightair_obs::plugins::Status::Ready { .. } => {
+                match lightair_host::plugins::status(eid) {
+                    lightair_host::plugins::Status::Ready { .. } => {
                         let _ = this.update(cx, |this, cx| this.open_plugin_editor(eid, cx));
                         return;
                     }
-                    lightair_obs::plugins::Status::Failed(_) | lightair_obs::plugins::Status::None => {
+                    lightair_host::plugins::Status::Failed(_) | lightair_host::plugins::Status::None => {
                         let _ = this.update(cx, |_, cx| cx.notify());
                         return;
                     }
-                    lightair_obs::plugins::Status::Loading => {}
+                    lightair_host::plugins::Status::Loading => {}
                 }
             }
         })
@@ -1167,9 +1167,9 @@ impl StudioWindow {
 
     /// A plugin insert's card: its editor, latency and where it stands.
     fn plugin_panel(&self, e: &Effect, cx: &mut Context<Self>) -> Div {
-        use lightair_obs::plugins::Status;
+        use lightair_host::plugins::Status;
         let eid = e.id;
-        let status = lightair_obs::plugins::status(eid);
+        let status = lightair_host::plugins::status(eid);
         let note: SharedString = match &status {
             Status::Ready { latency } if *latency > 0 => {
                 format!("Adds {:.1} ms of delay, compensated in recordings", *latency as f32 / 48.0).into()
@@ -1221,7 +1221,7 @@ impl StudioWindow {
     /// shows up): Audio Units at once, VST3 when its scan is done (new bundles are probed in a
     /// helper process, then remembered).
     fn scan_plugins(&mut self, cx: &mut Context<Self>) {
-        use lightair_obs::plugins::PluginInfo;
+        use lightair_host::plugins::PluginInfo;
         fn merged(au: Vec<PluginInfo>, vst3: Vec<PluginInfo>) -> std::sync::Arc<Vec<PluginInfo>> {
             let mut all: Vec<PluginInfo> = au.into_iter().chain(vst3).collect();
             all.sort_by_key(|p| (p.vendor.to_lowercase(), p.name.to_lowercase(), p.format.clone()));
@@ -1229,7 +1229,7 @@ impl StudioWindow {
         }
         let vst3_known: Vec<PluginInfo> =
             self.plugin_list.iter().flat_map(|l| l.iter()).filter(|p| p.format == "vst3").cloned().collect();
-        self.plugin_list = Some(merged(lightair_obs::plugins::scan_audio_units(), vst3_known));
+        self.plugin_list = Some(merged(lightair_host::plugins::scan_audio_units(), vst3_known));
         cx.spawn(async move |this, cx| {
             let vst3 = cx.background_executor().spawn(async { crate::plugin_scan::vst3() }).await;
             let _ = this.update(cx, |this, cx| {
@@ -1245,12 +1245,12 @@ impl StudioWindow {
     /// Shows a plugin insert's own editor (in front, if it's open already). Closing it saves the
     /// plugin's state in the workspace (one undo step).
     pub(super) fn open_plugin_editor(&mut self, effect: Id, cx: &mut Context<Self>) {
-        use lightair_obs::plugins::Hosted;
+        use lightair_host::plugins::Hosted;
         if let Some(ed) = self.plugin_editors.get(&effect).filter(|ed| ed.is_open()) {
             ed.front();
             return;
         }
-        let Some(hosted) = lightair_obs::plugins::hosted(effect) else { return };
+        let Some(hosted) = lightair_host::plugins::hosted(effect) else { return };
         let workspace = self.studio.read(cx).workspace().clone();
         let Some((owner, e)) = Owner::of_audio_effect(&workspace, effect) else { return };
         let strip = owner.find(&workspace).map(|(n, _)| n).unwrap_or_default();
@@ -1313,7 +1313,7 @@ impl StudioWindow {
 
     /// Writes a plugin insert's current state into the workspace, if it changed.
     pub(super) fn save_plugin_state(&mut self, effect: Id, cx: &mut Context<Self>) {
-        let Some(state) = lightair_obs::plugins::take_state(effect) else { return };
+        let Some(state) = lightair_host::plugins::take_state(effect) else { return };
         let workspace = self.studio.read(cx).workspace().clone();
         let Some((owner, e)) = Owner::of_audio_effect(&workspace, effect) else { return };
         if e.settings.get("state").and_then(Value::as_str) == Some(state.as_str()) {
@@ -1330,7 +1330,7 @@ impl StudioWindow {
             return;
         }
         let workspace = self.studio.read(cx).workspace().clone();
-        let present = lightair_obs::plugins::inserts(&workspace);
+        let present = lightair_host::plugins::inserts(&workspace);
         self.plugin_editors.retain(|id, ed| {
             let keep = present.contains(id);
             if !keep {
@@ -1405,7 +1405,7 @@ impl StudioWindow {
                 Page::Plugins => false,
             })
             .collect();
-        let shown_plugins: Vec<&lightair_obs::plugins::PluginInfo> = plugins
+        let shown_plugins: Vec<&lightair_host::plugins::PluginInfo> = plugins
             .iter()
             .filter(|p| match page {
                 _ if searching => p.name.to_lowercase().contains(&q) || p.vendor.to_lowercase().contains(&q),
@@ -1638,7 +1638,7 @@ pub(super) fn macos_effects_wanted(workspace: &lightair_model::Workspace) -> Mac
 /// The EQ's response, drawn: 20 Hz to 20 kHz across, ±18 dB up and down, with the engine's
 /// own filters (what's drawn is what's heard).
 fn eq_curve(e: &Effect) -> impl IntoElement {
-    let Some(lightair_audio::dsp::Params::Eq(p)) = lightair_obs::audio::params(e) else {
+    let Some(lightair_audio::dsp::Params::Eq(p)) = lightair_host::audio::params(e) else {
         return div().into_any_element();
     };
     const N: usize = 120;

@@ -1,7 +1,7 @@
 //! The scene Inspector's "Screen zoom & pointer" (docs/plans/screen-studio.md, live): how the
 //! scene's screen captures zoom (in to a click, or always following the pointer), and how the
 //! pointer and clicks are drawn on them. The engine puts it on every screen capture in the
-//! scene (`lightair_obs::cursor`).
+//! scene (`lightair_host::cursor`).
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -172,7 +172,7 @@ impl StudioWindow {
         // ---- toggle: its key, and whether it's in now
         if look.zoom == ScreenZoomPointer::ZOOM_TOGGLE {
             let keys = self.prefs.global_shortcuts.iter().find(|h| h.action == crate::shortcuts::GlobalAction::FollowZoom).map(|h| crate::shortcuts::display(&h.keys));
-            let following = lightair_obs::pointer::following();
+            let following = lightair_host::pointer::following();
             let control = div()
                 .flex()
                 .items_center()
@@ -204,7 +204,7 @@ impl StudioWindow {
                             .xsmall()
                             .outline()
                             .on_click(cx.listener(|_, _, _, cx| {
-                                lightair_obs::pointer::toggle_follow();
+                                lightair_host::pointer::toggle_follow();
                                 cx.notify();
                             })),
                     )

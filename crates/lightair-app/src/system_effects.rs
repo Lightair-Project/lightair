@@ -60,8 +60,9 @@ pub fn portrait_on() -> Option<bool> {
 }
 
 /// Whether Backgrounds (replacement) is on for Lightair; `None` before macOS 15.
-#[cfg_attr(not(feature = "libobs"), allow(dead_code))]
-pub fn backgrounds_on() -> Option<bool> {
+#[cfg_attr(not(test), allow(dead_code, reason = "this Mac's check reads it"))]
+pub fn
+ backgrounds_on() -> Option<bool> {
     class_bool(c"isBackgroundReplacementEnabled")
 }
 
@@ -93,26 +94,6 @@ pub fn set_background_picture(path: &std::path::Path) -> bool {
     let Some(url) = url else { return false };
     let _: () = unsafe { msg_send![class, setBackgroundReplacementURL: &*url] };
     true
-}
-
-/// A camera's state for Backgrounds (by its unique id): whether macOS is replacing its
-/// background now, and whether the format it runs in can (diagnostics).
-#[cfg_attr(not(feature = "libobs"), allow(dead_code))]
-pub fn camera_backgrounds(uid: &str) -> Option<(bool, bool)> {
-    use objc2::msg_send;
-    use objc2::rc::Retained;
-    use objc2::runtime::{AnyClass, AnyObject, Bool};
-    let class = AnyClass::get(c"AVCaptureDevice")?;
-    let id = objc2_foundation::NSString::from_str(uid);
-    let device: Option<Retained<AnyObject>> = unsafe { msg_send![class, deviceWithUniqueID: &*id] };
-    let device = device?;
-    let active: Bool = unsafe { msg_send![&*device, isBackgroundReplacementActive] };
-    let format: Option<Retained<AnyObject>> = unsafe { msg_send![&*device, activeFormat] };
-    let supported: Bool = match format {
-        Some(f) => unsafe { msg_send![&*f, isBackgroundReplacementSupported] },
-        None => Bool::NO,
-    };
-    Some((active.as_bool(), supported.as_bool()))
 }
 
 #[link(name = "CoreVideo", kind = "framework")]

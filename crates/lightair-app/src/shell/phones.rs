@@ -369,8 +369,8 @@ impl StudioWindow {
                 Err(e) => tracing::warn!("phones: mDNS: {e}"),
             }
         }
-        let live = lightair_obs::outputs::runtime().any_stream_running()
-            || lightair_obs::outputs::runtime().recording().state.is_running();
+        let live = lightair_host::outputs::runtime().any_stream_running()
+            || lightair_host::outputs::runtime().recording().state.is_running();
         if let Some(m) = &p.mdns {
             m.update(p.pairing.open(), live);
         }
@@ -433,7 +433,7 @@ impl StudioWindow {
             .tracks
             .iter()
             .map(|t| {
-                let l = lightair_obs::meters::meters().get(t.id).map(|c| c.levels());
+                let l = lightair_host::meters::meters().get(t.id).map(|c| c.levels());
                 let (peak, rms) = l.map_or(([f32::NEG_INFINITY; 2], [f32::NEG_INFINITY; 2]), |l| (l.peak, l.magnitude));
                 json!({
                     "track": t.id,
@@ -1306,7 +1306,7 @@ impl StudioWindow {
 
 // ---------------------------------------------------------------- outputs and issues
 
-use lightair_obs::outputs::{OutputKey, OutputState, runtime};
+use lightair_host::outputs::{OutputKey, OutputState, runtime};
 
 /// An output's state in phones' words (lightair-live's docs/05 §4.2, Outputs).
 fn output_state(s: &OutputState) -> &'static str {

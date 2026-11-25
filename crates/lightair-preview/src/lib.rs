@@ -1,15 +1,12 @@
-//! Canvas preview (docs/04-engine-libobs.md#preview-rendering).
+//! Canvas preview and Lightair's own compositor.
 //!
-//! libobs renders the canvas, scaled to the preview's size, on its graphics thread; the UI takes
-//! the newest finished frame. On macOS frames are IOSurface-backed `CVPixelBuffer`s for GPUI's
-//! `surface()` element, with no pixel copied on the CPU (`mac`). Elsewhere (Windows today) frames
-//! are read back to memory and shown as images (`readback`), until a zero-copy path replaces it.
+//! The compositor (`compose`) draws every canvas and preview on the GPU; the UI takes the newest
+//! finished frame. On macOS frames are IOSurface-backed `CVPixelBuffer`s for GPUI's `surface()`
+//! element, with no pixel copied on the CPU (`mac`). Elsewhere (Windows today) frames are read
+//! back to memory and shown as images (`readback`), or presented into a swap chain (`layer`).
 //!
-//! Threading: the render callback runs on libobs's graphics thread. It never waits on the UI;
-//! the only shared lock is held for a pointer swap.
-
-#[cfg(feature = "libobs")]
-mod render;
+//! Threading: the compositor never waits on the UI; the only shared lock is held for a pointer
+//! swap.
 
 #[cfg(target_os = "macos")]
 pub mod avatars;

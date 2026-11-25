@@ -183,7 +183,7 @@ fn items_of(workspace: &Workspace, from: &ExportFrom) -> (Vec<ExportItem>, Strin
                 let widget = object
                     .source
                     .and_then(|s| workspace.sources.get(&s))
-                    .filter(|s| s.kind == lightair_obs::web::KIND)
+                    .filter(|s| s.kind == lightair_host::web::KIND)
                     .and_then(|s| widget_item(&object.name, &s.settings));
                 match widget {
                     Some(item) => items.push(item),
