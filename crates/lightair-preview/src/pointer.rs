@@ -61,7 +61,7 @@ struct Sprite {
     size: f32,
     angle: f32,
     hot: vec2<f32>,
-    target: vec2<f32>,
+    canvas: vec2<f32>,
     opacity: f32,
     pad0: f32,
     pad1: f32,
@@ -84,7 +84,7 @@ fn vs_sprite(@builtin(vertex_index) i: u32) -> Out {
     let k = cos(sprite.angle);
     let px = sprite.at + vec2<f32>(local.x * k - local.y * s, local.x * s + local.y * k);
     var o: Out;
-    o.pos = vec4<f32>(px.x / sprite.target.x * 2.0 - 1.0, 1.0 - px.y / sprite.target.y * 2.0, 0.0, 1.0);
+    o.pos = vec4<f32>(px.x / sprite.canvas.x * 2.0 - 1.0, 1.0 - px.y / sprite.canvas.y * 2.0, 0.0, 1.0);
     o.uv = c;
     return o;
 }
