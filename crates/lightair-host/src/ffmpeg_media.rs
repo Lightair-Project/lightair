@@ -8,8 +8,10 @@
 //! or `input` (a URL), `looping`, `restart_on_activate` (on by default: off air it stops, on air
 //! it plays from the start; off: it carries on from where it was).
 //!
-//! Not yet: `speed_percent` (always normal speed), a rotation stored in the file (drawn as
-//! stored), `clear_on_media_end`.
+//! A rotation stored in the file (a phone's portrait video) is turned upright by FFmpeg as it
+//! decodes, and the size the probe reports is the turned one, so the pictures match it.
+//!
+//! Not yet: `speed_percent` (always normal speed), `clear_on_media_end`.
 
 use std::io::Read;
 use std::path::Path;
@@ -193,7 +195,8 @@ impl FfmpegMedia {
         let stop = Arc::new(AtomicBool::new(false));
         let mut children = Vec::new();
         let base = |cmd: &mut Command| {
-            cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-noautorotate", "-re"]);
+            // (pictures turned upright by a rotation stored in the file: the probed size)
+            cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-re"]);
             if settings.looping && settings.local {
                 cmd.args(["-stream_loop", "-1"]);
             }
@@ -322,7 +325,8 @@ fn ended(stop: &AtomicBool, control: &Mutex<Control>) {
 }
 
 /// A file's frames in order, as fast as they're read (a stinger that AVFoundation can't read:
-/// WebM with its alpha), through the `ffmpeg` tool: straight RGBA, each with its time.
+/// WebM with its alpha), through the `ffmpeg` tool: straight RGBA, each with its time, turned
+/// upright by a rotation stored in the file.
 pub struct Frames {
     child: Child,
     out: std::process::ChildStdout,
@@ -372,7 +376,7 @@ impl Frames {
     fn spawn(path: &str, decoder: Option<&str>, _size: (u32, u32)) -> Option<(Child, std::process::ChildStdout)> {
         let ffmpeg = lightair_render::media::ffmpeg().ok()?;
         let mut cmd = Command::new(ffmpeg);
-        cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-noautorotate"]);
+        cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
         if let Some(d) = decoder {
             cmd.args(["-c:v", d]);
         }

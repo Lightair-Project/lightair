@@ -38,7 +38,7 @@ block2 = "0.6"
 objc2 = "0.6"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2-io-surface"] }
-objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTPixelTransferSession", "VTSession", "objc2-core-video"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTPixelRotationProperties", "VTPixelRotationSession", "VTPixelTransferSession", "VTSession", "objc2-core-video"] }
 # Lightair's own encoders, recording files and senders
 lightair-encode.workspace = true
 lightair-feed.workspace = true

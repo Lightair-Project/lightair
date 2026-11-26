@@ -11,6 +11,11 @@
 //! source's sound gets it straight into the mixer, each part pushed as it comes due on the media
 //! clock; sound no track takes, the end and a restart go to the player's [`Elsewhere`] (the
 //! Library's player, say).
+//!
+//! A file with a rotation stored in it (a phone's portrait video: a quarter, half or three
+//! quarters turn clockwise in its track's transform) is drawn upright: VideoToolbox turns each
+//! frame on the GPU as it's converted into the source's surface, so the pictures, and the size
+//! reported for them, are as the file is shown. A mirrored transform is drawn unmirrored.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, CString, c_void};
@@ -21,13 +26,15 @@ use std::time::Duration;
 use lightair_model::Id;
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
+use objc2_video_toolbox::{
+    VTPixelRotationSession, VTSessionSetProperty, kVTPixelRotationPropertyKey_Rotation, kVTRotation_180,
+    kVTRotation_CCW90, kVTRotation_CW90,
+};
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{Encode, Encoding, RefEncode, msg_send};
 use parking_lot::{Condvar, Mutex};
-
-
 
 /// How far ahead of the clock sound no track takes is handed on (it's buffered by timestamp).
 const AUDIO_AHEAD_NS: i64 = 150_000_000;
@@ -43,7 +50,6 @@ const HELD: usize = 3;
 /// With Lightair's own compositor: more surfaces, for the frames its canvases may still be
 /// drawing from (each holds one until the GPU has finished with it).
 const COMPOSITOR_HELD: usize = 4;
-
 
 /// A media state code, numbered as OBS's media states are (what the app and the remote API
 /// read).
@@ -167,6 +173,8 @@ unsafe extern "C" {
     static kCVPixelBufferPixelFormatTypeKey: *const AnyObject;
     static kCVPixelBufferIOSurfacePropertiesKey: *const AnyObject;
     static kCVPixelBufferMetalCompatibilityKey: *const AnyObject;
+    static kCVPixelBufferWidthKey: *const AnyObject;
+    static kCVPixelBufferHeightKey: *const AnyObject;
     fn CVPixelBufferGetIOSurface(buffer: *mut c_void) -> *mut c_void;
     fn CVPixelBufferGetWidth(buffer: *mut c_void) -> usize;
     fn CVPixelBufferGetHeight(buffer: *mut c_void) -> usize;
@@ -182,6 +190,13 @@ unsafe extern "C" {
         attributes: *const c_void,
         out: *mut *mut c_void,
     ) -> i32;
+    fn CVPixelBufferPoolCreate(
+        allocator: *const c_void,
+        pool_attributes: *const c_void,
+        buffer_attributes: *const c_void,
+        out: *mut *mut c_void,
+    ) -> i32;
+    fn CVPixelBufferPoolCreatePixelBuffer(allocator: *const c_void, pool: *mut c_void, out: *mut *mut c_void) -> i32;
 }
 
 #[link(name = "VideoToolbox", kind = "framework")]
@@ -265,7 +280,14 @@ impl Slot {
                 (kCVPixelBufferIOSurfacePropertiesKey, dictionary(&[])),
                 (kCVPixelBufferMetalCompatibilityKey, number_bool(true)),
             ]);
-            CVPixelBufferCreate(std::ptr::null(), size.0 as usize, size.1 as usize, BGRA, attrs as *const c_void, &mut buffer)
+            CVPixelBufferCreate(
+                std::ptr::null(),
+                size.0 as usize,
+                size.1 as usize,
+                BGRA,
+                attrs as *const c_void,
+                &mut buffer,
+            )
         });
         if rc != 0 || buffer.is_null() {
             tracing::error!(rc, ?size, "media: no picture buffer");
@@ -327,10 +349,121 @@ impl Drop for Decoded {
 /// The reader's slots: queue + on screen + spare. A slot is free when only the ring holds it.
 const SLOTS: usize = QUEUE + HELD + 1;
 
+/// A picture `size` turned `rotation` degrees: width and height swap for a quarter turn.
+fn turned(size: (u32, u32), rotation: u32) -> (u32, u32) {
+    if rotation % 180 == 90 { (size.1, size.0) } else { size }
+}
+
+/// Turns BGRA pictures upright by quarter turns clockwise (VideoToolbox, on the GPU), for a
+/// file with a rotation stored in it.
+struct Turn {
+    session: CFRetained<VTPixelRotationSession>,
+    /// The rotation the session is set to (degrees clockwise; 0 before it's set).
+    set: u32,
+}
+
+impl Turn {
+    fn new() -> Option<Turn> {
+        let mut session: *mut VTPixelRotationSession = std::ptr::null_mut();
+        // SAFETY: `session` is a valid place for the new session.
+        let rc = unsafe { VTPixelRotationSession::create(None, NonNull::from(&mut session)) };
+        let Some(session) = NonNull::new(session).filter(|_| rc == 0) else {
+            tracing::error!(rc, "media: VTPixelRotationSessionCreate failed");
+            return None;
+        };
+        // SAFETY: the session was just made, its one reference ours.
+        Some(Turn { session: unsafe { CFRetained::from_raw(session) }, set: 0 })
+    }
+
+    /// `source` turned `rotation` degrees clockwise (90, 180 or 270) into `destination`, a BGRA
+    /// pixel buffer of the turned size; whether it was.
+    fn turn(&mut self, source: *mut c_void, destination: *mut c_void, rotation: u32) -> bool {
+        if self.set != rotation {
+            // SAFETY: VideoToolbox's constant keys and values, read only.
+            let value = unsafe {
+                match rotation {
+                    90 => kVTRotation_CW90,
+                    180 => kVTRotation_180,
+                    _ => kVTRotation_CCW90,
+                }
+            };
+            // SAFETY: the rotation key takes one of the rotation constants.
+            let rc = unsafe {
+                VTSessionSetProperty(&self.session, kVTPixelRotationPropertyKey_Rotation, Some(value.as_ref()))
+            };
+            if rc != 0 {
+                tracing::error!(rc, rotation, "media: can't set the rotation to turn pictures upright");
+                return false;
+            }
+            self.set = rotation;
+        }
+        let (Some(source), Some(destination)) =
+            (NonNull::new(source.cast::<CVPixelBuffer>()), NonNull::new(destination.cast::<CVPixelBuffer>()))
+        else {
+            return false;
+        };
+        // SAFETY: both are live pixel buffers, the destination the source's size turned.
+        unsafe { self.session.rotate_image(source.as_ref(), destination.as_ref()) == 0 }
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        // SAFETY: the session is ours and isn't used again.
+        unsafe { self.session.invalidate() };
+    }
+}
+
+/// A pool of BGRA IOSurface-backed pixel buffers Metal can use, one size: it hands out only
+/// buffers nobody holds.
+struct Pool {
+    pool: *mut c_void,
+    size: (u32, u32),
+}
+
+impl Pool {
+    fn new(size: (u32, u32)) -> Option<Pool> {
+        let mut pool: *mut c_void = std::ptr::null_mut();
+        let rc = autoreleasepool(|_| unsafe {
+            let attrs = dictionary(&[
+                (kCVPixelBufferPixelFormatTypeKey, number_u32(BGRA)),
+                (kCVPixelBufferWidthKey, number_u32(size.0)),
+                (kCVPixelBufferHeightKey, number_u32(size.1)),
+                (kCVPixelBufferIOSurfacePropertiesKey, dictionary(&[])),
+                (kCVPixelBufferMetalCompatibilityKey, number_bool(true)),
+            ]);
+            CVPixelBufferPoolCreate(std::ptr::null(), std::ptr::null(), attrs as *const c_void, &mut pool)
+        });
+        if rc != 0 || pool.is_null() {
+            tracing::error!(rc, ?size, "media: no pool of picture buffers");
+            return None;
+        }
+        Some(Pool { pool, size })
+    }
+
+    /// A buffer of the pool (+1, released by the caller).
+    fn buffer(&self) -> Option<*mut c_void> {
+        let mut out: *mut c_void = std::ptr::null_mut();
+        let rc = unsafe { CVPixelBufferPoolCreatePixelBuffer(std::ptr::null(), self.pool, &mut out) };
+        (rc == 0 && !out.is_null()).then_some(out)
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        unsafe { CFRelease(self.pool) };
+    }
+}
+
 /// The reader thread's slots and its converter (VideoToolbox, on the GPU).
 struct Ring {
     slots: Vec<Arc<Slot>>,
     transfer: *mut c_void,
+    /// For a file with a rotation: what turns its frames upright (made the first time one is
+    /// turned; `Some(None)` if it couldn't be), and the BGRA surface a frame is converted into,
+    /// as stored, before it's turned into a slot.
+    turn: Option<Option<Turn>>,
+    stage: Option<Arc<Slot>>,
 }
 
 impl Ring {
@@ -340,12 +473,15 @@ impl Ring {
         if rc != 0 {
             tracing::error!(rc, "media: VTPixelTransferSessionCreate failed");
         }
-        Ring { slots: Vec::new(), transfer }
+        Ring { slots: Vec::new(), transfer, turn: None, stage: None }
     }
 
-    /// `frame` converted into a free slot; `None` while every slot is in use.
-    fn convert(&mut self, frame: &Decoded) -> Option<Arc<Slot>> {
-        let size = unsafe { (CVPixelBufferGetWidth(frame.buffer) as u32, CVPixelBufferGetHeight(frame.buffer) as u32) };
+    /// `frame` converted into a free slot, turned upright by `rotation` (degrees clockwise);
+    /// `None` while every slot is in use.
+    fn convert(&mut self, frame: &Decoded, rotation: u32) -> Option<Arc<Slot>> {
+        let stored =
+            unsafe { (CVPixelBufferGetWidth(frame.buffer) as u32, CVPixelBufferGetHeight(frame.buffer) as u32) };
+        let size = turned(stored, rotation);
         self.slots.retain(|s| s.size == size);
         // with the compositor, a slot it still draws from (holding its pixel buffer) isn't free
         let own = crate::show::own();
@@ -362,8 +498,18 @@ impl Ring {
         if self.transfer.is_null() {
             return None;
         }
-        let rc = unsafe { VTPixelTransferSessionTransferImage(self.transfer, frame.buffer, slot.buffer) };
-        (rc == 0).then_some(slot)
+        if rotation == 0 {
+            let rc = unsafe { VTPixelTransferSessionTransferImage(self.transfer, frame.buffer, slot.buffer) };
+            return (rc == 0).then_some(slot);
+        }
+        // turned upright: converted as stored into the stage, then turned into the slot
+        if self.stage.as_ref().is_none_or(|s| s.size != stored) {
+            self.stage = Slot::new(stored);
+        }
+        let stage = self.stage.as_ref()?;
+        let turn = self.turn.get_or_insert_with(Turn::new).as_mut()?;
+        let rc = unsafe { VTPixelTransferSessionTransferImage(self.transfer, frame.buffer, stage.buffer) };
+        (rc == 0 && turn.turn(stage.buffer, slot.buffer, rotation)).then_some(slot)
     }
 }
 
@@ -593,7 +739,8 @@ fn open_asset(path: &str) -> Option<Asset> {
     unsafe {
         let string: *mut AnyObject = msg_send![class(c"NSString"), stringWithUTF8String: c_path.as_ptr()];
         let url: *mut AnyObject = msg_send![class(c"NSURL"), fileURLWithPath: string];
-        let asset: *mut AnyObject = msg_send![class(c"AVURLAsset"), URLAssetWithURL: url, options: std::ptr::null_mut::<AnyObject>()];
+        let asset: *mut AnyObject =
+            msg_send![class(c"AVURLAsset"), URLAssetWithURL: url, options: std::ptr::null_mut::<AnyObject>()];
         let asset = keep(asset)?;
         let video = first_track(&asset, AVMediaTypeVideo);
         let audio = first_track(&asset, AVMediaTypeAudio);
@@ -605,13 +752,13 @@ fn open_asset(path: &str) -> Option<Asset> {
 fn open_reader(asset: &Asset, start: i64, rate: u32) -> Option<Reader> {
     unsafe {
         let mut error: *mut AnyObject = std::ptr::null_mut();
-        let reader: *mut AnyObject = msg_send![class(c"AVAssetReader"), assetReaderWithAsset: &*asset.asset, error: &mut error];
+        let reader: *mut AnyObject =
+            msg_send![class(c"AVAssetReader"), assetReaderWithAsset: &*asset.asset, error: &mut error];
         let reader = keep(reader)?;
         let range = CMTimeRange { start: CMTime::from_ns(start.max(0)), duration: CMTime::positive_infinity() };
         let _: () = msg_send![&*reader, setTimeRange: range];
         let output = |track: &AnyObject, settings: *mut AnyObject| -> Option<Retained<AnyObject>> {
-            let out: *mut AnyObject =
-                msg_send![class(c"AVAssetReaderTrackOutput"), assetReaderTrackOutputWithTrack: track, outputSettings: settings];
+            let out: *mut AnyObject = msg_send![class(c"AVAssetReaderTrackOutput"), assetReaderTrackOutputWithTrack: track, outputSettings: settings];
             let out = keep(out)?;
             let _: () = msg_send![&*out, setAlwaysCopiesSampleData: false];
             let ok: bool = msg_send![&*reader, canAddOutput: &*out];
@@ -674,7 +821,9 @@ fn read_video(output: &AnyObject, offset: i64) -> Option<Option<Decoded>> {
                 CFRetain(image);
             }
             CFRelease(sample as *const c_void);
-            (!image.is_null()).then_some(Decoded { buffer: image, at: at.unwrap_or(0) + offset }).filter(|_| at.is_some())
+            (!image.is_null())
+                .then_some(Decoded { buffer: image, at: at.unwrap_or(0) + offset })
+                .filter(|_| at.is_some())
         };
         Some(frame)
     })
@@ -699,6 +848,14 @@ fn read_audio(output: &AnyObject, offset: i64) -> Option<Option<Sound>> {
     })
 }
 
+/// The rotation a video track is shown with (its transform's): degrees clockwise, to the
+/// nearest quarter turn.
+fn rotation_of(track: &AnyObject) -> u32 {
+    let m: CGAffineTransform = unsafe { msg_send![track, preferredTransform] };
+    let degrees = (m.b.atan2(m.a).to_degrees().round() as i32).rem_euclid(360) as u32;
+    (degrees + 45) / 90 % 4 * 90
+}
+
 /// Opens the file (once per path), learning its size, rotation and length.
 fn ensure_asset(shared: &Shared, asset: &mut Option<Asset>, path: &str) -> bool {
     if asset.as_ref().is_some_and(|a| a.path == path) {
@@ -713,9 +870,7 @@ fn ensure_asset(shared: &Shared, asset: &mut Option<Asset>, path: &str) -> bool 
         let duration: CMTime = msg_send![&*a.asset, duration];
         let (natural, rotation) = a.video.as_deref().map_or(((0, 0), 0), |t| {
             let size: CGSize = msg_send![t, naturalSize];
-            let m: CGAffineTransform = msg_send![t, preferredTransform];
-            let degrees = (m.b.atan2(m.a).to_degrees().round() as i32).rem_euclid(360) as u32;
-            ((size.width.round() as u32, size.height.round() as u32), degrees / 90 * 90)
+            ((size.width.round() as u32, size.height.round() as u32), rotation_of(t))
         });
         (duration.ns().unwrap_or(0), natural, rotation)
     };
@@ -757,6 +912,8 @@ fn reader_thread(shared: Arc<Shared>) {
 /// Reads from `start` until the play request `run` is replaced, or the end (looping on).
 fn play(shared: &Shared, asset: &Asset, ring: &mut Ring, run: u64, start: i64) {
     let mut offset = 0;
+    // the file's rotation: each frame is turned upright as it's converted
+    let rotation = shared.control.lock().rotation;
     let mut reader = open_reader(asset, start, shared.rate);
     let (mut video, mut sound) = (None::<Decoded>, None::<Sound>);
     loop {
@@ -795,7 +952,7 @@ fn play(shared: &Shared, asset: &Asset, ring: &mut Ring, run: u64, start: i64) {
             // buffer goes straight back to it)
             if let Some(v) = &video
                 && shared.queue.lock().len() < QUEUE
-                && let Some(slot) = ring.convert(v)
+                && let Some(slot) = ring.convert(v, rotation)
             {
                 shared.queue.lock().push_back(Frame { slot, at: v.at, run });
                 video = None;
@@ -825,7 +982,8 @@ fn play(shared: &Shared, asset: &Asset, ring: &mut Ring, run: u64, start: i64) {
             {
                 // (what a feed let go of mid-way didn't take)
                 let rest = &s.data[s.sent * 2..];
-                let at = base_os as i64 + (s.at - base_media) + (s.sent as i64 * 1_000_000_000 / shared.rate.max(1) as i64);
+                let at =
+                    base_os as i64 + (s.at - base_media) + (s.sent as i64 * 1_000_000_000 / shared.rate.max(1) as i64);
                 if at > 0
                     && !rest.is_empty()
                     && let Some(e) = &shared.elsewhere
@@ -875,16 +1033,21 @@ fn play(shared: &Shared, asset: &Asset, ring: &mut Ring, run: u64, start: i64) {
     }
 }
 
-
 // ------------------------------------------------------------------ a file's frames, for the compositor
 
 /// A video file's frames in time order, as the decoder writes them: BGRA IOSurface-backed pixel
-/// buffers that keep the file's alpha (ProRes 4444, HEVC with alpha), with no conversion. Lightair's
-/// own compositor plays stinger videos with it. Made and read on one thread.
+/// buffers that keep the file's alpha (ProRes 4444, HEVC with alpha), with no conversion; a file
+/// with a rotation has each frame turned upright (VideoToolbox, on the GPU) into a buffer of a
+/// pool. Lightair's own compositor plays stinger videos with it. Made and read on one thread.
 pub struct Frames {
     _asset: Retained<AnyObject>,
     reader: Retained<AnyObject>,
     output: Retained<AnyObject>,
+    /// The file's rotation (degrees clockwise), what turns its frames upright (made the first
+    /// time one is turned; `Some(None)` if it couldn't be), and the turned frames' pool.
+    rotation: u32,
+    turn: Option<Option<Turn>>,
+    pool: Option<Pool>,
     /// The file's length.
     pub duration_ms: u32,
 }
@@ -923,7 +1086,8 @@ impl Frames {
                 return None;
             }
             let duration_ms = (duration.ns().unwrap_or(0).max(0) / 1_000_000).min(u32::MAX as i64) as u32;
-            Some(Frames { _asset: asset.asset, reader, output, duration_ms })
+            let rotation = rotation_of(&track);
+            Some(Frames { _asset: asset.asset, reader, output, rotation, turn: None, pool: None, duration_ms })
         })
     }
 
@@ -933,12 +1097,40 @@ impl Frames {
             let decoded = read_video(&self.output, 0)?;
             let Some(decoded) = decoded else { continue };
             let at = (decoded.at.max(0) / 1_000_000).min(u32::MAX as i64) as u32;
-            // the decoder's reference is handed to the pixel buffer, which releases it
-            let decoded = std::mem::ManuallyDrop::new(decoded);
-            // SAFETY: `buffer` is a retained `CVPixelBufferRef` whose reference is given up here.
-            if let Some(buffer) = unsafe { lightair_render::texture::PixelBuffer::from_raw(decoded.buffer) } {
+            // turned upright into a buffer of the pool (as stored if it can't be)
+            let raw = match self.upright(&decoded) {
+                Some(upright) => upright,
+                None => {
+                    // the decoder's reference is handed to the pixel buffer, which releases it
+                    std::mem::ManuallyDrop::new(decoded).buffer
+                }
+            };
+            // SAFETY: `raw` is a retained `CVPixelBufferRef` whose reference is given up here.
+            if let Some(buffer) = unsafe { lightair_render::texture::PixelBuffer::from_raw(raw) } {
                 return Some((at, buffer));
             }
+        }
+    }
+
+    /// `frame` turned upright into a buffer of the pool (+1, released by the caller); `None` for
+    /// a file with no rotation, or when it can't be turned.
+    fn upright(&mut self, frame: &Decoded) -> Option<*mut c_void> {
+        if self.rotation == 0 {
+            return None;
+        }
+        let stored =
+            unsafe { (CVPixelBufferGetWidth(frame.buffer) as u32, CVPixelBufferGetHeight(frame.buffer) as u32) };
+        let size = turned(stored, self.rotation);
+        if self.pool.as_ref().is_none_or(|p| p.size != size) {
+            self.pool = Pool::new(size);
+        }
+        let turn = self.turn.get_or_insert_with(Turn::new).as_mut()?;
+        let out = self.pool.as_ref()?.buffer()?;
+        if turn.turn(frame.buffer, out, self.rotation) {
+            Some(out)
+        } else {
+            unsafe { CFRelease(out) };
+            None
         }
     }
 }
@@ -959,7 +1151,6 @@ impl Drop for Frames {
 /// The document's media sources this source type plays, by document id.
 static SOURCES: LazyLock<Mutex<HashMap<Id, Weak<Shared>>>> = LazyLock::new(Default::default);
 
-
 /// A frame a media source shows: a BGRA IOSurface-backed pixel buffer, opaque (so its colours
 /// are premultiplied too), or fully transparent once the source has cleared.
 pub struct Picture {
@@ -975,13 +1166,10 @@ pub fn plays(source: Id) -> bool {
 }
 
 /// The frame the document media source `source` shows now, picked on its clock (so pause, seek, looping, a new file and the end follow the source).
-/// `None` before its first frame, and for a file with a rotation (not turned upright here).
-/// The surface isn't written again while the buffer is held. Any thread.
+/// A file with a rotation is turned upright, its size the turned one. `None` before its first
+/// frame. The surface isn't written again while the buffer is held. Any thread.
 pub fn picture(source: Id) -> Option<Picture> {
     let shared = SOURCES.lock().get(&source)?.upgrade()?;
-    if shared.control.lock().rotation != 0 {
-        return None;
-    }
     tick(&shared);
     let mut c = shared.composited.lock();
     let slot = match (&c.slot, c.cleared) {
@@ -1033,7 +1221,8 @@ impl MediaPlayer {
         play_now: bool,
         elsewhere: Option<Arc<dyn Elsewhere>>,
     ) -> MediaPlayer {
-        let feed = source.filter(|_| crate::show::own() && crate::audio_host::mixer_on()).map(crate::audio_host::feed_slot);
+        let feed =
+            source.filter(|_| crate::show::own() && crate::audio_host::mixer_on()).map(crate::audio_host::feed_slot);
         let restart = settings.restart_on_activate;
         let shared = Arc::new(Shared {
             elsewhere,
