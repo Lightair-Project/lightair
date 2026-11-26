@@ -191,7 +191,7 @@ struct VideoPipe {
     /// A track of a multitrack stream: the stream's keyframe beat and this canvas's place in it.
     gop: Option<(Arc<Gop>, usize)>,
     /// Otherwise its own beat: the next keyframe is due at this time, a whole number of keyframe
-    /// intervals on the program clock.
+    /// intervals after its first.
     next_key_ns: AtomicI64,
 }
 
@@ -294,7 +294,10 @@ impl Gop {
             }
             c.started = true;
             c.answered = asked;
-            c.next_ns = (pts.div_euclid(self.every_ns) + 1) * self.every_ns;
+            // whole intervals from the stream's first keyframe (every canvas starts there), so
+            // the first interval is as long as the others
+            let start = self.start_ns.load(Ordering::Acquire);
+            c.next_ns = start + ((pts - start).div_euclid(self.every_ns) + 1) * self.every_ns;
             Beat::Key
         } else {
             Beat::Frame
@@ -369,12 +372,17 @@ impl VideoPipe {
                 Beat::Key => true,
                 Beat::Frame => false,
             },
-            // every keyframe interval on the program clock, not the encoder's own count
+            // every keyframe interval from the first keyframe on the program clock, not the
+            // encoder's own count: the first interval as long as the others (a platform checking
+            // the interval sees the same one throughout)
             None => {
                 let every = self.key.keyint.max(1) as i64 * 1_000_000_000;
-                let due = pts >= self.next_key_ns.load(Ordering::Acquire);
+                let next = self.next_key_ns.load(Ordering::Acquire);
+                let due = pts >= next;
                 if due {
-                    self.next_key_ns.store((pts.div_euclid(every) + 1) * every, Ordering::Release);
+                    let after = if next == i64::MIN { pts } else { next };
+                    let skipped = (pts - after).div_euclid(every);
+                    self.next_key_ns.store(after + (skipped + 1) * every, Ordering::Release);
                 }
                 due
             }
