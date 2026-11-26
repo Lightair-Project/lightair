@@ -196,8 +196,42 @@ fn encoders() -> Vec<String> {
             .map(String::from)
             .collect()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        // on a thread of its own: Media Foundation joins COM's multithreaded apartment, and the
+        // engine starts on the main thread, which the window's OLE needs single-threaded
+        std::thread::spawn(windows_encoders).join().unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     Vec::new()
+}
+
+/// Windows: the GPU encoders Media Foundation finds, by the ids the app's settings use for
+/// their maker (NVENC, Quick Sync, AMF), then AAC (Media Foundation's) and Opus.
+#[cfg(windows)]
+fn windows_encoders() -> Vec<String> {
+    use lightair_encode::VideoCodec;
+    use lightair_encode::windows::{Vendor, hardware_encoders};
+    let mut ids = Vec::new();
+    for (codec, ids_by_maker) in [
+        (VideoCodec::H264, ["jim_nvenc", "obs_qsv11_v2", "h264_texture_amf"]),
+        (VideoCodec::Hevc { main10: false }, ["jim_hevc_nvenc", "obs_qsv11_hevc", "h265_texture_amf"]),
+    ] {
+        let found = hardware_encoders(codec).unwrap_or_else(|e| {
+            tracing::warn!(%e, codec = codec.name(), "Media Foundation's encoders couldn't be listed");
+            Vec::new()
+        });
+        for (vendor, id) in [Vendor::Nvidia, Vendor::Intel, Vendor::Amd].into_iter().zip(ids_by_maker) {
+            if found.iter().any(|e| e.vendor == Some(vendor)) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    if ids.is_empty() {
+        tracing::warn!("no GPU encoder found: recording and streaming aren't available on this PC");
+    }
+    ids.extend(["ffmpeg_aac", "ffmpeg_opus"].map(String::from));
+    ids
 }
 
 /// Frame statistics: the primary canvas's compositor frames. Any thread.

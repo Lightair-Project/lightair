@@ -167,6 +167,8 @@ struct VideoKey {
     spatial_aq: Option<bool>,
     /// Scaled down by picking pixels (fast), not averaging them.
     fast_scale: bool,
+    /// The GPU maker whose encoder the settings chose, as a PCI vendor id (Windows; 0: any).
+    maker: u32,
     /// Non-zero: one output's own (its bitrate follows its connection).
     owner: u64,
 }
@@ -338,7 +340,7 @@ impl VideoPipe {
             VideoOutput::Failed(e) => tracing::warn!(%e, "own outputs: a picture wasn't encoded"),
         });
         let name = settings.codec.name();
-        let encoder = pictures::open_encoder(settings, key.cbr, sink)
+        let encoder = pictures::open_encoder(settings, key.cbr, key.maker, sink)
             .map_err(|e| format!("Couldn't open the {name} encoder ({e})."))?;
         tracing::info!(%canvas, codec = name, width = key.width, height = key.height, kbps = key.kbps,
             hardware = encoder.using_hardware(), "own outputs: video encoder open");
@@ -1981,6 +1983,7 @@ impl State {
             quality: track.as_ref().and_then(|t| t.tune.quality).filter(|_| !prores),
             spatial_aq: track.as_ref().and_then(|t| t.tune.spatial_aq),
             fast_scale: track.as_ref().is_some_and(|t| t.tune.fast_scale),
+            maker: pictures::maker_of(&enc.video_encoder),
             owner: if exclusive { next_id() } else { 0 },
         };
         if let Some(p) = self.videos.iter().find(|p| p.key == key && *p.canvas.lock() == canvas) {
@@ -3508,10 +3511,16 @@ mod pictures {
         Bgra,
     }
 
+    /// Every encoder id is VideoToolbox's here.
+    pub fn maker_of(_encoder: &str) -> u32 {
+        0
+    }
+
     /// A VideoToolbox encoder (its rate control follows the settings' ceiling).
     pub fn open_encoder(
         settings: VideoSettings,
         _cbr: bool,
+        _maker: u32,
         sink: VideoSink,
     ) -> Result<VideoEncoder, lightair_encode::Error> {
         VideoEncoder::new(settings, sink)

@@ -13,7 +13,9 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use lightair_encode::Color;
-use lightair_encode::windows::{Blit, Options, RateControl, VideoEncoder, VideoSettings, VideoSink, video_device};
+use lightair_encode::windows::{
+    Blit, Options, RateControl, Vendor, VideoEncoder, VideoSettings, VideoSink, video_device,
+};
 use parking_lot::Mutex;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_MAP_FLAG_DO_NOT_WAIT,
@@ -132,11 +134,27 @@ impl Opened {
 
 // ---------------------------------------------------------------- encoders
 
+/// The GPU maker an encoder id names (NVENC, Quick Sync, AMF) as a PCI vendor id; 0 for any.
+pub fn maker_of(encoder: &str) -> u32 {
+    let id = encoder.to_ascii_lowercase();
+    let vendor = if id.contains("nvenc") {
+        Vendor::Nvidia
+    } else if id.contains("qsv") {
+        Vendor::Intel
+    } else if id.contains("amf") {
+        Vendor::Amd
+    } else {
+        return 0;
+    };
+    vendor.id()
+}
+
 /// The GPU's encoder on the outputs' device: constant bitrate when `cbr`, else peak-constrained
-/// variable bitrate.
+/// variable bitrate; `maker`'s encoder first when it has one (0: the device's GPU's).
 pub fn open_encoder(
     settings: VideoSettings,
     cbr: bool,
+    maker: u32,
     sink: VideoSink,
 ) -> Result<VideoEncoder, lightair_encode::Error> {
     let device = device().map_err(lightair_encode::Error::Unsupported)?;
@@ -144,7 +162,7 @@ pub fn open_encoder(
         device: Some(device),
         rate_control: Some(if cbr { RateControl::Cbr } else { RateControl::Vbr }),
         pool_size: ENCODER_SLOTS,
-        vendor: None,
+        vendor: (maker != 0).then(|| Vendor::from_id(maker)),
     };
     VideoEncoder::with_options(settings, options, sink)
 }
