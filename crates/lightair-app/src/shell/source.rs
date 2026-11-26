@@ -369,12 +369,25 @@ impl StudioWindow {
         let id = source.id;
         let query = picker.search.read(cx).value().to_lowercase();
         let current = source.settings[key].clone();
-        let list: Vec<Choice> = choices(key, &self.source_options(id, key, false, cx), |v| lightair_platform::apps::hide_window(&value_text(v)))
+        let mut list: Vec<Choice> = choices(key, &self.source_options(id, key, false, cx), |v| lightair_platform::apps::hide_window(&value_text(v)))
             .into_iter()
             .filter(|c| {
                 query.is_empty() || c.title.to_lowercase().contains(&query) || c.detail.to_lowercase().contains(&query)
             })
             .collect();
+        // a game: first, no game in particular (whatever is full screen in front)
+        let game = source.kind == kinds::SCREEN && source.settings["mode"].as_i64() == Some(kinds::GAME);
+        if game && (query.is_empty() || "any full-screen application".contains(&query)) {
+            list.insert(
+                0,
+                Choice {
+                    title: "Any full-screen application".into(),
+                    detail: String::new(),
+                    group: "Any".into(),
+                    value: Value::Null,
+                },
+            );
+        }
         let icon = source_icon(&source.kind, &source.settings);
         let title = match key {
             "device" if source.kind == kinds::CAMERA => "Choose a camera",

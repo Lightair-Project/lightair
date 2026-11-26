@@ -85,6 +85,9 @@ pub(crate) enum Aim {
     /// fit.
     #[cfg(windows)]
     Game(String),
+    /// Windows: a game with none chosen: whatever application is full screen in front.
+    #[cfg(windows)]
+    AnyGame,
 }
 
 /// What a source's capture is: what it takes and how.
@@ -172,8 +175,7 @@ fn screen_aim(mode: i64, text: impl Fn(&str) -> Option<String>) -> Option<Aim> {
 
 /// What a screen source in `mode` takes, from its settings (`text`); `None` with nothing chosen.
 /// A window, app or game is libobs's window string (a window's id is taken too); an app or game
-/// by its executable. A game with none chosen (libobs's "any full-screen application") isn't
-/// captured yet.
+/// by its executable. A game with none chosen is "any full-screen application".
 #[cfg(windows)]
 fn screen_aim(mode: i64, text: impl Fn(&str) -> Option<String>) -> Option<Aim> {
     use lightair_host::displays::parse_window_string;
@@ -190,14 +192,10 @@ fn screen_aim(mode: i64, text: impl Fn(&str) -> Option<String>) -> Option<Aim> {
             }
         }
         kinds::APP => Aim::Target(screen::Target::App { bundle: exe(text("app")?), display: None }),
-        kinds::GAME => {
-            let Some(window) = text("window") else {
-                static SAID: std::sync::Once = std::sync::Once::new();
-                SAID.call_once(|| tracing::info!("not yet: a game capture of any full-screen application"));
-                return None;
-            };
-            Aim::Game(exe(window))
-        }
+        kinds::GAME => match text("window") {
+            Some(window) => Aim::Game(exe(window)),
+            None => Aim::AnyGame,
+        },
         _ => Aim::Target(screen::Target::Display(text("display").unwrap_or_default())),
     })
 }
@@ -436,6 +434,8 @@ enum Running {
     Camera(camera::CameraCapture),
     #[cfg(windows)]
     Game(lightair_capture::game::GameCapture),
+    #[cfg(windows)]
+    AnyGame(lightair_capture::game::FullscreenCapture),
 }
 
 impl Running {
@@ -445,6 +445,8 @@ impl Running {
             Running::Screen(c) => format!("screen {}x{}", c.size().0, c.size().1),
             #[cfg(windows)]
             Running::Game(c) => format!("game {}x{}", c.size().0, c.size().1),
+            #[cfg(windows)]
+            Running::AnyGame(c) => format!("the full-screen application {}x{}", c.size().0, c.size().1),
             Running::Camera(c) => {
                 let f = c.format();
                 format!("camera {}x{} {} at {:.2} fps", f.size.0, f.size.1, f.fourcc_text(), c.fps())
@@ -653,6 +655,8 @@ fn spawn(job: Job) {
                 Running::Screen(c) => c.reconfigure(&config),
                 #[cfg(windows)]
                 Running::Game(c) => c.reconfigure(&config),
+                #[cfg(windows)]
+                Running::AnyGame(c) => c.reconfigure(&config),
                 Running::Camera(_) => Ok(()),
             };
             if let Err(e) = changed {
@@ -749,6 +753,10 @@ fn open(source: Id, plan: &Plan, latest: &Arc<Latest>) -> Result<Running, Refuse
                 Aim::Window(named) => screen::Target::Window(
                     lightair_host::displays::find_window(named).ok_or_else(|| later("the window isn't open"))?,
                 ),
+                #[cfg(windows)]
+                Aim::AnyGame => {
+                    return Ok(Running::AnyGame(lightair_capture::game::FullscreenCapture::start(&config, sink)?));
+                }
                 #[cfg(windows)]
                 Aim::Game(exe) => {
                     return Ok(Running::Game(lightair_capture::game::GameCapture::start(
