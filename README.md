@@ -14,7 +14,7 @@
   <a href="https://github.com/Lightair-Project/lightair/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Lightair-Project/lightair?label=release&color=FF3B4A"></a>
   <a href="https://github.com/Lightair-Project/lightair/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Lightair-Project/lightair/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-2A2A2D"></a>
-  <a href="https://moongoblindev.github.io/lightair/"><img alt="Website" src="https://img.shields.io/badge/website-lightair-141414"></a>
+  <a href="https://lightair.app"><img alt="Website: lightair.app" src="https://img.shields.io/badge/website-lightair.app-141414"></a>
 </p>
 
 <p align="center">
@@ -96,15 +96,13 @@ cargo xtask bundle    # target/debug/Lightair.app
 open target/debug/Lightair.app
 ```
 
-On Windows, `cargo xtask dev` and `cargo run` (the Windows app is still being moved onto Lightair's own engine). `cargo xtask tidy` frees `target/` space (incremental caches and stale hashed copies; `--dry-run` first). `cargo xtask` lists everything else: `test`, `precommit`, `dist` (the signed release build) and more. Releases are cut by tagging: see [docs/releasing.md](docs/releasing.md).
+On Windows, `cargo xtask dev` and `cargo run` (the Windows app is still being moved onto Lightair's own engine). `cargo xtask tidy` frees `target/` space (incremental caches and stale hashed copies; `--dry-run` first). `cargo xtask` lists everything else: `test`, `precommit`, `dist` (the signed release build) and more. Releases are cut by tagging.
 
 ## Learn more
 
-- [Website](https://moongoblindev.github.io/lightair/)
-- [Design docs](docs/README.md): what Lightair is and how each part works
-- [Remote API](docs/remote-api.md) · [Official platform APIs](docs/official-apis.md) · [Brand](branding/README.md)
-- [Build order and status](IMPLEMENTATION.md)
+- [lightair.app](https://lightair.app): the website, with [Lightair for desktop](https://lightair.app/desktop) and the [changelog](https://lightair.app/changelog)
+- [Brand](branding/README.md)
 
 ## License
 
-GPL-3.0-or-later; see [LICENSE](LICENSE). Lightair is built on GPUI and gpui-kit (Apache-2.0); see [docs/15](docs/15-platform-distribution-licensing.md#licensing).
+GPL-3.0-or-later; see [LICENSE](LICENSE). Lightair is built on GPUI and gpui-kit (Apache-2.0).
