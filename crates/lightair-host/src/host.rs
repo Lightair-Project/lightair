@@ -15,9 +15,9 @@
 //!   another computer. Whether each is on air follows the program, the overlays, a switch under
 //!   way and the scenes drawn for outputs alone.
 //!
-//! What has no runtime yet on a platform (on Windows: the soundboard, media files, desktop and
-//! app sound, phone cameras, a camera over USB) is logged once per kind; the methods that would
-//! reach it return nothing.
+//! What has no runtime yet on a platform (on Windows: the soundboard, media playlists, phone
+//! cameras, a camera over USB) is logged once per kind; the methods that would reach it return
+//! nothing.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -54,7 +54,7 @@ enum Need {
     Web,
     /// An NDI source, by its name.
     Ndi(String),
-    /// Desktop sound (`None`) or one app's (macOS).
+    /// Desktop sound (`None`) or one app's (a bundle id on macOS, an executable's path on Windows).
     SystemSound(Option<String>),
     Voice,
     /// A link from another computer the compositor receives: its sound comes through a slot.
@@ -108,7 +108,8 @@ fn need(source: &Source) -> Need {
         "ffmpeg_source" if mac && playlist(s) => Need::Media,
         "ffmpeg_source" if playlist(s) => Need::Missing("media playlist"),
         "ffmpeg_source" if mac && native_media(s) => Need::Media,
-        "ffmpeg_source" if mac => Need::Ffmpeg,
+        // the ffmpeg tool decodes what AVFoundation doesn't play (on Windows: every file)
+        "ffmpeg_source" if mac || cfg!(windows) => Need::Ffmpeg,
         "ffmpeg_source" => Need::Missing("media file"),
         "lightair_web" if cfg!(any(target_os = "macos", windows)) => Need::Web,
         crate::ndi::KIND => Need::Ndi(text(s, "ndi_name")),
@@ -118,8 +119,9 @@ fn need(source: &Source) -> Need {
         kinds::DESKTOP_AUDIO if !crate::devices::is_system_default(&text(s, "device")) => {
             Need::Device(text(s, "device"))
         }
-        kinds::DESKTOP_AUDIO if mac => Need::SystemSound(None),
-        kinds::APP_AUDIO if mac => Need::SystemSound(Some(text(s, "app"))),
+        // Core Audio process taps on macOS, WASAPI (process) loopback on Windows
+        kinds::DESKTOP_AUDIO if mac || cfg!(windows) => Need::SystemSound(None),
+        kinds::APP_AUDIO if mac || cfg!(windows) => Need::SystemSound(Some(text(s, "app"))),
         kinds::DESKTOP_AUDIO | kinds::APP_AUDIO => Need::Missing("desktop or app sound"),
         crate::phone_camera::KIND if mac => Need::Phone,
         crate::phone_camera::KIND => Need::Missing("phone camera"),
@@ -182,7 +184,7 @@ enum Runtime {
     Ndi {
         _receiver: crate::ndi::Receiver,
     },
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     SystemSound {
         _sound: crate::system_audio::SystemSound,
     },
@@ -195,7 +197,7 @@ enum Runtime {
     Phone(crate::phone_run::PhoneCamera),
     #[cfg(any(target_os = "macos", windows))]
     Avatar(crate::avatar_run::AvatarRuntime),
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     Ffmpeg {
         media: crate::ffmpeg_media::FfmpegMedia,
         active: bool,
@@ -563,7 +565,7 @@ impl Host {
                 }
                 #[cfg(any(target_os = "macos", windows))]
                 Runtime::Avatar(avatar) => avatar.set_shown(showing.contains(id)),
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 Runtime::Ffmpeg { media, active: was } => {
                     let now = active.contains(id);
                     if now != *was {
@@ -629,7 +631,7 @@ impl Host {
             Some(Runtime::Web { page, .. }) => page.set_options(page_options(s)),
             #[cfg(any(target_os = "macos", windows))]
             Some(Runtime::Avatar(avatar)) => avatar.set_settings(s),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Some(Runtime::Ffmpeg { media, .. }) => media.update(crate::ffmpeg_media::Settings::from_json(s)),
             _ => {}
         }
@@ -709,7 +711,7 @@ impl Host {
             #[cfg(any(target_os = "macos", windows))]
             Need::Web => Runtime::Web { page: crate::web::WebPage::new(id, page_options(s), None, None), shown: false },
             Need::Ndi(name) => Runtime::Ndi { _receiver: crate::ndi::Receiver::start(id, name, None) },
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Need::SystemSound(app) => Runtime::SystemSound {
                 _sound: crate::system_audio::SystemSound::new(id, crate::system_audio::Settings { app: app.clone() }),
             },
@@ -722,7 +724,7 @@ impl Host {
             Need::Phone => Runtime::Phone(crate::phone_run::PhoneCamera::new(id)),
             #[cfg(any(target_os = "macos", windows))]
             Need::Avatar => Runtime::Avatar(crate::avatar_run::AvatarRuntime::new(id, s)),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Need::Ffmpeg => Runtime::Ffmpeg {
                 media: crate::ffmpeg_media::FfmpegMedia::new(
                     id,
@@ -983,7 +985,7 @@ impl Host {
                 duration_ms: player.duration_ms(),
             });
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(Runtime::Ffmpeg { media, .. }) = self.runtimes.get(&source) {
             return Some(MediaStatus {
                 state: crate::media::MediaState::from_code(media.state()),
@@ -1006,7 +1008,7 @@ impl Host {
                 MediaAction::Seek(ms) => player.set_time_ms(ms),
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(Runtime::Ffmpeg { media, .. }) = self.runtimes.get(&source) {
             match action {
                 MediaAction::Play => media.play_pause(false),
@@ -1269,7 +1271,7 @@ impl Host {
                 let (w, h) = if rotation % 180 == 90 { (h, w) } else { (w, h) };
                 (w > 0 && h > 0).then_some((w, h))
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Runtime::Ffmpeg { media, .. } => {
                 let (w, h) = media.size();
                 (w > 0 && h > 0).then_some((w, h))

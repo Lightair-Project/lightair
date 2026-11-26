@@ -51,22 +51,7 @@ const HELD: usize = 3;
 /// drawing from (each holds one until the GPU has finished with it).
 const COMPOSITOR_HELD: usize = 4;
 
-/// A media state code, numbered as OBS's media states are (what the app and the remote API
-/// read).
-pub type MediaStateCode = u32;
-
-/// The media states.
-pub mod state {
-    use super::MediaStateCode;
-    pub const NONE: MediaStateCode = 0;
-    pub const PLAYING: MediaStateCode = 1;
-    pub const OPENING: MediaStateCode = 2;
-    pub const BUFFERING: MediaStateCode = 3;
-    pub const PAUSED: MediaStateCode = 4;
-    pub const STOPPED: MediaStateCode = 5;
-    pub const ENDED: MediaStateCode = 6;
-    pub const ERROR: MediaStateCode = 7;
-}
+pub use crate::media::{MediaStateCode, state};
 
 /// Where a player tells what happens besides the compositor and the mixer (the Library's player).
 pub trait Elsewhere: Send + Sync {

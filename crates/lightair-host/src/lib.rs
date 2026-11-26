@@ -23,7 +23,7 @@ pub mod displays;
 pub mod dslr;
 pub mod engine;
 pub mod face_drive;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod ffmpeg_media;
 #[cfg(any(target_os = "macos", windows))]
 pub mod frames;
@@ -64,7 +64,7 @@ pub mod show;
 pub mod timers;
 #[cfg(any(target_os = "macos", windows))]
 pub mod tracker;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod system_audio;
 #[cfg(any(target_os = "macos", windows))]
 pub mod web;

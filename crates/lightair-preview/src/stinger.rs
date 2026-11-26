@@ -1,5 +1,5 @@
-//! A stinger transition's video for the compositor (macOS; Windows reads none yet, so its
-//! stingers are `failed`).
+//! A stinger transition's video for the compositor (macOS; on Windows read by the `ffmpeg` tool,
+//! [`lightair_host::ffmpeg_media::Frames`], into Lightair buffers).
 //!
 //! A [`Player`] decodes its file on a thread of its own with the desktop's hardware path
 //! (AVFoundation and VideoToolbox, `lightair_obs::media_source::Frames`): BGRA IOSurface-backed
@@ -68,23 +68,22 @@ impl Reader {
     }
 }
 
-/// Windows: no stinger video is read yet.
+/// Windows: a stinger's frames from the `ffmpeg` tool (WebM's alpha kept).
 #[cfg(windows)]
-enum Reader {}
+struct Reader(lightair_host::ffmpeg_media::Frames);
 
 #[cfg(windows)]
 impl Reader {
-    fn open(_path: &str) -> Option<Reader> {
-        crate::buffer_gpu::not_yet("stinger videos in the compositor");
-        None
+    fn open(path: &str) -> Option<Reader> {
+        lightair_host::ffmpeg_media::Frames::open(path).map(Reader)
     }
 
     fn duration_ms(&self) -> u32 {
-        match *self {}
+        self.0.duration_ms
     }
 
     fn next_frame(&mut self) -> Option<(u32, Frame)> {
-        match *self {}
+        self.0.next_frame()
     }
 }
 

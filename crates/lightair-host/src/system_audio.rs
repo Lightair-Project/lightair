@@ -1,4 +1,5 @@
-//! Desktop and app sound for the mixer (macOS): `lightair-capture`'s Core Audio process taps,
+//! Desktop and app sound for the mixer: `lightair-capture`'s Core Audio process taps (macOS) or
+//! WASAPI loopback (Windows; an app by its executable's path),
 //! running only while a track takes the source ([`SystemSound`]), so nothing taps at launch or
 //! for a source no track uses. Settings: `type` 0 (everything but Lightair, so monitoring doesn't
 //! come back in) or 1 with `application` (one app's bundle id; the capture follows the app as it

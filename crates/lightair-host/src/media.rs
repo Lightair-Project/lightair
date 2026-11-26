@@ -1,6 +1,23 @@
 //! Media playback status and control for media sources (video files, the soundboard): runtime
 //! state, not document state. Looping and the file live in settings.
 
+/// A media state code, numbered as OBS's media states are (what the app and the remote API
+/// read).
+pub type MediaStateCode = u32;
+
+/// The media states.
+pub mod state {
+    use super::MediaStateCode;
+    pub const NONE: MediaStateCode = 0;
+    pub const PLAYING: MediaStateCode = 1;
+    pub const OPENING: MediaStateCode = 2;
+    pub const BUFFERING: MediaStateCode = 3;
+    pub const PAUSED: MediaStateCode = 4;
+    pub const STOPPED: MediaStateCode = 5;
+    pub const ENDED: MediaStateCode = 6;
+    pub const ERROR: MediaStateCode = 7;
+}
+
 /// Where a media source's playback is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaState {
@@ -15,7 +32,7 @@ pub enum MediaState {
 }
 
 impl MediaState {
-    /// From a media state code (`crate::media_player::state`, numbered as OBS's are).
+    /// From a media state code ([`state`], numbered as OBS's are).
     pub fn from_code(code: u32) -> MediaState {
         match code {
             1 => MediaState::Playing,

@@ -1,4 +1,5 @@
-//! Media files and streams AVFoundation doesn't play (WebM, MKV, AVI, a network stream…) (macOS):
+//! Media files and streams AVFoundation doesn't play (WebM, MKV, AVI, a network stream…) on macOS,
+//! and every media file on Windows:
 //! decoded by the `ffmpeg` tool Lightair ships (`lightair_render::media::ffmpeg`),
 //! in real time, while the source is on air. Two processes per run: the pictures (raw RGBA,
 //! published by the source's id for the compositor: [`crate::frames`]) and the sound (float PCM
@@ -23,7 +24,21 @@ use std::time::Instant;
 use lightair_model::Id;
 use parking_lot::Mutex;
 
-use crate::media_player::{MediaStateCode, state};
+use crate::media::{MediaStateCode, state};
+
+/// A command for the `ffmpeg` tool. Windows: without a console window of its own (from a window
+/// app, each run would flash one).
+fn tool(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 
 /// What the source plays, from its settings.
 #[derive(Debug, Clone, PartialEq)]
@@ -209,7 +224,7 @@ impl FfmpegMedia {
         // the pictures
         let (w, h) = c.size;
         if w > 0 && h > 0 {
-            let mut cmd = Command::new(&ffmpeg);
+            let mut cmd = tool(&ffmpeg);
             base(&mut cmd);
             cmd.args(["-map", "0:v:0", "-an", "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);
             if let Ok(mut child) = cmd.spawn()
@@ -223,7 +238,7 @@ impl FfmpegMedia {
             }
         }
         // the sound
-        let mut cmd = Command::new(&ffmpeg);
+        let mut cmd = tool(&ffmpeg);
         base(&mut cmd);
         cmd.args(["-map", "0:a:0?", "-vn", "-f", "f32le", "-ac", "2", "-ar", &self.rate.to_string(), "-"]);
         if let Ok(mut child) = cmd.spawn()
@@ -375,7 +390,7 @@ impl Frames {
 
     fn spawn(path: &str, decoder: Option<&str>, _size: (u32, u32)) -> Option<(Child, std::process::ChildStdout)> {
         let ffmpeg = lightair_render::media::ffmpeg().ok()?;
-        let mut cmd = Command::new(ffmpeg);
+        let mut cmd = tool(ffmpeg);
         cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
         if let Some(d) = decoder {
             cmd.args(["-c:v", d]);
@@ -389,7 +404,7 @@ impl Frames {
     }
 
     /// The next frame and its time (ms from the file's start); `None` at the end.
-    pub fn next_frame(&mut self) -> Option<(u32, lightair_render::texture::PixelBuffer)> {
+    pub fn next_frame(&mut self) -> Option<(u32, Picture)> {
         let (w, h) = self.size;
         let bytes = match self.first.take() {
             Some(b) => b,
@@ -402,15 +417,25 @@ impl Frames {
         let at = (self.read as f64 * 1000.0 / self.fps) as u32;
         self.read += 1;
         let buffer = crate::buffers::from_rgba(&bytes, w, h)?;
+        #[cfg(windows)]
+        return Some((at, buffer));
         // SAFETY: the buffer's one reference is given up to the pixel buffer, which releases it
+        #[cfg(target_os = "macos")]
         let pixels = unsafe {
             lightair_render::texture::PixelBuffer::from_raw(
                 objc2_core_foundation::CFRetained::into_raw(buffer).as_ptr().cast(),
             )
         }?;
+        #[cfg(target_os = "macos")]
         Some((at, pixels))
     }
 }
+
+/// A stinger frame as [`Frames`] reads it: a pixel buffer (macOS), a Lightair buffer (Windows).
+#[cfg(target_os = "macos")]
+pub type Picture = lightair_render::texture::PixelBuffer;
+#[cfg(windows)]
+pub type Picture = crate::buffers::Buffer;
 
 impl Drop for Frames {
     fn drop(&mut self) {
