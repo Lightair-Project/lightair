@@ -988,7 +988,7 @@ mod round_trip {
     fn a_takes_proxy_says_what_it_stands_in_for() {
         let (ws, take, _, _) = workspace();
         let (sync, _) = sync_for(&ws);
-        let screen = ws.join("recordings/Studio take 10.32.lightair-take/screen.mp4");
+        let screen = ws.join("recordings").join("Studio take 10.32.lightair-take").join("screen.mp4");
         // (unique content: this test's own proxy in the shared cache)
         std::fs::write(&screen, format!("screen {}", Id::new()).repeat(200)).unwrap();
         let name = lightair_render::sequence::content_name(&screen).unwrap();
@@ -1000,7 +1000,8 @@ mod round_trip {
         let manifest = f["transfer"]["manifest"].as_array().unwrap();
         let p = manifest.iter().find(|e| e["name"] == format!("proxy-{name}.mp4")).expect("the proxy");
         assert_eq!(p["proxy_for"], "Studio take 10.32.lightair-take/screen.mp4");
-        assert_eq!(p["proxy_for_path"], json!(screen));
+        // (a path on this computer: compared as a path, so either separator matches on Windows)
+        assert_eq!(p["proxy_for_path"].as_str().map(Path::new), Some(screen.as_path()));
         assert!(!manifest.iter().any(|e| e["name"] == "Studio take 10.32.lightair-take/screen.mp4"), "proxies only");
         let _ = std::fs::remove_dir_all(&ws);
     }
@@ -1090,7 +1091,8 @@ mod round_trip {
             .iter()
             .find(|m| m["name"] == "Studio take 10.32.lightair-take/screen.mp4")
             .unwrap();
-        assert!(screen["path"].as_str().unwrap().ends_with("Studio take 10.32.lightair-take/screen.mp4"));
+        let path = Path::new(screen["path"].as_str().unwrap());
+        assert!(path.ends_with(Path::new("Studio take 10.32.lightair-take").join("screen.mp4")), "{path:?}");
         // the same names and SHA when fetched again (a new token resumes the same .partial files)
         let again = call(&sync, "takes.fetch", json!({"take": take})).unwrap();
         assert_eq!(again["transfer"]["manifest"], f["transfer"]["manifest"]);
