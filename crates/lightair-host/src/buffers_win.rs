@@ -20,7 +20,7 @@ use parking_lot::Mutex;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, LUID};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_QUERY_DESC,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_QUERY_DESC,
     D3D11_QUERY_EVENT, D3D11_RESOURCE_MISC_SHARED, D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_SDK_VERSION,
     D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11CreateDevice, ID3D11Device, ID3D11Device1,
     ID3D11Device5, ID3D11DeviceContext, ID3D11DeviceContext4, ID3D11Fence, ID3D11Multithread, ID3D11Query,
@@ -149,24 +149,35 @@ fn make_gpu(luid: Option<LUID>) -> Option<Gpu> {
     };
     let (adapter, luid) = adapter;
     let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
-    let (mut device, mut context) = (None, None);
-    let made = unsafe {
-        D3D11CreateDevice(
-            &adapter.cast::<IDXGIAdapter>().ok()?,
-            D3D_DRIVER_TYPE_UNKNOWN,
-            HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&levels),
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            None,
-            Some(&mut context),
-        )
+    let dxgi = adapter.cast::<IDXGIAdapter>().ok()?;
+    let make = |flags| {
+        let (mut device, mut context) = (None, None);
+        unsafe {
+            D3D11CreateDevice(
+                &dxgi,
+                D3D_DRIVER_TYPE_UNKNOWN,
+                HMODULE::default(),
+                flags,
+                Some(&levels),
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .map(|()| (device, context))
     };
-    if let Err(e) = made {
-        tracing::error!(%e, "buffers: making a Direct3D 11 device");
-        return None;
-    }
+    // with video support where the adapter has it: the decoders draw on this device too, rather
+    // than on one of their own (each device costs its own driver memory)
+    let made = make(D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT)
+        .or_else(|_| make(D3D11_CREATE_DEVICE_BGRA_SUPPORT));
+    let (device, context) = match made {
+        Ok(made) => made,
+        Err(e) => {
+            tracing::error!(%e, "buffers: making a Direct3D 11 device");
+            return None;
+        }
+    };
     let (device, context): (ID3D11Device, ID3D11DeviceContext) = (device?, context?);
     if let Ok(threads) = device.cast::<ID3D11Multithread>() {
         unsafe {

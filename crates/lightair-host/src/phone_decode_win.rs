@@ -158,7 +158,7 @@ unsafe impl Send for Gpu {}
 
 impl Gpu {
     pub(crate) fn new() -> Option<Gpu> {
-        let device = lightair_encode::windows::video_device(crate::buffers::device().as_ref()).ok()?;
+        let device = shared_video_device()?;
         let context = unsafe { device.GetImmediateContext() }.ok()?;
         let mut token = 0u32;
         let mut manager = None;
@@ -230,6 +230,33 @@ impl Gpu {
         }
         Some((c.handle, c.out))
     }
+}
+
+/// The video device every decoder shares (media files, phone cameras, SRT links): the buffers'
+/// own device when it has video support, else one made on the buffers' adapter. A device each
+/// costs its own driver memory (about 20 MB). It is multithread-protected; each decoder keeps
+/// its own device manager, query and conversion. Made again if the buffers' adapter changes.
+fn shared_video_device() -> Option<ID3D11Device> {
+    if let Some(device) = crate::buffers::device()
+        && device.cast::<ID3D11VideoDevice>().is_ok()
+    {
+        return Some(device);
+    }
+    struct Shared(windows::Win32::Foundation::LUID, ID3D11Device);
+    // SAFETY: Direct3D 11 devices are free-threaded; this one is multithread-protected.
+    unsafe impl Send for Shared {}
+    static SHARED: std::sync::Mutex<Option<Shared>> = std::sync::Mutex::new(None);
+    let buffers = crate::buffers::device();
+    let luid = crate::buffers::adapter().unwrap_or_default();
+    let mut shared = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(Shared(at, device)) = shared.as_ref()
+        && *at == luid
+    {
+        return Some(device.clone());
+    }
+    let device = lightair_encode::windows::video_device(buffers.as_ref()).ok()?;
+    *shared = Some(Shared(luid, device.clone()));
+    Some(device)
 }
 
 /// NV12 of one size to BGRA of another (turned clockwise by `rotation` degrees), into a shared
