@@ -168,7 +168,9 @@ pub struct Copier {
 unsafe impl Send for Copier {}
 
 impl Copier {
-    pub fn new() -> Copier {
+    /// `fast`: the plan's point scaler (Windows' video processor scales one way only).
+    pub fn new(fast: bool) -> Copier {
+        let _ = fast;
         Copier { opened: None }
     }
 

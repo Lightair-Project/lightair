@@ -161,6 +161,12 @@ struct VideoKey {
     profile: H264Profile,
     /// A ceiling over the average when it isn't constant, kbps (`None`: the encoder's own).
     peak: Option<u32>,
+    /// Constant quality instead of the bitrate, percent (`None`: the bitrate).
+    quality: Option<u8>,
+    /// Spatial adaptive quantisation (`None`: the encoder's own choice).
+    spatial_aq: Option<bool>,
+    /// Scaled down by picking pixels (fast), not averaging them.
+    fast_scale: bool,
     /// Non-zero: one output's own (its bitrate follows its connection).
     owner: u64,
 }
@@ -304,6 +310,7 @@ impl VideoPipe {
         settings: VideoSettings,
         gop: Option<(Arc<Gop>, usize)>,
     ) -> Result<Arc<VideoPipe>, String> {
+        let fast_scale = key.fast_scale;
         let subs: Subs = Arc::default();
         let skipped = Arc::new(AtomicU32::new(0));
         let format: Arc<Mutex<Option<Arc<VideoFormat>>>> = Arc::default();
@@ -339,7 +346,7 @@ impl VideoPipe {
             key,
             canvas: Mutex::new(canvas),
             encoder,
-            transfer: Mutex::new(pictures::Copier::new()),
+            transfer: Mutex::new(pictures::Copier::new(fast_scale)),
             subs,
             skipped,
             fed: AtomicU64::new(0),
@@ -1971,6 +1978,9 @@ impl State {
             reorder: reorder && !prores,
             profile: track.as_ref().map_or(H264Profile::High, |t| t.tune.profile),
             peak: track.as_ref().and_then(|t| t.tune.peak_kbps).filter(|_| !enc.constant_bitrate),
+            quality: track.as_ref().and_then(|t| t.tune.quality).filter(|_| !prores),
+            spatial_aq: track.as_ref().and_then(|t| t.tune.spatial_aq),
+            fast_scale: track.as_ref().is_some_and(|t| t.tune.fast_scale),
             owner: if exclusive { next_id() } else { 0 },
         };
         if let Some(p) = self.videos.iter().find(|p| p.key == key && *p.canvas.lock() == canvas) {
@@ -1993,6 +2003,8 @@ impl State {
             color: Color::BT709,
             hardware: Hardware::Prefer,
             h264_profile: key.profile,
+            quality: key.quality.map(|q| f32::from(q) / 100.0),
+            spatial_aq: key.spatial_aq,
         };
         let pipe = VideoPipe::open(key, canvas, settings, track.map(|t| (t.gop, t.place)))?;
         self.videos.push(pipe.clone());
@@ -2551,6 +2563,12 @@ struct Tune {
     main10: bool,
     /// A ceiling over the average when the bitrate isn't constant, kbps.
     peak_kbps: Option<u32>,
+    /// Constant quality instead of a bitrate, percent (the plan's CRF).
+    quality: Option<u8>,
+    /// Spatial adaptive quantisation, when the plan says.
+    spatial_aq: Option<bool>,
+    /// The plan's scaler picks pixels (`OBS_SCALE_POINT`) rather than averaging them.
+    fast_scale: bool,
 }
 
 /// A multitrack stream's track: its place on the stream's keyframe beat, and the plan's
@@ -2581,7 +2599,33 @@ fn track_encoder(cfg: &StreamConfig, t: &outputs::MultitrackVideo) -> (EncoderCo
         v => v.as_u64().map(|n| n > 0),
     };
     let kbps = number("bitrate").map_or(cfg.encoders.video_bitrate_kbps, |b| b as u32);
-    let cbr = s.get("rate_control").and_then(|v| v.as_str()).is_none_or(|r| r.eq_ignore_ascii_case("CBR"));
+    let rate_control = s.get("rate_control").and_then(|v| v.as_str()).map(|r| r.trim().to_ascii_uppercase());
+    // constant quality (CRF and its kin): Apple's encoders' `quality` (0–100), else a
+    // quantiser (`crf`, `cqp`, `icq_quality`: 0–51, lower is better) turned into a quality
+    let quality =
+        matches!(rate_control.as_deref(), Some("CRF" | "CQ" | "CQP" | "ICQ")).then(|| match number("quality") {
+            Some(q) => q.min(100) as u8,
+            None => {
+                let qp = number("crf").or_else(|| number("cqp")).or_else(|| number("icq_quality")).unwrap_or(23);
+                (100 - qp.min(51) * 100 / 51) as u8
+            }
+        });
+    let cbr = quality.is_none() && rate_control.as_deref().is_none_or(|r| r == "CBR");
+    // spatial adaptive quantisation: Apple's encoders' `spatial_aq_mode` (-1 or AUTO: theirs,
+    // 0 or DISABLED, 1 or ENABLED), or a plain on/off (`spatial_aq`, `psycho_aq`)
+    let spatial_aq = match s.get("spatial_aq_mode") {
+        Some(serde_json::Value::String(m)) => match m.trim().to_ascii_uppercase().as_str() {
+            "DISABLED" | "DISABLE" | "OFF" | "0" => Some(false),
+            "ENABLED" | "ENABLE" | "ON" | "1" => Some(true),
+            _ => None,
+        },
+        Some(v) => v.as_i64().and_then(|n| match n {
+            0 => Some(false),
+            n if n > 0 => Some(true),
+            _ => None,
+        }),
+        None => flag("spatial_aq").or_else(|| flag("psycho_aq")),
+    };
     // B-frames unless the plan says none, as libobs's Apple encoders make them
     let bframes = match s.get("bframes") {
         Some(_) => flag("bframes").unwrap_or(true),
@@ -2602,6 +2646,9 @@ fn track_encoder(cfg: &StreamConfig, t: &outputs::MultitrackVideo) -> (EncoderCo
             .flatten()
             .filter(|m| *m > 0)
             .map(|m| m as u32),
+        quality,
+        spatial_aq,
+        fast_scale: t.scale.as_deref().is_some_and(|k| k.eq_ignore_ascii_case("OBS_SCALE_POINT")),
     };
     let enc = EncoderConfig {
         video_encoder: t.encoder.clone(),
@@ -3508,8 +3555,23 @@ mod pictures {
     }
 
     impl Copier {
-        pub fn new() -> Copier {
-            Copier { session: transfer_session(), last: None }
+        /// `fast`: scaled down by picking pixels, not averaging them (the plan's point scaler).
+        pub fn new(fast: bool) -> Copier {
+            let session = transfer_session();
+            if fast && let Some(s) = &session {
+                use objc2_video_toolbox::{
+                    VTSessionSetProperty, kVTDownsamplingMode_Decimate, kVTPixelTransferPropertyKey_DownsamplingMode,
+                };
+                // SAFETY: VideoToolbox's constant key and value, read only.
+                unsafe {
+                    VTSessionSetProperty(
+                        s,
+                        kVTPixelTransferPropertyKey_DownsamplingMode,
+                        Some(kVTDownsamplingMode_Decimate),
+                    );
+                }
+            }
+            Copier { session, last: None }
         }
 
         /// Copies `frame` into a buffer of `encoder`'s and encodes it (`None`: the last again).
