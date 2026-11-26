@@ -26,7 +26,7 @@ mod compose;
 pub mod providers;
 #[cfg(any(target_os = "macos", windows))]
 mod provide_web;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod provide_ndi;
 #[cfg(target_os = "macos")]
 mod provide_syphon;

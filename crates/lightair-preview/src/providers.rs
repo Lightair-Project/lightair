@@ -55,9 +55,10 @@ fn builtin() -> Vec<Arc<dyn Provider>> {
     all.push(Arc::new(crate::provide_srt::Srt::default())); // SRT from another computer
     #[cfg(any(target_os = "macos", windows))]
     all.push(Arc::new(crate::provide_phone::Phone::default())); // the phone camera
+    #[cfg(any(target_os = "macos", windows))]
+    all.push(Arc::new(crate::provide_ndi::Ndi::default())); // NDI
     #[cfg(target_os = "macos")]
     {
-        all.push(Arc::new(crate::provide_ndi::Ndi::default())); // NDI
         all.push(Arc::new(crate::provide_syphon::Syphon::default())); // Syphon
         all.push(Arc::new(crate::provide_media::Media)); // media files
     }

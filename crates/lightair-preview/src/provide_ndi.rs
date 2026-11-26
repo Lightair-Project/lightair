@@ -7,17 +7,20 @@
 //!   own picture of the source, so thumbnails, Studio mode's libobs preview and a source with an
 //!   effect only libobs draws stay right.
 //! - **Pictures.** NDI gives BGRA (BGRX for senders without alpha); the copy multiplies the
-//!   colours by alpha, or makes them opaque, in one pass (Accelerate's vImage).
+//!   colours by alpha, or makes them opaque, in one pass (Accelerate's vImage; on Windows in a
+//!   plain loop, then uploaded into a Lightair buffer).
 //! - **Letting go.** A source no compositor has shown for a second is copied no more; its tap
 //!   goes the next time a compositor says what it shows.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "macos")]
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lightair_model::{Id, Source};
 use lightair_host::{bridge, ndi};
+#[cfg(target_os = "macos")]
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
     CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
@@ -54,14 +57,57 @@ struct Taken {
     copier: Mutex<Copier>,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct Copier {
     pool: Pool,
     serial: u64,
 }
 
+/// Windows: each picture uploaded into a Lightair buffer (premultiplied, or made opaque, on the
+/// way into `scratch`).
+#[cfg(windows)]
+#[derive(Default)]
+struct Copier {
+    buffers: lightair_host::buffers::Copier,
+    scratch: Vec<u8>,
+    serial: u64,
+}
+
 impl Taken {
     /// A received picture (on the source's receiving thread): copied while wanted.
+    #[cfg(windows)]
+    fn take(&self, picture: &ndi::Picture) {
+        if Instant::now() > *self.until.lock() {
+            return;
+        }
+        let (w, h) = (picture.width as usize, picture.height as usize);
+        if w == 0 || h == 0 || picture.stride < w * 4 || picture.data.len() < picture.stride * h {
+            return;
+        }
+        let mut copier = self.copier.lock();
+        let c = &mut *copier;
+        c.scratch.clear();
+        c.scratch.reserve(w * h * 4);
+        for row in picture.data.chunks(picture.stride).take(h) {
+            for px in row[..w * 4].as_chunks::<4>().0 {
+                let a = if picture.opaque { 255 } else { px[3] };
+                let mul = |v: u8| ((v as u16 * a as u16 + 127) / 255) as u8;
+                if a == 255 {
+                    c.scratch.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                } else {
+                    c.scratch.extend_from_slice(&[mul(px[0]), mul(px[1]), mul(px[2]), a]);
+                }
+            }
+        }
+        if let Some(buffer) = c.buffers.from_memory(&c.scratch, w * 4, (w as u32, h as u32)) {
+            c.serial += 1;
+            *self.latest.lock() = Some(Latest { buffer, serial: c.serial });
+        }
+    }
+
+    /// A received picture (on the source's receiving thread): copied while wanted.
+    #[cfg(target_os = "macos")]
     fn take(&self, picture: &ndi::Picture) {
         if Instant::now() > *self.until.lock() {
             return;
@@ -156,17 +202,21 @@ impl Latest {
 
 /// BGRA buffers a provider fills, reused once nothing but the pool holds them (the compositor
 /// holds the one it draws until its next frame; the provider holds its newest).
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 pub(crate) struct Pool {
     kept: Vec<bridge::Buffer>,
 }
 
 // SAFETY: pixel buffers are reference-counted and usable from any thread.
+#[cfg(target_os = "macos")]
 unsafe impl Send for Pool {}
 
 /// Buffers a pool keeps for reuse.
+#[cfg(target_os = "macos")]
 const KEPT: usize = 8;
 
+#[cfg(target_os = "macos")]
 impl Pool {
     /// A `w`×`h` BGRA buffer nothing else holds.
     pub(crate) fn take(&mut self, w: u32, h: u32) -> Option<bridge::Buffer> {
@@ -183,6 +233,7 @@ impl Pool {
 }
 
 /// What a BGRA picture's alpha is.
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Alpha {
     /// Colours not multiplied by alpha: they're multiplied while copied.
@@ -192,6 +243,7 @@ pub(crate) enum Alpha {
 }
 
 /// `vImage_Buffer`.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct VImageBuffer {
     data: *mut c_void,
@@ -200,6 +252,7 @@ struct VImageBuffer {
     row_bytes: usize,
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "Accelerate", kind = "framework")]
 unsafe extern "C" {
     /// Multiplies the first three channels by the fourth (alpha last, as in BGRA).
@@ -221,6 +274,7 @@ unsafe extern "C" {
 /// # Safety
 ///
 /// `src` must hold `h` rows of `src_row` bytes, each with at least `w` BGRA pixels.
+#[cfg(target_os = "macos")]
 pub(crate) unsafe fn copy_bgra(
     src: *const u8,
     src_row: usize,
