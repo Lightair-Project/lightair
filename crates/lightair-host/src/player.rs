@@ -83,8 +83,8 @@ impl Player {
         None
     }
 
-    /// The frame due now (BGRA, IOSurface-backed); `None` before the first, and for a file with
-    /// a rotation.
+    /// The frame due now (BGRA, IOSurface-backed, a rotated file's turned upright); `None` before
+    /// the first.
     pub fn frame(&self) -> Option<crate::buffers::Buffer> {
         crate::media_player::picture(self.id).map(|p| p.buffer)
     }

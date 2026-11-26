@@ -52,7 +52,10 @@ unsafe extern "C" {
 
 /// A pixel buffer over `surface` (an `IOSurfaceRef`, BGRA), sharing its memory: what someone
 /// else's picture is drawn as without a copy. The buffer keeps the surface alive, not in use.
-pub fn over_surface(surface: *mut c_void) -> Option<Buffer> {
+///
+/// # Safety
+/// `surface` must be null or a live `IOSurfaceRef`.
+pub unsafe fn over_surface(surface: *mut c_void) -> Option<Buffer> {
     if surface.is_null() {
         return None;
     }

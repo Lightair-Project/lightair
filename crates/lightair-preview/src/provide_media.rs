@@ -6,8 +6,8 @@
 //! restart on activate, the end and clearing), answers the media controls and the remote API,
 //! and hands its sound to the mix as before. This provider only takes the frame it picked on
 //! libobs's clock, so it never runs a clock of its own. Files that source type can't play
-//! (WebM, MKV, streams, playlists, a changed speed) are OBS's media source, which libobs draws;
-//! so is a file with a rotation, which libobs turns as it draws it.
+//! (WebM, MKV, streams, playlists, a changed speed) are played by ffmpeg instead. Either way a
+//! file with a rotation comes turned upright.
 
 use lightair_model::{Id, Source};
 use lightair_host::media_player as media_source;

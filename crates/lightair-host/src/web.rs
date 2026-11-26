@@ -109,8 +109,9 @@ mod mac {
         fn put(&mut self, surface: *mut c_void) {
             // only this list holds them: not the newest, not drawn
             self.held.retain(|(b, _)| b.retain_count() > 1);
-            let Some(buffer) = crate::buffers::over_surface(surface) else { return };
-            // SAFETY: `surface` is Chromium's, live during its paint.
+            // SAFETY: `surface` is Chromium's, live during its paint (or held in use).
+            let Some(buffer) = (unsafe { crate::buffers::over_surface(surface) }) else { return };
+            // SAFETY: as above.
             let hold = unsafe { Surface::hold(surface) };
             self.held.push((buffer.clone(), hold));
             self.serial += 1;
