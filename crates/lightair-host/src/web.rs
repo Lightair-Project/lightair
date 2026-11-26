@@ -5,9 +5,9 @@
 //! `fps`; `zoom` (percent, as a browser's); `css` (added to the page each time it loads).
 //!
 //! On macOS Chromium shares its frames as IOSurfaces ([`Frames`]): while Lightair's compositor
-//! wants a page, each frame painted is also copied on the GPU into a BGRA IOSurface from a small
-//! ring of the page's, and the compositor takes the newest finished copy ([`feed`]). A page's
-//! sound goes into its track in the mixer while a track takes it.
+//! wants a page, it draws Chromium's own surface of the newest frame, held in use (Chromium paints
+//! into another meanwhile) for as long as anything draws it ([`feed`]). A page's sound goes into
+//! its track in the mixer while a track takes it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 pub const KIND: &str = "lightair_web";
 
 #[cfg(target_os = "macos")]
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
 #[cfg(target_os = "macos")]
@@ -30,10 +30,6 @@ use std::sync::{LazyLock, Weak};
 #[cfg(target_os = "macos")]
 mod mac {
     use super::*;
-    /// Copy buffers per page at most: the newest copy, one each compositor may still hold until
-    /// its next frame, one being copied into, one free.
-    const RING: usize = 6;
-
     /// How long after the compositor last took a frame the page still counts as drawn by it.
     const TAKEN_FOR: Duration = Duration::from_millis(250);
 
@@ -93,90 +89,47 @@ mod mac {
     // SAFETY: IOSurfaces are reference-counted kernel objects usable from any thread.
     unsafe impl Send for Surface {}
 
-    /// A buffer of the ring, and the GPU's view of it that copies go into.
-    struct Slot {
-        buffer: crate::buffers::Buffer,
-        target: lightair_web::copy::Target,
-    }
-
-    /// A copy the GPU is making: into `buffer`, from Chromium's surface (held until it's done).
-    struct Copying {
-        copy: lightair_web::copy::Copy,
-        buffer: crate::buffers::Buffer,
-        _from: Surface,
-    }
-
-    /// The compositor's copies of the page's frames.
+    /// The frames handed to Lightair's compositor: Chromium's surfaces as pixel buffers, each
+    /// held in use while anything draws it.
     #[derive(Default)]
-    struct Copies {
-        ring: Vec<Slot>,
-        /// Oldest first (one queue: they finish in order).
-        copying: VecDeque<Copying>,
-        /// The newest finished copy, and its count.
+    struct Handed {
+        held: Vec<(crate::buffers::Buffer, Surface)>,
+        /// The newest, and its count.
         latest: Option<(crate::buffers::Buffer, u64)>,
         serial: u64,
     }
 
-    // SAFETY: CoreVideo pixel buffers are reference-counted and usable from any thread; the
-    // targets and copies are Metal objects only read once made; the surfaces IOSurfaces.
-    unsafe impl Send for Copies {}
+    // SAFETY: CoreVideo pixel buffers are reference counted thread-safely; the surfaces are
+    // IOSurfaces.
+    unsafe impl Send for Handed {}
 
-    impl Copies {
-        /// Hands on the copies the GPU has finished.
-        fn collect(&mut self) {
-            while let Some(done) = self.copying.front().and_then(|c| c.copy.finished()) {
-                let Some(c) = self.copying.pop_front() else { break };
-                if done {
-                    self.serial += 1;
-                    self.latest = Some((c.buffer, self.serial));
-                }
-            }
-        }
-
-        /// Starts copying `surface` (Chromium's, being painted now) into a free buffer of its
-        /// size; `false` when every buffer is still held (the frame is skipped).
-        fn start(&mut self, surface: *mut c_void) -> bool {
-            self.collect();
-            let size = unsafe { (IOSurfaceGetWidth(surface) as u32, IOSurfaceGetHeight(surface) as u32) };
-            // buffers of another size go once nothing holds them (the page was resized)
-            self.ring.retain(|s| s.target.size() == size || s.buffer.retain_count() > 1);
-            let free = self.ring.iter().position(|s| s.target.size() == size && s.buffer.retain_count() == 1);
-            let slot = match free {
-                Some(i) => i,
-                None if self.ring.len() < RING => {
-                    let Some(buffer) = crate::buffers::bgra_buffer(size.0, size.1) else { return true };
-                    let Some(target) =
-                        crate::buffers::surface_of(&buffer).and_then(|s| unsafe { lightair_web::copy::Target::new(s) })
-                    else {
-                        return true;
-                    };
-                    self.ring.push(Slot { buffer, target });
-                    self.ring.len() - 1
-                }
-                None => return false,
-            };
-            let slot = &self.ring[slot];
-            // SAFETY: `surface` is Chromium's, live during its paint; it's held below until the
-            // copy has run.
-            if let Some(copy) = unsafe { lightair_web::copy::copy(surface, &slot.target) } {
-                self.copying.push_back(Copying { copy, buffer: slot.buffer.clone(), _from: unsafe { Surface::hold(surface) } });
-            }
-            true
+    impl Handed {
+        /// `surface` (Chromium's, being painted now) is the newest frame; the ones nothing draws
+        /// any more go back to Chromium.
+        fn put(&mut self, surface: *mut c_void) {
+            // only this list holds them: not the newest, not drawn
+            self.held.retain(|(b, _)| b.retain_count() > 1);
+            let Some(buffer) = crate::buffers::over_surface(surface) else { return };
+            // SAFETY: `surface` is Chromium's, live during its paint.
+            let hold = unsafe { Surface::hold(surface) };
+            self.held.push((buffer.clone(), hold));
+            self.serial += 1;
+            self.latest = Some((buffer, self.serial));
         }
     }
 
     /// A page's painted frames (macOS): the newest Chromium painted (retained, and marked in use so
     /// Chromium doesn't paint into it again meanwhile) until whoever draws the page takes it, and,
-    /// while a compositor wants the page, copies of each into buffers of the page's own ring
-    /// (Chromium's surface held in use until the GPU has copied it).
+    /// while a compositor wants the page, each one painted as a pixel buffer over Chromium's own
+    /// surface (held in use while anything draws it).
     #[derive(Default)]
     pub struct Frames {
         /// Painted, not yet drawn.
         next: Mutex<Option<Surface>>,
         /// What a drawer of the frames shows now (kept in use while it does).
         shown: Mutex<Option<Surface>>,
-        /// Copies for Lightair's own compositor, made while it wants the page.
-        copies: Mutex<Copies>,
+        /// Frames for Lightair's own compositor, while it wants the page.
+        handed: Mutex<Handed>,
         wanted: AtomicBool,
         /// The page should paint again (the compositor has no copy of what it shows).
         repaint: AtomicBool,
@@ -193,46 +146,40 @@ mod mac {
             if surface.is_null() {
                 return;
             }
-            if self.wanted.load(Ordering::Relaxed) && !self.copies.lock().start(surface) {
-                // every copy is still held: the next paint brings this one's picture
-                self.repaint.store(true, Ordering::Relaxed);
+            if self.wanted.load(Ordering::Relaxed) {
+                self.handed.lock().put(surface);
             }
             let held = unsafe { Surface::hold(surface) };
             // the one it replaces (never drawn) goes back to Chromium
             *self.next.lock() = Some(held);
         }
 
-        /// Whether a compositor shows the page: while it does, each frame painted is copied for it
-        /// (and the page is asked to paint once more when there's no copy yet); when it stops, the
-        /// copies go.
+        /// Whether a compositor shows the page: while it does, each frame painted is handed to it
+        /// (and the page is asked to paint once more); when it stops, the frames held for it go
+        /// back to Chromium.
         pub fn want(&self, on: bool) {
             let was = self.wanted.swap(on, Ordering::Relaxed);
             if on && !was {
-                // the newest frame Chromium painted, copied now; and another asked for, in case
-                // the page has repainted that surface since (one lock at a time: a drawer takes
-                // `shown`, then `next`)
+                // the newest frame Chromium painted (held in use, so as painted) handed on now
+                // (one lock at a time: a drawer takes `shown`, then `next`)
                 let next = self.next.lock().as_ref().map(|s| unsafe { Surface::hold(s.0) });
                 let newest = next.or_else(|| self.shown.lock().as_ref().map(|s| unsafe { Surface::hold(s.0) }));
                 if let Some(s) = newest {
-                    self.copies.lock().start(s.0);
+                    self.handed.lock().put(s.0);
                 }
                 self.repaint.store(true, Ordering::Relaxed);
             } else if !on && was {
-                let old = std::mem::take(&mut *self.copies.lock());
+                let old = std::mem::take(&mut *self.handed.lock());
                 self.taken.store(0, Ordering::Relaxed);
                 drop(old);
             }
         }
 
-        /// The newest finished copy of the page's frame, and a count that changes with each new
-        /// one. `take`: the compositor draws it, and counts as drawing the page for as long as
-        /// frames keep being taken.
+        /// The newest frame handed to the compositor, and a count that changes with each new one.
+        /// `take`: the compositor draws it, and counts as drawing the page for as long as frames
+        /// keep being taken.
         pub fn frame(&self, take: bool) -> Option<(crate::buffers::Buffer, u64)> {
-            let latest = {
-                let mut copies = self.copies.lock();
-                copies.collect();
-                copies.latest.clone()
-            }?;
+            let latest = self.handed.lock().latest.clone()?;
             if take {
                 self.taken.store(now(), Ordering::Relaxed);
             }

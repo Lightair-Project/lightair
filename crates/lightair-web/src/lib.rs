@@ -15,9 +15,6 @@
 
 use std::sync::Arc;
 
-#[cfg(target_os = "macos")]
-pub mod copy;
-
 /// Where a page's frames go: premultiplied BGRA rows, `width × 4` bytes each, and the size.
 pub type FrameSink = Arc<dyn Fn(&[u8], u32, u32) + Send + Sync>;
 

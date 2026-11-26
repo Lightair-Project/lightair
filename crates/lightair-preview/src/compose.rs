@@ -343,6 +343,7 @@ fn run(canvas: Id, stop: &AtomicBool) {
         stingers_of: 0,
         playing: None,
         views: HashMap::new(),
+        handover: None,
     };
     let mut next = Instant::now();
     while !stop.load(Ordering::Acquire) {
@@ -402,6 +403,8 @@ struct State {
     playing: Option<(Instant, String)>,
     /// The scenes previews show in the program's place, and those drawn for outputs.
     views: HashMap<ViewKey, View>,
+    /// Hands each program frame on once the GPU has finished it (made at the first frame).
+    handover: Option<Handover>,
 }
 
 /// Whose a view is.
@@ -751,15 +754,17 @@ impl State {
             };
             let mut pictures = Ready { shots: &shots, stinger: stinger.clone() };
             let drawn = draw_program(&self.gpu, drawer, &ws, switch.as_ref(), overlays, canvas.id, &mut pictures, time);
-            if let Some(frame) = drawn {
+            if let Some((frame, submitted)) = drawn {
                 for preview in &showing {
-                    preview.feed(&frame);
                     if !self.fed.iter().any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(preview))) {
                         self.fed.push(Arc::downgrade(preview));
                     }
                 }
-                program_source::publish(canvas.id, &frame);
+                // the time this thread spent on the frame; the GPU finishes it on its own
                 lightair_host::program::count_frame(canvas.id, started.elapsed(), period);
+                let previews: Vec<Arc<Shared>> = showing.iter().map(|p| Arc::clone(p)).collect();
+                let handover = self.handover.get_or_insert_with(|| Handover::start(&self.gpu));
+                handover.send(Handed { frame, submitted, previews, canvas: canvas.id });
             }
         }
         // the scenes shown in the program's place that are due, from the same pictures
@@ -1076,7 +1081,7 @@ fn draw_program(
     canvas: Id,
     pictures: &mut Ready,
     time: f32,
-) -> Option<Frame> {
+) -> Option<(Frame, wgpu::SubmissionIndex)> {
     match switch {
         Some(p) => {
             let _ = drawer.renderer.transition(ws, p.from, p.to, canvas, &p.settings, p.progress, pictures, time);
@@ -1098,11 +1103,59 @@ fn draw_program(
         _ => None,
     };
     let i = drawer.ring.free(&gpu.device)?;
-    if !drawer.blit.copy(gpu, drawer.renderer.target(), over.map(|r| r.target()), &drawer.ring.slots[i].texture) {
-        return None;
-    }
+    let submitted =
+        drawer.blit.submit(gpu, drawer.renderer.target(), over.map(|r| r.target()), &drawer.ring.slots[i].texture);
     drawer.ring.handed(i);
-    Some(drawer.ring.slots[i].buffer.clone())
+    Some((drawer.ring.slots[i].buffer.clone(), submitted))
+}
+
+/// A program frame handed on once the GPU has finished it.
+struct Handed {
+    frame: Frame,
+    submitted: wgpu::SubmissionIndex,
+    /// The previews showing the program.
+    previews: Vec<Arc<Shared>>,
+    canvas: Id,
+}
+
+// SAFETY: CoreVideo pixel buffers (and Lightair's Windows pictures) are reference counted
+// thread-safely, and a finished frame isn't written while it's handed on (`program::publish`).
+unsafe impl Send for Handed {}
+
+/// The thread that waits for each program frame's GPU work and then hands the frame to the
+/// previews and Lightair's outputs, so the compositor's thread goes on to the next frame meanwhile.
+/// Frames are handed on in the order drawn; the thread ends with its compositor.
+struct Handover {
+    tx: std::sync::mpsc::Sender<Handed>,
+}
+
+impl Handover {
+    fn start(gpu: &SharedGpu) -> Handover {
+        let (tx, rx) = std::sync::mpsc::channel::<Handed>();
+        let device = gpu.device.clone();
+        let spawned = std::thread::Builder::new().name("lightair-handover".into()).spawn(move || {
+            while let Ok(h) = rx.recv() {
+                let done =
+                    device.poll(wgpu::PollType::Wait { submission_index: Some(h.submitted), timeout: Some(GPU_WAIT) });
+                if done.is_err() {
+                    // the GPU didn't finish it in time: dropped, as a frame not drawn
+                    continue;
+                }
+                for preview in &h.previews {
+                    preview.feed(&h.frame);
+                }
+                program_source::publish(h.canvas, &h.frame);
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::error!(%e, "compositor: no hand-over thread");
+        }
+        Handover { tx }
+    }
+
+    fn send(&self, handed: Handed) {
+        let _ = self.tx.send(handed);
+    }
 }
 
 /// A switch as the compositor draws it.
@@ -2336,10 +2389,14 @@ impl Blit {
         }
     }
 
-    /// Draws `frame`, with `over` laid over it if given, into `out` and waits for the GPU to
-    /// finish (so the buffer is complete when it's handed on). False when the GPU didn't finish
-    /// in time.
-    fn copy(&self, gpu: &SharedGpu, frame: &wgpu::Texture, over: Option<&wgpu::Texture>, out: &wgpu::Texture) -> bool {
+    /// Draws `frame`, with `over` laid over it if given, into `out`: submitted, not waited for.
+    fn submit(
+        &self,
+        gpu: &SharedGpu,
+        frame: &wgpu::Texture,
+        over: Option<&wgpu::Texture>,
+        out: &wgpu::Texture,
+    ) -> wgpu::SubmissionIndex {
         let source = frame.create_view(&Default::default());
         let over = over.map(|t| t.create_view(&Default::default()));
         let target = out.create_view(&Default::default());
@@ -2380,7 +2437,13 @@ impl Blit {
             pass.set_bind_group(0, &group, &[]);
             pass.draw(0..3, 0..1);
         }
-        let submitted = gpu.queue.submit([encoder.finish()]);
+        gpu.queue.submit([encoder.finish()])
+    }
+
+    /// [`Blit::submit`], then waits for the GPU to finish (so the buffer is complete when it's
+    /// handed on). False when the GPU didn't finish in time.
+    fn copy(&self, gpu: &SharedGpu, frame: &wgpu::Texture, over: Option<&wgpu::Texture>, out: &wgpu::Texture) -> bool {
+        let submitted = self.submit(gpu, frame, over, out);
         gpu.device.poll(wgpu::PollType::Wait { submission_index: Some(submitted), timeout: Some(GPU_WAIT) }).is_ok()
     }
 }

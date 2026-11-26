@@ -40,6 +40,33 @@ pub fn bgra_buffer(width: u32, height: u32) -> Option<Buffer> {
     Some(unsafe { CFRetained::from_raw(NonNull::new_unchecked(out)) })
 }
 
+#[link(name = "CoreVideo", kind = "framework")]
+unsafe extern "C" {
+    fn CVPixelBufferCreateWithIOSurface(
+        allocator: *const c_void,
+        surface: *mut c_void,
+        attributes: *const c_void,
+        out: *mut *mut CVPixelBuffer,
+    ) -> i32;
+}
+
+/// A pixel buffer over `surface` (an `IOSurfaceRef`, BGRA), sharing its memory: what someone
+/// else's picture is drawn as without a copy. The buffer keeps the surface alive, not in use.
+pub fn over_surface(surface: *mut c_void) -> Option<Buffer> {
+    if surface.is_null() {
+        return None;
+    }
+    let mut out: *mut CVPixelBuffer = ptr::null_mut();
+    // SAFETY: `surface` is a live IOSurfaceRef (the caller's); `out` is a valid place for the
+    // new buffer, which we own one reference to.
+    let rc = unsafe { CVPixelBufferCreateWithIOSurface(ptr::null(), surface, ptr::null(), &mut out) };
+    if rc != kCVReturnSuccess || out.is_null() {
+        tracing::warn!(rc, "CVPixelBufferCreateWithIOSurface failed");
+        return None;
+    }
+    Some(unsafe { CFRetained::from_raw(NonNull::new_unchecked(out)) })
+}
+
 /// The buffer's IOSurface, borrowed (as an `IOSurfaceRef`).
 pub fn surface_of(buffer: &Buffer) -> Option<*mut c_void> {
     let surface = CVPixelBufferGetIOSurface(Some(buffer))?;
