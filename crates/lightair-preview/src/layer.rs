@@ -7,6 +7,11 @@
 //! ([`Layer::present_buffer`]). The app shows the swap chain in a composition visual under
 //! GPUI's (`native_preview`).
 //!
+//! Frames are presented at the size the picture is shown at when that's smaller (the UI tells it:
+//! [`Layer::show_at`]), scaled by the GPU's video processor: the swap chain's picture crosses to
+//! the GPU that drives the display (a laptop's integrated one) every frame, and a preview a third
+//! as wide is a ninth of that copying.
+//!
 //! Never waiting matters: the thread that presents draws the program for the outputs too, so a
 //! present that blocked (the compositor busy, say while a display capture starts up and Windows
 //! reconfigures it) would make the program skip frames. The swap chain has a frame-latency
@@ -17,10 +22,11 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Resource, ID3D11Texture2D};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, RECT, WAIT_OBJECT_0};
+use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE_IGNORE, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM,
+    DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT_DO_NOT_WAIT,
@@ -49,6 +55,91 @@ pub struct Layer {
     /// adapter) opened on it, each kept while its picture lives.
     device: ID3D11Device,
     opened: Mutex<Vec<(std::sync::Weak<lightair_host::buffers::Shared>, ID3D11Texture2D)>>,
+    /// Scales frames down to the size shown (the presenting thread, under `lock`).
+    scaler: Mutex<Option<Scaler>>,
+}
+
+/// The video processor scaling BGRA frames of one size to another.
+struct Scaler {
+    sizes: ((u32, u32), (u32, u32)),
+    video: ID3D11VideoDevice,
+    context: ID3D11VideoContext1,
+    enumerator: ID3D11VideoProcessorEnumerator,
+    processor: ID3D11VideoProcessor,
+}
+
+impl Scaler {
+    fn new(device: &ID3D11Device, from: (u32, u32), to: (u32, u32)) -> Option<Scaler> {
+        let video: ID3D11VideoDevice = device.cast().ok()?;
+        let context: ID3D11VideoContext1 = unsafe { device.GetImmediateContext() }.ok()?.cast().ok()?;
+        let rate = DXGI_RATIONAL { Numerator: 60, Denominator: 1 };
+        let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+            InputFrameRate: rate,
+            InputWidth: from.0,
+            InputHeight: from.1,
+            OutputFrameRate: rate,
+            OutputWidth: to.0,
+            OutputHeight: to.1,
+            Usage: D3D11_VIDEO_USAGE_OPTIMAL_QUALITY,
+        };
+        unsafe {
+            let enumerator = video.CreateVideoProcessorEnumerator(&content).ok()?;
+            let flags = enumerator.CheckVideoProcessorFormat(DXGI_FORMAT_B8G8R8A8_UNORM).ok()?;
+            let both =
+                (D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT.0 | D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT.0) as u32;
+            if flags & both != both {
+                return None;
+            }
+            let processor = video.CreateVideoProcessor(&enumerator, 0).ok()?;
+            // RGB in and out: scaled, nothing converted
+            context.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+            context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
+            context.VideoProcessorSetStreamColorSpace1(&processor, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+            context.VideoProcessorSetOutputColorSpace1(&processor, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+            let all = |(w, h): (u32, u32)| RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 };
+            context.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&all(from)));
+            context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&all(to)));
+            context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&all(to)));
+            Some(Scaler { sizes: (from, to), video, context, enumerator, processor })
+        }
+    }
+
+    /// `src` scaled into `target`.
+    unsafe fn scale(&self, src: &ID3D11Resource, target: &ID3D11Texture2D) -> bool {
+        unsafe {
+            let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                FourCC: 0,
+                ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                    Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 },
+                },
+            };
+            let mut input = None;
+            if self.video.CreateVideoProcessorInputView(src, &self.enumerator, &in_desc, Some(&mut input)).is_err() {
+                return false;
+            }
+            let out_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } },
+            };
+            let mut output = None;
+            if self.video.CreateVideoProcessorOutputView(target, &self.enumerator, &out_desc, Some(&mut output)).is_err()
+            {
+                return false;
+            }
+            let Some(output) = output else { return false };
+            let mut streams = [D3D11_VIDEO_PROCESSOR_STREAM {
+                Enable: true.into(),
+                pInputSurface: std::mem::ManuallyDrop::new(input),
+                ..Default::default()
+            }];
+            let blitted = self.context.VideoProcessorBlt(&self.processor, &output, 0, &streams);
+            // the stream's reference to the input view is ours to drop
+            std::mem::ManuallyDrop::drop(&mut streams[0].pInputSurface);
+            blitted.is_ok()
+        }
+    }
 }
 
 // SAFETY: the swap chain is used by one presenting thread at a time (under `lock`: resize, copy,
@@ -92,6 +183,7 @@ impl Layer {
             lock: Mutex::new(()),
             device: device.clone(),
             opened: Mutex::new(Vec::new()),
+            scaler: Mutex::new(None),
         })
     }
 
@@ -133,6 +225,18 @@ impl Layer {
         ((p >> 32) as u32, p as u32)
     }
 
+
+    /// The size a `w`×`h` frame is presented at: the size shown when that's smaller (its aspect
+    /// kept), else its own.
+    fn presented_size(&self, (w, h): (u32, u32)) -> (u32, u32) {
+        let wanted = self.wanted.load(Ordering::Relaxed);
+        let ww = (wanted >> 32) as u32;
+        if wanted == 0 || ww >= w || w == 0 {
+            return (w, h);
+        }
+        let th = ((ww as u64 * h as u64 / w as u64) as u32 & !1).max(2);
+        (ww.max(2), th)
+    }
 
     /// Whether the swap chain can take a frame now, without `Present` waiting.
     fn can_take(&self) -> bool {
@@ -182,20 +286,43 @@ impl Layer {
         if !self.can_take() {
             return false;
         }
+        // smaller: scaled down by the video processor (BGRA only), else copied as it is
+        let to = if format == DXGI_FORMAT_B8G8R8A8_UNORM { self.presented_size((w, h)) } else { (w, h) };
         unsafe {
             let mut current = self.format.lock();
-            if self.size() != (w, h) || *current != format {
-                if self.swap.ResizeBuffers(0, w, h, format, FLAGS).is_err() {
+            let mut scaler = self.scaler.lock();
+            let scaled = to != (w, h) && {
+                if scaler.as_ref().is_none_or(|s| s.sizes != ((w, h), to)) {
+                    *scaler = Scaler::new(&self.device, (w, h), to);
+                }
+                scaler.is_some()
+            };
+            let (bw, bh) = if scaled { to } else { (w, h) };
+            if self.size() != (bw, bh) || *current != format {
+                if self.swap.ResizeBuffers(0, bw, bh, format, FLAGS).is_err() {
                     return false;
                 }
-                self.size.store(pack(w, h), Ordering::Relaxed);
+                self.size.store(pack(bw, bh), Ordering::Relaxed);
                 *current = format;
             }
             let Ok(back) = self.swap.GetBuffer::<ID3D11Texture2D>(0) else { return false };
-            let Ok(device) = back.GetDevice() else { return false };
-            let Ok(context) = device.GetImmediateContext() else { return false };
-            context.CopyResource(&back, src);
+            let done = match scaler.as_ref().filter(|_| scaled) {
+                Some(s) => s.scale(src, &back),
+                None => {
+                    let Ok(device) = back.GetDevice() else { return false };
+                    let Ok(context) = device.GetImmediateContext() else { return false };
+                    context.CopyResource(&back, src);
+                    true
+                }
+            };
             drop(back);
+            if !done {
+                // this frame isn't shown; the next is copied at full size
+                *scaler = None;
+                self.wanted.store(0, Ordering::Relaxed);
+                tracing::debug!("the preview couldn't scale its frame: shown at full size");
+                return false;
+            }
             let started = std::time::Instant::now();
             let hr = self.swap.Present(0, DXGI_PRESENT_DO_NOT_WAIT);
             let took = started.elapsed();
