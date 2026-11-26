@@ -376,11 +376,10 @@ impl Pointers {
                 }
                 art => {
                     let key = (art, if coloured(art) { color } else { 0 });
-                    if !self.art.contains_key(&key) {
-                        let bitmap = bitmap(art, color);
-                        self.art.insert(key, art_group(device, queue, pass, &bitmap, RES as u32));
-                    }
-                    self.art.get(&key)?.clone()
+                    self.art
+                        .entry(key)
+                        .or_insert_with(|| art_group(device, queue, pass, &bitmap(art, color), RES as u32))
+                        .clone()
                 }
             });
         }

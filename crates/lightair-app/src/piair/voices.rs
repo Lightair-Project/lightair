@@ -365,7 +365,7 @@ pub fn openrouter_transcription_models() -> Result<Vec<(String, String)>, String
                 .collect()
         })
         .unwrap_or_default();
-    list.sort_by(|a, b| b.0.cmp(&a.0));
+    list.sort_by_key(|a| std::cmp::Reverse(a.0));
     if list.is_empty() {
         return Err("OpenRouter lists no speech-to-text models right now".into());
     }

@@ -205,6 +205,8 @@ fn read(path: &str, shared: &Shared) {
         if reading != Some(run) {
             // from the start, for this run
             reading = Some(run);
+            // the old reader goes first (on macOS, its decoder)
+            #[allow(clippy::drop_non_drop)]
             drop(frames.take());
             frames = Reader::open(path);
             let mut s = shared.state.lock();

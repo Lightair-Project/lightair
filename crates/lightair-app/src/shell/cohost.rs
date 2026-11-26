@@ -180,11 +180,10 @@ impl StudioWindow {
         drop(current);
         // the computer is waiting on the streamer's yes: show the co-host so they see it
         let asking = self.piair.state().question.is_some();
-        if asking && !self.cohost.surfaced {
-            if let Some(object) = want.and_then(|s| workspace.objects_using(s.id).next().map(|(_, o)| o.id)) {
+        if asking && !self.cohost.surfaced
+            && let Some(object) = want.and_then(|s| workspace.objects_using(s.id).next().map(|(_, o)| o.id)) {
                 self.select_object(Some(object), cx);
             }
-        }
         self.cohost.surfaced = asking;
     }
 

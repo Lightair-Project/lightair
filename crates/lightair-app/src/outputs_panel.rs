@@ -22,7 +22,8 @@ use crate::ui::{self, tok};
 enum Setup {
     Pick(Pick),
     Configure(Configure),
-    Edit(Edit),
+    /// Boxed: a destination's settings are much larger than the other steps.
+    Edit(Box<Edit>),
 }
 
 /// The platform picker: its search field.
@@ -699,7 +700,7 @@ impl OutputsPanel {
                 .masked(true)
         });
         let chat = chat_input(platform, d.chat.as_deref(), window, cx);
-        self.setup = Some(Setup::Edit(Edit {
+        self.setup = Some(Setup::Edit(Box::new(Edit {
             id,
             platform,
             name,
@@ -714,7 +715,7 @@ impl OutputsPanel {
             options: d.options.clone(),
             official_in: lightair_live::official::signed_in(platform.id),
             error: None,
-        }));
+        })));
         cx.notify();
     }
 

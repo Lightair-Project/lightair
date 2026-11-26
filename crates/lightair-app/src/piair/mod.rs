@@ -509,11 +509,10 @@ impl Host {
             std::thread::sleep(Duration::from_secs(1));
             // still thinking or acting a second later: end it (restarted if wanted)
             let busy = matches!(host.state().status.as_str(), "acting" | "thinking");
-            if busy && host.0.generation.load(Ordering::Relaxed) == run_id {
-                if let Some(c) = host.0.child.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            if busy && host.0.generation.load(Ordering::Relaxed) == run_id
+                && let Some(c) = host.0.child.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                     let _ = c.kill();
                 }
-            }
         });
     }
 

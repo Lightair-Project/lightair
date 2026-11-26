@@ -78,7 +78,8 @@ fn cef_dir() -> PathBuf {
 /// The publisher's private release settings, from `release.env` at the repository's root (kept
 /// out of git: .gitignore): `KEY=value` lines, set for the build unless already set. Lightair's
 /// registered apps (LIGHTAIR_YOUTUBE_CLIENT_ID, …: compiled in, docs/official-apis.md) and
-/// LIGHTAIR_NOTARY_PROFILE.
+/// LIGHTAIR_NOTARY_PROFILE. Read by `dist`, which builds on macOS.
+#[cfg(target_os = "macos")]
 pub(crate) fn release_env() {
     let Ok(text) = std::fs::read_to_string(root().join("release.env")) else { return };
     let mut set = Vec::new();

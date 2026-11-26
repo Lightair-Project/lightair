@@ -199,8 +199,8 @@ pub fn can_post(prompt: bool) -> bool {
             keys.as_ptr(),
             values.as_ptr(),
             1,
-            &kCFTypeDictionaryKeyCallBacks as *const _ as *const c_void,
-            &kCFTypeDictionaryValueCallBacks as *const _ as *const c_void,
+            &kCFTypeDictionaryKeyCallBacks as *const _,
+            &kCFTypeDictionaryValueCallBacks as *const _,
         );
         let ok = AXIsProcessTrustedWithOptions(d);
         CFRelease(d);
@@ -629,7 +629,7 @@ pub fn running_apps() -> Vec<(String, String)> {
             }
         }
     }
-    out.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    out.sort_by_key(|a| a.1.to_lowercase());
     out.dedup_by(|a, b| a.0 == b.0);
     out
 }

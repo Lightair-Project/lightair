@@ -510,7 +510,7 @@ impl Puppet {
                 }
             }
             out.positions.clear();
-            out.positions.extend(local.chunks_exact(2).map(|p| {
+            out.positions.extend(local.as_chunks::<2>().0.iter().map(|p| {
                 let (x, y) = match parent {
                     Some(w) => w.apply(p[0], p[1]),
                     None => (p[0], p[1]),
@@ -645,7 +645,7 @@ impl Buffers<'_> {
             .checked_add(length)
             .filter(|&e| e <= bytes.len())
             .ok_or(Error::Invalid("an accessor reaches past its buffer"))?;
-        Ok(bytes[offset..end].chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+        Ok(bytes[offset..end].as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect())
     }
 
     fn floats(&mut self, v: Option<&Value>) -> Result<Vec<f32>, Error> {
@@ -1054,7 +1054,7 @@ impl DeformerDef {
                 }
                 let look = self.look(vals, parent);
                 if let Some(p) = parent {
-                    for point in cp.chunks_exact_mut(2) {
+                    for point in cp.as_chunks_mut::<2>().0 {
                         let (x, y) = p.apply(point[0], point[1]);
                         point[0] = x;
                         point[1] = y;
@@ -1801,7 +1801,7 @@ impl Loader<'_, '_> {
                 if indices.iter().any(|&i| i < 0 || i as usize >= n) {
                     return Err(Error::Other(format!("the drawable {name}'s triangles name vertices it doesn't have")));
                 }
-                let uvs = uvs.chunks_exact(2).map(|p| [p[0], p[1]]).collect();
+                let uvs = uvs.as_chunks::<2>().0.to_vec();
                 (local, uvs, indices.into_iter().map(|i| i as u32).collect())
             }
             None => (Vec::new(), Vec::new(), Vec::new()),

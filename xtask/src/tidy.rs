@@ -14,7 +14,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, TryLockError};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -203,7 +202,7 @@ pub fn prune_objects(deps: &Path, dry_run: bool) -> (usize, u64) {
         if used.contains(&file_name(&o)) {
             continue;
         }
-        let size = fs::symlink_metadata(&o).map_or(0, |m| m.blocks() * 512);
+        let size = fs::symlink_metadata(&o).map_or(0, |m| disk(&m).0);
         if dry_run || fs::remove_file(&o).is_ok() {
             files += 1;
             bytes += size;
@@ -339,13 +338,29 @@ fn rel(target: &Path, p: &Path) -> String {
     p.strip_prefix(target).unwrap_or(p).display().to_string()
 }
 
+/// The disk a file takes, and (on Unix) its device and inode, so hard links count once.
+#[cfg(unix)]
+fn disk(m: &fs::Metadata) -> (u64, Option<(u64, u64)>) {
+    use std::os::unix::fs::MetadataExt;
+    (m.blocks() * 512, Some((m.dev(), m.ino())))
+}
+
+/// The disk a file takes: its length (no inodes to tell hard links apart).
+#[cfg(not(unix))]
+fn disk(m: &fs::Metadata) -> (u64, Option<(u64, u64)>) {
+    (m.len(), None)
+}
+
 /// Disk used by a file or tree, counting each hard-linked inode once per run.
 fn size(p: &Path, seen: &mut HashSet<(u64, u64)>) -> u64 {
     let Ok(m) = fs::symlink_metadata(p) else { return 0 };
     if m.is_dir() {
         return read(p).iter().map(|c| size(c, seen)).sum();
     }
-    if seen.insert((m.dev(), m.ino())) { m.blocks() * 512 } else { 0 }
+    match disk(&m) {
+        (_, Some(id)) if !seen.insert(id) => 0,
+        (bytes, _) => bytes,
+    }
 }
 
 fn remove(p: &Path, target: &Path) -> Result {

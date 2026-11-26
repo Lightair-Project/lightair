@@ -206,8 +206,11 @@ pub fn open(
 
 type Thumbs = HashMap<String, Arc<Image>>;
 
-/// Reads a `.lairava` for editing: its description, its pictures as PNG bytes, their thumbnails.
-fn read(path: &Path) -> Result<(Avatar, HashMap<String, Vec<u8>>, Thumbs), String> {
+/// A `.lairava` read for editing: its description, its pictures as PNG bytes, their thumbnails.
+type ForEditing = (Avatar, HashMap<String, Vec<u8>>, Thumbs);
+
+/// Reads a `.lairava` for editing.
+fn read(path: &Path) -> Result<ForEditing, String> {
     let loaded = lightair_pngtuber::file::read_path(path).map_err(|e| e.to_string())?;
     let mut pngs = HashMap::new();
     let mut thumbs = HashMap::new();

@@ -123,9 +123,12 @@ pub fn clear_timer_texts() {
     }
 }
 
-/// The object being cropped (scene, canvas, object), shown whole as a faint ghost around its
-/// crop, and whether the ghost is fading out (crop view closing).
-static CROP: Mutex<Option<((Id, Id, Id), bool)>> = Mutex::new(None);
+/// An object in one scene and canvas: (scene, canvas, object).
+type Placed = (Id, Id, Id);
+
+/// The object being cropped, shown whole as a faint ghost around its crop, and whether the
+/// ghost is fading out (crop view closing).
+static CROP: Mutex<Option<(Placed, bool)>> = Mutex::new(None);
 
 /// Engine thread: crop view for `target` (`None`: none), fading its ghost out or not.
 pub fn set_crop_view(target: Option<(Id, Id, Id)>, fading: bool) {

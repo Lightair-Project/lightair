@@ -66,6 +66,9 @@ pub(crate) fn live() -> Option<Arc<Live>> {
     LIVE.read().clone()
 }
 
+/// A widget's storage as last read: when, a number that changes with it, and what it holds.
+type Stored = (Instant, u64, Map<String, Value>);
+
 pub(crate) struct Live {
     hub: Hub,
     server: Option<Widgets>,
@@ -73,7 +76,7 @@ pub(crate) struct Live {
     dirty: AtomicBool,
     chat: Mutex<Chat>,
     /// Each widget's storage as last read: when, a number that changes with it, and what it holds.
-    storage: Mutex<HashMap<String, (Instant, u64, Map<String, Value>)>>,
+    storage: Mutex<HashMap<String, Stored>>,
     /// The alert boxes' feeds, by widget id.
     alerts: Mutex<HashMap<String, Arc<Watch>>>,
 }

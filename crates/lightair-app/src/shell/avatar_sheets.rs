@@ -30,6 +30,9 @@ use super::avatar_props::KIND;
 use crate::avatar_library as lib;
 use crate::ui::{self, tok};
 
+/// What runs when a picture's editor has saved it: the file it saved, and the app.
+type OnSaved = Rc<dyn Fn(PathBuf, &mut App)>;
+
 pub(super) struct LibrarySheet {
     /// The avatar to switch (its source); `None`: add a new avatar object.
     source: Option<Id>,
@@ -578,7 +581,7 @@ impl StudioWindow {
             .and_then(|s| workspace.sources.get(&s))
             .and_then(|i| serde_json::from_value::<Id>(i.settings["mic"].clone()).ok());
         let me = cx.entity().downgrade();
-        let on_saved: Rc<dyn Fn(PathBuf, &mut App)> = Rc::new(move |saved: PathBuf, cx: &mut App| {
+        let on_saved: OnSaved = Rc::new(move |saved: PathBuf, cx: &mut App| {
             let Some(me) = me.upgrade() else { return };
             me.update(cx, |this, cx| this.png_saved(&saved, source, cx));
         });
@@ -648,6 +651,7 @@ impl StudioWindow {
 
     /// Opens the anchor picker: to pin `object`, or to add `file` as an accessory pinned where
     /// chosen.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn open_anchor_sheet(
         &mut self,
         scene: Id,

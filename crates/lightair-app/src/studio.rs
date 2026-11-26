@@ -1527,8 +1527,9 @@ impl Studio {
             return true;
         };
         let workspace = self.workspace().clone();
-        match workspace.outputs.destinations.iter().find(|d| d.id == next).cloned() {
-            Some(d) => match self.start_one(&d, &workspace) {
+        // one removed while the sequence ran: on to the next
+        if let Some(d) = workspace.outputs.destinations.iter().find(|d| d.id == next).cloned() {
+            match self.start_one(&d, &workspace) {
                 Ok(()) => {
                     if let Some(seq) = &mut self.sequence {
                         seq.current = Some((next, std::time::Instant::now()));
@@ -1539,9 +1540,7 @@ impl Studio {
                         seq.failure = Some(StartFailure { id: next, name: d.name, reason });
                     }
                 }
-            },
-            // removed while the sequence ran: on to the next
-            None => {}
+            }
         }
         cx.notify();
         false

@@ -110,14 +110,16 @@ fn num(p: &Value, k: &str) -> Option<f32> {
 impl Computer {
     /// Answers one `computer.*` call. `ask` puts a yes/no question to the streamer (the panel)
     /// and waits for it.
+    #[cfg(target_os = "macos")]
     pub fn call(&self, method: &str, p: &Value, ask: &dyn Fn(String) -> bool) -> Result<Value, Refusal> {
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (method, p, ask);
-            return Err(refuse("unsupported", "Computer use isn't available on this system yet."));
-        }
-        #[cfg(target_os = "macos")]
         self.call_mac(method, p, ask)
+    }
+
+    /// Answers one `computer.*` call: not available on this system yet.
+    #[cfg(not(target_os = "macos"))]
+    pub fn call(&self, method: &str, p: &Value, ask: &dyn Fn(String) -> bool) -> Result<Value, Refusal> {
+        let _ = (method, p, ask);
+        Err(refuse("unsupported", "Computer use isn't available on this system yet."))
     }
 
     #[cfg(target_os = "macos")]

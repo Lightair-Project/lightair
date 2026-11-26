@@ -44,6 +44,8 @@ fn providers() -> &'static [Arc<dyn Provider>] {
 }
 
 /// The providers Lightair has. One line per kind, each kept by its own module.
+// what's pushed depends on the platform
+#[allow(clippy::vec_init_then_push)]
 fn builtin() -> Vec<Arc<dyn Provider>> {
     #[allow(unused_mut)]
     let mut all: Vec<Arc<dyn Provider>> = Vec::new();

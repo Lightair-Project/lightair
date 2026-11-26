@@ -364,6 +364,13 @@ fn run(canvas: Id, stop: &AtomicBool) {
 }
 
 /// What the thread keeps between ticks.
+/// The document as drawn, from the engine's document and the effects switched off live
+/// (eyedropper): what it was made from, those switches, and the result.
+type Prepared = (Arc<Workspace>, Vec<(Id, Id)>, Arc<Workspace>);
+
+/// An avatar's anchors at rest and now, by key, and its picture's size.
+type AvatarPins = (Vec<(String, Spot, Spot)>, (u32, u32));
+
 struct State {
     canvas: Id,
     /// The canvas's id as text (how previews of it are known).
@@ -396,7 +403,7 @@ struct State {
     /// Crop view's ghost: its object's id, its opacity now, and when that last moved.
     ghost: Option<(Id, f32, Instant)>,
     /// The document as drawn (live switches and makeup LUTs), and what it was made from.
-    prepared: Option<(Arc<Workspace>, Vec<(Id, Id)>, Arc<Workspace>)>,
+    prepared: Option<Prepared>,
     /// The workspace they were last kept for.
     stingers_of: usize,
     /// The stinger switch being drawn: when it started, and its video's path.
@@ -2077,7 +2084,7 @@ impl Native {
     /// loads or if it can't be drawn (libobs's picture stands in).
     /// Where `keys` (anchors of avatar `source`) are in its picture at rest and now, as this
     /// compositor's renderer poses it, and the picture's size.
-    fn avatar_pins(&mut self, source: Id, keys: &[String]) -> Option<(Vec<(String, Spot, Spot)>, (u32, u32))> {
+    fn avatar_pins(&mut self, source: Id, keys: &[String]) -> Option<AvatarPins> {
         let renderer = self.avatars.get_mut(&source)?.renderer.as_mut()?;
         let pins = renderer.pins(keys);
         (!pins.is_empty()).then(|| (pins, renderer.size()))
