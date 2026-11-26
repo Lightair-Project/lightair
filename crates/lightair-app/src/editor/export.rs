@@ -58,6 +58,12 @@ const FORMATS: &[(&str, usize)] = &[
     ("MP3 (sound only)", 14),
 ];
 
+/// Whether a preset is offered on this platform: one asking for transparency only where it keeps
+/// it (HEVC's needs Apple's encoder, so Windows doesn't offer it).
+fn offered_here(preset: &ExportSettings) -> bool {
+    !preset.alpha || preset.alpha_possible()
+}
+
 /// Whether `s` is `preset`'s kind of file (its container and codecs: the rest may differ).
 fn same_format(preset: &ExportSettings, s: &ExportSettings) -> bool {
     preset.container == s.container
@@ -525,8 +531,10 @@ impl Editor {
             );
 
         // the format: what kind of file, by name (a preset's codecs, keeping the size and rate)
-        let formats: Vec<(String, usize)> = FORMATS.iter().map(|(n, i)| (n.to_string(), *i)).collect();
-        let current = FORMATS.iter().map(|(_, i)| *i).find(|i| same_format(&PRESETS[*i].2, &s)).unwrap_or(usize::MAX);
+        // (HEVC with transparency only where Apple's encoder makes it: not offered elsewhere)
+        let offered = || FORMATS.iter().filter(|(_, i)| offered_here(&PRESETS[*i].2));
+        let formats: Vec<(String, usize)> = offered().map(|(n, i)| (n.to_string(), *i)).collect();
+        let current = offered().map(|(_, i)| *i).find(|i| same_format(&PRESETS[*i].2, &s)).unwrap_or(usize::MAX);
         let format_name = if current == usize::MAX {
             format!("{} · {}{}", s.container.name(), s.video.name(), if s.keeps_alpha() { " (transparent)" } else { "" })
         } else {
