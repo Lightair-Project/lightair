@@ -1,14 +1,13 @@
-//! A dock panel in a window of its own: "Open in New Window" on its tab (right-click). The
-//! panel moves, it isn't copied: it leaves the dock, and closing its window docks it again in
-//! the region it came from. The canvas too: its preview then shows in a layer under its own
-//! window (and back under the main window's when it docks again).
+//! The canvas in a window of its own ("Open in New Window" on its tab, or its tab dragged out
+//! of the main window): its preview then shows in a layer under that window, while the main
+//! window's dock keeps its place and shows where it went; closing the window brings it back.
+//! Every other panel floats in a dock window (shell/dock_windows). Also the canvas full screen.
 
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{BasePanelView, DockPlacement, PanelHandle};
 use gpui_kit::component::Sizable as _;
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -112,24 +111,6 @@ impl Render for PanelWindow {
     }
 }
 
-/// What a panel's window is called.
-fn title(name: &str) -> &'static str {
-    match name {
-        "layers" => "Hierarchy",
-        "scenes" => "Scenes",
-        "inspector" => "Inspector",
-        "assets" => "Assets",
-        "mixer" => "Audio Mixer",
-        "outputs" => "Outputs",
-        "chat" => "Chat",
-        "activity" => "Activity",
-        "stream" => "Stream",
-        "automations" => "Automations",
-        "canvas" => "Canvas",
-        _ => "Panel",
-    }
-}
-
 /// Whether a panel can have a window of its own (every one: the canvas's preview moves to
 /// a layer under its window).
 pub(super) fn can_pop_out(_: &str) -> bool {
@@ -137,21 +118,6 @@ pub(super) fn can_pop_out(_: &str) -> bool {
 }
 
 impl StudioWindow {
-    /// A tab's right-click menu: open its panel in a window of its own.
-    pub(super) fn tab_menu(me: WeakEntity<Self>) -> gpui_kit::component::dock::TabMenu {
-        std::rc::Rc::new(move |menu: PopupMenu, panel: Arc<dyn BasePanelView>, _: &mut Window, cx: &mut App| {
-            if !can_pop_out(panel.panel_name(cx)) {
-                return menu;
-            }
-            let me = me.clone();
-            menu.item(PopupMenuItem::new("Open in New Window").on_click(move |_, window, cx| {
-                if let Some(me) = me.upgrade() {
-                    me.update(cx, |this, cx| this.pop_out(panel.clone(), window, cx));
-                }
-            }))
-        })
-    }
-
     /// The docked panel called `name` (`BasePanel::panel_name`), if it's in the dock.
     pub(super) fn docked_panel(&self, name: &str, cx: &App) -> Option<Arc<dyn BasePanelView>> {
         let area = self.dock.as_ref()?.read(cx);
@@ -163,23 +129,24 @@ impl StudioWindow {
             .find(|panel| panel.panel_name(cx) == name)
     }
 
-    /// Moves `panel` out of the dock into a window of its own.
+    /// Moves `panel` out of the dock into a window of its own: a floating dock window
+    /// (shell/dock_windows), or for the canvas, a window showing it while the dock keeps its
+    /// place.
     pub(super) fn pop_out(&mut self, panel: Arc<dyn BasePanelView>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dock) = self.dock.clone() else { return };
         let id = panel.panel_id(cx);
         let name = panel.panel_name(cx);
+        if name != "canvas" {
+            self.float_panel(id, None, cx);
+            return;
+        }
         let Some(region) = dock.read(cx).region_of_panel(id) else { return };
-        if !can_pop_out(name) {
+        if !can_pop_out(name) || self.canvas_window(cx).is_some() {
             return;
         }
         // (the canvas stays in the dock, which shows where it went, `canvas_away`; its window
         // gets a canvas panel of its own)
-        let panel = if name == "canvas" {
-            self.new_canvas_panel(cx)
-        } else {
-            dock.update(cx, |area, cx| area.remove_panel_view(id, window, cx));
-            panel
-        };
+        let panel = self.new_canvas_panel(cx);
         let id = panel.panel_id(cx);
         self.own_window(name, true, cx);
         let main = window.window_handle();
@@ -198,7 +165,7 @@ impl StudioWindow {
             window_bounds: Some(WindowBounds::Windowed(Bounds { origin, size })),
             // the canvas's preview is drawn under its UI, showing where the UI leaves room
             window_background: if native.is_some() { WindowBackgroundAppearance::Transparent } else { WindowBackgroundAppearance::Opaque },
-            titlebar: Some(TitlebarOptions { title: Some(format!("{} · Lightair", title(name)).into()), ..Default::default() }),
+            titlebar: Some(TitlebarOptions { title: Some(format!("{} · Lightair", super::dock_windows::title(name)).into()), ..Default::default() }),
             window_min_size: Some(gpui_kit::size(px(240.), px(200.))),
             ..Default::default()
         };
@@ -231,11 +198,12 @@ impl StudioWindow {
     }
 
     /// Every panel in a window of its own back in the dock (a test hook's).
-    pub(super) fn all_back(this: WeakEntity<Self>, cx: &mut AsyncApp) {
+    pub(super) fn all_back(this: WeakEntity<Self>, cx: &mut AsyncWindowContext) {
         let Ok(windows) = this.update(cx, |this, _| this.panel_windows.clone()) else { return };
         for (_, handle, view) in windows {
             let _ = handle.update(cx, |_, window, cx| view.update(cx, |w, cx| w.back(window, cx)));
         }
+        let _ = this.update_in(cx, |this, window, cx| this.switch_mode(super::modes::Preset::Edit.name(), window, cx));
     }
 
     /// What a panel does differently in a window of its own: the mixer's meters.
@@ -288,6 +256,8 @@ impl StudioWindow {
         let display = window.display(cx);
         let me = cx.entity().downgrade();
         let popped = self.canvas_window(cx);
+        // floating panels would float over it: away until it's back
+        self.stash_floating(cx);
         cx.defer(move |cx| {
             if let Some((handle, view)) = popped {
                 let _ = handle.update(cx, |_, w, cx| view.update(cx, |v, cx| v.back(w, cx)));
@@ -355,6 +325,7 @@ impl StudioWindow {
             self.canvas_home();
             cx.notify();
         }
+        self.unstash_floating(cx);
     }
 
     /// Where the canvas is while it's away from the main window: its own window, or full screen.

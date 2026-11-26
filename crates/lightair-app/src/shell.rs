@@ -32,6 +32,7 @@ mod remote;
 mod screen_pick;
 mod assets;
 mod docking;
+mod dock_windows;
 mod effects;
 mod golive;
 mod hierarchy;
@@ -460,8 +461,19 @@ pub struct StudioWindow {
     /// The devices connected now (looked at every few seconds) and whether the console is open.
     connected: Option<crate::console::Connected>,
     console_open: bool,
-    /// Panels in windows of their own (shell/panel_window), and their windows.
+    /// The canvas in a window of its own (shell/panel_window), and its window.
     panel_windows: Vec<(gpui_kit::component::dock::PanelId, AnyWindowHandle, Entity<panel_window::PanelWindow>)>,
+    /// Floating dock windows (shell/dock_windows) and their docks.
+    dock_windows: Vec<(AnyWindowHandle, Entity<gpui_kit::component::dock::DockArea>)>,
+    /// The arrangement's save, a moment after the last change.
+    layout_save: Option<Task<()>>,
+    /// The main window's frame and display, as last drawn (new floating windows open beside it).
+    main_bounds: Bounds<Pixels>,
+    main_display: Option<u64>,
+    /// The mixer is in a floating window (its meters then move on their own).
+    mixer_floating: bool,
+    /// Floating windows put away while the canvas is full screen.
+    floating_stash: Option<Vec<dock_windows::FloatingLayout>>,
     /// macOS's camera effects as last set (`effects::sync_macos_effects`); `None` before the
     /// first look.
     macos_fx: Option<effects::MacosEffects>,
@@ -931,6 +943,12 @@ impl StudioWindow {
             connected: None,
             console_open: false,
             panel_windows: Vec::new(),
+            dock_windows: Vec::new(),
+            layout_save: None,
+            main_bounds: Bounds::new(point(px(0.), px(0.)), size(px(1440.), px(900.))),
+            main_display: None,
+            mixer_floating: false,
+            floating_stash: None,
             panning: None,
             space_down: false,
             sizes: RefCell::default(),
@@ -2386,6 +2404,8 @@ impl StudioWindow {
 impl Render for StudioWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.main_window = Some(window.window_handle());
+        self.main_bounds = window.bounds();
+        self.main_display = window.display(cx).map(|d| u64::from(d.id()));
         let native = self.sync_native(window);
         self.tick_add_object();
         self.watch_widget_folders(cx);
@@ -2398,7 +2418,8 @@ impl Render for StudioWindow {
         let studio = self.studio.read(cx);
         let workspace = studio.workspace().clone();
 
-        self.menu_actions(div(), cx)
+        // (a panel's tab dragged out of this window goes to the floating window under it)
+        dock_windows::route_drags(self.menu_actions(div(), cx), cx.entity().downgrade())
             .relative()
             .key_context("Studio")
             .track_focus(&self.focus)

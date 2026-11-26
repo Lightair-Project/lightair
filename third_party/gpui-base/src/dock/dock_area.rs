@@ -42,6 +42,9 @@ pub enum DockEvent {
     LayoutChanged,
     /// A host-owned drag item was dropped inside the dock.
     DragDrop { item: AnyDrag, target: DropTarget },
+    /// Lightair patch: a panel this area doesn't hold was dropped on it (dragged from another
+    /// area, in another window). The host moves it here with [`DockArea::insert_panel_view_at`].
+    ForeignPanelDropped { panel: PanelId, target: InsertTarget },
 }
 
 /// What fills the whole area, when something does.
@@ -110,6 +113,8 @@ pub struct DockArea {
     panels: HashMap<PanelId, Arc<dyn PanelView>>,
 
     locked: bool,
+    /// Lightair patch: the center's last panel may leave (the area's window then closes).
+    emptiable: bool,
     zoomed: Option<Zoomed>,
     focus_handle: FocusHandle,
     renderer: Rc<dyn DockAreaRenderer>,
@@ -142,6 +147,7 @@ impl DockArea {
             splits: HashMap::new(),
             panels: HashMap::new(),
             locked: false,
+            emptiable: false,
             zoomed: None,
             focus_handle: cx.focus_handle(),
             renderer: Rc::new(BareDockArea),
@@ -481,9 +487,59 @@ impl DockArea {
         self.remove_panel_id(panel, window, cx);
     }
 
+    /// Lightair patch: lets the center's last panel be dragged out or closed, for an area
+    /// whose window closes once it's empty.
+    pub fn set_emptiable(&mut self, emptiable: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.emptiable != emptiable {
+            self.emptiable = emptiable;
+            self.reconcile(window, cx);
+        }
+    }
+
     /// Lightair patch: which region holds `panel`, if any.
     pub fn region_of_panel(&self, panel: PanelId) -> Option<DockPlacement> {
         self.placement_of_panel(panel)
+    }
+
+    /// Lightair patch: puts a panel this area doesn't hold at `target` (a node of this area's,
+    /// as [`DockEvent::ForeignPanelDropped`] names it). False when the target is gone.
+    pub fn insert_panel_view_at(
+        &mut self,
+        panel: Arc<dyn PanelView>,
+        target: InsertTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let id = panel.panel_id(cx);
+        let Some(destination) = self.placement_of_node(target_node(&target)) else {
+            return false;
+        };
+        if matches!(target, InsertTarget::Split { .. }) {
+            self.adopt_measured_sizes(destination, cx);
+        }
+        let previous = self.panels.insert(id, panel);
+        let Some(tree) = self.tree_mut(destination) else {
+            self.restore_registration(id, previous);
+            return false;
+        };
+        let result = tree.insert_panel(id, target);
+        if !result.changed() {
+            self.restore_registration(id, previous);
+            return false;
+        }
+        self.commit(result, window, cx);
+        true
+    }
+
+    /// Lightair patch: every panel this area holds, in any region.
+    pub fn panel_views(&self) -> Vec<Arc<dyn PanelView>> {
+        let mut out = Vec::new();
+        for placement in [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom] {
+            if let Some(tree) = self.layout(placement) {
+                out.extend(tree.panels().filter_map(|id| self.panels.get(&id).cloned()));
+            }
+        }
+        out
     }
 
     /// Move a panel to a new home. The panel never leaves the dock, so it is
@@ -497,7 +553,11 @@ impl DockArea {
     ) {
         // A panel this area does not own (e.g. dropped from a nested dock) has
         // no backing entity here; inserting it would strand a ghost tab.
+        // Lightair patch: the host is told, so it can move the panel here itself.
         if self.panel(panel).is_none() {
+            if self.placement_of_node(target_node(&target)).is_some() {
+                cx.emit(DockEvent::ForeignPanelDropped { panel, target });
+            }
             return;
         }
         let Some(destination) = self.placement_of_node(target_node(&target)) else {
@@ -1017,9 +1077,9 @@ impl DockArea {
         // Planned first, applied second: the plan borrows the trees, and
         // applying it needs `&mut self` to fill the caches.
         let mut plans = Vec::new();
-        plan_tree(&self.center, false, self.locked, &mut plans);
+        plan_tree(&self.center, false, self.locked, !self.emptiable, &mut plans);
         for pane in self.docks.values() {
-            plan_tree(&pane.tree, !pane.dock.is_open(), self.locked, &mut plans);
+            plan_tree(&pane.tree, !pane.dock.is_open(), self.locked, true, &mut plans);
         }
 
         // Sets rather than vectors: these are membership tests, run once per
@@ -1722,7 +1782,7 @@ fn sync_split_panels(
     );
 }
 
-fn plan_tree(tree: &PaneTree, collapsed: bool, locked: bool, out: &mut Vec<ContainerPlan>) {
+fn plan_tree(tree: &PaneTree, collapsed: bool, locked: bool, root_alone: bool, out: &mut Vec<ContainerPlan>) {
     // The root has nothing beside it by definition.
     let root = tree.root();
     // Lightair patch: every edge of a root split is the split's own
@@ -1730,7 +1790,7 @@ fn plan_tree(tree: &PaneTree, collapsed: bool, locked: bool, out: &mut Vec<Conta
         PaneRef::Split { .. } => [Some(root.id()); 4],
         PaneRef::Tabs { .. } => [None; 4],
     };
-    plan_node(root, true, collapsed, locked, outer, out);
+    plan_node(root, root_alone, collapsed, locked, outer, out);
 }
 
 fn plan_node(
@@ -1753,7 +1813,9 @@ fn plan_node(
                 children: children.iter().map(PaneNode::id).collect(),
                 sizes: sizes.to_vec(),
             });
-            let children_alone = children.len() <= 1;
+            // Lightair patch: a lone child is alone only if its split is (an emptiable
+            // area's center wraps its one group in a split)
+            let children_alone = alone && children.len() <= 1;
             let last = children.len().saturating_sub(1);
             for (ix, child) in children.iter().enumerate() {
                 // Lightair patch: an edge stays the outer split's while the child is on it

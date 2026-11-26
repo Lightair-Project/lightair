@@ -14,6 +14,12 @@ A copy of the published crate with these changes, each marked "Lightair patch":
 - **A panel taken out by id, and where a panel is.** `DockArea::remove_panel_view` and
   `DockArea::region_of_panel`, for Lightair's panels in windows of their own (the host holds
   the panel while it's out, and docks it again when its window closes).
+- **Panels moved between areas.** A drop of a panel the area doesn't hold (dragged from another
+  window's area) is reported as `DockEvent::ForeignPanelDropped` instead of ignored, and
+  `DockArea::insert_panel_view_at` puts a panel at that drop's target; `DockArea::panel_views`
+  lists what an area holds. `DockArea::set_emptiable` lets the center's last panel be dragged
+  out or closed (an area whose window closes once it's empty). Lightair's floating dock windows
+  use them.
 
 The workspace uses it through `[patch.crates-io]` in the root `Cargo.toml`. Drop it once
 upstream docks beside a whole split and exposes these.

@@ -42,7 +42,46 @@ pub(super) struct DockPanels {
     pub(super) packages: Entity<super::packages::PackagesPanel>,
 }
 
+/// A panel entity of any kind, as the dock holds it.
+trait AnyPanel {
+    fn handle(&self) -> Arc<dyn gpui_kit::component::dock::BasePanelView>;
+}
+
+impl<P: Panel> AnyPanel for Entity<P> {
+    fn handle(&self) -> Arc<dyn gpui_kit::component::dock::BasePanelView> {
+        panel_handle(self.clone())
+    }
+}
+
 impl DockPanels {
+    /// Every panel, as the dock holds them.
+    fn all(&self) -> Vec<Arc<dyn gpui_kit::component::dock::BasePanelView>> {
+        let all: [&dyn AnyPanel; 16] = [
+            &self.objects,
+            &self.scenes,
+            &self.canvas,
+            &self.inspector,
+            &self.assets,
+            &self.mixer,
+            &self.outputs,
+            &self.chat,
+            &self.activity,
+            &self.stream,
+            &self.automations,
+            &self.soundboard,
+            &self.notes,
+            &self.rundown,
+            &self.ptz,
+            &self.packages,
+        ];
+        all.into_iter().map(|p| p.handle()).collect()
+    }
+
+    /// The panel called `name` (`BasePanel::panel_name`).
+    pub(super) fn by_name(&self, name: &str, cx: &App) -> Option<Arc<dyn gpui_kit::component::dock::BasePanelView>> {
+        self.all().into_iter().find(|p| p.panel_name(cx) == name)
+    }
+
     /// Registers each panel under its name, so a saved layout can be loaded onto these very
     /// panels (rather than new ones).
     fn register(&self, cx: &mut App) {
@@ -96,23 +135,24 @@ pub(super) fn populate_dock(
             .panel_view(panel_handle(panels.notes.clone()), cx)
             .panel_view(panel_handle(panels.ptz.clone()), cx);
     }
+    // Edit (the default) is lean: the mixer with Assets beside it; every other panel is in the
+    // Window menu. (A screenshot hook naming one of them gets it here, in front.)
     if preset != Preset::Live {
-        bottom = bottom
-            .panel_view(panel_handle(panels.assets.clone()), cx)
-            .panel_view(panel_handle(panels.automations.clone()), cx)
-            .panel_view(panel_handle(panels.soundboard.clone()), cx)
-            .panel_view(panel_handle(panels.rundown.clone()), cx)
-            .panel_view(panel_handle(panels.notes.clone()), cx)
-            .panel_view(panel_handle(panels.ptz.clone()), cx)
-            .panel_view(panel_handle(panels.packages.clone()), cx)
-            .active_index(match hook.as_deref() {
-                Some(h) if h.starts_with("assets") => 1,
-                Some(h) if h.starts_with("automations") => 2,
-                Some(h) if h.starts_with("soundboard") => 3,
-                Some(h) if h.starts_with("rundown") => 4,
-                Some(h) if h.starts_with("notes") => 5,
-                _ => 0,
-            });
+        bottom = bottom.panel_view(panel_handle(panels.assets.clone()), cx);
+        if open_hook("assets") {
+            bottom = bottom.active_index(1);
+        }
+        if let Some(extra) = [
+            ("automations", &panels.automations as &dyn AnyPanel),
+            ("soundboard", &panels.soundboard),
+            ("rundown", &panels.rundown),
+            ("notes", &panels.notes),
+        ]
+        .into_iter()
+        .find(|(name, _)| open_hook(name))
+        {
+            bottom = bottom.panel_view(extra.1.handle(), cx).active_index(2);
+        }
     }
     area.set_dock(DockPlacement::Bottom, bottom, window, cx);
     // tall enough for a full channel strip (taller for the audio screenshot hooks); compact when live
@@ -137,17 +177,15 @@ pub(super) fn populate_dock(
             .panel_view(panel_handle(panels.activity.clone()), cx)
             .panel_view(panel_handle(panels.outputs.clone()), cx)
             .panel_view(panel_handle(panels.stream.clone()), cx),
-        _ => DockLayout::tabs()
-            .panel_view(panel_handle(panels.outputs.clone()), cx)
-            .panel_view(panel_handle(panels.chat.clone()), cx)
-            .panel_view(panel_handle(panels.activity.clone()), cx)
-            .panel_view(panel_handle(panels.stream.clone()), cx)
-            .active_index(match hook.as_deref() {
-                Some("chat") => 1,
-                Some(h) if h.starts_with("activity") => 2,
-                Some("stream") => 3,
-                _ => 0,
-            }),
+        _ => {
+            let tabs = DockLayout::tabs().panel_view(panel_handle(panels.outputs.clone()), cx).panel_view(panel_handle(panels.chat.clone()), cx);
+            match hook.as_deref() {
+                Some("chat") => tabs.active_index(1),
+                Some(h) if h.starts_with("activity") => tabs.panel_view(panel_handle(panels.activity.clone()), cx).active_index(2),
+                Some("stream") => tabs.panel_view(panel_handle(panels.stream.clone()), cx).active_index(2),
+                _ => tabs,
+            }
+        }
     };
     area.set_dock(
         DockPlacement::Right,
@@ -390,20 +428,17 @@ impl StudioWindow {
                 cx.new(|cx| super::packages::PackagesPanel::new(shell, studio, window, cx))
             },
         };
-        // Every group shows a tab bar, even with one panel, so any panel can be dropped onto
-        // any header to join it as a tab (and the canvas gets a header like the rest).
+        // the look and tab menu every dock shares (shell/dock_windows: floating windows too)
         let (dock, skin) = DockSkin::dock_area("lightair-studio", Some(1), window, cx);
-        skin.set_panel_style(gpui_kit::component::dock::PanelStyle::TabBar, cx);
-        // No "…" menu in panel headers: each panel's actions are its own buttons.
-        skin.set_menu_button_visible(false, cx);
-        // a tab's right-click: its panel in a window of its own (shell/panel_window)
-        skin.set_tab_menu(Self::tab_menu(cx.entity().downgrade()), cx);
+        Self::dress_area(&skin, cx.entity().downgrade(), cx);
         // the panels a saved layout can name (shell/modes.rs loads them back by name)
         panels.register(cx);
         dock.update(cx, |area, cx| populate_dock(&panels, super::modes::Preset::Edit, area, window, cx));
         self.dock_panels = Some(panels);
-        self.dock = Some(dock);
-        // The layout last used on these displays comes back (a hook can ask for one to look at).
+        self.dock = Some(dock.clone());
+        self.register_shell(cx);
+        // The arrangement last used on these displays comes back (a hook can ask for a mode
+        // to look at instead).
         match std::env::var("LIGHTAIR_OPEN").ok().as_deref().and_then(|h| h.strip_prefix("mode:")) {
             Some(name) => {
                 let name = name.to_string();
@@ -429,13 +464,20 @@ impl StudioWindow {
                 }
             }
             None if std::env::var_os("LIGHTAIR_OPEN").is_none() => {
-                let mode = self.current_mode(cx);
-                if mode != "Edit" {
-                    self.switch_mode(&mode, window, cx);
+                let restored = self.last_arrangement(cx).is_some_and(|last| self.apply_arrangement(last, window, cx));
+                if !restored {
+                    let mode = self.current_mode(cx);
+                    match super::modes::Preset::ALL.into_iter().find(|p| p.name() == mode) {
+                        Some(preset) => self.apply_preset(preset, window, cx),
+                        None => self.switch_mode(&mode, window, cx),
+                    }
                 }
             }
             None => {}
         }
+        // followed from now on: what's dropped on it from other windows, and its changes
+        self.watch_area(&dock, cx);
+        self.refresh_window_menu(cx);
         // Development: open a dialog on launch for screenshots (no clicking needed).
         match std::env::var("LIGHTAIR_OPEN").as_deref() {
             Ok("add-object") => self.open_add_object(window, cx),
@@ -446,6 +488,8 @@ impl StudioWindow {
                 self.open_add_object(window, cx);
                 self.add_object_hook(&hook[11..], window, cx);
             }
+            // panels shown, dragged between windows and closed (shell/dock_windows)
+            Ok("dock-windows") => self.start_dock_check(window, cx),
             // a tab dragged inside this window ("dock-drag:1338,60>1432,600", in points), held
             // over its drop a while, then dropped; the right dock's layout logged
             Ok(hook) if hook.starts_with("dock-drag:") => {

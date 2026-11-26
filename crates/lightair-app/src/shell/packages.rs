@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dock::{DockPlacement, PanelEvent, panel_handle};
+use gpui_kit::component::dock::PanelEvent;
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -831,30 +831,9 @@ impl StudioWindow {
         self.dock_panels.as_ref().map(|p| p.packages.clone())
     }
 
-    /// Brings the Packages panel forward (into the bottom dock if a layout left it out).
-    pub(super) fn show_packages_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(dock), Some(entity)) = (self.dock.clone(), self.packages_panel()) else { return };
-        let panel = panel_handle(entity);
-        let id = panel.panel_id(cx);
-        // in a window of its own: it's there already
-        if self.panel_windows.iter().any(|(p, ..)| *p == id) {
-            return;
-        }
-        if self.place != super::Place::Live {
-            self.show_place(super::Place::Live, cx);
-        }
-        dock.update(cx, |area, cx| {
-            if area.panel(id).is_none() {
-                area.add_panel_view(panel, DockPlacement::Bottom, None, window, cx);
-            }
-            for placement in [DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom] {
-                let here = area.layout(placement).is_some_and(|t| t.find_panel_node(id).is_some());
-                if here && !area.is_dock_open(placement) {
-                    area.toggle_dock(placement, window, cx);
-                }
-            }
-            area.select_panel(id, window, cx);
-        });
+    /// Brings the Packages panel forward where it is, or in a window of its own.
+    pub(super) fn show_packages_panel(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_panel("packages", cx);
     }
 
     /// Install…: asks for package files and folders, then installs them.

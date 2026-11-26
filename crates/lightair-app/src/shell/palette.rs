@@ -40,6 +40,9 @@ pub(super) enum PaletteAction {
     Layout(String),
     SaveLayout,
     DeleteLayout(String),
+    ResetLayout,
+    /// A panel by name, as Window › its title.
+    Panel(&'static str),
 }
 
 pub(super) struct Entry {
@@ -168,6 +171,11 @@ fn layout_entries(saved: &[String]) -> Vec<Entry> {
         });
     }
     out.push(Entry { label: "Save panels as a new layout".into(), hint: "", icon: "plus", action: PaletteAction::SaveLayout });
+    out.push(Entry { label: "Reset layout".into(), hint: "", icon: "rotate-ccw", action: PaletteAction::ResetLayout });
+    // every panel, as the Window menu lists them (Windows has no menu bar)
+    for (name, title, _) in super::dock_windows::PANELS.iter().flat_map(|g| g.iter()) {
+        out.push(Entry { label: format!("Window: {title}"), hint: "", icon: "app-window", action: PaletteAction::Panel(name) });
+    }
     out
 }
 
@@ -250,6 +258,8 @@ impl StudioWindow {
             Layout(name) => self.switch_mode(&name, window, cx),
             SaveLayout => self.save_layout_as_mode(cx),
             DeleteLayout(name) => self.delete_mode(&name, cx),
+            ResetLayout => self.reset_layout(window, cx),
+            Panel(name) => self.show_panel(name, cx),
             Replay => self.studio.update(cx, |s, cx| s.replay_last_clip(cx)),
             AddScene => self.add_scene(cx),
             AddImage => self.add_image(window, cx),

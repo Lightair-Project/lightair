@@ -6,7 +6,9 @@
 //!
 //! Modes are saved per display setup (the displays' number and sizes), since a laptop's
 //! arrangement would be wrong on the studio's three screens, in `modes.json` beside the
-//! preferences: they are about this computer, not the workspace.
+//! preferences: they are about this computer, not the workspace. So is the arrangement last
+//! used (where each panel is, and the floating windows' frames: shell/dock_windows.rs), saved
+//! as it changes and put back at launch.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -41,6 +43,9 @@ impl Preset {
 pub(super) struct SavedMode {
     pub name: String,
     pub layout: DockAreaState,
+    /// Its floating windows.
+    #[serde(default)]
+    pub floating: Vec<super::dock_windows::FloatingLayout>,
 }
 
 /// What a display setup remembers.
@@ -49,6 +54,9 @@ pub(super) struct DisplayModes {
     /// The mode in use: a preset's name or a saved mode's.
     pub current: Option<String>,
     pub custom: Vec<SavedMode>,
+    /// The panels as they were last arranged.
+    #[serde(default)]
+    pub last: Option<super::dock_windows::Arrangement>,
 }
 
 /// `modes.json`: each display setup's modes.
@@ -124,20 +132,21 @@ impl StudioWindow {
         let _ = save_to(&path(), &file);
     }
 
-    /// Switches to a mode by name: a preset, or a saved layout.
+    /// Switches to a mode by name: a preset, or a saved layout. The floating windows are the
+    /// mode's (a preset has none).
     pub(super) fn switch_mode(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(dock), Some(panels)) = (self.dock.clone(), self.dock_panels.clone()) else { return };
         if let Some(preset) = Preset::ALL.into_iter().find(|p| p.name() == name) {
-            dock.update(cx, |area, cx| super::docking::populate_dock(&panels, preset, area, window, cx));
+            self.apply_preset(preset, window, cx);
         } else {
             let key = self.display_key_now(cx);
             let Some(saved) = load_from(&path()).displays.get(&key).and_then(|d| d.custom.iter().find(|m| m.name == name).cloned())
             else {
                 return;
             };
-            let loaded = dock.update(cx, |area, cx| area.load(saved.layout, window, cx));
-            if let Err(e) = loaded {
-                tracing::warn!(%e, "a saved layout didn't load");
+            let arrangement = super::dock_windows::Arrangement { main: saved.layout, floating: saved.floating };
+            if !self.apply_arrangement(arrangement, window, cx) {
+                dock.update(cx, |area, cx| super::docking::populate_dock(&panels, Preset::Edit, area, window, cx));
                 self.studio.update(cx, |s, _| s.issue = Some(format!("Couldn't load the layout “{name}”.").into()));
                 return;
             }
@@ -147,17 +156,38 @@ impl StudioWindow {
         cx.notify();
     }
 
+    /// A preset's arrangement: the main window's dock only, every floating window closed.
+    pub(super) fn apply_preset(&mut self, preset: Preset, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(dock), Some(panels)) = (self.dock.clone(), self.dock_panels.clone()) else { return };
+        self.floating_stash = None;
+        self.close_dock_windows(cx);
+        dock.update(cx, |area, cx| super::docking::populate_dock(&panels, preset, area, window, cx));
+    }
+
+    /// Saves where every panel is now, for the next launch on these displays.
+    pub(super) fn save_arrangement(&self, cx: &mut App) {
+        let Some(arrangement) = self.arrangement(cx) else { return };
+        let key = self.display_key_now(cx);
+        let mut file = load_from(&path());
+        file.displays.entry(key).or_default().last = Some(arrangement);
+        let _ = save_to(&path(), &file);
+    }
+
+    /// The arrangement last used on these displays, if one was saved.
+    pub(super) fn last_arrangement(&self, cx: &App) -> Option<super::dock_windows::Arrangement> {
+        load_from(&path()).displays.get(&self.display_key_now(cx)).and_then(|d| d.last.clone())
+    }
+
     /// Saves the panels as they are now as a mode of their own.
     pub(super) fn save_layout_as_mode(&mut self, cx: &mut Context<Self>) {
-        let Some(dock) = self.dock.clone() else { return };
-        let layout = dock.read(cx).dump(cx);
+        let Some(super::dock_windows::Arrangement { main: layout, floating }) = self.arrangement(cx) else { return };
         let key = self.display_key_now(cx);
         let mut file = load_from(&path());
         let entry = file.displays.entry(key).or_default();
         let taken: Vec<String> =
             Preset::ALL.iter().map(|p| p.name().to_string()).chain(entry.custom.iter().map(|m| m.name.clone())).collect();
         let name = next_name(&taken);
-        entry.custom.push(SavedMode { name: name.clone(), layout });
+        entry.custom.push(SavedMode { name: name.clone(), layout, floating });
         entry.current = Some(name.clone());
         let _ = save_to(&path(), &file);
         self.studio.update(cx, |s, _| s.issue = Some(format!("Saved as the mode “{name}”").into()));

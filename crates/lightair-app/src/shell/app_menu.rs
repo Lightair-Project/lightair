@@ -45,8 +45,8 @@ fn act(name: &str, action: impl Action) -> MenuItem {
     MenuItem::action(name.to_string(), action)
 }
 
-/// The menus, in order.
-pub fn menus() -> Vec<Menu> {
+/// The menus, in order; `shown` says which panels are showing (checked in the Window menu).
+pub fn menus(shown: &dyn Fn(&str) -> bool) -> Vec<Menu> {
     vec![
         Menu::new("Lightair").items([
             act("About Lightair", About),
@@ -94,14 +94,13 @@ pub fn menus() -> Vec<Menu> {
             act("Live", ShowLive),
             act("Editor", ShowEditor),
             MenuItem::separator(),
-            act("Packages", ShowPackages),
-            MenuItem::separator(),
             MenuItem::submenu(Menu::new("Layout").items([
                 act("Edit", LayoutEdit),
                 act("Live", LayoutLive),
                 act("Minimal", LayoutMinimal),
                 MenuItem::separator(),
                 act("Save Panels as a New Layout", SaveLayoutMode),
+                act("Reset Layout", super::dock_windows::ResetLayout),
             ])),
             MenuItem::separator(),
             act("Zoom In", ZoomIn),
@@ -147,7 +146,14 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::separator(),
             act("Mute or Unmute Microphones", ToggleMics),
         ]),
-        Menu::new("Window").items([act("Minimize", Minimize), act("Zoom", ZoomWindow)]),
+        // every panel: a checked one is showing (chosen: brought forward); an unchecked one
+        // opens in a window of its own
+        Menu::new("Window").items(
+            [act("Minimize", Minimize), act("Zoom", ZoomWindow)]
+                .into_iter()
+                .chain(super::dock_windows::panel_items(shown))
+                .chain([MenuItem::separator(), act("Reset Layout", super::dock_windows::ResetLayout)]),
+        ),
         Menu::new("Help").items([act("Keyboard Shortcuts", KeyboardShortcuts)]),
     ]
 }
@@ -167,7 +173,8 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new(crate::ui::key("cmd-w"), CloseWindow, Some("Studio")),
         KeyBinding::new(crate::ui::key("cmd-r"), ToggleRecord, Some("Studio")),
     ]);
-    cx.set_menus(menus());
+    super::dock_windows::bind(cx);
+    cx.set_menus(menus(&|_| false));
 }
 
 impl StudioWindow {
@@ -187,7 +194,7 @@ impl StudioWindow {
             .on_action(cx.listener(|this, _: &ImportObsScenes, window, cx| this.import_obs(window, cx)))
             .on_action(cx.listener(|this, _: &InstallPackage, window, cx| this.pick_package_files(window, cx)))
             .on_action(cx.listener(|this, _: &ExportAsPackage, window, cx| this.export_selection_as_package(window, cx)))
-            .on_action(cx.listener(|this, _: &ShowPackages, window, cx| this.show_packages_panel(window, cx)))
+            .on_action(cx.listener(|this, _: &ShowPackages, _, cx| this.show_panel("packages", cx)))
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|_, _: &ZoomWindow, window, _| window.zoom_window()))
