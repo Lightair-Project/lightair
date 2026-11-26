@@ -1089,3 +1089,41 @@ impl StudioWindow {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::MenuItem;
+
+    use super::PANELS;
+
+    /// The Window menu's panel items: (title, checked).
+    fn window_items(shown: &dyn Fn(&str) -> bool) -> Vec<(String, bool)> {
+        let menus = super::super::app_menu::menus(shown);
+        let window = menus.into_iter().find(|m| m.name == "Window").expect("a Window menu");
+        let titles: Vec<&str> = PANELS.iter().flat_map(|g| g.iter()).map(|(_, t, _)| *t).collect();
+        window
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { name, checked, .. } if titles.contains(&name.as_ref()) => {
+                    Some((name.to_string(), checked))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The Window menu lists every panel once and checks exactly the ones showing somewhere,
+    /// so a panel closed or hidden in a floating window can always be found and brought back.
+    #[test]
+    fn the_window_menu_checks_the_panels_showing_and_only_those() {
+        let items = window_items(&|name| name == "mixer" || name == "chat");
+        let every: usize = PANELS.iter().map(|g| g.len()).sum();
+        assert_eq!(items.len(), every, "every panel is listed once: {items:?}");
+        let checked: Vec<&str> = items.iter().filter(|(_, c)| *c).map(|(t, _)| t.as_str()).collect();
+        assert_eq!(checked, ["Audio Mixer", "Chat"], "{items:?}");
+
+        let none = window_items(&|_| false);
+        assert!(none.iter().all(|(_, c)| !c), "nothing showing, nothing checked: {none:?}");
+    }
+}

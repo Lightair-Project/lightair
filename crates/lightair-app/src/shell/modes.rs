@@ -243,4 +243,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A modes.json written before floating windows (saved layouts without them, no arrangement
+    /// last used) still loads with its layouts; the arrangement saved after it keeps its
+    /// floating windows' frames and displays, and the old layouts stay.
+    #[test]
+    fn layouts_saved_before_floating_windows_survive_and_floating_windows_are_kept() {
+        use gpui_kit::component::dock::DockAreaState;
+
+        use super::super::dock_windows::{Arrangement, FloatingLayout};
+
+        let dir = std::env::temp_dir().join(format!("lightair-modes-floating-{}", std::process::id()));
+        let file = dir.join("modes.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        let layout = serde_json::to_value(DockAreaState::default()).unwrap();
+        let before = serde_json::json!({
+            "displays": {"1:1512x982": {"current": "Streaming", "custom": [{"name": "Streaming", "layout": layout}]}}
+        });
+        std::fs::write(&file, serde_json::to_vec(&before).unwrap()).unwrap();
+
+        let mut modes = load_from(&file);
+        let setup = modes.displays.get_mut("1:1512x982").expect("the old file's display setup");
+        assert_eq!(setup.current.as_deref(), Some("Streaming"));
+        assert_eq!(setup.custom.len(), 1, "the saved layout is still there");
+        assert!(setup.custom[0].floating.is_empty() && setup.last.is_none());
+
+        setup.last = Some(Arrangement {
+            main: DockAreaState::default(),
+            floating: vec![FloatingLayout {
+                bounds: [1600.0, 80.0, 420.0, 640.0],
+                display: Some(2),
+                layout: DockAreaState::default(),
+            }],
+        });
+        save_to(&file, &modes).unwrap();
+        let back = load_from(&file);
+        let setup = &back.displays["1:1512x982"];
+        let floating = &setup.last.as_ref().expect("the arrangement last used").floating;
+        assert_eq!(floating.len(), 1);
+        assert_eq!((floating[0].bounds, floating[0].display), ([1600.0, 80.0, 420.0, 640.0], Some(2)));
+        assert_eq!(setup.custom[0].name, "Streaming", "the old layout stays");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

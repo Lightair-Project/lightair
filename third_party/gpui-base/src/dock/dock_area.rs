@@ -4350,4 +4350,129 @@ mod tests {
             "the area must not fill itself with a group that never zoomed"
         );
     }
+
+    // ── Lightair: panels moved between areas (floating dock windows) ──────────
+
+    /// The center's (first) tab group.
+    fn center_node(area: &Entity<DockArea>, cx: &mut VisualTestContext) -> NodeId {
+        cx.read(|cx| first_tab_group(area.read(cx).layout(DockPlacement::Center).unwrap().root()).unwrap())
+    }
+
+    fn panel_ids_in(area: &Entity<DockArea>, cx: &mut VisualTestContext) -> Vec<PanelId> {
+        cx.read(|cx| area.read(cx).panel_views().iter().map(|p| p.panel_id(cx)).collect())
+    }
+
+    /// A second area beside the first (another window's dock), holding `name` in its center.
+    fn other_area(name: &'static str, cx: &mut VisualTestContext) -> (Entity<DockArea>, Entity<TestPanel>) {
+        let (other, panel) = cx.update(|window, cx| {
+            let panel = TestPanel::new(name, cx);
+            let other = cx.new(|cx| DockArea::new("other-dock", None, window, cx));
+            other.update(cx, |area, cx| {
+                area.set_center(DockLayout::tabs().panel(panel.clone()), window, cx)
+            });
+            (other, panel)
+        });
+        cx.run_until_parked();
+        (other, panel)
+    }
+
+    /// A tab dragged from another window's dock and let go on this one is reported to the host
+    /// with where it was dropped, and the tree is left for the host to change.
+    #[gpui::test]
+    fn a_panel_dropped_from_another_area_is_reported_with_its_place(cx: &mut TestAppContext) {
+        let log = Log::default();
+        let (area, _panels, cx) = one_group(&log, &["Alpha"], None, cx);
+        let (_other, gamma) = other_area("Gamma", cx);
+        let gamma_id = panel_id_of(&gamma);
+        let node = center_node(&area, cx);
+        let reported = Rc::new(RefCell::new(Vec::new()));
+        let seen = reported.clone();
+        let _subscription = cx.update(|window, cx| {
+            window.subscribe(&area, cx, move |_, event: &DockEvent, _, _| {
+                if let DockEvent::ForeignPanelDropped { panel, target } = event {
+                    seen.borrow_mut().push((*panel, target.clone()));
+                }
+            })
+        });
+        let before = cx.read(|cx| area.read(cx).dump(cx));
+
+        move_panel_into(&area, gamma_id, node, Some(0), true, cx);
+
+        let reported = reported.borrow().clone();
+        assert_eq!(reported.len(), 1, "one drop, one report");
+        assert_eq!(reported[0].0, gamma_id, "the dropped panel is named");
+        assert!(
+            matches!(reported[0].1, InsertTarget::Tabs { node: n, ix: Some(0), .. } if n == node),
+            "with where it was let go: {:?}",
+            reported[0].1
+        );
+        assert_eq!(before, cx.read(|cx| area.read(cx).dump(cx)), "the area itself is untouched");
+    }
+
+    /// The host's move: out of one window's dock, into the other's at the drop's place. The
+    /// panel is the same entity (its state goes with it) and only the receiving area holds it.
+    #[gpui::test]
+    fn a_panel_moves_between_areas_as_itself(cx: &mut TestAppContext) {
+        let log = Log::default();
+        let (area, panels, cx) = one_group(&log, &["Alpha", "Beta"], None, cx);
+        let (other, gamma) = other_area("Gamma", cx);
+        let alpha = panel_id_of(&panels[0]);
+        let target = InsertTarget::Tabs { node: center_node(&other, cx), ix: None, activate: true };
+
+        let placed = cx.update(|window, cx| {
+            let view = area.read(cx).panel(alpha).cloned().expect("the area holds Alpha");
+            area.update(cx, |a, cx| a.remove_panel_view(alpha, window, cx));
+            other.update(cx, |a, cx| a.insert_panel_view_at(view, target, window, cx))
+        });
+        cx.run_until_parked();
+
+        assert!(placed, "the drop's place is there");
+        assert!(!panel_ids_in(&area, cx).contains(&alpha), "it left the first area");
+        let there = panel_ids_in(&other, cx);
+        assert!(there.contains(&alpha) && there.contains(&panel_id_of(&gamma)), "{there:?}");
+        let dumped = cx.read(|cx| other.read(cx).dump(cx));
+        // the center: a stack around one tab group
+        let names: Vec<String> = dumped.center.children[0].children.iter().map(|c| c.panel_name.clone()).collect();
+        assert_eq!(names, vec!["Gamma".to_string(), "Alpha".to_string()], "tabbed with Gamma, saved so");
+    }
+
+    /// A drop whose place went meanwhile (its group closed) is refused: nothing is added, so
+    /// the host can put the panel back where it came from.
+    #[gpui::test]
+    fn a_drop_on_a_place_that_went_is_refused(cx: &mut TestAppContext) {
+        let log = Log::default();
+        let (area, panels, cx) = one_group(&log, &["Alpha"], None, cx);
+        let (other, _gamma) = other_area("Gamma", cx);
+        let alpha = panel_id_of(&panels[0]);
+        let before = cx.read(|cx| other.read(cx).dump(cx));
+        // a node id from nowhere: a group that closed between the drag and the drop
+        let gone = InsertTarget::Tabs { node: NodeId::from_u64(9_999_999), ix: None, activate: true };
+
+        let placed = cx.update(|window, cx| {
+            let view = area.read(cx).panel(alpha).cloned().unwrap();
+            other.update(cx, |a, cx| a.insert_panel_view_at(view, gone, window, cx))
+        });
+
+        assert!(!placed);
+        assert_eq!(before, cx.read(|cx| other.read(cx).dump(cx)), "the area is as it was");
+        assert!(!panel_ids_in(&other, cx).contains(&alpha));
+    }
+
+    /// The main window's dock keeps its last panel (dragging it out would leave a window with
+    /// nothing); a floating window's dock lets it go, and its window closes once empty.
+    #[gpui::test]
+    fn only_an_emptiable_area_lets_its_last_panel_be_dragged_out(cx: &mut TestAppContext) {
+        let log = Log::default();
+        let (area, _panels, cx) = one_group(&log, &["Alpha"], None, cx);
+        let draggable = |cx: &mut VisualTestContext| {
+            let node = center_node(&area, cx);
+            let group = cx.read(|cx| area.read(cx).groups.get(&node).unwrap().entity.clone());
+            cx.read(|cx| group.read(cx).context(cx).is_draggable())
+        };
+        assert!(!draggable(cx), "the main window's last panel stays");
+
+        cx.update(|window, cx| area.update(cx, |a, cx| a.set_emptiable(true, window, cx)));
+        cx.run_until_parked();
+        assert!(draggable(cx), "a floating window's last panel can leave");
+    }
 }
