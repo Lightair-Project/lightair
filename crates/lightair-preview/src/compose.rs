@@ -714,9 +714,11 @@ impl State {
                 // Windows: nothing else draws a kind the compositor doesn't make (screens and
                 // cameras are the captures', which say why they don't run)
                 #[cfg(windows)]
+                // (a source a runtime plays has no picture until its first: not missing)
                 if alone
                     && !made_here(source)
                     && !crate::providers::handled(source)
+                    && !lightair_host::host::runs_here(source)
                     && !matches!(source.kind.as_str(), lightair_model::kinds::SCREEN | lightair_model::kinds::CAMERA)
                 {
                     buffer_gpu::not_yet(&format!("{} sources in the compositor", source.kind));

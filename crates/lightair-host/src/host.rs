@@ -96,6 +96,12 @@ fn playlist(settings: &serde_json::Value) -> bool {
     settings["playlist"].as_array().is_some_and(|a| a.iter().any(|v| v.as_str().is_some_and(|s| !s.is_empty())))
 }
 
+/// Whether one of the host's runtimes plays `source` here (a media file, a web page, a timer…):
+/// its pictures come from that runtime, once it has made the first.
+pub fn runs_here(source: &Source) -> bool {
+    !matches!(need(source), Need::Nothing | Need::Missing(_))
+}
+
 fn need(source: &Source) -> Need {
     let s = &source.settings;
     let mac = cfg!(target_os = "macos");
