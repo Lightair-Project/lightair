@@ -121,7 +121,7 @@ fn draw(p: &Puppet, w: usize, h: usize, framing: Framing) -> Vec<u8> {
                 let pos = &p.positions()[*part];
                 let use_mask = masked && !in_composite;
                 let frame: &TextureFrame = texture;
-                for tri in part_data.indices.chunks_exact(3) {
+                for tri in part_data.indices.as_chunks::<3>().0 {
                     let i = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
                     let px = i.map(|k| to_px(pos[k]));
                     let uv = i.map(|k| Vec2::from(part_data.uvs[k]));
@@ -185,7 +185,7 @@ fn draw(p: &Puppet, w: usize, h: usize, framing: Framing) -> Vec<u8> {
                     continue;
                 }
                 let use_mask = masked && !in_composite;
-                for tri in part_data.indices.chunks_exact(3) {
+                for tri in part_data.indices.as_chunks::<3>().0 {
                     let [a, b2, c2] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
                     let (pa, pb, pc) = (to_px(pos[a]), to_px(pos[b2]), to_px(pos[c2]));
                     let (ua, ub, uc) =

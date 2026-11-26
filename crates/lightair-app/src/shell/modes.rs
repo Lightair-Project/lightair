@@ -207,7 +207,7 @@ mod tests {
         save_to(&file, &modes).unwrap();
         let back = load_from(&file);
         assert_eq!(back.displays["1:1512x982"].current.as_deref(), Some("Live"));
-        assert!(back.displays.get("2:1512x982+2560x1440").is_none(), "another setup starts fresh");
+        assert!(!back.displays.contains_key("2:1512x982+2560x1440"), "another setup starts fresh");
         std::fs::write(&file, b"nonsense").unwrap();
         assert!(load_from(&file).displays.is_empty(), "a damaged file is no modes, not a crash");
         let _ = std::fs::remove_dir_all(dir);

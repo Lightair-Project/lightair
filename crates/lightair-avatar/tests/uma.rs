@@ -33,7 +33,7 @@ fn raster(
     to_px: &impl Fn([f32; 2]) -> Vec2,
     mut f: impl FnMut(usize, Px),
 ) {
-    for tri in d.indices.chunks_exact(3) {
+    for tri in d.indices.as_chunks::<3>().0 {
         let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
         let (pa, pb, pc) = (to_px(d.positions[a]), to_px(d.positions[b]), to_px(d.positions[c]));
         let (ua, ub, uc) = (Vec2::from(d.uvs[a]), Vec2::from(d.uvs[b]), Vec2::from(d.uvs[c]));
@@ -147,7 +147,9 @@ fn draw_live2d(faces: &[(&str, Face)], w: usize, h: usize) {
             height: t.height(),
             rgba: t
                 .rgba()
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|c| {
                     let pm = |v: u8| ((v as u32 * c[3] as u32 + 127) / 255) as u8;
                     [pm(c[0]), pm(c[1]), pm(c[2]), c[3]]
