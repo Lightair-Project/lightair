@@ -37,8 +37,12 @@ OBS_INSTALL = os.environ.get("OBS_DIR", r"C:\Program Files\obs-studio")
 OBS_ROOT = os.path.join(B, "obs")
 OBS_EXE = os.path.join(OBS_ROOT, "bin", "64bit", "obs64.exe")
 LIGHTAIR_EXE = os.environ.get("LIGHTAIR_EXE", os.path.join(ROOT, "target", "release", "lightair.exe"))
-LA_WS = os.path.join(B, "la-ws")
+# Lightair's scratch workspace (LIGHTAIR_BENCH_WS: another one, for another build of Lightair)
+LA_WS = os.environ.get("LIGHTAIR_BENCH_WS", os.path.join(B, "la-ws"))
 PORT = {"obs": 4460, "lightair": 4466}
+# OBS's recording encoder (BENCH_OBS_ENCODER: obs_x264, or a hardware one such as obs_qsv11_v2;
+# `prepare` writes it into OBS's profile)
+OBS_ENCODER = os.environ.get("BENCH_OBS_ENCODER", "obs_x264")
 SCENES = ["Starting Soon", "Gameplay", "Desktop", "Just Chatting", "BRB", "Ending"]
 SYSTEM_PLUGINS = r"C:\ProgramData\obs-studio\plugins"
 SYSTEM_PLUGINS_ASIDE = r"C:\ProgramData\obs-studio\plugins.lightair-bench-aside"
@@ -632,13 +636,16 @@ Mode=Advanced
 RecType=Standard
 RecFilePath={os.path.join(B, "rec-obs").replace(chr(92), "/")}
 RecFormat2=mp4
-RecEncoder=obs_x264
+RecEncoder={OBS_ENCODER}
 RecAudioEncoder=ffmpeg_aac
 RecTracks=1
 Track1Bitrate=192
 """,
-        "basic/profiles/Bench/recordEncoder.json": json.dumps({"bitrate": 12000, "rate_control": "ABR", "profile": "high", "preset": "veryfast",
-                                                               "keyint_sec": 2}),
+        "basic/profiles/Bench/recordEncoder.json": json.dumps(
+            {"bitrate": 12000, "rate_control": "ABR", "profile": "high", "preset": "veryfast", "keyint_sec": 2}
+            if OBS_ENCODER == "obs_x264"
+            # a hardware encoder: the same bitrate and keyframes, its own rate control names
+            else {"bitrate": 12000, "rate_control": "VBR", "profile": "high", "keyint_sec": 2}),
         "plugin_config/obs-websocket/config.json": json.dumps({"alerts_enabled": False, "auth_required": False,
                                                                "first_load": False, "server_enabled": True,
                                                                "server_password": "", "server_port": 4460}),
