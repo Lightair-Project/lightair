@@ -84,7 +84,17 @@ pub fn device_name(device: &str) -> Option<String> {
     if is_system_default(device) {
         return None;
     }
-    Some(find_input(device).or_else(|| find_output(device)).map_or_else(|| device.to_string(), |d| name_of(&d)))
+    Some(find_input(device).or_else(|| find_output(device)).map_or_else(|| missing_name(device), |d| name_of(&d)))
+}
+
+/// What a device that isn't here is called: the setting itself, except a Windows endpoint id
+/// (`{0.0.1.00000000}.{…}`, a GUID nobody can read), which says what kind of device is missing.
+fn missing_name(device: &str) -> String {
+    match device.get(..6) {
+        Some("{0.0.1") => "Disconnected microphone".into(),
+        Some("{0.0.0") => "Disconnected output".into(),
+        _ => device.to_string(),
+    }
 }
 
 /// Turns a device's rate into the engine's by linear interpolation (devices that can't run at
