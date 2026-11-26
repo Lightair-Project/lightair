@@ -15,8 +15,7 @@
 //!   another computer. Whether each is on air follows the program, the overlays, a switch under
 //!   way and the scenes drawn for outputs alone.
 //!
-//! What has no runtime yet on a platform (on Windows: the soundboard, media playlists, phone
-//! cameras, a camera over USB) is logged once per kind; the methods that would reach it return
+//! What has no runtime yet on a platform (on Windows: phone cameras, a camera over USB) is logged once per kind; the methods that would reach it return
 //! nothing.
 
 use std::collections::{HashMap, HashSet};
@@ -102,10 +101,12 @@ fn need(source: &Source) -> Need {
     let mac = cfg!(target_os = "macos");
     match source.kind.as_str() {
         TIMER_KIND => Need::Timer,
-        crate::soundboard::KIND if mac => Need::Soundboard,
+        crate::soundboard::KIND if mac || cfg!(windows) => Need::Soundboard,
         crate::soundboard::KIND => Need::Missing("soundboard"),
         "ffmpeg_source" if crate::show::link_received_by_compositor(source) => Need::Link,
         "ffmpeg_source" if mac && playlist(s) => Need::Media,
+        // Windows: a playlist's files through the ffmpeg tool, one after another
+        "ffmpeg_source" if cfg!(windows) && playlist(s) => Need::Ffmpeg,
         "ffmpeg_source" if playlist(s) => Need::Missing("media playlist"),
         "ffmpeg_source" if mac && native_media(s) => Need::Media,
         // the ffmpeg tool decodes what AVFoundation doesn't play (on Windows: every file)
@@ -175,6 +176,11 @@ enum Runtime {
         player: crate::media_player::MediaPlayer,
         playing: parking_lot::Mutex<(String, bool)>,
     },
+    /// Windows: the soundboard's sounds through the ffmpeg tool.
+    #[cfg(windows)]
+    SoundboardFf {
+        media: crate::ffmpeg_media::FfmpegMedia,
+    },
     #[cfg(any(target_os = "macos", windows))]
     Web {
         page: crate::web::WebPage,
@@ -201,6 +207,8 @@ enum Runtime {
     Ffmpeg {
         media: crate::ffmpeg_media::FfmpegMedia,
         active: bool,
+        /// Its files played in turn, when it has a playlist (Windows).
+        playlist: Option<Playlist>,
     },
     /// Held for its thread (it stops as it drops).
     #[cfg(target_os = "macos")]
@@ -211,7 +219,7 @@ enum Runtime {
 
 /// A media source's playlist: its order and place, and when its file last started (a new file
 /// reads as ended for a moment).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 struct Playlist {
     order: crate::playlists::Order,
     started: Instant,
@@ -226,6 +234,18 @@ fn playlist_file(file: &str) -> crate::media_player::Settings {
         restart_on_activate: false,
         clear_on_end: false,
     }
+}
+
+/// The ffmpeg tool's settings for a soundboard pad's file (Windows).
+#[cfg(windows)]
+fn soundboard_ffmpeg(input: String, looping: bool) -> crate::ffmpeg_media::Settings {
+    crate::ffmpeg_media::Settings { input, local: true, looping, restart_on_activate: false }
+}
+
+/// The ffmpeg tool's settings for a playlist's file (never looping one file).
+#[cfg(any(target_os = "macos", windows))]
+fn playlist_ffmpeg_file(file: &str) -> crate::ffmpeg_media::Settings {
+    crate::ffmpeg_media::Settings { input: file.to_string(), local: true, looping: false, restart_on_activate: false }
 }
 
 /// A scene switch under way: the scenes it draws besides the program until it ends.
@@ -431,6 +451,18 @@ impl Host {
                         p.started = Instant::now();
                     }
                 }
+                #[cfg(any(target_os = "macos", windows))]
+                Runtime::Ffmpeg { media, playlist: Some(p), .. } => {
+                    if p.started.elapsed() >= Duration::from_millis(800)
+                        && media.state() == crate::media::state::ENDED
+                        && p.order.ended()
+                        && let Some(file) = p.order.file()
+                    {
+                        media.update(playlist_ffmpeg_file(file));
+                        media.restart();
+                        p.started = Instant::now();
+                    }
+                }
                 _ => {}
             }
         }
@@ -566,7 +598,7 @@ impl Host {
                 #[cfg(any(target_os = "macos", windows))]
                 Runtime::Avatar(avatar) => avatar.set_shown(showing.contains(id)),
                 #[cfg(any(target_os = "macos", windows))]
-                Runtime::Ffmpeg { media, active: was } => {
+                Runtime::Ffmpeg { media, active: was, .. } => {
                     let now = active.contains(id);
                     if now != *was {
                         if now {
@@ -632,7 +664,17 @@ impl Host {
             #[cfg(any(target_os = "macos", windows))]
             Some(Runtime::Avatar(avatar)) => avatar.set_settings(s),
             #[cfg(any(target_os = "macos", windows))]
-            Some(Runtime::Ffmpeg { media, .. }) => media.update(crate::ffmpeg_media::Settings::from_json(s)),
+            Some(Runtime::Ffmpeg { media, playlist, .. }) => match playlist {
+                Some(p) => {
+                    if p.order.follow(s)
+                        && let Some(file) = p.order.file()
+                    {
+                        media.update(playlist_ffmpeg_file(file));
+                        p.started = Instant::now();
+                    }
+                }
+                None => media.update(crate::ffmpeg_media::Settings::from_json(s)),
+            },
             _ => {}
         }
         matches!(need, Need::Device(_))
@@ -708,6 +750,10 @@ impl Host {
                     playing: parking_lot::Mutex::new((String::new(), false)),
                 }
             }
+            #[cfg(windows)]
+            Need::Soundboard => Runtime::SoundboardFf {
+                media: crate::ffmpeg_media::FfmpegMedia::new(id, soundboard_ffmpeg(String::new(), false), self.sample_rate),
+            },
             #[cfg(any(target_os = "macos", windows))]
             Need::Web => Runtime::Web { page: crate::web::WebPage::new(id, page_options(s), None, None), shown: false },
             Need::Ndi(name) => Runtime::Ndi { _receiver: crate::ndi::Receiver::start(id, name, None) },
@@ -725,14 +771,18 @@ impl Host {
             #[cfg(any(target_os = "macos", windows))]
             Need::Avatar => Runtime::Avatar(crate::avatar_run::AvatarRuntime::new(id, s)),
             #[cfg(any(target_os = "macos", windows))]
-            Need::Ffmpeg => Runtime::Ffmpeg {
-                media: crate::ffmpeg_media::FfmpegMedia::new(
-                    id,
-                    crate::ffmpeg_media::Settings::from_json(s),
-                    self.sample_rate,
-                ),
-                active: false,
-            },
+            Need::Ffmpeg => {
+                let playlist = crate::playlists::Order::of(s).map(|order| Playlist { order, started: Instant::now() });
+                let settings = match playlist.as_ref().and_then(|p| p.order.file()) {
+                    Some(file) => playlist_ffmpeg_file(file),
+                    None => crate::ffmpeg_media::Settings::from_json(s),
+                };
+                Runtime::Ffmpeg {
+                    media: crate::ffmpeg_media::FfmpegMedia::new(id, settings, self.sample_rate),
+                    active: false,
+                    playlist,
+                }
+            }
             #[cfg(target_os = "macos")]
             Need::Dslr => Runtime::Dslr { _live: crate::dslr::LiveView::start(id) },
             #[allow(unreachable_patterns)]
@@ -985,6 +1035,14 @@ impl Host {
                 duration_ms: player.duration_ms(),
             });
         }
+        #[cfg(windows)]
+        if let Some(Runtime::SoundboardFf { media }) = self.runtimes.get(&source) {
+            return Some(MediaStatus {
+                state: crate::media::MediaState::from_code(media.state()),
+                time_ms: media.time_ms(),
+                duration_ms: media.duration_ms(),
+            });
+        }
         #[cfg(any(target_os = "macos", windows))]
         if let Some(Runtime::Ffmpeg { media, .. }) = self.runtimes.get(&source) {
             return Some(MediaStatus {
@@ -1008,8 +1066,18 @@ impl Host {
                 MediaAction::Seek(ms) => player.set_time_ms(ms),
             }
         }
+        #[cfg(windows)]
+        let soundboard = match self.runtimes.get(&source) {
+            Some(Runtime::SoundboardFf { media }) => Some(media),
+            _ => None,
+        };
+        #[cfg(target_os = "macos")]
+        let soundboard: Option<&crate::ffmpeg_media::FfmpegMedia> = None;
         #[cfg(any(target_os = "macos", windows))]
-        if let Some(Runtime::Ffmpeg { media, .. }) = self.runtimes.get(&source) {
+        if let Some(media) = soundboard.or(match self.runtimes.get(&source) {
+            Some(Runtime::Ffmpeg { media, .. }) => Some(media),
+            _ => None,
+        }) {
             match action {
                 MediaAction::Play => media.play_pause(false),
                 MediaAction::Pause => media.play_pause(true),
@@ -1086,6 +1154,18 @@ impl Host {
             }
             return;
         }
+        #[cfg(windows)]
+        if let Some(Runtime::SoundboardFf { media }) = self.runtimes.get(&source) {
+            match file {
+                Some((path, looped, _volume)) => {
+                    // the same pad again plays from the start; another file at once
+                    media.update(soundboard_ffmpeg(path.to_string(), looped));
+                    media.restart();
+                }
+                None => media.stop(),
+            }
+            return;
+        }
         let _ = (source, file);
     }
 
@@ -1094,6 +1174,10 @@ impl Host {
         #[cfg(target_os = "macos")]
         if let Some(Runtime::Soundboard { player, .. }) = self.runtimes.get(&source) {
             return player.state() == crate::media_player::state::PLAYING;
+        }
+        #[cfg(windows)]
+        if let Some(Runtime::SoundboardFf { media }) = self.runtimes.get(&source) {
+            return media.state() == crate::media::state::PLAYING;
         }
         let _ = source;
         false
@@ -1110,6 +1194,15 @@ impl Host {
                 p.started = Instant::now();
             }
         }
+        #[cfg(any(target_os = "macos", windows))]
+        if let Some(Runtime::Ffmpeg { media, playlist: Some(p), .. }) = self.runtimes.get_mut(&source) {
+            p.order.skip(by);
+            if let Some(file) = p.order.file() {
+                media.update(playlist_ffmpeg_file(file));
+                media.restart();
+                p.started = Instant::now();
+            }
+        }
         let _ = (source, by);
     }
 
@@ -1117,6 +1210,10 @@ impl Host {
     pub fn playlist_now(&self, source: Id) -> Option<(usize, usize, String)> {
         #[cfg(target_os = "macos")]
         if let Some(Runtime::Media { playlist: Some(p), .. }) = self.runtimes.get(&source) {
+            return p.order.now();
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        if let Some(Runtime::Ffmpeg { playlist: Some(p), .. }) = self.runtimes.get(&source) {
             return p.order.now();
         }
         let _ = source;
