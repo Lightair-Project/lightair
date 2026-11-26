@@ -17,8 +17,9 @@
 //! A face stickers preset's face distortion is drawn by the looks' warp: the source the engine
 //! reads is given it first ([`with_sticker_shape`]).
 //!
-//! Windows: no looks yet (no face tracker there, and the engine's feeds take no Direct3D
-//! texture); a source with looks is drawn without them, and the log says so once.
+//! Windows: the same, with the trackers on ONNX Runtime and DirectML (`lightair-tracker.dll`);
+//! the feed is given the camera's shared Direct3D texture as opened on the compositor's device,
+//! and the analysis a copy scaled down on the GPU (`lightair_host::buffers_small`).
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -53,7 +54,6 @@ use serde_json::{Map, Value};
 
 /// The analysis picture's short side at most (the Effect Stack filter's: eyelid detail for
 /// eyeliner on HD cameras).
-#[cfg(target_os = "macos")]
 const TRACK_SHORT_SIDE: f32 = 720.0;
 /// How often the analysis thread looks for new results while no picture comes.
 const POLL: Duration = Duration::from_millis(8);
@@ -305,11 +305,12 @@ fn pushed(picture: &bridge::Picture) -> Option<Pushed> {
     Some(Pushed::Buffer(pixels, kept))
 }
 
-/// Windows: a camera feed takes no Direct3D texture yet.
+/// Windows: the picture's shared texture as opened on the compositor's device (kept open while
+/// the picture lives), drawn as it is.
 #[cfg(windows)]
-fn pushed(_picture: &bridge::Picture) -> Option<Pushed> {
-    crate::buffer_gpu::not_yet("the camera looks in the compositor (feeds of Direct3D textures)");
-    None
+fn pushed(picture: &bridge::Picture) -> Option<Pushed> {
+    let gpu = lightair_render::compose::shared_gpu().ok()?;
+    crate::win_gpu::texture_of(&gpu.device, &picture.buffer).map(Pushed::Texture)
 }
 
 // ---------------------------------------------------------------- the analysis thread
@@ -360,19 +361,29 @@ fn analyse(source: Id, feed: &Feed, jobs: &Receiver<Job>, stop: &AtomicBool) {
     crate::stickers::unshare(source);
 }
 
-/// Windows: no face tracker yet, so nothing is handed to one.
+/// Scales pictures to the analysis size on the GPU (the video processor), reads them back and
+/// hands them to a face tracker.
 #[cfg(windows)]
-pub(crate) struct Scaler;
+pub(crate) struct Scaler(lightair_host::buffers_small::Shrinker);
 
 #[cfg(windows)]
 impl Scaler {
     pub(crate) fn new() -> Scaler {
-        Scaler
+        Scaler(lightair_host::buffers_small::Shrinker::new())
     }
 
-    /// Nothing yet: pictures aren't scaled for a tracker on Windows.
-    pub(crate) fn submit(&mut self, _tracker: &FaceTracker, _buffer: &bridge::Buffer, _id: u64, _time_ns: i64) {
-        crate::buffer_gpu::not_yet("face tracking on the compositor's pictures");
+    /// `buffer`, scaled to at most [`TRACK_SHORT_SIDE`] on its short side (even sides), given to
+    /// the tracker with `id` and its time.
+    pub(crate) fn submit(&mut self, tracker: &FaceTracker, buffer: &bridge::Buffer, id: u64, time_ns: i64) {
+        let (w, h) = buffer.size();
+        let s = (TRACK_SHORT_SIDE / w.min(h).max(1) as f32).min(1.0);
+        let (sw, sh) = (((w as f32 * s) as u32) & !1, ((h as f32 * s) as u32) & !1);
+        if sw < 16 || sh < 16 {
+            return;
+        }
+        let Some(bytes) = self.0.read(buffer, (sw, sh)) else { return };
+        // SAFETY: `bytes` holds `sh` tightly packed rows of `sw` BGRA pixels
+        unsafe { tracker.submit(bytes.as_ptr(), sw as usize * 4, sw, sh, id, time_ns) };
     }
 }
 

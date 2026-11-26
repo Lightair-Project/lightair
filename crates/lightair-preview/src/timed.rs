@@ -53,8 +53,7 @@ pub(crate) fn mask_source(e: &Effect) -> Option<Id> {
     serde_json::from_value(serde_json::Value::String(id.to_string())).ok()
 }
 
-/// The copy of the picture Vision looks at is at most this wide.
-#[cfg(target_os = "macos")]
+/// The copy of the picture the face detector looks at is at most this wide.
 const WATCH_WIDTH: usize = 320;
 /// The most faces blurred.
 const FACES: usize = 6;
@@ -337,29 +336,19 @@ struct State {
     started: Option<Instant>,
 }
 
-/// Every face in a source's picture, found by Apple's Vision on a thread of its own from a
-/// small copy of every third picture (macOS; Windows has no face detector yet).
-#[cfg_attr(windows, allow(dead_code, reason = "no face detector on Windows yet"))]
+/// Every face in a source's picture, found on a thread of its own from a small copy of every
+/// third picture: by Apple's Vision (macOS), by Windows' own face detector (Windows, the copy
+/// scaled down on the GPU and read back).
 struct Watch {
     to: std::sync::mpsc::SyncSender<(Vec<u8>, usize, usize)>,
     /// The faces found last (x, y, w, h, 0..1 from the top left), and when.
     found: std::sync::Arc<parking_lot::Mutex<(Vec<[f32; 4]>, Instant)>>,
     frames: u32,
+    #[cfg(windows)]
+    shrinker: lightair_host::buffers_small::Shrinker,
 }
 
 impl Watch {
-    /// Windows: no face detector yet.
-    #[cfg(windows)]
-    fn new() -> Option<Watch> {
-        crate::buffer_gpu::not_yet("face detection in the compositor (Face blur, Auto-frame)");
-        None
-    }
-
-    /// Windows: no face detector yet.
-    #[cfg(windows)]
-    fn look(&mut self, _buffer: &bridge::Buffer) {}
-
-    #[cfg(target_os = "macos")]
     fn new() -> Option<Watch> {
         let (to, from) = std::sync::mpsc::sync_channel::<(Vec<u8>, usize, usize)>(1);
         let found = std::sync::Arc::new(parking_lot::Mutex::new((Vec::new(), Instant::now())));
@@ -373,7 +362,32 @@ impl Watch {
                 }
             })
             .ok()?;
-        Some(Watch { to, found, frames: 0 })
+        Some(Watch {
+            to,
+            found,
+            frames: 0,
+            #[cfg(windows)]
+            shrinker: lightair_host::buffers_small::Shrinker::new(),
+        })
+    }
+
+    /// Hands the detector a small copy of `buffer` (every third time asked; dropped while it's
+    /// busy), scaled down on the GPU.
+    #[cfg(windows)]
+    fn look(&mut self, buffer: &bridge::Buffer) {
+        self.frames += 1;
+        if !self.frames.is_multiple_of(3) {
+            return;
+        }
+        let (w, h) = buffer.size();
+        if w == 0 || h == 0 {
+            return;
+        }
+        let step = (w as usize).div_ceil(WATCH_WIDTH).max(1);
+        let (sw, sh) = (w as usize / step, h as usize / step);
+        if let Some(small) = self.shrinker.read(buffer, (sw as u32, sh as u32)) {
+            let _ = self.to.try_send((small, sw, sh));
+        }
     }
 
     /// Hands Vision a small copy of `buffer` (every third time asked; dropped while it's busy).

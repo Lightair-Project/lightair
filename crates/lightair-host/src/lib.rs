@@ -17,6 +17,9 @@ pub mod buffers;
 #[cfg(windows)]
 #[path = "buffers_win.rs"]
 pub mod buffers;
+#[cfg(windows)]
+#[path = "buffers_small_win.rs"]
+pub mod buffers_small;
 pub mod clock;
 pub mod devices;
 pub mod displays;
@@ -80,6 +83,9 @@ pub mod vcam;
 #[cfg(target_os = "macos")]
 pub mod vcam_mac;
 #[cfg(target_os = "macos")]
+pub mod vision;
+#[cfg(windows)]
+#[path = "vision_win.rs"]
 pub mod vision;
 pub mod zoom_to;
 

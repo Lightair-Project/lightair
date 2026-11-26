@@ -3,7 +3,9 @@
 The models below run on Core ML: `coreml/*.mlpackage` are fp16 conversions of these ONNX files
 (the person detector fp32: some of its raw scores pass fp16's range)
 (made by `tools/convert-coreml.py`; the segmenter has its softmax and class mix built in), compiled
-into the module at build time. The ONNX originals are only needed to re-run the conversion.
+into the module at build time. On Windows the trackers run the ONNX originals themselves (ONNX
+Runtime with DirectML): `cmake/windows-tracker.cmake` fetches them, pinned to a commit of each
+repository below and checked by SHA-256, beside `lightair-tracker.dll` in `tracker-models`.
 
 | File | Model | Source | License |
 |---|---|---|---|

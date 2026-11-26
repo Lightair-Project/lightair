@@ -15,9 +15,10 @@
 //! What's pinned to the avatar follows its anchors as the compositor's renderer poses it; an
 //! anchor's place at rest comes from there too ([`AvatarRuntime::anchor_rest`]).
 //!
-//! Windows has no tracker library yet: the camera isn't opened there (the log says so once), so
-//! a VRM or a flat avatar settles at rest; a PNGtuber's mic and push to talk, the model's status
-//! and its anchors work as on macOS.
+//! Windows: the same, with the trackers on ONNX Runtime and DirectML (`lightair-tracker.dll`);
+//! the camera's frames (shared Direct3D textures) are copied and read back for them. Without the
+//! library a VRM or a flat avatar settles at rest; a PNGtuber's mic and push to talk, the
+//! model's status and its anchors work regardless.
 
 use std::ffi::c_void;
 #[cfg(target_os = "macos")]
@@ -47,7 +48,6 @@ const LINGER: Duration = Duration::from_secs(2);
 /// How often the posing is worked out and published.
 const STEP: Duration = Duration::from_millis(16);
 /// The tracking view's picture: at most this wide.
-#[cfg(target_os = "macos")]
 const VIEW_WIDTH: u32 = 640;
 
 /// The body tracker's frame (body-tracker.h's `bt_body`).
@@ -171,12 +171,8 @@ impl Drop for AvatarRuntime {
     }
 }
 
-/// The source's camera while it runs (macOS).
-#[cfg(target_os = "macos")]
+/// The source's camera while it runs.
 type Camera = lightair_capture::camera::CameraCapture;
-/// Windows: none is opened.
-#[cfg(windows)]
-type Camera = ();
 
 /// The stepping thread: the camera kept, the model read, the posing published, until dropped.
 fn run(s: Arc<Shared>) {
@@ -259,14 +255,44 @@ fn run(s: Arc<Shared>) {
     }
 }
 
-/// Windows: no tracker library to give the camera's frames to yet.
+/// The source's camera, its frames going to the trackers as they come: each texture copied into
+/// a picture of Lightair's and read back (Windows).
 #[cfg(windows)]
-fn open_camera(_s: &Arc<Shared>, _device: &str) -> Option<Camera> {
-    static SAID: std::sync::Once = std::sync::Once::new();
-    SAID.call_once(|| {
-        tracing::warn!("not yet on this platform: an avatar's face and body tracking (no tracker library)")
-    });
-    None
+fn open_camera(s: &Arc<Shared>, device: &str) -> Option<Camera> {
+    use lightair_capture::{Image, PixelFormat, camera};
+    if !crate::tracker::FaceTracker::available() {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| tracing::warn!("avatar: no trackers (lightair-tracker.dll): the avatar stays at rest"));
+        return None;
+    }
+    let config = camera::Config { format: None, height: Some(720), fps: Some(30.0), pixel_format: PixelFormat::Bgra };
+    let to = s.clone();
+    let mut copier = crate::buffers::Copier::new();
+    let mut reader = crate::buffers_small::Shrinker::new();
+    let sink = move |frame: lightair_capture::Frame| {
+        if frame.format != PixelFormat::Bgra {
+            return;
+        }
+        match frame.image() {
+            Image::Memory(m) => to.track_bytes(&m.data, m.stride, frame.size),
+            Image::Texture(t) => {
+                let Some(buffer) = copier.copy(t.shared_handle(), frame.size, t.fence().map(|f| (f.handle, f.value)))
+                else {
+                    return;
+                };
+                if let Some(bytes) = reader.read(&buffer, frame.size) {
+                    to.track_bytes(&bytes, frame.size.0 as usize * 4, frame.size);
+                }
+            }
+        }
+    };
+    match camera::CameraCapture::start(device, &config, sink) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(%e, device, "avatar: the camera didn't open");
+            None
+        }
+    }
 }
 
 /// The source's camera, its frames going to the trackers as they come.
@@ -297,6 +323,25 @@ impl Shared {
     /// A camera frame to the trackers (the capture's queue).
     #[cfg(target_os = "macos")]
     fn track(&self, buffer: &CVPixelBuffer) {
+        let read_only = CVPixelBufferLockFlags::ReadOnly;
+        // SAFETY: the buffer is locked for reading while its bytes are read
+        unsafe { CVPixelBufferLockBaseAddress(buffer, read_only) };
+        let (w, h) = (CVPixelBufferGetWidth(buffer) as u32, CVPixelBufferGetHeight(buffer) as u32);
+        let stride = CVPixelBufferGetBytesPerRow(buffer);
+        let base = CVPixelBufferGetBaseAddress(buffer) as *const u8;
+        if !base.is_null() {
+            // SAFETY: `base` holds `h` rows of `stride` bytes while locked
+            let bytes = unsafe { std::slice::from_raw_parts(base, stride * h as usize) };
+            self.track_bytes(bytes, stride, (w, h));
+        }
+        unsafe { CVPixelBufferUnlockBaseAddress(buffer, read_only) };
+    }
+
+    /// A BGRA camera frame (`h` rows `stride` bytes apart) to the trackers, which copy it.
+    fn track_bytes(&self, bytes: &[u8], stride: usize, (w, h): (u32, u32)) {
+        if w == 0 || h == 0 || bytes.len() < stride * (h as usize - 1) + w as usize * 4 {
+            return;
+        }
         let settings = self.settings.lock().clone();
         let body = !settings.is_flat() && settings.body_mode() != BodyMode::Off;
         let (face_t, body_t) = {
@@ -312,31 +357,21 @@ impl Shared {
         if face_t.is_null() {
             return;
         }
-        let read_only = CVPixelBufferLockFlags::ReadOnly;
-        // SAFETY: the buffer is locked for reading while its bytes are read
-        unsafe { CVPixelBufferLockBaseAddress(buffer, read_only) };
-        let (w, h) = (CVPixelBufferGetWidth(buffer) as u32, CVPixelBufferGetHeight(buffer) as u32);
-        let stride = CVPixelBufferGetBytesPerRow(buffer);
-        let base = CVPixelBufferGetBaseAddress(buffer) as *const u8;
-        if !base.is_null() {
-            let id = self.frame.load(Ordering::Relaxed) + 1;
-            let now = crate::clock::now_ns();
-            // SAFETY: `base` holds `h` rows of `stride` bytes while locked; the trackers copy it
-            unsafe {
-                raw::face_submit(face_t, base, stride as u32, w, h, id, now);
-                if !body_t.is_null() {
-                    raw::body_submit(body_t, base, stride as u32, w, h, id);
-                }
-            }
-            self.frame.store(id, Ordering::Release);
-            *self.size.lock() = (w, h);
-            if settings.show_tracking {
-                // SAFETY: as above
-                let bytes = unsafe { std::slice::from_raw_parts(base, stride * h as usize) };
-                *self.view.lock() = Some(small(bytes, stride, (w, h)));
+        let base = bytes.as_ptr();
+        let id = self.frame.load(Ordering::Relaxed) + 1;
+        let now = crate::clock::now_ns();
+        // SAFETY: `bytes` holds `h` rows of `stride` bytes; the trackers copy it
+        unsafe {
+            raw::face_submit(face_t, base, stride as u32, w, h, id, now);
+            if !body_t.is_null() {
+                raw::body_submit(body_t, base, stride as u32, w, h, id);
             }
         }
-        unsafe { CVPixelBufferUnlockBaseAddress(buffer, read_only) };
+        self.frame.store(id, Ordering::Release);
+        *self.size.lock() = (w, h);
+        if settings.show_tracking {
+            *self.view.lock() = Some(small(bytes, stride, (w, h)));
+        }
     }
 
     /// The face the tracker sees in the newest frame, if any, and its points.
@@ -458,7 +493,6 @@ fn mic_level(track: &str) -> f32 {
 }
 
 /// A BGRA picture at most [`VIEW_WIDTH`] wide (every n-th pixel), rows packed.
-#[cfg(target_os = "macos")]
 fn small(bytes: &[u8], stride: usize, (w, h): (u32, u32)) -> View {
     let step = w.div_ceil(VIEW_WIDTH).max(1);
     let (sw, sh) = (w / step, h / step);

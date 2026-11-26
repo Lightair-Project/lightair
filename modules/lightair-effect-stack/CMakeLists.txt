@@ -1,6 +1,7 @@
 # Lightair Effect Stack (docs/09-effect-stack.md): the face trackers Lightair's engine calls.
 # macOS: liblightair-tracker.dylib (tracking and segmentation on Core ML and Vision) and its
-# compiled models in tracker-models. The presets, sticker art and shaders in data/ are built into
+# compiled models in tracker-models. Windows: lightair-tracker.dll on ONNX Runtime with DirectML
+# and the ONNX models (cmake/windows-tracker.cmake). The presets, sticker art and shaders in data/ are built into
 # the app (lightair-preview, lightair-app).
 #
 # The old libobs module (lightair-effect-stack.plugin on macOS, lightair-effect-stack.dll on
@@ -17,7 +18,8 @@ option(LIGHTAIR_WITH_LIBOBS "Build the old libobs module too" OFF)
 if(CMAKE_HOST_WIN32)
   project(lightair-effect-stack VERSION 0.1.0 LANGUAGES C CXX)
   if(NOT LIGHTAIR_WITH_LIBOBS)
-    message(STATUS "Lightair Effect Stack: nothing to build on Windows yet (the trackers alone are macOS's)")
+    # the trackers alone, on ONNX Runtime with DirectML
+    include(cmake/windows-tracker.cmake)
     return()
   endif()
   include(cmake/windows.cmake)

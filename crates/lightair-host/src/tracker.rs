@@ -1,7 +1,10 @@
-//! The Effect Stack's trackers (macOS): `liblightair-tracker.dylib`, the face
-//! tracker and segmentation (Core ML and Vision) built alone from the module's sources, called
-//! through its C API (`face-tracker.h`). Loaded from the app's Frameworks (a bundle) or the
-//! module's build folder (development), with the compiled models beside it (`tracker-models`).
+//! The Effect Stack's trackers: the face tracker and segmentation built alone from the module's
+//! sources, called through its C API (`face-tracker.h`). macOS: `liblightair-tracker.dylib` on
+//! Core ML and Vision, from the app's Frameworks (a bundle) or the module's build folder
+//! (development), with the compiled models beside it (`tracker-models`). Windows:
+//! `lightair-tracker.dll` on ONNX Runtime with DirectML (`onnxruntime.dll` and `DirectML.dll`
+//! beside it), beside the app or in the module's build folder, the ONNX models in
+//! `tracker-models`; it runs on the graphics adapter Lightair's pictures are on.
 //! Without the library the looks have no tracker and say so ([`FaceTracker::available`]).
 
 use std::ffi::{CString, c_char, c_void};
@@ -56,6 +59,12 @@ struct Lib {
     body_get: unsafe extern "C" fn(Tracker, *mut c_void) -> bool,
 }
 
+/// The library's file name here.
+#[cfg(target_os = "macos")]
+const LIBRARY: &str = "liblightair-tracker.dylib";
+#[cfg(windows)]
+const LIBRARY: &str = "lightair-tracker.dll";
+
 // SAFETY: the library's functions may be called from any thread (they lock what they share).
 unsafe impl Send for Lib {}
 unsafe impl Sync for Lib {}
@@ -71,14 +80,15 @@ fn candidates() -> Vec<(PathBuf, PathBuf)> {
     }
     if let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
         // a bundle: Contents/MacOS/<app> → Contents/Frameworks, Contents/Resources
-        out.push((
-            exe_dir.join("../Frameworks/liblightair-tracker.dylib"),
-            exe_dir.join("../Resources/tracker-models"),
-        ));
+        #[cfg(target_os = "macos")]
+        out.push((exe_dir.join("../Frameworks").join(LIBRARY), exe_dir.join("../Resources/tracker-models")));
+        // Windows: beside the app
+        #[cfg(windows)]
+        out.push((exe_dir.join(LIBRARY), exe_dir.join("tracker-models")));
         // development: target/<profile>/<app> (or target/<profile>/deps/<test>)
         for up in ["..", "../.."] {
             let built = exe_dir.join(up).join("modules/lightair-effect-stack");
-            out.push((built.join("liblightair-tracker.dylib"), built.join("tracker-models")));
+            out.push((built.join(LIBRARY), built.join("tracker-models")));
         }
     }
     out
@@ -120,12 +130,44 @@ fn lib() -> Option<&'static Lib> {
                     _lib: l,
                 }
             };
+            #[cfg(windows)]
+            windows_setup(&folder_of(&path));
             tracing::info!(path = %path.display(), "trackers loaded");
             return Some(lib);
         }
         None
     })
     .as_ref()
+}
+
+/// The folder the library is in.
+#[cfg(windows)]
+fn folder_of(library: &Path) -> PathBuf {
+    library.parent().map(Path::to_path_buf).unwrap_or_default()
+}
+
+/// Windows, before any tracker is made: ONNX Runtime from beside the library (never another
+/// copy on the system), and DirectML on the adapter Lightair's pictures are on (index 0 is the
+/// integrated GPU on a laptop).
+#[cfg(windows)]
+fn windows_setup(folder: &Path) {
+    let Ok(l) = (unsafe { libloading::Library::new(folder.join(LIBRARY)) }) else { return };
+    // SAFETY: the symbols have the types face-tracker.h gives them; the library stays loaded
+    // (the copy `lib` keeps), so this handle can go.
+    unsafe {
+        type SetPath = unsafe extern "C" fn(*const c_char);
+        type SetDevice = unsafe extern "C" fn(*mut c_void);
+        if let Ok(set) = l.get::<SetPath>(b"face_tracker_set_runtime_library\0") {
+            let runtime = CString::new(folder.join("onnxruntime.dll").to_string_lossy().into_owned()).unwrap_or_default();
+            set(runtime.as_ptr());
+        }
+        if let Ok(set) = l.get::<SetDevice>(b"face_tracker_set_render_device\0")
+            && let Some(device) = crate::buffers::device()
+        {
+            use windows::core::Interface;
+            set(device.as_raw());
+        }
+    }
 }
 
 /// The face tracker and segmentation, for a host that tracks and smooths their results itself
