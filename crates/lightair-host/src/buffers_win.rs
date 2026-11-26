@@ -324,6 +324,15 @@ impl Copier {
         self.finish(&gpu).then_some(target)
     }
 
+    /// [`Copier::copy`] of a handle that's only valid for this call (Chromium's paint): opened
+    /// for the copy and let go after, since the same value may name another texture later.
+    pub fn copy_once(&mut self, handle: HANDLE, size: (u32, u32)) -> Option<Buffer> {
+        let copied = self.copy(handle, size, None);
+        let key = handle.0 as usize;
+        self.opened.retain(|(h, _, _)| *h != key);
+        copied
+    }
+
     /// A buffer holding a picture in memory: `size`, BGRA rows `stride` bytes apart. `None`
     /// when `data` is too short or every buffer is still held. Blocks until it's written.
     pub fn from_memory(&mut self, data: &[u8], stride: usize, size: (u32, u32)) -> Option<Buffer> {

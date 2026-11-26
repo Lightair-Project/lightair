@@ -716,6 +716,7 @@ impl State {
                 #[cfg(windows)]
                 if alone
                     && !made_here(source)
+                    && !crate::providers::handled(source)
                     && !matches!(source.kind.as_str(), lightair_model::kinds::SCREEN | lightair_model::kinds::CAMERA)
                 {
                     buffer_gpu::not_yet(&format!("{} sources in the compositor", source.kind));

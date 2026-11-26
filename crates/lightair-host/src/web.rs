@@ -6,7 +6,8 @@
 //!
 //! On macOS Chromium shares its frames as IOSurfaces ([`Frames`]): while Lightair's compositor
 //! wants a page, it draws Chromium's own surface of the newest frame, held in use (Chromium paints
-//! into another meanwhile) for as long as anything draws it ([`feed`]). A page's sound goes into
+//! into another meanwhile) for as long as anything draws it ([`feed`]); on Windows each frame is
+//! copied on the GPU into a Lightair buffer while it wants the page. A page's sound goes into
 //! its track in the mixer while a track takes it.
 
 use std::sync::Arc;
@@ -242,6 +243,113 @@ use mac::FEEDS;
 #[cfg(target_os = "macos")]
 pub use mac::{Feed, Frames, Surface, feed};
 
+/// Windows: Chromium shares each frame as a Direct3D 11 texture whose NT handle is valid only
+/// during its paint, so while Lightair's compositor wants the page each frame is copied on the
+/// GPU into a Lightair buffer of the page's own (or, when Chromium paints into memory, uploaded).
+#[cfg(windows)]
+mod win {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Weak};
+
+    use super::*;
+    use crate::buffers::{Buffer, Copier};
+
+    /// The page's frames for the compositor.
+    #[derive(Default)]
+    pub struct Frames {
+        copier: Mutex<Copier>,
+        /// The newest frame, and its count.
+        latest: Mutex<Option<(Buffer, u64)>>,
+        serial: std::sync::atomic::AtomicU64,
+        wanted: AtomicBool,
+        /// The page should paint again (the compositor has nothing of it yet).
+        repaint: AtomicBool,
+    }
+
+    impl Frames {
+        /// A frame Chromium shares (its paint, Chromium's thread): copied while wanted.
+        pub fn put_texture(&self, handle: *mut std::ffi::c_void, width: u32, height: u32) {
+            if handle.is_null() || width == 0 || height == 0 || !self.wanted.load(Ordering::Relaxed) {
+                return;
+            }
+            let copied = self.copier.lock().copy_once(windows::Win32::Foundation::HANDLE(handle), (width, height));
+            self.publish(copied);
+        }
+
+        /// A frame Chromium painted into memory (BGRA): uploaded while wanted.
+        pub fn put_memory(&self, bgra: &[u8], width: u32, height: u32) {
+            if !self.wanted.load(Ordering::Relaxed) {
+                return;
+            }
+            let copied = self.copier.lock().from_memory(bgra, width as usize * 4, (width, height));
+            self.publish(copied);
+        }
+
+        fn publish(&self, frame: Option<Buffer>) {
+            if let Some(buffer) = frame {
+                let serial = self.serial.fetch_add(1, Ordering::Relaxed) + 1;
+                *self.latest.lock() = Some((buffer, serial));
+            }
+        }
+
+        /// Whether a compositor shows the page (on: it's asked to paint once more, so a still
+        /// page has a frame).
+        pub fn want(&self, on: bool) {
+            let was = self.wanted.swap(on, Ordering::Relaxed);
+            if on && !was {
+                self.repaint.store(true, Ordering::Relaxed);
+            } else if !on && was {
+                *self.latest.lock() = None;
+            }
+        }
+
+        /// The newest frame and a count that changes with each new one.
+        pub fn frame(&self, _take: bool) -> Option<(Buffer, u64)> {
+            self.latest.lock().clone()
+        }
+
+        /// Whether the page was asked to paint again since last asked (and forgets it).
+        pub fn repaint_asked(&self) -> bool {
+            self.repaint.swap(false, Ordering::Relaxed)
+        }
+    }
+
+    /// The web pages' frames for Lightair's own compositor, by document source id (as text).
+    pub(super) static FEEDS: LazyLock<Mutex<HashMap<String, Weak<Frames>>>> = LazyLock::new(Default::default);
+
+    /// A web page's frames, as Lightair's own compositor takes them.
+    pub struct Feed(Arc<Frames>);
+
+    /// The frames of the web page of document source `source` (its id as text), when it has one.
+    pub fn feed(source: &str) -> Option<Feed> {
+        FEEDS.lock().get(source).and_then(Weak::upgrade).map(Feed)
+    }
+
+    impl Feed {
+        /// See [`Frames::want`].
+        pub fn want(&self, on: bool) {
+            self.0.want(on);
+        }
+
+        /// See [`Frames::frame`].
+        pub fn frame(&self, take: bool) -> Option<(Buffer, u64)> {
+            self.0.frame(take)
+        }
+    }
+
+    /// Chromium renders on the graphics adapter Lightair's buffers are on, so the textures it
+    /// shares open on their device (set once, before the first page).
+    pub fn use_buffers_adapter() {
+        if let Some(luid) = crate::buffers::adapter() {
+            lightair_web::set_gpu_adapter(luid.HighPart, luid.LowPart);
+        }
+    }
+}
+#[cfg(windows)]
+use win::FEEDS;
+#[cfg(windows)]
+pub use win::{Feed, Frames, feed};
+
 // ---------------------------------------------------------------------------------------------
 // The page
 
@@ -269,7 +377,7 @@ pub struct WebPage {
     texture: Option<lightair_web::TextureSink>,
     frame: lightair_web::FrameSink,
     audio: lightair_web::AudioSink,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     frames: Arc<Frames>,
 }
 
@@ -284,8 +392,15 @@ impl WebPage {
         elsewhere: Option<Arc<dyn Elsewhere>>,
     ) -> WebPage {
         let slot = crate::audio_host::mixer_on().then(|| crate::audio_host::feed_slot(source));
+        #[cfg(any(target_os = "macos", windows))]
+        let frames = Arc::new(Frames::default());
         let to = elsewhere.clone();
+        #[cfg(windows)]
+        let painted = frames.clone();
         let frame: lightair_web::FrameSink = Arc::new(move |bgra: &[u8], w: u32, h: u32| {
+            // where Chromium can't share textures, the compositor gets the frames from memory
+            #[cfg(windows)]
+            painted.put_memory(bgra, w, h);
             if let Some(e) = &to {
                 e.frame(bgra, w, h);
             }
@@ -299,15 +414,18 @@ impl WebPage {
                 e.audio(planes, rate);
             }
         });
-        #[cfg(target_os = "macos")]
-        let frames = Arc::new(Frames::default());
+        #[cfg(windows)]
+        let texture = texture.or_else(|| {
+            let f = frames.clone();
+            Some(Arc::new(move |handle, w, h| f.put_texture(handle, w, h)) as lightair_web::TextureSink)
+        });
         #[cfg(target_os = "macos")]
         let texture = texture.or_else(|| {
             let f = frames.clone();
             // SAFETY: Chromium hands its surface over during its paint
             Some(Arc::new(move |surface, _w, _h| unsafe { f.put(surface) }) as lightair_web::TextureSink)
         });
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if crate::show::own() {
             FEEDS.lock().insert(source.to_string(), Arc::downgrade(&frames));
         }
@@ -320,7 +438,7 @@ impl WebPage {
             texture,
             frame,
             audio,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             frames,
         }
     }
@@ -375,7 +493,7 @@ impl WebPage {
     /// painted since (a still page paints once), and closes the page once nothing has shown it
     /// for a moment.
     pub fn tick(&self) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if self.frames.repaint_asked()
             && let Some(page) = self.page.lock().as_ref()
         {
@@ -410,6 +528,8 @@ impl WebPage {
     fn ensure_open(&self) {
         let mut page = self.page.lock();
         if page.is_none() {
+            #[cfg(windows)]
+            win::use_buffers_adapter();
             let o = self.options.lock().clone();
             if !o.url.trim().is_empty() {
                 *page = Some(match &self.texture {
@@ -430,7 +550,7 @@ impl Drop for WebPage {
         if crate::audio_host::mixer_on() {
             crate::audio_host::feeds_itself_no_more(self.source);
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         FEEDS.lock().retain(|_, f| !std::ptr::eq(f.as_ptr(), Arc::as_ptr(&self.frames)));
     }
 }

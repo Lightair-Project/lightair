@@ -24,7 +24,7 @@ mod timed;
 mod compose;
 #[cfg(any(target_os = "macos", windows))]
 pub mod providers;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod provide_web;
 #[cfg(target_os = "macos")]
 mod provide_ndi;

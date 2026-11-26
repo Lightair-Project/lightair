@@ -49,9 +49,10 @@ fn providers() -> &'static [Arc<dyn Provider>] {
 fn builtin() -> Vec<Arc<dyn Provider>> {
     #[allow(unused_mut)]
     let mut all: Vec<Arc<dyn Provider>> = Vec::new();
+    #[cfg(any(target_os = "macos", windows))]
+    all.push(Arc::new(crate::provide_web::Web::default())); // web pages
     #[cfg(target_os = "macos")]
     {
-        all.push(Arc::new(crate::provide_web::Web::default()));
         all.push(Arc::new(crate::provide_ndi::Ndi::default())); // NDI
         all.push(Arc::new(crate::provide_syphon::Syphon::default())); // Syphon
         all.push(Arc::new(crate::provide_srt::Srt::default())); // SRT from another computer
@@ -60,6 +61,12 @@ fn builtin() -> Vec<Arc<dyn Provider>> {
     }
     all.push(Arc::new(crate::provide_frames::Frames)); // what lightair-host's runtimes make
     all
+}
+
+/// Whether a provider makes `source`'s pictures (it may have none yet: a page still loading).
+#[cfg(windows)]
+pub(crate) fn handled(source: &Source) -> bool {
+    providers().iter().any(|p| p.handles(source))
 }
 
 /// Tells every provider which of its sources `canvas` shows now.
