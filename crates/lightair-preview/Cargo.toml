@@ -41,8 +41,7 @@ objc2-io-surface = { version = "0.3", default-features = false, features = ["std
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTPixelRotationProperties", "VTPixelRotationSession", "VTPixelTransferProperties", "VTPixelTransferSession", "VTSession", "objc2-core-video"] }
 objc2 = "0.6.3"
 objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLTexture", "MTLPixelFormat", "MTLResource", "MTLTypes", "objc2-io-surface"] }
-# another computer's stream over SRT (provide_srt.rs): the listener, and the MPEG-TS demuxer
-# phone cameras use
+# another computer's stream over SRT (provide_srt.rs): as on Windows
 srt-tokio = "0.4.4"
 srt-protocol = "0.4.4"
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "macros", "sync"] }
@@ -54,6 +53,13 @@ libloading = "0.8"
 block2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]
+# another computer's stream over SRT (provide_srt.rs): the listener, and the MPEG-TS demuxer
+# phone cameras use (also on macOS)
+srt-tokio = "0.4.4"
+srt-protocol = "0.4.4"
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "macros", "sync"] }
+futures = "0.3"
+lightair-phone-camera.workspace = true
 # the compositor's device (Direct3D 12), which opens shared textures (win_gpu.rs)
 windows = { version = "0.62", features = [
     "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi",

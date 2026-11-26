@@ -10,7 +10,8 @@
 //!   link no address (`bridge::link_received_by_compositor`), so libobs never listens on the port
 //!   this provider listens on. The document keeps the address.
 //! - **Pictures.** The stream is split into access units as it arrives (the same MPEG-TS
-//!   demuxer as the phone cameras') and decoded by VideoToolbox into BGRA IOSurfaces, shown the
+//!   demuxer as the phone cameras') and decoded by VideoToolbox into BGRA IOSurfaces (Media
+//!   Foundation into Lightair's buffers on Windows), shown the
 //!   moment they're decoded, after a reorder of a few frames when the stream has B-frames. Each
 //!   picture is a buffer of the decoder's own, which it doesn't reuse while it's held.
 //! - **Sound.** AAC decoded by AudioToolbox is handed to libobs's media source for the link as
@@ -28,7 +29,9 @@ use lightair_model::{Id, Source};
 use lightair_host::phone_camera::{Decoder, Pictures};
 use lightair_host::bridge;
 use lightair_phone_camera::ts::{Codec, Demuxer, Kind, Unit};
+#[cfg(target_os = "macos")]
 use objc2_core_foundation::Type;
+#[cfg(target_os = "macos")]
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetIOSurface, CVPixelBufferGetPixelFormatType, kCVPixelFormatType_32BGRA,
 };
@@ -167,13 +170,24 @@ struct Slot {
 
 impl Slot {
     /// A picture from the decoder (BGRA, IOSurface-backed), shown once it's due.
+    #[cfg(target_os = "macos")]
     fn decoded(&self, image: &CVPixelBuffer, pts: Option<u64>) {
         if CVPixelBufferGetPixelFormatType(image) != kCVPixelFormatType_32BGRA
             || CVPixelBufferGetIOSurface(Some(image)).is_none()
         {
             return;
         }
-        let due = self.reorder.lock().push(pts, image.retain());
+        self.show(pts, image.retain());
+    }
+
+    /// A picture from the decoder (a BGRA Lightair buffer), shown once it's due.
+    #[cfg(windows)]
+    fn decoded(&self, image: &bridge::Buffer, pts: Option<u64>) {
+        self.show(pts, image.clone());
+    }
+
+    fn show(&self, pts: Option<u64>, picture: bridge::Buffer) {
+        let due = self.reorder.lock().push(pts, picture);
         // (only the newest due is shown: a compositor draws one picture a frame)
         if let Some(picture) = due.into_iter().last() {
             let serial = self.serial.fetch_add(1, Ordering::AcqRel) + 1;

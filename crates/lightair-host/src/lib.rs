@@ -43,6 +43,9 @@ pub mod outputs_host;
 pub mod phone_camera;
 #[cfg(target_os = "macos")]
 pub mod phone_decode;
+#[cfg(windows)]
+#[path = "phone_decode_win.rs"]
+pub mod phone_decode;
 #[cfg(target_os = "macos")]
 pub mod phone_run;
 pub mod phone_units;

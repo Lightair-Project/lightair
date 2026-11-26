@@ -51,11 +51,12 @@ fn builtin() -> Vec<Arc<dyn Provider>> {
     let mut all: Vec<Arc<dyn Provider>> = Vec::new();
     #[cfg(any(target_os = "macos", windows))]
     all.push(Arc::new(crate::provide_web::Web::default())); // web pages
+    #[cfg(any(target_os = "macos", windows))]
+    all.push(Arc::new(crate::provide_srt::Srt::default())); // SRT from another computer
     #[cfg(target_os = "macos")]
     {
         all.push(Arc::new(crate::provide_ndi::Ndi::default())); // NDI
         all.push(Arc::new(crate::provide_syphon::Syphon::default())); // Syphon
-        all.push(Arc::new(crate::provide_srt::Srt::default())); // SRT from another computer
         all.push(Arc::new(crate::provide_phone::Phone::default())); // the phone camera
         all.push(Arc::new(crate::provide_media::Media)); // media files
     }

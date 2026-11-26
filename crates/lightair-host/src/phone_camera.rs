@@ -30,7 +30,7 @@ use parking_lot::Mutex;
 
 /// The decoder phone feeds use (VideoToolbox and AudioToolbox), for other streams of the same
 /// kind (H.264 or HEVC and AAC, as access units).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub use crate::phone_decode::{Decoder, Pictures};
 
 /// The workspace kind of a Phone camera source.
