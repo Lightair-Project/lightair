@@ -694,6 +694,12 @@ impl StudioWindow {
                             area.update(cx, |a, cx| twice.iter().for_each(|id| a.remove_panel_view(*id, w, cx)));
                         });
                     }
+                    // Windows: owned by the main window, so it stays in front of it (as a macOS
+                    // utility panel does) without sitting over other apps
+                    #[cfg(windows)]
+                    if let Some(main) = s.main_window {
+                        own_by(cx, main, handle);
+                    }
                     s.dock_windows.push((handle, area));
                     s.after_move(cx);
                 }
@@ -948,6 +954,26 @@ impl StudioWindow {
             }
             menu
         })
+    }
+}
+
+/// Makes `owner` the owner of window `owned` (Windows): an owned window is always in front of its
+/// owner, minimises with it, and isn't over other apps' windows.
+#[cfg(windows)]
+fn own_by(cx: &mut App, owner: AnyWindowHandle, owned: AnyWindowHandle) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GWLP_HWNDPARENT, SetWindowLongPtrW};
+    let hwnd = |cx: &mut App, h: AnyWindowHandle| {
+        h.update(cx, |_, w, _| match HasWindowHandle::window_handle(w).map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
+            _ => None,
+        })
+        .ok()
+        .flatten()
+    };
+    if let (Some(owner), Some(owned)) = (hwnd(cx, owner), hwnd(cx, owned)) {
+        // SAFETY: both are this process's live top-level windows.
+        unsafe { SetWindowLongPtrW(owned as _, GWLP_HWNDPARENT, owner) };
     }
 }
 
