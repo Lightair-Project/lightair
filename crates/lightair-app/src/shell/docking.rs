@@ -977,6 +977,11 @@ impl StudioWindow {
                 self.show_place(super::Place::Editor, cx);
                 self.editor.update(cx, |e, cx| e.hook_tools(cx));
             }
+            // the Library's first card played in its player
+            Ok("library-play") => {
+                self.show_place(super::Place::Library, cx);
+                self.library.update(cx, |l, cx| l.hook_play(cx));
+            }
             Ok("library-pick") => {
                 self.show_place(super::Place::Library, cx);
                 self.library.update(cx, |l, cx| l.hook_pick(cx));

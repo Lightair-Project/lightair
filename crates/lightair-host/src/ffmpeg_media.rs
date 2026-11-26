@@ -95,15 +95,30 @@ pub struct FfmpegMedia {
     id: Id,
     rate: u32,
     control: Arc<Mutex<Control>>,
+    /// Where its sound goes instead of the mixer (the Library's player).
+    sound_to: Option<SoundTo>,
 }
+
+/// Where a player's sound goes instead of the mixer: stereo, interleaved, at the rate given, in
+/// real time.
+pub type SoundTo = Arc<dyn Fn(&[f32], u32) + Send + Sync>;
 
 impl FfmpegMedia {
     pub fn new(id: Id, settings: Settings, rate: u32) -> FfmpegMedia {
         // its sound into a track of the mixer
         crate::audio_host::feed_slot(id);
+        FfmpegMedia::make(id, settings, rate, None)
+    }
+
+    /// A player whose sound goes to `sound_to`, not into the mixer (not a document's source).
+    pub fn with_sound_to(id: Id, settings: Settings, rate: u32, sound_to: SoundTo) -> FfmpegMedia {
+        FfmpegMedia::make(id, settings, rate, Some(sound_to))
+    }
+
+    fn make(id: Id, settings: Settings, rate: u32, sound_to: Option<SoundTo>) -> FfmpegMedia {
         let control =
             Control { settings, run: None, state: state::NONE, from_ms: 0, since: None, size: (0, 0), duration_ms: 0 };
-        FfmpegMedia { id, rate, control: Arc::new(Mutex::new(control)) }
+        FfmpegMedia { id, rate, control: Arc::new(Mutex::new(control)), sound_to }
     }
 
     /// New settings: a new file or stream plays from the start (when it's playing).
@@ -244,11 +259,11 @@ impl FfmpegMedia {
         if let Ok(mut child) = cmd.spawn()
             && let Some(out) = child.stdout.take()
         {
-            let (id, rate, stop) = (self.id, self.rate, stop.clone());
+            let (id, rate, stop, sound_to) = (self.id, self.rate, stop.clone(), self.sound_to.clone());
             let control = (w == 0 || h == 0).then(|| self.control.clone());
             let _ = std::thread::Builder::new()
                 .name("lightair-ffmpeg-audio".into())
-                .spawn(move || read_sound(id, out, rate, stop, control));
+                .spawn(move || read_sound(id, out, rate, stop, control, sound_to));
             children.push(child);
         }
         if children.is_empty() {
@@ -307,6 +322,7 @@ fn read_sound(
     rate: u32,
     stop: Arc<AtomicBool>,
     control: Option<Arc<Mutex<Control>>>,
+    sound_to: Option<SoundTo>,
 ) {
     // 10 ms blocks, stereo
     let frames = (rate / 100).max(1) as usize;
@@ -319,7 +335,9 @@ fn read_sound(
         for (s, b) in samples.iter_mut().zip(bytes.as_chunks::<4>().0) {
             *s = f32::from_le_bytes(*b);
         }
-        if let Some(slot) = crate::audio_host::slot_of(id) {
+        if let Some(to) = &sound_to {
+            to(&samples, rate);
+        } else if let Some(slot) = crate::audio_host::slot_of(id) {
             slot.push(&samples, 2, rate);
         }
     }

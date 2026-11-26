@@ -249,7 +249,7 @@ impl Library {
 
     // ------------------------------------------------------------ actions
 
-    fn play(&mut self, workspace: &Path, id: Id, cx: &mut Context<Self>) {
+    pub(crate) fn play(&mut self, workspace: &Path, id: Id, cx: &mut Context<Self>) {
         let Some(item) = self.indexes.get(workspace).and_then(|i| i.get(id)).cloned() else { return };
         // the first file that's there: the program's video, or the first audio file
         let Some(path) = item.files.iter().map(|f| f.path.clone()).find(|p| p.exists() && !p.extension().is_some_and(|e| e == "json")) else {
@@ -976,7 +976,10 @@ impl Library {
         // straight from the player
         #[cfg(target_os = "macos")]
         let frame = p.player.frame();
-        #[cfg(not(target_os = "macos"))]
+        // (Windows: the player's picture read back for GPUI to draw)
+        #[cfg(windows)]
+        let frame = p.player.frame().and_then(|b| lightair_preview::frame_of_buffer(&b));
+        #[cfg(not(any(target_os = "macos", windows)))]
         let frame = p.preview.latest_frame();
 
         let sound_only = w == 0 || h == 0;

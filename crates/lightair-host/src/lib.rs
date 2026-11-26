@@ -55,7 +55,10 @@ pub mod own_outputs;
 pub mod program;
 #[cfg(target_os = "macos")]
 pub mod player;
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+#[path = "player_win.rs"]
+pub mod player;
+#[cfg(not(any(target_os = "macos", windows)))]
 #[path = "player_elsewhere.rs"]
 pub mod player;
 pub mod playlists;

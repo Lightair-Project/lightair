@@ -137,4 +137,12 @@ impl Library {
         self.picked = shown;
         cx.notify();
     }
+
+    /// For the check hook: the first card shown played in the Library's player.
+    pub(crate) fn hook_play(&mut self, cx: &mut Context<Self>) {
+        self.reload(cx);
+        if let Some((dir, id)) = self.shown(cx).into_iter().map(|(d, i)| (d, i.id)).next() {
+            self.play(&dir, id, cx);
+        }
+    }
 }
