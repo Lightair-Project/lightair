@@ -1452,12 +1452,20 @@ impl MixerPanel {
                             menu = menu.item(pick(to, String::new(), label, me.clone(), on));
                         }
                         menu = menu.separator().item(pick(
-                            TrackSource::Desktop,
+                            TrackSource::Desktop(String::new()),
                             String::new(),
                             "Desktop audio".into(),
                             me.clone(),
-                            current == TrackSource::Desktop,
+                            current == TrackSource::Desktop(String::new()),
                         ));
+                        // Windows: what one output plays (headphones, a second screen's speakers)
+                        if cfg!(windows) {
+                            for d in lightair_host::devices::output_devices() {
+                                let to = TrackSource::Desktop(d.id.clone());
+                                let on = to == current;
+                                menu = menu.item(pick(to, String::new(), format!("Desktop audio · {}", d.name), me.clone(), on));
+                            }
+                        }
                         let (me2, current2) = (me.clone(), current.clone());
                         menu.submenu("App", window, cx, move |mut sub, _, _| {
                             let apps = running_apps();
@@ -2234,8 +2242,9 @@ struct StripSource {
 enum TrackSource {
     /// An audio interface the engine opens ("" for the system default).
     Device(String),
-    /// Everything the computer plays.
-    Desktop,
+    /// Everything the computer plays ("": everything but Lightair), or what one output plays
+    /// (Windows: an output device by id, captured through loopback; macOS: a loopback device).
+    Desktop(String),
     /// One app (its bundle id; "" until one is chosen).
     App(String),
     /// Something else (a media object, an older capture): kept until another is chosen.
@@ -2251,7 +2260,10 @@ impl TrackSource {
                 TrackSource::Device(if lightair_host::devices::is_system_default(d) { String::new() } else { d.into() })
             }
             kinds::APP_AUDIO => TrackSource::App(i.settings["app"].as_str().unwrap_or("").into()),
-            kinds::DESKTOP_AUDIO => TrackSource::Desktop,
+            kinds::DESKTOP_AUDIO => {
+                let d = i.settings["device"].as_str().unwrap_or("");
+                TrackSource::Desktop(if lightair_host::devices::is_system_default(d) { String::new() } else { d.into() })
+            }
             _ => TrackSource::Other,
         }
     }
@@ -2264,7 +2276,9 @@ impl TrackSource {
                 lightair_host::devices::DEVICE_KIND,
                 json!({ "device": d }),
             ),
-            TrackSource::Desktop => ("Desktop audio".into(), kinds::DESKTOP_AUDIO, json!({})),
+            // (the device emptied: settings merge, so one chosen before doesn't stay)
+            TrackSource::Desktop(d) if d.is_empty() => ("Desktop audio".into(), kinds::DESKTOP_AUDIO, json!({ "device": "" })),
+            TrackSource::Desktop(d) => (desktop_label(d), kinds::DESKTOP_AUDIO, json!({ "device": d })),
             TrackSource::App(b) => (app_name.to_string(), kinds::APP_AUDIO, json!({ "app": b })),
             TrackSource::Other => (String::new(), "", json!({})),
         }
@@ -2290,6 +2304,14 @@ fn source_item(
             });
         }
     })
+}
+
+/// A desktop audio source from one output: "Desktop audio · <its name>".
+fn desktop_label(device: &str) -> String {
+    match lightair_host::devices::device_name(device) {
+        Some(name) => format!("Desktop audio · {name}"),
+        None => "Desktop audio".into(),
+    }
 }
 
 /// The microphone the OS is set to use (macOS's or Windows' default source).
@@ -2358,7 +2380,8 @@ fn strip_views(p: &Workspace) -> Vec<StripView> {
         let current = TrackSource::of(i);
         let (icon, label) = match &current {
             TrackSource::Device(d) => ("mic", lightair_host::devices::device_name(d).unwrap_or_else(|| SYSTEM_DEFAULT.into())),
-            TrackSource::Desktop => ("volume-2", "Desktop audio".into()),
+            TrackSource::Desktop(d) if d.is_empty() => ("volume-2", "Desktop audio".into()),
+            TrackSource::Desktop(d) => ("volume-2", desktop_label(d)),
             TrackSource::App(b) if b.is_empty() => ("app-window", "Pick an app".into()),
             TrackSource::App(_) => ("app-window", i.name.clone()),
             TrackSource::Other => (ui::source_icon(&i.kind), i.name.clone()),

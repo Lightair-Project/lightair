@@ -78,6 +78,27 @@ pub fn input_devices() -> Vec<DeviceInfo> {
         .collect()
 }
 
+/// The audio outputs this computer has, with their channel counts (Windows: each can be
+/// captured as desktop audio, through WASAPI loopback).
+pub fn output_devices() -> Vec<DeviceInfo> {
+    let host = cpal::default_host();
+    let default = host.default_output_device().and_then(|d| id_of(&d));
+    let Ok(devices) = host.output_devices() else { return vec![] };
+    devices
+        .filter_map(|d| {
+            let id = id_of(&d)?;
+            let config = d.default_output_config().ok()?;
+            Some(DeviceInfo {
+                default: default.as_deref() == Some(id.as_str()),
+                name: name_of(&d),
+                id,
+                channels: config.channels(),
+                sample_rate: config.sample_rate(),
+            })
+        })
+        .collect()
+}
+
 /// What a device setting is called: "" for the system's default, else the device's name (the
 /// setting itself when that device isn't here).
 pub fn device_name(device: &str) -> Option<String> {
@@ -313,9 +334,21 @@ impl Drop for Devices {
 }
 
 fn open(name: &str, sample_rate: u32, mut ring: rtrb::Producer<f32>) -> Result<(cpal::Stream, u16), String> {
-    let device = find_input(name).ok_or_else(|| format!("no audio input \"{name}\""))?;
+    // Windows: an output is captured as it plays (WASAPI loopback: an input stream on it, in
+    // the output's own formats)
+    let (device, loopback) = match find_input(name) {
+        Some(d) => (d, false),
+        None if cfg!(windows) && !is_system_default(name) => {
+            (find_output(name).ok_or_else(|| format!("no audio input or output \"{name}\""))?, true)
+        }
+        None => return Err(format!("no audio input \"{name}\"")),
+    };
     // all its channels, at the engine's rate if it can, in 32-bit float
-    let configs: Vec<_> = device.supported_input_configs().map_err(|e| e.to_string())?.collect();
+    let configs: Vec<_> = if loopback {
+        device.supported_output_configs().map_err(|e| e.to_string())?.collect()
+    } else {
+        device.supported_input_configs().map_err(|e| e.to_string())?.collect()
+    };
     let channels = configs.iter().map(|c| c.channels()).max().ok_or("the device has no inputs")?;
     let at_rate = configs.iter().find(|c| {
         c.channels() == channels && c.min_sample_rate() <= sample_rate && c.max_sample_rate() >= sample_rate
@@ -323,7 +356,8 @@ fn open(name: &str, sample_rate: u32, mut ring: rtrb::Producer<f32>) -> Result<(
     let rate = if at_rate.is_some() {
         sample_rate
     } else {
-        device.default_input_config().map_err(|e| e.to_string())?.sample_rate()
+        let default = if loopback { device.default_output_config() } else { device.default_input_config() };
+        default.map_err(|e| e.to_string())?.sample_rate()
     };
     let config = cpal::StreamConfig {
         channels,
