@@ -175,13 +175,13 @@ impl Gpu {
 
     /// `texture`'s picture (slice `slice`, NV12, `coded` big) as BGRA of `shown` size, finished on
     /// the GPU; the shared texture it's in and its NT handle.
-    fn bgra_of(&mut self, texture: &ID3D11Texture2D, slice: u32, shown: (u32, u32)) -> Option<HANDLE> {
+    fn bgra_of(&mut self, texture: &ID3D11Texture2D, slice: u32, shown: (u32, u32), rotation: u32) -> Option<(HANDLE, (u32, u32))> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.GetDesc(&mut desc) };
         let coded = (desc.Width, desc.Height);
-        let key = (coded, shown);
+        let key = (coded, shown, rotation);
         if self.convert.as_ref().is_none_or(|c| c.key != key) {
-            self.convert = Convert::new(&self.device, &self.video, &self.video_context, coded, shown);
+            self.convert = Convert::new(&self.device, &self.video, &self.video_context, coded, shown, rotation);
         }
         let c = self.convert.as_ref()?;
         let view_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
@@ -228,13 +228,16 @@ impl Gpu {
             }
             std::thread::yield_now();
         }
-        Some(c.handle)
+        Some((c.handle, c.out))
     }
 }
 
-/// NV12 of one size to BGRA of another, into a shared texture of its own.
+/// NV12 of one size to BGRA of another (turned clockwise by `rotation` degrees), into a shared
+/// texture of its own.
 struct Convert {
-    key: ((u32, u32), (u32, u32)),
+    key: ((u32, u32), (u32, u32), u32),
+    /// The turned size.
+    out: (u32, u32),
     enumerator: ID3D11VideoProcessorEnumerator,
     processor: ID3D11VideoProcessor,
     output: ID3D11VideoProcessorOutputView,
@@ -249,7 +252,10 @@ impl Convert {
         context: &ID3D11VideoContext1,
         coded: (u32, u32),
         shown: (u32, u32),
+        rotation: u32,
     ) -> Option<Convert> {
+        let turned = rotation == 90 || rotation == 270;
+        let out = if turned { (shown.1, shown.0) } else { shown };
         let rate = DXGI_RATIONAL { Numerator: 30, Denominator: 1 };
         let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
@@ -257,15 +263,15 @@ impl Convert {
             InputWidth: coded.0,
             InputHeight: coded.1,
             OutputFrameRate: rate,
-            OutputWidth: shown.0,
-            OutputHeight: shown.1,
+            OutputWidth: out.0,
+            OutputHeight: out.1,
             Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
         };
         let enumerator = unsafe { video.CreateVideoProcessorEnumerator(&content) }.ok()?;
         let processor = unsafe { video.CreateVideoProcessor(&enumerator, 0) }.ok()?;
         let desc = D3D11_TEXTURE2D_DESC {
-            Width: shown.0,
-            Height: shown.1,
+            Width: out.0,
+            Height: out.1,
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -305,8 +311,15 @@ impl Convert {
             context.VideoProcessorSetStreamColorSpace1(&processor, 0, input_space);
             context.VideoProcessorSetOutputColorSpace1(&processor, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
             context.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&source));
+            let turn = match rotation {
+                90 => D3D11_VIDEO_PROCESSOR_ROTATION_90,
+                180 => D3D11_VIDEO_PROCESSOR_ROTATION_180,
+                270 => D3D11_VIDEO_PROCESSOR_ROTATION_270,
+                _ => D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
+            };
+            context.VideoProcessorSetStreamRotation(&processor, 0, rotation != 0, turn);
         }
-        Some(Convert { key: (coded, shown), enumerator, processor, output: output?, _target: target, handle })
+        Some(Convert { key: (coded, shown, rotation), out, enumerator, processor, output: output?, _target: target, handle })
     }
 }
 
@@ -381,21 +394,21 @@ impl Video {
     }
 
     /// One access unit (Annex B, as received) decoded; each picture to `pictures`.
-    fn decode(&mut self, unit: &[u8], pts: u64, gpu: Option<&mut Gpu>, copier: &mut Copier, pictures: &Pictures) {
+    fn decode(&mut self, unit: &[u8], pts: u64, rotation: u32, gpu: Option<&mut Gpu>, copier: &mut Copier, pictures: &Pictures) {
         let Some(sample) = memory_sample(unit, (pts as i64) * 1000 / 9) else { return };
         let mut gpu = gpu;
         for _ in 0..2 {
             match unsafe { self.mft.ProcessInput(0, &sample, 0) } {
                 Ok(()) => break,
                 // full: take what's done and try once more
-                Err(e) if e.code() == MF_E_NOTACCEPTING => self.take(gpu.as_deref_mut(), copier, pictures),
+                Err(e) if e.code() == MF_E_NOTACCEPTING => self.take(rotation, gpu.as_deref_mut(), copier, pictures),
                 Err(_) => return,
             }
         }
-        self.take(gpu, copier, pictures);
+        self.take(rotation, gpu, copier, pictures);
     }
 
-    fn take(&mut self, mut gpu: Option<&mut Gpu>, copier: &mut Copier, pictures: &Pictures) {
+    fn take(&mut self, rotation: u32, mut gpu: Option<&mut Gpu>, copier: &mut Copier, pictures: &Pictures) {
         let (mut coded, mut shown) = (self.coded, self.shown);
         let mut outs = Vec::new();
         drain(
@@ -412,7 +425,7 @@ impl Video {
         for sample in outs {
             let pts = unsafe { sample.GetSampleTime() }.ok().map(|hns| (hns.max(0) as u64) * 9 / 1000);
             let picture = if self.gpu {
-                gpu.as_deref_mut().and_then(|g| on_gpu(&sample, g, self.shown, copier))
+                gpu.as_deref_mut().and_then(|g| on_gpu(&sample, g, self.shown, rotation, copier))
             } else {
                 in_memory(&sample, self.coded, self.shown, copier)
             };
@@ -444,7 +457,7 @@ fn aperture(t: &IMFMediaType) -> Option<(u32, u32)> {
 }
 
 /// A decoded picture in a Direct3D texture, as a Lightair buffer.
-fn on_gpu(sample: &IMFSample, gpu: &mut Gpu, shown: (u32, u32), copier: &mut Copier) -> Option<Buffer> {
+fn on_gpu(sample: &IMFSample, gpu: &mut Gpu, shown: (u32, u32), rotation: u32, copier: &mut Copier) -> Option<Buffer> {
     let buffer = unsafe { sample.GetBufferByIndex(0) }.ok()?;
     let dxgi: IMFDXGIBuffer = buffer.cast().ok()?;
     let mut raw = std::ptr::null_mut();
@@ -452,8 +465,8 @@ fn on_gpu(sample: &IMFSample, gpu: &mut Gpu, shown: (u32, u32), copier: &mut Cop
     // SAFETY: GetResource added a reference to the texture for us
     let texture = unsafe { ID3D11Texture2D::from_raw(raw) };
     let slice = unsafe { dxgi.GetSubresourceIndex() }.ok()?;
-    let handle = gpu.bgra_of(&texture, slice, shown)?;
-    copier.copy(handle, shown, None)
+    let (handle, size) = gpu.bgra_of(&texture, slice, shown, rotation)?;
+    copier.copy(handle, size, None)
 }
 
 /// A decoded picture in memory (NV12), as a Lightair buffer.
@@ -612,6 +625,8 @@ pub struct Decoder {
     copier: Copier,
     /// Said once that the sound couldn't be decoded.
     audio_failed: bool,
+    /// Clockwise degrees the pictures are turned (a phone's, upright).
+    rotation: u32,
     _mf: Option<Mf>,
 }
 
@@ -627,7 +642,7 @@ impl Decoder {
         if gpu.is_none() {
             tracing::info!("phone camera: decoding without the GPU's help (no Direct3D video device)");
         }
-        Decoder { video: None, audio: None, pictures, gpu, copier: Copier::new(), audio_failed: false, _mf: mf }
+        Decoder { video: None, audio: None, pictures, gpu, copier: Copier::new(), audio_failed: false, rotation: 0, _mf: mf }
     }
 
     /// One video access unit (Annex B) and its PTS (and DTS) on the 90 kHz clock, decoded before
@@ -652,7 +667,13 @@ impl Decoder {
             bytes.extend_from_slice(&[0, 0, 0, 1]);
             bytes.extend_from_slice(n);
         }
-        v.decode(&bytes, pts, self.gpu.as_mut(), &mut self.copier, &self.pictures);
+        v.decode(&bytes, pts, self.rotation, self.gpu.as_mut(), &mut self.copier, &self.pictures);
+    }
+
+    /// Turns the pictures clockwise by `degrees` (0, 90, 180, 270) as they're converted (on the
+    /// GPU; pictures decoded in memory aren't turned).
+    pub fn set_rotation(&mut self, degrees: u32) {
+        self.rotation = if matches!(degrees, 90 | 180 | 270) { degrees } else { 0 };
     }
 
     /// One unit of AAC in ADTS (one or more frames), decoded, each frame's planes and rate

@@ -38,7 +38,7 @@ mod provide_frames;
 mod provide_media;
 #[cfg(any(target_os = "macos", windows))]
 mod provide_srt;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod provide_phone;
 #[cfg(any(target_os = "macos", windows))]
 mod looks;

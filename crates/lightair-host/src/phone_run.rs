@@ -1,4 +1,4 @@
-//! A Phone camera source (macOS): each stream the phone sends (a new feed
+//! A Phone camera source (macOS, Windows): each stream the phone sends (a new feed
 //! generation) gets a decoder of its own, on a thread of its own. Its pictures go to the feed,
 //! which the compositor's phone provider takes them from; its microphone goes into the mixer by
 //! the source's id (a track takes it like any other source).
@@ -53,6 +53,8 @@ impl Drop for PhoneCamera {
 
 /// Decodes a stream's units until they stop: pictures to the feed, sound into the mixer.
 fn decode(id: Id, feed: Arc<Feed>, units: crossbeam_channel::Receiver<Unit>) {
+    #[cfg(windows)]
+    let feed_rotation = feed.clone();
     let to = feed;
     let pictures: Pictures = Arc::new(move |image, pts| {
         // (taken by the compositor's provider while it shows the source; else let go)
@@ -64,6 +66,9 @@ fn decode(id: Id, feed: Arc<Feed>, units: crossbeam_channel::Receiver<Unit>) {
     });
     let mut decoder = Decoder::new(true, pictures);
     for unit in units {
+        // Windows: the decoder turns the picture upright as it converts it
+        #[cfg(windows)]
+        decoder.set_rotation(feed_rotation.rotation());
         match unit.kind {
             UnitKind::H264 | UnitKind::Hevc => decoder.video(unit.kind == UnitKind::Hevc, &unit.data, unit.pts, None),
             UnitKind::Aac => decoder.sound(&unit.data, &mut |planes, rate| crate::bridge::sound(id, planes, rate)),

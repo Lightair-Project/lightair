@@ -15,7 +15,7 @@
 //!   another computer. Whether each is on air follows the program, the overlays, a switch under
 //!   way and the scenes drawn for outputs alone.
 //!
-//! What has no runtime yet on a platform (on Windows: phone cameras, a camera over USB) is logged once per kind; the methods that would reach it return
+//! What has no runtime yet on a platform (on Windows: a camera over USB) is logged once per kind; the methods that would reach it return
 //! nothing.
 
 use std::collections::{HashMap, HashSet};
@@ -124,7 +124,7 @@ fn need(source: &Source) -> Need {
         kinds::DESKTOP_AUDIO if mac || cfg!(windows) => Need::SystemSound(None),
         kinds::APP_AUDIO if mac || cfg!(windows) => Need::SystemSound(Some(text(s, "app"))),
         kinds::DESKTOP_AUDIO | kinds::APP_AUDIO => Need::Missing("desktop or app sound"),
-        crate::phone_camera::KIND if mac => Need::Phone,
+        crate::phone_camera::KIND if mac || cfg!(windows) => Need::Phone,
         crate::phone_camera::KIND => Need::Missing("phone camera"),
         crate::avatar::KIND if cfg!(any(target_os = "macos", windows)) => Need::Avatar,
         crate::avatar::KIND => Need::Missing("avatar"),
@@ -199,7 +199,7 @@ enum Runtime {
     },
     /// The sound slot is registered with the mixer by id (`crate::audio_host::feed_slot`).
     Link,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     Phone(crate::phone_run::PhoneCamera),
     #[cfg(any(target_os = "macos", windows))]
     Avatar(crate::avatar_run::AvatarRuntime),
@@ -436,7 +436,7 @@ impl Host {
             match rt {
                 #[cfg(any(target_os = "macos", windows))]
                 Runtime::Web { page, .. } => page.tick(),
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 Runtime::Phone(phone) => phone.tick(),
                 // a playlist's file ended: the next one
                 #[cfg(target_os = "macos")]
@@ -766,7 +766,7 @@ impl Host {
                 crate::audio_host::feed_slot(id);
                 Runtime::Link
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Need::Phone => Runtime::Phone(crate::phone_run::PhoneCamera::new(id)),
             #[cfg(any(target_os = "macos", windows))]
             Need::Avatar => Runtime::Avatar(crate::avatar_run::AvatarRuntime::new(id, s)),

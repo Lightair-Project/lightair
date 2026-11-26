@@ -9,13 +9,14 @@
 //!   back to libobs a second later.
 //! - **Upright.** The phone encodes as its sensor sees and says which way is up: a picture that
 //!   needs turning is turned by VideoToolbox into a buffer of a pool (one the compositor isn't
-//!   holding), on the decoder's thread.
+//!   holding), on the decoder's thread; on Windows the decoder's video processor turns it.
 //! - **Placeholder.** While no pictures come (no phone, or it dropped) this provider has no
 //!   frame, so libobs's wrapper, with its line saying what it waits for, stands in.
 //! - **Sound** is the phone's microphone, as before: the decoder hands it to the wrapper's
 //!   private source, which passes it on to the wrapper and so into the mix.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "macos")]
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -23,13 +24,16 @@ use std::time::{Duration, Instant};
 
 use lightair_model::{Id, Source};
 use lightair_host::{bridge, phone_camera};
+#[cfg(target_os = "macos")]
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, Type};
+#[cfg(target_os = "macos")]
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetIOSurface, CVPixelBufferGetPixelFormatType,
     CVPixelBufferGetWidth, CVPixelBufferPool, kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
     kCVPixelBufferMetalCompatibilityKey, kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
     kCVPixelFormatType_32BGRA, kCVReturnSuccess,
 };
+#[cfg(target_os = "macos")]
 use objc2_video_toolbox::{
     VTPixelRotationSession, VTSessionSetProperty, kVTPixelRotationPropertyKey_Rotation, kVTRotation_180,
     kVTRotation_CCW90, kVTRotation_CW90,
@@ -61,11 +65,26 @@ struct Slot {
     /// When a compositor last showed the source (`now_ms`): a decoder still handing pictures
     /// long after gives them back to libobs itself, in case no compositor runs any more.
     wanted_at: AtomicU64,
+    #[cfg(target_os = "macos")]
     turner: Mutex<Turner>,
 }
 
 impl Slot {
+    /// A decoded picture (already upright: the decoder turns it on Windows), kept as the newest;
+    /// whether it was taken.
+    #[cfg(windows)]
+    fn take(&self, image: &bridge::Buffer, _rotation: u32) -> bool {
+        if now_ms().saturating_sub(self.wanted_at.load(Ordering::Acquire)) > 2 * LINGER.as_millis() as u64 {
+            return false;
+        }
+        let serial = self.serial.fetch_add(1, Ordering::AcqRel) + 1;
+        let old = self.newest.lock().replace(Shown(image.clone(), serial));
+        drop(old);
+        true
+    }
+
     /// A decoded picture, turned upright and kept as the newest; whether it was taken.
+    #[cfg(target_os = "macos")]
     fn take(&self, image: &CVPixelBuffer, rotation: u32) -> bool {
         if now_ms().saturating_sub(self.wanted_at.load(Ordering::Acquire)) > 2 * LINGER.as_millis() as u64 {
             return false;
@@ -86,102 +105,111 @@ impl Slot {
     }
 }
 
-/// Turns pictures by quarter turns with VideoToolbox, into buffers of a pool sized for the
-/// turned picture (the pool hands out only buffers nobody holds).
-struct Turner {
-    session: Option<CFRetained<VTPixelRotationSession>>,
-    /// The rotation the session is set to (degrees clockwise).
-    set: u32,
-    pool: Option<(CFRetained<CVPixelBufferPool>, (usize, usize))>,
-}
+#[cfg(target_os = "macos")]
+use turning::Turner;
 
-// SAFETY: the session and pool are used under the slot's lock, one thread at a time.
-unsafe impl Send for Turner {}
+/// Turning pictures upright (macOS: VideoToolbox; on Windows the decoder turns them).
+#[cfg(target_os = "macos")]
+mod turning {
+    use super::*;
 
-impl Turner {
-    fn new() -> Turner {
-        Turner { session: None, set: 0, pool: None }
+    /// Turns pictures by quarter turns with VideoToolbox, into buffers of a pool sized for the
+    /// turned picture (the pool hands out only buffers nobody holds).
+    pub(super) struct Turner {
+        session: Option<CFRetained<VTPixelRotationSession>>,
+        /// The rotation the session is set to (degrees clockwise).
+        set: u32,
+        pool: Option<(CFRetained<CVPixelBufferPool>, (usize, usize))>,
     }
 
-    fn turn(&mut self, image: &CVPixelBuffer, rotation: u32) -> Option<bridge::Buffer> {
-        if self.session.is_none() {
-            let mut session: *mut VTPixelRotationSession = std::ptr::null_mut();
-            // SAFETY: `session` is a valid place for the new session
-            let rc = unsafe { VTPixelRotationSession::create(None, NonNull::from(&mut session)) };
-            if rc != 0 || session.is_null() {
-                tracing::warn!(rc, "phone camera: no VideoToolbox session to turn pictures");
-                return None;
-            }
-            // SAFETY: the session was just made, one reference ours
-            self.session = Some(unsafe { CFRetained::from_raw(NonNull::new_unchecked(session)) });
-            self.set = 0;
+    // SAFETY: the session and pool are used under the slot's lock, one thread at a time.
+    unsafe impl Send for Turner {}
+
+    impl Turner {
+        pub(super) fn new() -> Turner {
+            Turner { session: None, set: 0, pool: None }
         }
-        let session = self.session.as_ref()?;
-        if self.set != rotation {
-            // SAFETY: VideoToolbox's constant keys and values, read only
-            let value = unsafe {
-                match rotation {
-                    90 => kVTRotation_CW90,
-                    180 => kVTRotation_180,
-                    _ => kVTRotation_CCW90,
+
+        pub(super) fn turn(&mut self, image: &CVPixelBuffer, rotation: u32) -> Option<bridge::Buffer> {
+            if self.session.is_none() {
+                let mut session: *mut VTPixelRotationSession = std::ptr::null_mut();
+                // SAFETY: `session` is a valid place for the new session
+                let rc = unsafe { VTPixelRotationSession::create(None, NonNull::from(&mut session)) };
+                if rc != 0 || session.is_null() {
+                    tracing::warn!(rc, "phone camera: no VideoToolbox session to turn pictures");
+                    return None;
                 }
-            };
-            // SAFETY: the rotation key takes one of the rotation constants
-            let rc =
-                unsafe { VTSessionSetProperty(session, kVTPixelRotationPropertyKey_Rotation, Some(value.as_ref())) };
-            if rc != 0 {
+                // SAFETY: the session was just made, one reference ours
+                self.session = Some(unsafe { CFRetained::from_raw(NonNull::new_unchecked(session)) });
+                self.set = 0;
+            }
+            let session = self.session.as_ref()?;
+            if self.set != rotation {
+                // SAFETY: VideoToolbox's constant keys and values, read only
+                let value = unsafe {
+                    match rotation {
+                        90 => kVTRotation_CW90,
+                        180 => kVTRotation_180,
+                        _ => kVTRotation_CCW90,
+                    }
+                };
+                // SAFETY: the rotation key takes one of the rotation constants
+                let rc =
+                    unsafe { VTSessionSetProperty(session, kVTPixelRotationPropertyKey_Rotation, Some(value.as_ref())) };
+                if rc != 0 {
+                    return None;
+                }
+                self.set = rotation;
+            }
+            let (w, h) = (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image));
+            let size = if rotation % 180 == 90 { (h, w) } else { (w, h) };
+            if self.pool.as_ref().is_none_or(|(_, s)| *s != size) {
+                self.pool = pool(size).map(|p| (p, size));
+            }
+            let (pool, _) = self.pool.as_ref()?;
+            let mut out: *mut CVPixelBuffer = std::ptr::null_mut();
+            // SAFETY: `out` is a valid place for the new buffer
+            let rc = unsafe { CVPixelBufferPool::create_pixel_buffer(None, pool, NonNull::from(&mut out)) };
+            if rc != kCVReturnSuccess || out.is_null() {
                 return None;
             }
-            self.set = rotation;
+            // SAFETY: the pool gave one reference, ours
+            let turned = unsafe { CFRetained::from_raw(NonNull::new_unchecked(out)) };
+            // SAFETY: both are valid BGRA buffers, the destination the source's size turned
+            (unsafe { session.rotate_image(image, &turned) } == 0).then_some(turned)
         }
-        let (w, h) = (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image));
-        let size = if rotation % 180 == 90 { (h, w) } else { (w, h) };
-        if self.pool.as_ref().is_none_or(|(_, s)| *s != size) {
-            self.pool = pool(size).map(|p| (p, size));
-        }
-        let (pool, _) = self.pool.as_ref()?;
-        let mut out: *mut CVPixelBuffer = std::ptr::null_mut();
-        // SAFETY: `out` is a valid place for the new buffer
-        let rc = unsafe { CVPixelBufferPool::create_pixel_buffer(None, pool, NonNull::from(&mut out)) };
+    }
+
+    /// A pool of BGRA IOSurface-backed buffers Metal can use, `size` each.
+    fn pool(size: (usize, usize)) -> Option<CFRetained<CVPixelBufferPool>> {
+        let empty: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(&[], &[]);
+        let (format, w, h) = (
+            CFNumber::new_i32(kCVPixelFormatType_32BGRA as i32),
+            CFNumber::new_i64(size.0 as i64),
+            CFNumber::new_i64(size.1 as i64),
+        );
+        // SAFETY: CoreVideo's constant keys, read only
+        let keys: [&CFString; 5] = unsafe {
+            [
+                kCVPixelBufferPixelFormatTypeKey,
+                kCVPixelBufferWidthKey,
+                kCVPixelBufferHeightKey,
+                kCVPixelBufferIOSurfacePropertiesKey,
+                kCVPixelBufferMetalCompatibilityKey,
+            ]
+        };
+        let values: [&CFType; 5] = [format.as_ref(), w.as_ref(), h.as_ref(), empty.as_ref(), CFBoolean::new(true).as_ref()];
+        let attrs = CFDictionary::from_slices(&keys, &values);
+        let mut out: *mut CVPixelBufferPool = std::ptr::null_mut();
+        // SAFETY: `out` is a valid place for the new pool; the attributes outlive the call
+        let rc = unsafe { CVPixelBufferPool::create(None, None, Some(attrs.as_opaque()), NonNull::from(&mut out)) };
         if rc != kCVReturnSuccess || out.is_null() {
+            tracing::warn!(rc, ?size, "phone camera: no pool for turned pictures");
             return None;
         }
-        // SAFETY: the pool gave one reference, ours
-        let turned = unsafe { CFRetained::from_raw(NonNull::new_unchecked(out)) };
-        // SAFETY: both are valid BGRA buffers, the destination the source's size turned
-        (unsafe { session.rotate_image(image, &turned) } == 0).then_some(turned)
+        // SAFETY: the pool was just made, one reference ours
+        Some(unsafe { CFRetained::from_raw(NonNull::new_unchecked(out)) })
     }
-}
-
-/// A pool of BGRA IOSurface-backed buffers Metal can use, `size` each.
-fn pool(size: (usize, usize)) -> Option<CFRetained<CVPixelBufferPool>> {
-    let empty: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(&[], &[]);
-    let (format, w, h) = (
-        CFNumber::new_i32(kCVPixelFormatType_32BGRA as i32),
-        CFNumber::new_i64(size.0 as i64),
-        CFNumber::new_i64(size.1 as i64),
-    );
-    // SAFETY: CoreVideo's constant keys, read only
-    let keys: [&CFString; 5] = unsafe {
-        [
-            kCVPixelBufferPixelFormatTypeKey,
-            kCVPixelBufferWidthKey,
-            kCVPixelBufferHeightKey,
-            kCVPixelBufferIOSurfacePropertiesKey,
-            kCVPixelBufferMetalCompatibilityKey,
-        ]
-    };
-    let values: [&CFType; 5] = [format.as_ref(), w.as_ref(), h.as_ref(), empty.as_ref(), CFBoolean::new(true).as_ref()];
-    let attrs = CFDictionary::from_slices(&keys, &values);
-    let mut out: *mut CVPixelBufferPool = std::ptr::null_mut();
-    // SAFETY: `out` is a valid place for the new pool; the attributes outlive the call
-    let rc = unsafe { CVPixelBufferPool::create(None, None, Some(attrs.as_opaque()), NonNull::from(&mut out)) };
-    if rc != kCVReturnSuccess || out.is_null() {
-        tracing::warn!(rc, ?size, "phone camera: no pool for turned pictures");
-        return None;
-    }
-    // SAFETY: the pool was just made, one reference ours
-    Some(unsafe { CFRetained::from_raw(NonNull::new_unchecked(out)) })
 }
 
 /// A source whose feed this provider takes.
@@ -226,6 +254,7 @@ impl Provider for Phone {
                     newest: Mutex::new(None),
                     serial: AtomicU64::new(0),
                     wanted_at: AtomicU64::new(at),
+                    #[cfg(target_os = "macos")]
                     turner: Mutex::new(Turner::new()),
                 });
                 let into = slot.clone();

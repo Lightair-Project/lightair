@@ -46,7 +46,7 @@ pub mod phone_decode;
 #[cfg(windows)]
 #[path = "phone_decode_win.rs"]
 pub mod phone_decode;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod phone_run;
 pub mod phone_units;
 pub mod piair_voice;

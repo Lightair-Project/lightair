@@ -1,7 +1,8 @@
 //! The Phone camera layer's picture and sound (docs/07-scenes-layers-canvas.md, LY-16;
 //! lightair-live's docs/05 §6). A phone in Lightair Live's Camera mode sends MPEG-TS over SRT;
 //! the app receives it (`lightair-phone-camera`) and hands each unit to the source's [`Feed`],
-//! where this machine's decoder takes it (macOS: VideoToolbox, `phone_decode`).
+//! where this machine's decoder takes it (`phone_decode`: VideoToolbox on macOS, Media
+//! Foundation on Windows, which also turns the picture upright).
 //!
 //! `lightair_phone_camera` wraps that decoder:
 //!
@@ -156,12 +157,18 @@ fn now_us() -> u64 {
 /// What takes a feed's pictures (Lightair's compositor): each decoded picture
 /// (BGRA, IOSurface-backed, borrowed for the call) and the clockwise degrees that turn it
 /// upright. It answers whether it took the picture; one it didn't take isn't drawn.
+#[cfg(any(target_os = "macos", windows))]
+pub type Taker = Arc<dyn Fn(&Picture, u32) -> bool + Send + Sync>;
+
+/// A decoded picture as a taker gets it: a pixel buffer (macOS), a Lightair buffer (Windows).
 #[cfg(target_os = "macos")]
-pub type Taker = Arc<dyn Fn(&objc2_core_video::CVPixelBuffer, u32) -> bool + Send + Sync>;
+pub type Picture = objc2_core_video::CVPixelBuffer;
+#[cfg(windows)]
+pub type Picture = crate::buffers::Buffer;
 
 /// A feed's pictures while the compositor takes them: who takes them, and the newest it took
 /// (as decoded, not yet turned), which the wrapper draws.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Default)]
 pub struct Taken {
     taker: Option<Taker>,
@@ -170,7 +177,7 @@ pub struct Taken {
 
 // SAFETY: CoreVideo's buffers are reference counted thread-safely, and a decoded picture isn't
 // written again while it's held.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 unsafe impl Send for Taken {}
 
 /// One Phone camera source's feed, as the app sees it: where its stream goes, and what the
@@ -197,7 +204,7 @@ pub struct Feed {
     /// Data came since the decoder was last made.
     pub streamed: AtomicBool,
     /// The compositor taking the pictures, if it does.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub taken: Mutex<Taken>,
 }
 
@@ -222,7 +229,7 @@ impl Feed {
             timing: Mutex::new(Timing::default()),
             units: Mutex::new(None),
             undrawn: AtomicU64::new(0),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             taken: Mutex::new(Taken::default()),
         }
     }
@@ -287,8 +294,8 @@ impl Feed {
     }
 
     /// Lightair's compositor takes this feed's pictures (`Some`), or lets them go (`None`).
-    /// Pictures are BGRA IOSurfaces.
-    #[cfg(target_os = "macos")]
+    /// Pictures are BGRA IOSurfaces (macOS), Lightair buffers (Windows).
+    #[cfg(any(target_os = "macos", windows))]
     pub fn take(&self, taker: Option<Taker>) {
         let mut t = self.taken.lock();
         if taker.is_none() {
@@ -298,8 +305,9 @@ impl Feed {
     }
 
     /// A decoded picture, offered to the compositor: whether it took it.
-    #[cfg(target_os = "macos")]
-    pub fn offer(&self, image: &objc2_core_video::CVPixelBuffer) -> bool {
+    #[cfg(any(target_os = "macos", windows))]
+    pub fn offer(&self, image: &Picture) -> bool {
+        #[cfg(target_os = "macos")]
         use objc2_core_foundation::Type;
         let taker = {
             let mut t = self.taken.lock();
@@ -315,12 +323,16 @@ impl Feed {
         let took = taker(image, self.rotation());
         let mut t = self.taken.lock();
         // (kept only while still taken)
-        t.newest = (took && t.taker.is_some()).then(|| image.retain());
+        #[cfg(target_os = "macos")]
+        let kept = || image.retain();
+        #[cfg(windows)]
+        let kept = || image.clone();
+        t.newest = (took && t.taker.is_some()).then(kept);
         took
     }
 
-    /// The newest picture the compositor took, as decoded (not turned).
-    #[cfg(target_os = "macos")]
+    /// The newest picture the compositor took, as decoded (not turned on macOS).
+    #[cfg(any(target_os = "macos", windows))]
     pub fn newest_taken(&self) -> Option<crate::own_outputs::Buffer> {
         self.taken.try_lock()?.newest.clone()
     }
