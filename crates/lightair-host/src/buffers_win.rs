@@ -344,6 +344,19 @@ impl Copier {
         copied
     }
 
+    /// A buffer of `size` drawn into by `draw` (given the buffers' device and the buffer's
+    /// texture, under the device's lock); `None` when `draw` fails or every buffer is still held.
+    /// Finished on the GPU when it's handed out.
+    pub fn draw(&mut self, size: (u32, u32), draw: impl FnOnce(&ID3D11Device, &ID3D11Texture2D) -> bool) -> Option<Buffer> {
+        let gpu = self.gpu()?;
+        let target = self.take(&gpu, size)?;
+        let drawn = {
+            let _lock = gpu.lock.lock();
+            draw(&gpu.device, target.texture())
+        };
+        (drawn && self.finish(&gpu)).then_some(target)
+    }
+
     /// A buffer holding a picture in memory: `size`, BGRA rows `stride` bytes apart. `None`
     /// when `data` is too short or every buffer is still held. Blocks until it's written.
     pub fn from_memory(&mut self, data: &[u8], stride: usize, size: (u32, u32)) -> Option<Buffer> {

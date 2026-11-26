@@ -173,17 +173,33 @@ impl Gpu {
         Some(Gpu { device, context, manager, video, video_context, query: query?, convert: None })
     }
 
-    /// `texture`'s picture (slice `slice`, NV12, `coded` big) as BGRA of `shown` size, finished on
-    /// the GPU; the shared texture it's in and its NT handle.
-    fn bgra_of(&mut self, texture: &ID3D11Texture2D, slice: u32, shown: (u32, u32), rotation: u32) -> Option<(HANDLE, (u32, u32))> {
+    /// The conversion for `texture`'s pictures at `shown` size, turned by `rotation`.
+    fn convert_for(&mut self, texture: &ID3D11Texture2D, shown: (u32, u32), rotation: u32) -> Option<&mut Convert> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.GetDesc(&mut desc) };
         let coded = (desc.Width, desc.Height);
         let key = (coded, shown, rotation);
         if self.convert.as_ref().is_none_or(|c| c.key != key) {
-            self.convert = Convert::new(&self.device, &self.video, &self.video_context, coded, shown, rotation);
+            self.convert = Convert::new(&self.video, &self.video_context, coded, shown, rotation);
         }
-        let c = self.convert.as_ref()?;
+        self.convert.as_mut()
+    }
+
+    /// Whether Lightair's buffers are on this decoder's device (its pictures converted straight
+    /// into them).
+    fn shares_buffers(&self) -> bool {
+        crate::buffers::device().is_some_and(|d| d.as_raw() == self.device.as_raw())
+    }
+
+    /// The video processor's pass from `texture`'s slice into `output`.
+    fn blt(
+        &self,
+        texture: &ID3D11Texture2D,
+        slice: u32,
+        enumerator: &ID3D11VideoProcessorEnumerator,
+        processor: &ID3D11VideoProcessor,
+        output: &ID3D11VideoProcessorOutputView,
+    ) -> bool {
         let view_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
             FourCC: 0,
             ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
@@ -192,18 +208,46 @@ impl Gpu {
             },
         };
         let mut input = None;
-        unsafe { self.video.CreateVideoProcessorInputView(texture, &c.enumerator, &view_desc, Some(&mut input)) }
-            .ok()?;
-        let stream = D3D11_VIDEO_PROCESSOR_STREAM {
-            Enable: true.into(),
-            pInputSurface: ManuallyDrop::new(input),
-            ..Default::default()
-        };
-        let mut streams = [stream];
-        let blitted = unsafe { self.video_context.VideoProcessorBlt(&c.processor, &c.output, 0, &streams) };
+        if unsafe { self.video.CreateVideoProcessorInputView(texture, enumerator, &view_desc, Some(&mut input)) }.is_err() {
+            return false;
+        }
+        let mut streams =
+            [D3D11_VIDEO_PROCESSOR_STREAM { Enable: true.into(), pInputSurface: ManuallyDrop::new(input), ..Default::default() }];
+        let blitted = unsafe { self.video_context.VideoProcessorBlt(processor, output, 0, &streams) };
         // the stream's reference to the input view is ours to drop
         unsafe { ManuallyDrop::drop(&mut streams[0].pInputSurface) };
-        blitted.ok()?;
+        blitted.is_ok()
+    }
+
+    /// `texture`'s picture (slice `slice`, NV12) converted into `target` (one of Lightair's
+    /// buffers, on this device, the conversion's size). The GPU finishes it later: the caller
+    /// waits (`Copier::draw`).
+    fn bgra_into(&mut self, texture: &ID3D11Texture2D, slice: u32, shown: (u32, u32), rotation: u32, target: &ID3D11Texture2D) -> bool {
+        let video = self.video.clone();
+        let Some(c) = self.convert_for(texture, shown, rotation) else { return false };
+        let Some(output) = c.view_of(&video, target) else { return false };
+        let (enumerator, processor) = (c.enumerator.clone(), c.processor.clone());
+        self.blt(texture, slice, &enumerator, &processor, &output)
+    }
+
+    /// The size `texture`'s pictures convert to at `shown`, turned by `rotation`.
+    fn out_size(&mut self, texture: &ID3D11Texture2D, shown: (u32, u32), rotation: u32) -> Option<(u32, u32)> {
+        self.convert_for(texture, shown, rotation).map(|c| c.out)
+    }
+
+    /// `texture`'s picture (slice `slice`, NV12) as BGRA of `shown` size in the conversion's own
+    /// shared texture, finished on the GPU: its NT handle and size (for a decoder whose device
+    /// isn't the buffers').
+    fn bgra_of(&mut self, texture: &ID3D11Texture2D, slice: u32, shown: (u32, u32), rotation: u32) -> Option<(HANDLE, (u32, u32))> {
+        let (device, video) = (self.device.clone(), self.video.clone());
+        let c = self.convert_for(texture, shown, rotation)?;
+        let out = c.out;
+        let (enumerator, processor) = (c.enumerator.clone(), c.processor.clone());
+        let own = c.own(&device, &video)?;
+        let (output, handle) = (own.output.clone(), own.handle);
+        if !self.blt(texture, slice, &enumerator, &processor, &output) {
+            return None;
+        }
         // finished before another device copies it
         unsafe {
             self.context.End(&self.query);
@@ -213,12 +257,7 @@ impl Gpu {
         loop {
             let mut done = BOOL(0);
             let read = unsafe {
-                self.context.GetData(
-                    &self.query,
-                    Some(&mut done as *mut BOOL as *mut _),
-                    size_of::<BOOL>() as u32,
-                    0,
-                )
+                self.context.GetData(&self.query, Some(&mut done as *mut BOOL as *mut _), size_of::<BOOL>() as u32, 0)
             };
             if read.is_ok() && done.as_bool() {
                 break;
@@ -228,7 +267,7 @@ impl Gpu {
             }
             std::thread::yield_now();
         }
-        Some((c.handle, c.out))
+        Some((handle, out))
     }
 }
 
@@ -259,14 +298,20 @@ fn shared_video_device() -> Option<ID3D11Device> {
     Some(device)
 }
 
-/// NV12 of one size to BGRA of another (turned clockwise by `rotation` degrees), into a shared
-/// texture of its own.
+/// NV12 of one size to BGRA of another (turned clockwise by `rotation` degrees): into Lightair's
+/// buffers directly when they're on the decoder's device, else into a shared texture of its own
+/// ([`Own`], made the first time it's needed).
 struct Convert {
     key: ((u32, u32), (u32, u32), u32),
     /// The turned size.
     out: (u32, u32),
     enumerator: ID3D11VideoProcessorEnumerator,
     processor: ID3D11VideoProcessor,
+    own: Option<Own>,
+}
+
+/// The conversion's own shared texture, for a decoder on a device of its own.
+struct Own {
     output: ID3D11VideoProcessorOutputView,
     _target: ID3D11Texture2D,
     handle: HANDLE,
@@ -274,7 +319,6 @@ struct Convert {
 
 impl Convert {
     fn new(
-        device: &ID3D11Device,
         video: &ID3D11VideoDevice,
         context: &ID3D11VideoContext1,
         coded: (u32, u32),
@@ -296,6 +340,57 @@ impl Convert {
         };
         let enumerator = unsafe { video.CreateVideoProcessorEnumerator(&content) }.ok()?;
         let processor = unsafe { video.CreateVideoProcessor(&enumerator, 0) }.ok()?;
+        // HD's colours from 720 lines up, SD's below; the picture's coded margin cut off
+        let input_space = if shown.1 >= 720 {
+            DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709
+        } else {
+            DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601
+        };
+        let source = RECT { left: 0, top: 0, right: shown.0.min(coded.0) as i32, bottom: shown.1.min(coded.1) as i32 };
+        unsafe {
+            context.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+            context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
+            context.VideoProcessorSetStreamColorSpace1(&processor, 0, input_space);
+            context.VideoProcessorSetOutputColorSpace1(&processor, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+            context.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&source));
+            let turn = match rotation {
+                90 => D3D11_VIDEO_PROCESSOR_ROTATION_90,
+                180 => D3D11_VIDEO_PROCESSOR_ROTATION_180,
+                270 => D3D11_VIDEO_PROCESSOR_ROTATION_270,
+                _ => D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
+            };
+            context.VideoProcessorSetStreamRotation(&processor, 0, rotation != 0, turn);
+        }
+        Some(Convert { key: (coded, shown, rotation), out, enumerator, processor, own: None })
+    }
+
+    /// Its own shared texture to convert into, made once.
+    fn own(&mut self, device: &ID3D11Device, video: &ID3D11VideoDevice) -> Option<&Own> {
+        if self.own.is_none() {
+            self.own = Own::new(device, video, &self.enumerator, self.out);
+        }
+        self.own.as_ref()
+    }
+
+    /// An output view of `target` (BGRA, [`Convert::out`] big) for this conversion.
+    fn view_of(&self, video: &ID3D11VideoDevice, target: &ID3D11Texture2D) -> Option<ID3D11VideoProcessorOutputView> {
+        let out_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+            ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } },
+        };
+        let mut output = None;
+        unsafe { video.CreateVideoProcessorOutputView(target, &self.enumerator, &out_desc, Some(&mut output)) }.ok()?;
+        output
+    }
+}
+
+impl Own {
+    fn new(
+        device: &ID3D11Device,
+        video: &ID3D11VideoDevice,
+        enumerator: &ID3D11VideoProcessorEnumerator,
+        out: (u32, u32),
+    ) -> Option<Own> {
         let desc = D3D11_TEXTURE2D_DESC {
             Width: out.0,
             Height: out.1,
@@ -324,33 +419,12 @@ impl Convert {
             Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } },
         };
         let mut output = None;
-        unsafe { video.CreateVideoProcessorOutputView(&target, &enumerator, &out_desc, Some(&mut output)) }.ok()?;
-        // HD's colours from 720 lines up, SD's below; the picture's coded margin cut off
-        let input_space = if shown.1 >= 720 {
-            DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709
-        } else {
-            DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601
-        };
-        let source = RECT { left: 0, top: 0, right: shown.0.min(coded.0) as i32, bottom: shown.1.min(coded.1) as i32 };
-        unsafe {
-            context.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-            context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
-            context.VideoProcessorSetStreamColorSpace1(&processor, 0, input_space);
-            context.VideoProcessorSetOutputColorSpace1(&processor, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
-            context.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&source));
-            let turn = match rotation {
-                90 => D3D11_VIDEO_PROCESSOR_ROTATION_90,
-                180 => D3D11_VIDEO_PROCESSOR_ROTATION_180,
-                270 => D3D11_VIDEO_PROCESSOR_ROTATION_270,
-                _ => D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
-            };
-            context.VideoProcessorSetStreamRotation(&processor, 0, rotation != 0, turn);
-        }
-        Some(Convert { key: (coded, shown, rotation), out, enumerator, processor, output: output?, _target: target, handle })
+        unsafe { video.CreateVideoProcessorOutputView(&target, enumerator, &out_desc, Some(&mut output)) }.ok()?;
+        Some(Own { output: output?, _target: target, handle })
     }
 }
 
-impl Drop for Convert {
+impl Drop for Own {
     fn drop(&mut self) {
         let _ = unsafe { CloseHandle(self.handle) };
     }
@@ -492,6 +566,11 @@ pub(crate) fn on_gpu(sample: &IMFSample, gpu: &mut Gpu, shown: (u32, u32), rotat
     // SAFETY: GetResource added a reference to the texture for us
     let texture = unsafe { ID3D11Texture2D::from_raw(raw) };
     let slice = unsafe { dxgi.GetSubresourceIndex() }.ok()?;
+    // on the buffers' own device: converted straight into one of them
+    if gpu.shares_buffers() {
+        let out = gpu.out_size(&texture, shown, rotation)?;
+        return copier.draw(out, |_, target| gpu.bgra_into(&texture, slice, shown, rotation, target));
+    }
     let (handle, size) = gpu.bgra_of(&texture, slice, shown, rotation)?;
     copier.copy(handle, size, None)
 }
