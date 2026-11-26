@@ -29,10 +29,10 @@ use crate::phone_units::{adts, nals, parameter_set};
 pub type Pictures = Arc<dyn Fn(&Buffer, Option<u64>) + Send + Sync>;
 
 /// Media Foundation started for as long as a decoder lives.
-struct Mf;
+pub(crate) struct Mf;
 
 impl Mf {
-    fn start() -> Option<Mf> {
+    pub(crate) fn start() -> Option<Mf> {
         // S_FALSE (already) and RPC_E_CHANGED_MODE (a single-threaded apartment) both leave the
         // thread able to use Media Foundation
         let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
@@ -143,10 +143,10 @@ fn drain(mft: &IMFTransform, mut renegotiate: impl FnMut(&IMFTransform) -> bool,
 
 /// The GPU side: a video device on the adapter Lightair's buffers are on, the device manager the
 /// decoder uses it through, and the conversion to BGRA.
-struct Gpu {
+pub(crate) struct Gpu {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
-    manager: IMFDXGIDeviceManager,
+    pub(crate) manager: IMFDXGIDeviceManager,
     video: ID3D11VideoDevice,
     video_context: ID3D11VideoContext1,
     query: ID3D11Query,
@@ -157,7 +157,7 @@ struct Gpu {
 unsafe impl Send for Gpu {}
 
 impl Gpu {
-    fn new() -> Option<Gpu> {
+    pub(crate) fn new() -> Option<Gpu> {
         let device = lightair_encode::windows::video_device(crate::buffers::device().as_ref()).ok()?;
         let context = unsafe { device.GetImmediateContext() }.ok()?;
         let mut token = 0u32;
@@ -446,7 +446,7 @@ impl Drop for Video {
 }
 
 /// The part of the picture shown (its minimum display aperture), when the type says.
-fn aperture(t: &IMFMediaType) -> Option<(u32, u32)> {
+pub(crate) fn aperture(t: &IMFMediaType) -> Option<(u32, u32)> {
     let mut area = MFVideoArea::default();
     let mut size = 0u32;
     let bytes = unsafe {
@@ -457,7 +457,7 @@ fn aperture(t: &IMFMediaType) -> Option<(u32, u32)> {
 }
 
 /// A decoded picture in a Direct3D texture, as a Lightair buffer.
-fn on_gpu(sample: &IMFSample, gpu: &mut Gpu, shown: (u32, u32), rotation: u32, copier: &mut Copier) -> Option<Buffer> {
+pub(crate) fn on_gpu(sample: &IMFSample, gpu: &mut Gpu, shown: (u32, u32), rotation: u32, copier: &mut Copier) -> Option<Buffer> {
     let buffer = unsafe { sample.GetBufferByIndex(0) }.ok()?;
     let dxgi: IMFDXGIBuffer = buffer.cast().ok()?;
     let mut raw = std::ptr::null_mut();
@@ -470,7 +470,7 @@ fn on_gpu(sample: &IMFSample, gpu: &mut Gpu, shown: (u32, u32), rotation: u32, c
 }
 
 /// A decoded picture in memory (NV12), as a Lightair buffer.
-fn in_memory(sample: &IMFSample, coded: (u32, u32), shown: (u32, u32), copier: &mut Copier) -> Option<Buffer> {
+pub(crate) fn in_memory(sample: &IMFSample, coded: (u32, u32), shown: (u32, u32), copier: &mut Copier) -> Option<Buffer> {
     let buffer = unsafe { sample.ConvertToContiguousBuffer() }.ok()?;
     let mut at: *mut u8 = std::ptr::null_mut();
     let mut len = 0u32;

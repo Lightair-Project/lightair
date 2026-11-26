@@ -12,6 +12,9 @@
 //! A rotation stored in the file (a phone's portrait video) is turned upright by FFmpeg as it
 //! decodes, and the size the probe reports is the turned one, so the pictures match it.
 //!
+//! On Windows a local file goes to Media Foundation first (`ffmpeg_media_mf.rs`: decoded on the
+//! GPU); the tool plays what it can't.
+//!
 //! Not yet: `speed_percent` (always normal speed), `clear_on_media_end`.
 
 use std::io::Read;
@@ -25,6 +28,10 @@ use lightair_model::Id;
 use parking_lot::Mutex;
 
 use crate::media::{MediaStateCode, state};
+
+#[cfg(windows)]
+#[path = "ffmpeg_media_mf.rs"]
+mod mf;
 
 /// A command for the `ffmpeg` tool. Windows: without a console window of its own (from a window
 /// app, each run would flash one).
@@ -210,6 +217,30 @@ impl FfmpegMedia {
         let settings = c.settings.clone();
         if settings.input.is_empty() {
             return;
+        }
+        // Windows: a local file Media Foundation plays decodes on the GPU; the tool for the rest
+        #[cfg(windows)]
+        if settings.local {
+            let stop = Arc::new(AtomicBool::new(false));
+            let job = mf::Job {
+                id: self.id,
+                path: settings.input.clone(),
+                from_ms,
+                looping: settings.looping,
+                rate: self.rate,
+                stop: stop.clone(),
+                control: self.control.clone(),
+                sound_to: self.sound_to.clone(),
+            };
+            if let Some((size, duration_ms)) = mf::play(job) {
+                c.size = size;
+                c.duration_ms = duration_ms;
+                c.run = Some(Run { children: Vec::new(), stop });
+                c.from_ms = from_ms;
+                c.since = Some(Instant::now());
+                c.state = state::PLAYING;
+                return;
+            }
         }
         let Ok(ffmpeg) = lightair_render::media::ffmpeg() else {
             tracing::warn!(id = %self.id, "media: no ffmpeg to play it");
