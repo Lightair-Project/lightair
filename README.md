@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="site/assets/lockup-white.svg">
-    <img src="site/assets/lockup-ink.svg" alt="Lightair" height="64">
+    <source media="(prefers-color-scheme: dark)" srcset="branding/final/lockup/lightair-lockup-white.svg">
+    <img src="branding/final/lockup/lightair-lockup-ink.svg" alt="Lightair" height="64">
   </picture>
 </p>
 
@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="site/assets/editor-zoom.webp" alt="Lightair's Editor: a Studio take of an app on a gradient backdrop, a 2× zoom selected on the zoom track with its settings, the screen, backdrop, mic and music on their own tracks" width="100%">
+  <img src=".github/readme/editor-zoom.webp" alt="Lightair's Editor: a Studio take of an app on a gradient backdrop, a 2× zoom selected on the zoom track with its settings, the screen, backdrop, mic and music on their own tracks" width="100%">
 </p>
 
 Lightair is one app for app demos, podcasts and streams. Record a **Studio take** and it keeps the pointer, clicks and keys as data, so it can zoom where you clicked and redraw the pointer smooth; it keeps every screen, camera and mic in a file of its own; and its **Editor** cuts it all on a real timeline. The same app is a full live studio. Underneath is Lightair's own engine (a GPU compositor, a real-time mixer and the system's hardware encoders), with an interface written in **Rust** on **GPUI**.
@@ -46,7 +46,7 @@ Lightair updates itself (Settings › About), and never installs an update while
 - Every mic a channel strip with **Voice Clarity** in one switch, every one recorded to its own file; face-aware camera effects; landscape and vertical at once.
 
 <p align="center">
-  <img src="site/assets/editor-titles.webp" alt="The Editor's Text panel with title styles, a moving title selected with its settings, and a timeline of titles, a shape, a take, its backdrop and its sound" width="100%">
+  <img src=".github/readme/editor-titles.webp" alt="The Editor's Text panel with title styles, a moving title selected with its settings, and a timeline of titles, a shape, a take, its backdrop and its sound" width="100%">
 </p>
 
 **Build the show**
@@ -81,7 +81,7 @@ Lightair updates itself (Settings › About), and never installs an update while
 - A console that tells you what needs attention (an unplugged mic, a stream that stopped) and fixes it.
 
 <p align="center">
-  <img src="site/assets/formats.webp" alt="Landscape and vertical formats of one show side by side: the vertical one puts the camera on top and the chat below" width="100%">
+  <img src=".github/readme/formats.webp" alt="Landscape and vertical formats of one show side by side: the vertical one puts the camera on top and the chat below" width="100%">
 </p>
 
 ## Build from source

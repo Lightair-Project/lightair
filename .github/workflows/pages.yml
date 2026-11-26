@@ -1,4 +1,5 @@
-# The website (site/) on GitHub Pages: https://moongoblindev.github.io/lightair/
+# The old website's address on GitHub Pages: site/ is a page sending visitors to
+# https://lightair.app (index.html, and 404.html for any old path).
 name: Website
 
 on:
