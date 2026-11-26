@@ -585,7 +585,7 @@ fn normalize_combo(keys: &str) -> String {
 #[cfg(test)]
 mod tests {
     // (not `super::*`: gpui's own `test` macro would come with it)
-    use super::{Computer, DESTRUCTIVE_KEYS, DESTRUCTIVE_WORDS, Rect, WinInfo, contains_word, mask, normalize_combo};
+    use super::{DESTRUCTIVE_KEYS, DESTRUCTIVE_WORDS, Rect, WinInfo, contains_word, mask, normalize_combo};
 
     fn destructive(keys: &str) -> bool {
         DESTRUCTIVE_KEYS.contains(&normalize_combo(keys).as_str())
@@ -620,7 +620,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn only_the_apps_on_the_list_are_allowed() {
-        let c = Computer::default();
+        let c = super::Computer::default();
         assert!(!c.allowed("com.apple.TextEdit"), "nothing by default");
         c.allowed.lock().unwrap().push("com.apple.TextEdit".into());
         assert!(c.allowed("com.apple.textedit"));
