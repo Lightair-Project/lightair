@@ -7,7 +7,9 @@
 //!                              (for measuring performance)
 //!   cargo xtask dist       the app to ship: target/dist/Lightair.app and Lightair-<version>.dmg,
 //!                              everything it runs inside it, signed with a Developer ID and
-//!                              notarized (LIGHTAIR_NOTARY_PROFILE) (macOS)
+//!                              notarized (LIGHTAIR_NOTARY_PROFILE) (macOS); on Windows
+//!                              target/dist/Lightair and Lightair-<version>-windows-x64.zip,
+//!                              everything beside lightair.exe (LIGHTAIR_SIGN_CERT signs it)
 //!   cargo xtask dev        Windows: Chromium's runtime next to target/debug for `cargo run`
 //!   cargo xtask virtual-camera [--uninstall]  build "Lightair Virtual Camera" (the camera
 //!                          extension and its installer, modules/lightair-virtual-camera),
@@ -26,6 +28,9 @@
 //!                              them; refuses while a cargo build holds the lock)
 
 use std::path::{Path, PathBuf};
+
+#[cfg(windows)]
+use anyhow::Context;
 use std::process::Command;
 
 #[cfg(target_os = "macos")]
@@ -335,17 +340,142 @@ fn dev(release: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Windows: the app to ship. Not yet: the Windows app is being moved off libobs (its
-/// compositor, captures and outputs), and nothing of libobs or OBS ships any more.
+/// Windows: the app to ship, `target/dist/Lightair` (a folder that runs from anywhere) and
+/// `target/dist/Lightair-<version>-windows-x64.zip`. Everything Lightair runs sits beside
+/// `lightair.exe`: Chromium for web sources, the MSVC runtime, the Effect Stack's trackers
+/// (`lightair-tracker.dll` with ONNX Runtime and their models; DirectML is the system's), the virtual camera's
+/// `lightair_camera.dll`, the command-line tools some features run (FFmpeg; whisper.cpp when
+/// it's installed) and PiAir. Nothing of libobs or OBS is in it.
+///
+/// Signed with Authenticode (`signtool`) when `LIGHTAIR_SIGN_CERT` names a certificate's SHA-1
+/// thumbprint in the user's store; unsigned otherwise (SmartScreen warns on first run).
 #[cfg(windows)]
 fn dist_windows() -> anyhow::Result<()> {
-    anyhow::bail!("the Windows app is being moved off libobs: `cargo xtask dist` doesn't build it yet")
+    let root = root();
+    run(Command::new("cargo").current_dir(&root).args([
+        "build",
+        "--release",
+        "-p",
+        "lightair-app",
+        "-p",
+        "lightair-web-helper",
+        "-p",
+        "lightair-camera-win",
+    ]))?;
+    modules()?;
+    let dist = root.join("target/dist");
+    let out = dist.join("Lightair");
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out)?;
+    let release = root.join("target/release");
+    for file in ["lightair.exe", "lightair-web-helper.exe", "lightair_camera.dll"] {
+        std::fs::copy(release.join(file), out.join(file)).with_context(|| file.to_string())?;
+    }
+    chromium_runtime(&out)?;
+    // the MSVC runtime the binaries link
+    let crt = msvc_runtime().ok_or_else(|| anyhow::anyhow!("no MSVC runtime (Visual Studio's redistributable)"))?;
+    for entry in std::fs::read_dir(&crt)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == "dll") {
+            std::fs::copy(&path, out.join(path.file_name().unwrap()))?;
+        }
+    }
+    // the trackers and what they run on: ONNX Runtime (MIT); DirectML is Windows' own (System32,
+    // Windows 10 1903 on), unless LIGHTAIR_BUNDLE_DIRECTML ships Microsoft's redistributable
+    // beside it (its own license terms, not the GPL's: see docs/15-platform-distribution-licensing.md)
+    let modules = root.join("target/modules/lightair-effect-stack");
+    let mut trackers = vec!["lightair-tracker.dll", "onnxruntime.dll"];
+    if std::env::var_os("LIGHTAIR_BUNDLE_DIRECTML").is_some() {
+        trackers.push("DirectML.dll");
+    }
+    for file in trackers {
+        std::fs::copy(modules.join(file), out.join(file)).with_context(|| file.to_string())?;
+    }
+    copy_dir(&modules.join("tracker-models"), &out.join("tracker-models"))?;
+    // the tools features run (found beside the app first)
+    for (tool, needed) in [("ffmpeg", true), ("ffprobe", true), ("whisper-cli", false)] {
+        match installed_tool(tool) {
+            Some(found) => {
+                std::fs::copy(&found, out.join(format!("{tool}.exe")))?;
+            }
+            None if needed => anyhow::bail!("{tool} isn't installed (scoop install ffmpeg)"),
+            None => eprintln!("{tool} isn't installed: transcription won't be in the app"),
+        }
+    }
+    if let Err(e) = piair_binary(&out.join("piair.exe")) {
+        eprintln!("PiAir isn't in the app: {e}");
+    }
+    // signed, when there's a certificate
+    if let Ok(thumbprint) = std::env::var("LIGHTAIR_SIGN_CERT") {
+        for entry in std::fs::read_dir(&out)? {
+            let path = entry?.path();
+            let ours = path.file_name().is_some_and(|n| {
+                let n = n.to_string_lossy();
+                n.starts_with("lightair") || n == "piair.exe"
+            });
+            if ours {
+                run(Command::new("signtool")
+                    .args(["sign", "/fd", "SHA256", "/tr", "http://timestamp.digicert.com", "/td", "SHA256", "/sha1"])
+                    .arg(&thumbprint)
+                    .arg(&path))?;
+            }
+        }
+    } else {
+        eprintln!("unsigned (set LIGHTAIR_SIGN_CERT to a code-signing certificate's thumbprint)");
+    }
+    let version = app_version()?;
+    let zip = dist.join(format!("Lightair-{version}-windows-x64.zip"));
+    let _ = std::fs::remove_file(&zip);
+    // (Windows' own tar writes zip files)
+    run(Command::new("tar").arg("-a").arg("-c").arg("-f").arg(&zip).arg("-C").arg(&dist).arg("Lightair"))?;
+    eprintln!("built {} and {}", out.display(), zip.display());
+    Ok(())
+}
+
+/// A command-line tool as installed: on PATH (through a Scoop shim, the program it points at).
+#[cfg(windows)]
+fn installed_tool(tool: &str) -> Option<PathBuf> {
+    let exe = format!("{tool}.exe");
+    let found = std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(&exe)).find(|p| p.is_file())?;
+    let shim = found.with_extension("shim");
+    if let Ok(text) = std::fs::read_to_string(&shim) {
+        let target = text.lines().find_map(|l| l.trim().strip_prefix("path = "))?.trim().trim_matches('"');
+        return Some(PathBuf::from(target));
+    }
+    Some(found)
+}
+
+/// The app's version (lightair-app's, from the workspace).
+#[cfg(windows)]
+fn app_version() -> anyhow::Result<String> {
+    let text = std::fs::read_to_string(root().join("Cargo.toml"))?;
+    let in_package = text.split("[workspace.package]").nth(1).unwrap_or("");
+    let version = in_package
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("version").map(|v| v.trim_start_matches([' ', '=']).trim().trim_matches('"').to_string()))
+        .ok_or_else(|| anyhow::anyhow!("no version in the workspace's Cargo.toml"))?;
+    Ok(version)
+}
+
+/// Copies a folder's files and folders into `to`.
+#[cfg(windows)]
+fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dst = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &dst)?;
+        } else {
+            std::fs::copy(entry.path(), dst)?;
+        }
+    }
+    Ok(())
 }
 
 /// The MSVC runtime's redistributable folder (`Microsoft.VC143.CRT`, x64) of an installed
 /// Visual Studio or its Build Tools.
 #[cfg(windows)]
-#[allow(dead_code, reason = "the Windows app's dist, once it's off libobs")]
 fn msvc_runtime() -> Option<PathBuf> {
     let vs = PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio");
     let alt = PathBuf::from(r"C:\Program Files\Microsoft Visual Studio");
