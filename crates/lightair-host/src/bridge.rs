@@ -188,7 +188,7 @@ static TAKEN: Mutex<Taken> = Mutex::new(Taken(None));
 pub fn publish_capture(source: Id, buffer: &Buffer) {
     TAKEN.lock().0.get_or_insert_with(HashMap::new).insert(source, buffer.clone());
     // a Studio take recording it
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     crate::studio_take::frame(source, buffer);
 }
 

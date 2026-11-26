@@ -1,6 +1,6 @@
 //! A Studio take's video (docs/plans/screen-studio.md, 4.2): each screen and camera in the
 //! program recorded to a file of its own, at its own size, as fragmented MP4 (a take that stops
-//! abruptly keeps what was written). On macOS: each source's frames as the
+//! abruptly keeps what was written). On macOS and Windows: each source's frames as the
 //! compositor captures them (`crate::bridge::publish_capture`) go to a recording of Lightair's
 //! own, keyed by a feed of the take's.
 //!
@@ -32,7 +32,7 @@ pub struct StudioTake {
     keys: Vec<Id>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod feeds {
     use std::collections::HashMap;
 
@@ -45,7 +45,7 @@ mod feeds {
 
 /// A source's newest captured frame (the compositor's capture): to its take's recording, when a
 /// take records it. Any thread.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub fn frame(source: Id, buffer: &crate::buffers::Buffer) {
     let key = feeds::FEEDS.lock().as_ref().and_then(|f| f.get(&source).copied());
     if let Some(key) = key {
@@ -53,9 +53,21 @@ pub fn frame(source: Id, buffer: &crate::buffers::Buffer) {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn even(v: u32) -> u32 {
     v.max(2) & !1
+}
+
+/// A captured frame's size.
+#[cfg(target_os = "macos")]
+fn size_of(buffer: &crate::buffers::Buffer) -> (u32, u32) {
+    use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
+    (CVPixelBufferGetWidth(buffer) as u32, CVPixelBufferGetHeight(buffer) as u32)
+}
+
+#[cfg(windows)]
+fn size_of(buffer: &crate::buffers::Buffer) -> (u32, u32) {
+    buffer.size()
 }
 
 impl StudioTake {
@@ -67,15 +79,13 @@ impl StudioTake {
         outputs: &mut crate::outputs_host::Outputs,
         encoders: &[String],
     ) -> Result<StudioTake, String> {
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = (sources, folder, fps, outputs, encoders);
-            Err("Studio takes are recorded on macOS only for now.".into())
+            Err("Studio takes are recorded on macOS and Windows only.".into())
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
-            use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
-
             use crate::outputs::{Container, RecordingConfig, default_encoders};
 
             std::fs::create_dir_all(folder).map_err(|e| format!("Can't create the take's folder: {e}"))?;
@@ -85,7 +95,7 @@ impl StudioTake {
                 let screen = source.kind == lightair_model::kinds::SCREEN;
                 // its size as captured now
                 let (w, h) = crate::bridge::captured(id)
-                    .map(|b| (CVPixelBufferGetWidth(&b) as u32, CVPixelBufferGetHeight(&b) as u32))
+                    .map(|b| size_of(&b))
                     .filter(|(w, h)| *w > 0 && *h > 0)
                     .map_or((1920, 1080), |(w, h)| (even(w), even(h)));
                 let key = Id::new();
@@ -135,7 +145,7 @@ impl StudioTake {
 
     /// The feeds and their shapes let go.
     fn let_go(&mut self) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             let sources: Vec<Id> = self.tracks.iter().map(|t| t.source).collect();
             if let Some(f) = feeds::FEEDS.lock().as_mut() {
