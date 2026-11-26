@@ -3694,3 +3694,6 @@ mod pictures {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
