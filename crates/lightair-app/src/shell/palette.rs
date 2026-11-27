@@ -43,6 +43,8 @@ pub(super) enum PaletteAction {
     ResetLayout,
     /// A panel by name, as Window › its title.
     Panel(&'static str),
+    /// A plugin's command: its package id and the command's id.
+    Plugin(String, String),
 }
 
 pub(super) struct Entry {
@@ -176,6 +178,10 @@ fn layout_entries(saved: &[String]) -> Vec<Entry> {
     for (name, title, _) in super::dock_windows::PANELS.iter().flat_map(|g| g.iter()) {
         out.push(Entry { label: format!("Window: {title}"), hint: "", icon: "app-window", action: PaletteAction::Panel(name) });
     }
+    // running plugins' commands, under their names
+    for (package, name, c) in crate::helpers_host::commands() {
+        out.push(Entry { label: format!("{name}: {}", c.title), hint: "Plugin", icon: "puzzle", action: PaletteAction::Plugin(package, c.id) });
+    }
     out
 }
 
@@ -260,6 +266,20 @@ impl StudioWindow {
             DeleteLayout(name) => self.delete_mode(&name, cx),
             ResetLayout => self.reset_layout(window, cx),
             Panel(name) => self.show_panel(name, cx),
+            Plugin(package, command) => {
+                // the helper answers on its own time: off the main thread, a problem to the status bar
+                let studio = self.studio.clone();
+                cx.spawn(async move |_, cx| {
+                    let result = cx.background_executor().spawn(async move { crate::helpers_host::run_command(&package, &command) }).await;
+                    if let Err(e) = result {
+                        studio.update(cx, |s, cx| {
+                            s.issue = Some(e.into());
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
             Replay => self.studio.update(cx, |s, cx| s.replay_last_clip(cx)),
             AddScene => self.add_scene(cx),
             AddImage => self.add_image(window, cx),

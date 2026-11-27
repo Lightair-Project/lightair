@@ -217,6 +217,18 @@ pub fn current_notice() -> Option<Notice> {
     s.newest.as_ref().filter(|(_, t)| t.elapsed() < NOTICE_SHOWN).map(|(n, _)| n.clone())
 }
 
+/// A notice a plugin asked to show (`notifications.show`): not a refusal, not urgent.
+pub fn message(plugin: &str, text: &str) {
+    let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
+    let n = Notice { plugin: plugin.into(), kind: None, text: text.into(), refused: false, urgent: false };
+    if s.notices.len() >= 100 {
+        s.notices.pop_front();
+    }
+    s.newest = Some((n.clone(), Instant::now()));
+    s.notices.push_back(n);
+    s.generation += 1;
+}
+
 /// The notices of this run, newest last.
 pub fn notices() -> Vec<Notice> {
     state().lock().unwrap_or_else(|e| e.into_inner()).notices.iter().cloned().collect()

@@ -43,6 +43,7 @@ mod permissions;
 mod piair;
 mod catalogs;
 mod grants;
+mod helpers_host;
 mod links;
 mod plugin_activity;
 mod platforms;

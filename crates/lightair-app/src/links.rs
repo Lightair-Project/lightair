@@ -12,6 +12,9 @@ pub enum Link {
     Install { id: String, version: Option<String>, catalog: Option<String> },
     /// `lightair://catalog?url=…`.
     Catalog { url: String },
+    /// `lightair://install?git=<https URL>&rev=<tag, branch or commit>`: a package straight from a
+    /// git repository (not from a catalog).
+    Git { url: String, rev: String },
 }
 
 static PENDING: Mutex<Vec<Link>> = Mutex::new(Vec::new());
@@ -49,6 +52,7 @@ pub fn parse(url: &str) -> Option<Link> {
         .collect();
     let get = |k: &str| params.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()).filter(|v| !v.is_empty());
     match what.trim_end_matches('/') {
+        "install" if get("git").is_some() => Some(Link::Git { url: get("git")?, rev: get("rev").unwrap_or_else(|| "main".into()) }),
         "install" => Some(Link::Install { id: get("id")?, version: get("version"), catalog: get("catalog") }),
         "catalog" => Some(Link::Catalog { url: get("url")? }),
         _ => None,

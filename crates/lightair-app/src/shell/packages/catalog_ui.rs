@@ -224,8 +224,27 @@ impl StudioWindow {
                     self.install_from_catalog(catalog, id, version, window, cx);
                 }
                 Link::Catalog { url } => self.add_catalog_from_url(url, window, cx),
+                Link::Git { url, rev } => self.install_from_git(url, rev, window, cx),
             }
         }
+    }
+
+    /// Installs a package from a git repository: cloned off the UI thread, then the install screen.
+    pub(crate) fn install_from_git(&mut self, url: String, rev: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_packages_panel(window, cx);
+        self.package_note(format!("Getting {url} at {rev}…"), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let read = cx.background_executor().spawn(async move { pk::prepare_git(&url, &rev) }).await;
+            match read {
+                Ok(prepared) => {
+                    let _ = StudioWindow::confirm_and_install(&this, cx, prepared).await;
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| this.package_note(format!("Couldn't install from git: {e}"), cx));
+                }
+            }
+        })
+        .detach();
     }
 
     /// Updates every package with a newer version: one question for those asking for nothing
@@ -372,6 +391,79 @@ impl StudioWindow {
                 for n in crate::plugin_activity::notices() {
                     tracing::info!(text = n.text, refused = n.refused, "CHECK notice");
                 }
+            }
+            // helpers (crate::helpers_host)
+            "pkg-helpers" => {
+                for p in pk::installed().iter() {
+                    let id = p.id().as_str();
+                    if let Some(st) = crate::helpers_host::status(id) {
+                        tracing::info!(id, running = st.running, ready = st.ready, full_access = st.full_access, error = ?st.error, enabled = crate::helpers_host::enabled(id), declared = ?crate::helpers_host::declared(id), settings = ?crate::helpers_host::setting_values(id), "CHECK helper");
+                    } else if p.manifest.contents.iter().any(|c| c.kind == lightair_packages::Kind::Helper) {
+                        tracing::info!(id, enabled = crate::helpers_host::enabled(id), "CHECK helper not running");
+                    }
+                }
+                for (package, name, c) in crate::helpers_host::commands() {
+                    tracing::info!(package, name, command = c.id, title = c.title, "CHECK palette command");
+                }
+                for (package, name, st) in crate::helpers_host::steps() {
+                    tracing::info!(package, name, step = st.id, title = st.title, "CHECK automation step");
+                }
+            }
+            "pkg-command" => {
+                let (id, command) = (args.next().unwrap_or_default().to_string(), args.next().unwrap_or_default().to_string());
+                std::thread::spawn(move || tracing::info!(result = ?crate::helpers_host::run_command(&id, &command), "CHECK command"));
+            }
+            "pkg-step" => {
+                let (id, step) = (args.next().unwrap_or_default().to_string(), args.next().unwrap_or_default().to_string());
+                let params: serde_json::Value = serde_json::from_str(&args.collect::<Vec<_>>().join(" ")).unwrap_or_else(|_| serde_json::json!({}));
+                std::thread::spawn(move || {
+                    let mut call = params.clone();
+                    call["package"] = serde_json::json!(id);
+                    call["step"] = serde_json::json!(step);
+                    tracing::info!(result = ?crate::helpers_host::api("plugins.step", &call), "CHECK step");
+                });
+            }
+            "pkg-export" => {
+                let Some(dir) = self.studio.read(cx).workspace_dir() else { return };
+                let workspace = self.studio.read(cx).workspace().clone();
+                pk::record_show(&dir, &workspace);
+                tracing::info!(result = ?pk::export_show(&dir, std::path::Path::new(rest.trim())), "CHECK export");
+            }
+            "pkg-bundled" => {
+                let show = std::path::PathBuf::from(rest.trim());
+                let missing: Vec<(lightair_packages::PackageId, Option<semver::Version>)> = pk::check_show(&show)
+                    .map(|(_, res)| res.missing.iter().map(|m| (m.id.clone(), m.locked.as_ref().map(|l| l.version.clone()))).collect())
+                    .unwrap_or_default();
+                let found = pk::bundled_for(&show, &missing);
+                tracing::info!(missing = ?missing, bundled = ?found, "CHECK bundled");
+                for path in found {
+                    match pk::prepare(&path) {
+                        Ok(p) => {
+                            let (title, detail) = install_screen(&p);
+                            tracing::info!("CHECK install screen: {title} / {}", detail.replace('\n', " | "));
+                            tracing::info!(result = ?pk::install(p).map(|i| i.installed.id().to_string()), "CHECK installed from the show");
+                        }
+                        Err(e) => tracing::warn!("CHECK prepare failed: {e}"),
+                    }
+                }
+            }
+            "pkg-remove" => tracing::info!(result = ?lightair_packages::PackageId::new(rest.trim()).map_err(|e| e.to_string()).and_then(|id| pk::remove(&id, None)), "CHECK removed"),
+            "pkg-git" => {
+                let (url, rev) = (args.next().unwrap_or_default().to_string(), args.next().unwrap_or("main").to_string());
+                std::thread::spawn(move || match pk::prepare_git(&url, &rev) {
+                    Ok(p) => {
+                        let (title, detail) = install_screen(&p);
+                        tracing::info!("CHECK install screen: {title} / {}", detail.replace('\n', " | "));
+                        tracing::info!(result = ?pk::install(p).map(|i| format!("{} from {}", i.installed.id(), pk::source_label(&i.installed.record.source))), "CHECK installed from git");
+                    }
+                    Err(e) => tracing::warn!("CHECK git failed: {e}"),
+                });
+            }
+            "pkg-helper-on" | "pkg-helper-off" => crate::helpers_host::set_enabled(rest.trim(), cmd == "pkg-helper-on"),
+            "pkg-setting" => {
+                let (id, key) = (args.next().unwrap_or_default().to_string(), args.next().unwrap_or_default().to_string());
+                let v: serde_json::Value = serde_json::from_str(&args.collect::<Vec<_>>().join(" ")).unwrap_or(serde_json::Value::Null);
+                crate::helpers_host::set_setting(&id, &key, v);
             }
             _ => tracing::warn!(cmd, "CHECK unknown command"),
         }

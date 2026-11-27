@@ -501,6 +501,8 @@ pub enum Origin {
     Community { name: String },
     File,
     Folder,
+    /// A git repository at a tag, branch or commit (`lightair://install?git=…&rev=…`).
+    Git { url: String, rev: String },
 }
 
 impl Origin {
@@ -511,6 +513,7 @@ impl Origin {
             Origin::Lightair { reviewed: false } => "Checked by Lightair".into(),
             Origin::Community { name } => format!("From {name}, not checked by Lightair"),
             Origin::File | Origin::Folder => "Not from a catalog, not checked by anyone".into(),
+            Origin::Git { url, rev } => format!("From {url} at {rev}, not checked by anyone"),
         }
     }
 
@@ -598,12 +601,70 @@ impl Prepared {
             .collect()
     }
 
-    /// Deletes a download that wasn't installed.
+    /// Deletes a download (or a git clone) once installed or cancelled.
     pub fn discard(self) {
         if self.temporary {
-            let _ = std::fs::remove_file(&self.path);
+            if self.path.is_dir() {
+                let _ = std::fs::remove_dir_all(&self.path);
+            } else {
+                let _ = std::fs::remove_file(&self.path);
+            }
         }
     }
+}
+
+/// Clones a git repository at `rev` (a tag, branch or commit) into a staging folder of the store
+/// and reads it as a package, for the install screen (`git` must be installed). Only `https://`
+/// addresses: no local paths or other transports. The install records the exact commit.
+pub fn prepare_git(url: &str, rev: &str) -> Result<Prepared, String> {
+    // development builds also take a local repository, for checks
+    let local = cfg!(debug_assertions) && url.starts_with("file://");
+    if !(url.starts_with("https://") || local) || url.contains(char::is_whitespace) {
+        return Err("A package's git address must start with https://".into());
+    }
+    if rev.is_empty() || rev.starts_with('-') || rev.contains(char::is_whitespace) {
+        return Err("Name the tag, branch or commit to install".into());
+    }
+    let store = store().ok_or("the packages folder can't be made")?;
+    let staging = store.root().join(format!(
+        ".staging-git-{}",
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+    ));
+    let git = |args: &[&str]| -> Result<String, String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .map_err(|e| format!("git couldn't run (is it installed?): {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or("git failed").to_string())
+        }
+    };
+    let dir = staging.to_string_lossy().into_owned();
+    // a tag or branch shallowly; a commit needs the history
+    if git(&["clone", "--quiet", "--depth", "1", "--branch", rev, "--", url, &dir]).is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+        git(&["clone", "--quiet", "--", url, &dir]).map_err(|e| format!("Couldn't clone {url}: {e}"))?;
+        if let Err(e) = git(&["-C", &dir, "checkout", "--quiet", rev]) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("{rev} isn't in {url}: {e}"));
+        }
+    }
+    let commit = git(&["-C", &dir, "rev-parse", "HEAD"]).unwrap_or_else(|_| rev.to_string());
+    let _ = std::fs::remove_dir_all(staging.join(".git"));
+    let package = match open_package(&staging) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+    let mut p = Prepared::of_package(staging, package, Origin::Git { url: url.to_string(), rev: rev.to_string() });
+    p.source = Some(Source::Git { url: url.to_string(), rev: commit });
+    p.temporary = true;
+    Ok(p)
 }
 
 /// Reads what's at `path` for the install prompt; the error is a sentence to show.
@@ -778,3 +839,70 @@ pub fn remove_unused(dir: &Path, workspace: &Workspace) -> Result<usize, String>
     project.save().map_err(|e| e.to_string())?;
     Ok(removed.len())
 }
+
+// ------------------------------------------------------------ shows carrying their packages
+
+/// The folder inside a show where its packages' `.airpkg` files travel with it.
+pub const BUNDLED: &str = "Packages";
+
+/// A bundled file's name: `<id>-<version>.airpkg`.
+fn bundled_name(id: &PackageId, version: &Version) -> String {
+    format!("{id}-{version}.{}", lightair_packages::ARCHIVE_EXTENSION)
+}
+
+/// Copies the show at `show_dir` to `dest` (a new folder) with the `.airpkg` file of every
+/// package its lock names, written from the installed copies into `dest/Packages/`. Opening the
+/// copy on another computer offers to install them from there. Returns how many were bundled.
+pub fn export_show(show_dir: &Path, dest: &Path) -> Result<usize, String> {
+    if dest.exists() {
+        return Err(format!("{} already exists", dest.display()));
+    }
+    if dest.starts_with(show_dir) {
+        return Err("The copy can't go inside the show itself".into());
+    }
+    copy_tree(show_dir, dest).map_err(|e| format!("Couldn't copy the show: {e}"))?;
+    let project = Project::load(show_dir).map_err(|e| e.to_string())?;
+    let store = store().ok_or("the packages folder can't be made")?;
+    let out = dest.join(BUNDLED);
+    let mut n = 0;
+    for (id, locked) in &project.lock.packages {
+        let Some(installed) = store.get(id, &locked.version).ok().flatten() else {
+            tracing::warn!("{id} {} isn't installed here, so it isn't bundled", locked.version);
+            continue;
+        };
+        std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+        lightair_packages::export::write_archive_with(&installed.path, &out.join(bundled_name(id, &locked.version)), limits())
+            .map_err(|e| format!("Couldn't bundle {id}: {e}"))?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// The bundled `.airpkg` files in a show for packages it needs and this computer lacks.
+pub fn bundled_for(show_dir: &Path, missing: &[(PackageId, Option<Version>)]) -> Vec<PathBuf> {
+    let dir = show_dir.join(BUNDLED);
+    missing
+        .iter()
+        .filter_map(|(id, version)| {
+            let version = version.as_ref()?;
+            let path = dir.join(bundled_name(id, version));
+            path.is_file().then_some(path)
+        })
+        .collect()
+}
+

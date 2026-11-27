@@ -821,6 +821,9 @@ impl StudioWindow {
             this.sync_remote(cx);
             // PiAir's Lightair calls: answered like MCP clients' (crate::piair)
             this.piair.set_handler(this.api_handler(cx));
+            // third-party helpers' calls: answered the same way, each checked against its permissions
+            crate::helpers_host::init(this.api_handler(cx), this.studio.read(cx).chat.clone());
+            this.keep_helpers_told(cx);
             this.load_connections(cx);
             // what's connected (for the console): looked at every few seconds
             this.watch_devices(cx);

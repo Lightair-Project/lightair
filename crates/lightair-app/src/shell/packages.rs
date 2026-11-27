@@ -25,6 +25,7 @@ use super::assets::{Asset, AssetKind, DraggedAsset, Placement};
 use crate::packages::{self as pk, Item, Use};
 
 mod catalog_ui;
+mod helper_ui;
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 
@@ -70,6 +71,9 @@ pub(crate) struct PackagesPanel {
     search: Entity<InputState>,
     /// A community catalog's address, to add.
     catalog_url: Entity<InputState>,
+    /// A helper's text or number setting being edited: the field, and which (package, key).
+    helper_edit: Entity<InputState>,
+    helper_editing: Option<(String, String)>,
 }
 
 /// A copy started by a check or screenshot hook: no prompts.
@@ -194,12 +198,13 @@ impl PackagesPanel {
         })
         .detach();
         let catalog_url = cx.new(|cx| InputState::new(window, cx).placeholder("A catalog's address (https://…)"));
+        let helper_edit = cx.new(|cx| InputState::new(window, cx));
         // catalogs fetched, packages installed or withdrawn: drawn again
         cx.spawn(async move |this, cx| {
             let mut seen = (0, 0);
             loop {
                 cx.background_executor().timer(Duration::from_millis(500)).await;
-                let now = (crate::catalogs::generation(), pk::generation());
+                let now = (crate::catalogs::generation(), pk::generation() + crate::helpers_host::generation());
                 if now != seen {
                     seen = now;
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
@@ -215,6 +220,8 @@ impl PackagesPanel {
         PackagesPanel {
             search,
             catalog_url,
+            helper_edit,
+            helper_editing: None,
             shell: shell.downgrade(),
             studio,
             focus: cx.focus_handle(),
@@ -265,16 +272,25 @@ impl PackagesPanel {
             lines.push(format!("and {} more", n - 8));
         }
         let detail = lines.join("\n");
-        let answer = window.prompt(PromptLevel::Warning, &title, Some(&detail), &["Show packages", "Not now"], cx);
+        // a show exported with its packages carries them: offered first
+        let wanted: Vec<(PackageId, Option<Version>)> =
+            self.show.missing.iter().map(|m| (m.id.clone(), m.locked.as_ref().map(|l| l.version.clone()))).collect();
+        let bundled = dir.as_deref().map(|d| pk::bundled_for(d, &wanted)).unwrap_or_default();
+        let buttons: &[&str] = if bundled.is_empty() { &["Show packages", "Not now"] } else { &["Install from this show", "Show packages", "Not now"] };
+        let answer = window.prompt(PromptLevel::Warning, &title, Some(&detail), buttons, cx);
         let shell = self.shell.clone();
+        let offset = usize::from(!bundled.is_empty());
         cx.spawn_in(window, async move |_, cx| {
-            if answer.await == Ok(0) {
-                let _ = cx.update(|window, cx| {
-                    if let Some(s) = shell.upgrade() {
-                        s.update(cx, |w, cx| w.show_packages_panel(window, cx));
-                    }
-                });
-            }
+            let choice = answer.await;
+            let _ = cx.update(|window, cx| {
+                let Some(s) = shell.upgrade() else { return };
+                if offset == 1 && choice == Ok(0) {
+                    // each through the install screen and its checks, as a dropped file
+                    s.update(cx, |w, cx| w.install_package_paths(bundled, window, cx));
+                } else if choice == Ok(offset) {
+                    s.update(cx, |w, cx| w.show_packages_panel(window, cx));
+                }
+            });
         })
         .detach();
     }
@@ -783,6 +799,7 @@ impl PackagesPanel {
             if self.open.contains(id) {
                 list = list.child(self.contents(i, &versions[0], cx));
                 list = list.children(self.permissions(i, &versions[0], cx));
+                list = list.children(self.helper_section(i, &versions[0], cx));
             }
         }
         list.into_any_element()

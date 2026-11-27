@@ -340,6 +340,10 @@ impl StudioWindow {
             if let Some(reply) = editor_sync.call(&call) {
                 return reply;
             }
+            // plugins' commands and steps wait for the helper: on the server's thread
+            if let Some(reply) = crate::helpers_host::api(&call.method, &call.params) {
+                return reply.map_err(|e| ApiError::new(ErrorKind::State, e));
+            }
             // sending takes a moment: on the server's thread, not the main one
             if call.method == "chat.send" {
                 return crate::chat_send::send(&chat, &call.params).map_err(|e| ApiError::new(ErrorKind::State, e));

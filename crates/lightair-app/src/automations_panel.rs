@@ -725,6 +725,23 @@ impl AutomationsPanel {
                     }
                 }));
             }
+            // running plugins' steps: a Lightair call to `plugins.step` with the step's fields
+            for (package, name, s) in crate::helpers_host::steps() {
+                let (me, base, list) = (me.clone(), base.clone(), list.clone());
+                let mut params = serde_json::Map::new();
+                params.insert("package".into(), json!(package));
+                params.insert("step".into(), json!(s.id));
+                for f in &s.fields {
+                    params.insert(f.key.clone(), f.default.clone());
+                }
+                let step = serde_json::to_value(Step::Call { method: "plugins.step".into(), params: Value::Object(params) }).unwrap_or_default();
+                menu = menu.item(PopupMenuItem::new(format!("{name}: {}", s.title)).on_click(move |_, _, cx| {
+                    let step = step.clone();
+                    if let Some(me) = me.upgrade() {
+                        me.update(cx, |this, cx| this.change_list(&base, &list, |l| l.push(step), cx));
+                    }
+                }));
+            }
             menu
         }))
     }

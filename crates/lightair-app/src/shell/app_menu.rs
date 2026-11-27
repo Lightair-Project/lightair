@@ -37,6 +37,7 @@ actions!(
         KeyboardShortcuts,
         InstallPackage,
         ExportAsPackage,
+        ExportWorkspaceWithPackages,
         ShowPackages
     ]
 );
@@ -70,6 +71,7 @@ pub fn menus(shown: &dyn Fn(&str) -> bool) -> Vec<Menu> {
             MenuItem::separator(),
             act("Install Package…", InstallPackage),
             act("Export as Package…", ExportAsPackage),
+            act("Export Workspace with Packages…", ExportWorkspaceWithPackages),
             MenuItem::separator(),
             act("Close Window", CloseWindow),
         ]),
@@ -194,6 +196,7 @@ impl StudioWindow {
             .on_action(cx.listener(|this, _: &ImportObsScenes, window, cx| this.import_obs(window, cx)))
             .on_action(cx.listener(|this, _: &InstallPackage, window, cx| this.pick_package_files(window, cx)))
             .on_action(cx.listener(|this, _: &ExportAsPackage, window, cx| this.export_selection_as_package(window, cx)))
+            .on_action(cx.listener(|this, _: &ExportWorkspaceWithPackages, window, cx| this.export_workspace_with_packages(window, cx)))
             .on_action(cx.listener(|this, _: &ShowPackages, _, cx| this.show_panel("packages", cx)))
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
