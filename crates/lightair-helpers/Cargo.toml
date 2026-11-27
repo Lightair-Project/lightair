@@ -1,0 +1,12 @@
+[package]
+name = "lightair-helpers"
+description = "Runs package helpers: a sandbox profile from their permissions, a local proxy as their only way out, and a launch that gives them none of Lightair's privacy permissions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crossbeam-channel.workspace = true
+tracing.workspace = true
+libc = "0.2"

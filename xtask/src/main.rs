@@ -224,7 +224,7 @@ fn bundle(release: bool) -> anyhow::Result<()> {
     let root = root();
     let profile = if release { "release" } else { "debug" };
     let mut build = Command::new("cargo");
-    build.current_dir(&root).args(["build", "-p", "lightair-app", "-p", "lightair-web-helper"]);
+    build.current_dir(&root).args(["build", "-p", "lightair-app", "-p", "lightair-web-helper", "-p", "lightair-sandbox"]);
     if release {
         build.arg("--release");
     }
@@ -242,6 +242,8 @@ fn bundle(release: bool) -> anyhow::Result<()> {
     }
     stream_deck_plugin(&app.join("Resources/Lightair.streamDeckPlugin"))?;
     speech_helper(&app.join("MacOS/lightair-speech"))?;
+    // The launcher that starts package helpers in their sandbox (lightair-helpers).
+    std::fs::copy(root.join(format!("target/{profile}/lightair-sandbox")), app.join("MacOS/lightair-sandbox"))?;
     piair_binary(&app.join("MacOS/piair"))?;
     bundle_chromium(&root, &app, profile, false, "app.lightair.dev")?;
     // Sign the bundle itself so macOS privacy settings identify Lightair. Nested code keeps its

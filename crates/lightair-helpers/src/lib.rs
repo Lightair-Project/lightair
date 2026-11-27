@@ -1,0 +1,137 @@
+//! Running package helpers (tier 4, plugins.md §4.8, §4.11, §4.12).
+//!
+//! A sandboxed helper is started on macOS through `lightair-sandbox` with responsibility
+//! disclaimed, so it inherits none of Lightair's privacy permissions (camera, microphone, screen
+//! recording, Accessibility). It runs under a deny-by-default seatbelt profile written from its
+//! grants ([`profile::macos`]): its package folder to read, its data folder to read and write,
+//! and a proxy [`proxy::Lane`] as its only network. Anything powerful (the screen, the camera,
+//! chat, Lightair's methods) it asks Lightair for over its protocol, where the caller checks
+//! the permission. A full-access helper starts as a plain program.
+//!
+//! The helper's stdin and stdout are pipes for its protocol; stderr is its log.
+
+pub mod grants;
+pub mod profile;
+pub mod proxy;
+mod spawn;
+
+use std::io;
+use std::path::PathBuf;
+
+use crossbeam_channel::Sender;
+
+pub use grants::{Device, Grants, Picked};
+pub use proxy::{Event, Lane, Rules};
+pub use spawn::Child;
+
+/// A helper to start.
+#[derive(Clone, Debug)]
+pub struct Spec {
+    /// Its package id (for logs, events and the lane's name).
+    pub id: String,
+    /// The program, inside `package_dir`.
+    pub entry: PathBuf,
+    pub args: Vec<String>,
+    /// The installed package's folder (read-only to it).
+    pub package_dir: PathBuf,
+    /// Its own data folder (`<data>/PackageData/<id>/`), its working folder and home.
+    pub data_dir: PathBuf,
+    pub grants: Grants,
+    /// More environment for it (never secrets: those go over the protocol).
+    pub env: Vec<(String, String)>,
+}
+
+/// A running helper. Dropping it kills the helper and closes its lane.
+pub struct Helper {
+    pub child: Child,
+    lane: Option<Lane>,
+    profile_file: Option<PathBuf>,
+}
+
+impl Helper {
+    /// Its proxy port, when it has network.
+    pub fn proxy_port(&self) -> Option<u16> {
+        self.lane.as_ref().map(Lane::port)
+    }
+}
+
+impl Drop for Helper {
+    fn drop(&mut self) {
+        self.child.kill();
+        if let Some(f) = &self.profile_file {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+}
+
+/// Starts a helper. `launcher` is `lightair-sandbox` beside Lightair's executable (macOS).
+/// Network attempts are sent to `events`.
+pub fn launch(spec: &Spec, launcher: &std::path::Path, events: Sender<Event>) -> io::Result<Helper> {
+    std::fs::create_dir_all(spec.data_dir.join("tmp"))?;
+    if !spec.entry.starts_with(&spec.package_dir) {
+        return Err(io::Error::other("the helper's program isn't inside its package"));
+    }
+
+    if spec.grants.full_access {
+        let env = full_access_env(spec);
+        let child = spawn::spawn(&spec.entry, &spec.args, &spec.data_dir, &env)?;
+        return Ok(Helper { child, lane: None, profile_file: None });
+    }
+
+    sandboxed(spec, launcher, events)
+}
+
+#[cfg(target_os = "macos")]
+fn sandboxed(spec: &Spec, launcher: &std::path::Path, events: Sender<Event>) -> io::Result<Helper> {
+    let lane =
+        if spec.grants.uses_network() { Some(Lane::open(&spec.id, Rules::from(&spec.grants), events)?) } else { None };
+    let profile = profile::macos(spec, lane.as_ref().map(Lane::port));
+    let dir = std::env::temp_dir().join("lightair-sandbox");
+    std::fs::create_dir_all(&dir)?;
+    let profile_file = dir.join(format!("{}-{}.sb", sanitize(&spec.id), std::process::id()));
+    std::fs::write(&profile_file, profile)?;
+
+    let mut env = base_env(spec);
+    if let Some(lane) = &lane {
+        let url = lane.url();
+        for k in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"] {
+            env.push((k.into(), url.clone()));
+        }
+        env.push(("NO_PROXY".into(), String::new()));
+    }
+    let mut args = vec![profile_file.to_string_lossy().into_owned(), spec.entry.to_string_lossy().into_owned()];
+    args.extend(spec.args.iter().cloned());
+    let child = spawn::spawn(launcher, &args, &spec.data_dir, &env)?;
+    Ok(Helper { child, lane, profile_file: Some(profile_file) })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sandboxed(_spec: &Spec, _launcher: &std::path::Path, _events: Sender<Event>) -> io::Result<Helper> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "sandboxed helpers aren't available on this platform yet"))
+}
+
+/// A sandboxed helper's environment: nothing of Lightair's own, its data folder as home.
+fn base_env(spec: &Spec) -> Vec<(String, String)> {
+    let data = spec.data_dir.to_string_lossy().into_owned();
+    let mut env = vec![
+        ("HOME".to_string(), data.clone()),
+        ("TMPDIR".to_string(), format!("{data}/tmp/")),
+        ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+        ("LANG".to_string(), std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into())),
+        ("LIGHTAIR_PACKAGE".to_string(), spec.id.clone()),
+    ];
+    env.extend(spec.env.iter().cloned());
+    env
+}
+
+/// A full-access helper runs as a normal program: the user's own environment, plus ours.
+fn full_access_env(spec: &Spec) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = std::env::vars().collect();
+    env.push(("LIGHTAIR_PACKAGE".to_string(), spec.id.clone()));
+    env.extend(spec.env.iter().cloned());
+    env
+}
+
+fn sanitize(id: &str) -> String {
+    id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect()
+}

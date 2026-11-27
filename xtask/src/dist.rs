@@ -77,7 +77,7 @@ fn build() -> anyhow::Result<()> {
     anyhow::ensure!(cfg!(target_os = "macos"), "the shipped app is built on macOS");
     let root = root();
     let version = env!("CARGO_PKG_VERSION");
-    run(Command::new("cargo").current_dir(&root).args(["build", "--release", "-p", "lightair-app", "-p", "lightair-web-helper"]))?;
+    run(Command::new("cargo").current_dir(&root).args(["build", "--release", "-p", "lightair-app", "-p", "lightair-web-helper", "-p", "lightair-sandbox"]))?;
     modules()?;
     let out = root.join("target/dist");
     let _ = std::fs::remove_dir_all(&out);
@@ -94,6 +94,8 @@ fn build() -> anyhow::Result<()> {
     std::fs::copy(root.join("branding/final/icon/lightair-icon-512.png"), c.join("Resources/lightair-icon-512.png"))?;
     crate::stream_deck_plugin(&c.join("Resources/Lightair.streamDeckPlugin"))?;
     crate::speech_helper(&c.join("MacOS/lightair-speech"))?;
+    // The launcher that starts package helpers in their sandbox (lightair-helpers).
+    std::fs::copy(root.join("target/release/lightair-sandbox"), c.join("MacOS/lightair-sandbox"))?;
     crate::piair_binary(&c.join("MacOS/piair"))?;
 
     // the trackers, which Lightair's engine calls, and their models
