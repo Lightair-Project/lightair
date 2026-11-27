@@ -781,7 +781,7 @@ impl Studio {
                     label: several.then(|| canvas.name.clone()),
                     folder: self.recording_folder().join("Clips"),
                     seconds: settings.seconds,
-                    encoders: default_encoders(&self.engine.capabilities.encoders, 8000, false),
+                    encoders: crate::encoding::for_clips(&self.engine.capabilities.encoders, &workspace.outputs.recording, canvas),
                 };
                 self.engine.post(move |s| {
                     let video = s.reconciler.canvas_video(id);

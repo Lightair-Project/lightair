@@ -152,6 +152,21 @@ pub fn for_recording(caps: &[String], settings: &RecordingSettings, canvas: &Can
     }
 }
 
+/// A replay buffer's: the recording's own, so the two share one encoder while both run (each
+/// encode of a canvas costs the media engine a stream); ProRes, which an MP4 clip can't hold, gives
+/// way to H.264 at 8 Mbps.
+pub fn for_clips(caps: &[String], settings: &RecordingSettings, canvas: &Canvas) -> EncoderConfig {
+    let recording = for_recording(caps, settings, canvas);
+    if recording.video_encoder.contains("prores") {
+        return EncoderConfig {
+            video_encoder: encoder_id(caps, VideoEncoder::H264),
+            video_bitrate_kbps: 8000,
+            ..recording
+        };
+    }
+    recording
+}
+
 fn audio_id(caps: &[String]) -> String {
     aac_encoder(caps)
 }
