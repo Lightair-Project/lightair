@@ -102,6 +102,109 @@ fn resolved(mut o: PageOptions) -> PageOptions {
     o
 }
 
+/// What a page from a package may reach.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PageAllow {
+    /// The package's id, reported with each refusal.
+    pub owner: String,
+    /// `example.com`, `*.example.com`, or `*` for any host.
+    pub hosts: Vec<String>,
+}
+
+/// Where refused requests of limited pages are reported: the package the page is from and what
+/// it asked for. Set once by the app ([`on_blocked`]).
+pub type BlockedSink = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+static BLOCKED: std::sync::OnceLock<BlockedSink> = std::sync::OnceLock::new();
+
+/// Reports every request a limited page (`PageOptions::allow`) was refused, for the app's
+/// Plugin activity panel.
+pub fn on_blocked(f: impl Fn(&str, &str) + Send + Sync + 'static) {
+    let _ = BLOCKED.set(Arc::new(f));
+}
+
+fn report_blocked(owner: &str, url: &str) {
+    tracing::info!(owner, url, "a page from a package asked for an address it didn't declare");
+    if let Some(f) = BLOCKED.get() {
+        f(owner, url);
+    }
+}
+
+/// What a limited page may reach: its own origin (scheme, host and port), the folder its page
+/// file is in when it's a file, and its declared hosts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostRules {
+    owner: String,
+    origin: Option<(String, String, Option<u16>)>,
+    file_root: Option<String>,
+    hosts: Vec<String>,
+}
+
+impl HostRules {
+    pub fn new(page_url: &str, allow: &PageAllow) -> HostRules {
+        let origin = split_url(page_url).filter(|(scheme, ..)| scheme != "file").map(|(s, h, p, _)| (s, h, p));
+        let file_root = page_url.strip_prefix("file://").map(|path| match path.rfind('/') {
+            Some(i) => path[..=i].to_string(),
+            None => path.to_string(),
+        });
+        let hosts = allow.hosts.iter().map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).collect();
+        HostRules { owner: allow.owner.clone(), origin, file_root, hosts }
+    }
+
+    /// Whether the page may load `url`.
+    pub fn allows(&self, url: &str) -> bool {
+        let lower = url.trim().to_ascii_lowercase();
+        if ["data:", "blob:", "about:"].iter().any(|s| lower.starts_with(s)) {
+            return true;
+        }
+        if let Some(path) = url.trim().strip_prefix("file://") {
+            return self.file_root.as_ref().is_some_and(|root| !path.contains("/../") && path.starts_with(root.as_str()));
+        }
+        let Some((scheme, host, port, _)) = split_url(url) else { return false };
+        if !matches!(scheme.as_str(), "http" | "https" | "ws" | "wss") {
+            return false;
+        }
+        if let Some((o_scheme, o_host, o_port)) = &self.origin {
+            let secure = |s: &str| matches!(s, "https" | "wss");
+            let default = |s: &str| if secure(s) { 443 } else { 80 };
+            let same_port = port.unwrap_or(default(&scheme)) == o_port.unwrap_or(default(o_scheme));
+            if *o_host == host && same_port && secure(&scheme) == secure(o_scheme) {
+                return true;
+            }
+        }
+        self.hosts.iter().any(|r| match r.strip_prefix("*.") {
+            _ if r == "*" => true,
+            Some(base) => host == base || host.ends_with(&format!(".{base}")),
+            None => *r == host,
+        })
+    }
+
+    /// Reports `url` as refused.
+    pub fn refuse(&self, url: &str) {
+        report_blocked(&self.owner, url);
+    }
+}
+
+/// `scheme://host:port/rest` as (scheme, host, port, rest), lower-cased scheme and host.
+fn split_url(url: &str) -> Option<(String, String, Option<u16>, String)> {
+    let (scheme, rest) = url.trim().split_once("://")?;
+    let (authority, path) = match rest.find(['/', '?', '#']) {
+        Some(i) => (&rest[..i], rest[i..].to_string()),
+        None => (rest, String::new()),
+    };
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a);
+    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
+        let (h, after) = v6.split_once(']')?;
+        (h.to_string(), after.strip_prefix(':').and_then(|p| p.parse().ok()))
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), Some(p.parse().ok()?)),
+            None => (authority.to_string(), None),
+        }
+    };
+    Some((scheme.to_ascii_lowercase(), host.to_ascii_lowercase(), port, path))
+}
+
 /// A page's settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageOptions {
@@ -115,6 +218,10 @@ pub struct PageOptions {
     pub zoom: f32,
     /// Style sheet added to the page each time it loads (after its own, so it wins ties).
     pub css: String,
+    /// For pages from packages: the package and the hosts it may reach besides the page's own
+    /// origin. Anything else it asks for is refused and reported ([`on_blocked`]), and it can't
+    /// navigate away or open windows. `None`: no limit (the user's own pages).
+    pub allow: Option<PageAllow>,
 }
 
 impl PageOptions {
@@ -143,7 +250,7 @@ impl Page {
     /// far: to listen in on its connections).
     pub fn open_agent_early(url: &str, early: String, script: String, messages: MessageSink) -> Page {
         let id = imp::next_id();
-        let options = PageOptions { url: url.into(), width: 1024, height: 768, fps: 1, zoom: 1.0, css: String::new() };
+        let options = PageOptions { url: url.into(), width: 1024, height: 768, fps: 1, zoom: 1.0, css: String::new(), allow: None };
         let none: FrameSink = Arc::new(|_, _, _| {});
         let silent: AudioSink = Arc::new(|_, _| {});
         imp::request(imp::Request::Open { id, options, sink: none, texture: None, audio: silent, agent: Some((early, script, messages)), window: None });
@@ -156,7 +263,7 @@ impl Page {
     /// every page's cookies. `on_closed` runs when it's closed.
     pub fn open_window(url: &str, title: &str, size: (u32, u32), on_closed: OnClosed) -> Page {
         let id = imp::next_id();
-        let options = PageOptions { url: url.into(), width: size.0, height: size.1, fps: 60, zoom: 1.0, css: String::new() };
+        let options = PageOptions { url: url.into(), width: size.0, height: size.1, fps: 60, zoom: 1.0, css: String::new(), allow: None };
         let none: FrameSink = Arc::new(|_, _, _| {});
         let silent: AudioSink = Arc::new(|_, _| {});
         imp::request(imp::Request::Open { id, options, sink: none, texture: None, audio: silent, agent: None, window: Some((title.into(), on_closed)) });
@@ -273,7 +380,7 @@ pub fn set_waker(wake: impl Fn() + Send + Sync + 'static) {
 
 #[cfg(any(target_os = "macos", all(windows, not(lightair_cross_check))))]
 mod imp {
-    use super::{AudioSink, CookieSpec, CookiesDone, FrameSink, MessageSink, OnClosed, PageOptions, TextureSink};
+    use super::{AudioSink, CookieSpec, CookiesDone, FrameSink, HostRules, MessageSink, OnClosed, PageOptions, TextureSink};
     use cef::*;
     use parking_lot::Mutex;
     use std::cell::RefCell;
@@ -634,6 +741,8 @@ mod imp {
         options: PageOptions,
         /// On screen somewhere (hidden pages don't paint).
         visible: bool,
+        /// What a page from a package may reach (`PageOptions::allow`); read by its request handler.
+        rules: Arc<Mutex<Option<HostRules>>>,
     }
 
     /// `s` as a JavaScript string literal.
@@ -728,8 +837,34 @@ mod imp {
     wrap_life_span_handler! {
         struct PageLife {
             id: u64,
+            rules: Arc<Mutex<Option<HostRules>>>,
         }
         impl LifeSpanHandler {
+            fn on_before_popup(
+                &self,
+                _browser: Option<&mut Browser>,
+                _frame: Option<&mut Frame>,
+                _popup_id: ::std::os::raw::c_int,
+                target_url: Option<&CefString>,
+                _target_frame_name: Option<&CefString>,
+                _target_disposition: WindowOpenDisposition,
+                _user_gesture: ::std::os::raw::c_int,
+                _popup_features: Option<&PopupFeatures>,
+                _window_info: Option<&mut WindowInfo>,
+                _client: Option<&mut Option<Client>>,
+                _settings: Option<&mut BrowserSettings>,
+                _extra_info: Option<&mut Option<DictionaryValue>>,
+                _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
+            ) -> ::std::os::raw::c_int {
+                // A page from a package never opens windows.
+                match &*self.rules.lock() {
+                    Some(rules) => {
+                        rules.refuse(&target_url.map(|u| u.to_string()).unwrap_or_default());
+                        1
+                    }
+                    None => 0,
+                }
+            }
             fn on_before_close(&self, _browser: Option<&mut Browser>) {
                 let id = self.id;
                 if let Some(f) = WINDOWS.with(|w| w.borrow_mut().remove(&id)) {
@@ -931,6 +1066,87 @@ mod imp {
         }
     }
 
+    // A page from a package: every request checked against its rules; refused ones are cancelled
+    // and reported. Its main frame can't navigate to an address it may not reach.
+    wrap_resource_request_handler! {
+        struct PageResource {
+            rules: Arc<Mutex<Option<HostRules>>>,
+        }
+        impl ResourceRequestHandler {
+            fn on_before_resource_load(
+                &self,
+                _browser: Option<&mut Browser>,
+                _frame: Option<&mut Frame>,
+                request: Option<&mut cef::Request>,
+                _callback: Option<&mut Callback>,
+            ) -> ReturnValue {
+                let Some(request) = request else { return ReturnValue::CONTINUE };
+                let url = CefString::from(&request.url()).to_string();
+                match &*self.rules.lock() {
+                    Some(rules) if !rules.allows(&url) => {
+                        rules.refuse(&url);
+                        ReturnValue::CANCEL
+                    }
+                    _ => ReturnValue::CONTINUE,
+                }
+            }
+        }
+    }
+
+    wrap_request_handler! {
+        struct PageRequest {
+            rules: Arc<Mutex<Option<HostRules>>>,
+        }
+        impl RequestHandler {
+            fn on_before_browse(
+                &self,
+                _browser: Option<&mut Browser>,
+                frame: Option<&mut Frame>,
+                request: Option<&mut cef::Request>,
+                _user_gesture: ::std::os::raw::c_int,
+                _is_redirect: ::std::os::raw::c_int,
+            ) -> ::std::os::raw::c_int {
+                let (Some(_frame), Some(request)) = (frame, request) else { return 0 };
+                let url = CefString::from(&request.url()).to_string();
+                match &*self.rules.lock() {
+                    Some(rules) if !rules.allows(&url) => {
+                        rules.refuse(&url);
+                        1
+                    }
+                    _ => 0,
+                }
+            }
+            fn on_open_urlfrom_tab(
+                &self,
+                _browser: Option<&mut Browser>,
+                _frame: Option<&mut Frame>,
+                target_url: Option<&CefString>,
+                _target_disposition: WindowOpenDisposition,
+                _user_gesture: ::std::os::raw::c_int,
+            ) -> ::std::os::raw::c_int {
+                match &*self.rules.lock() {
+                    Some(rules) => {
+                        rules.refuse(&target_url.map(|u| u.to_string()).unwrap_or_default());
+                        1
+                    }
+                    None => 0,
+                }
+            }
+            fn resource_request_handler(
+                &self,
+                _browser: Option<&mut Browser>,
+                _frame: Option<&mut Frame>,
+                _request: Option<&mut cef::Request>,
+                _is_navigation: ::std::os::raw::c_int,
+                _is_download: ::std::os::raw::c_int,
+                _request_initiator: Option<&CefString>,
+                _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
+            ) -> Option<ResourceRequestHandler> {
+                self.rules.lock().is_some().then(|| PageResource::new(self.rules.clone()))
+            }
+        }
+    }
+
     wrap_client! {
         struct PageClient {
             render: RenderHandler,
@@ -938,8 +1154,12 @@ mod imp {
             audio: AudioHandler,
             load: LoadHandler,
             display: DisplayHandler,
+            request: RequestHandler,
         }
         impl Client {
+            fn request_handler(&self) -> Option<RequestHandler> {
+                Some(self.request.clone())
+            }
             fn display_handler(&self) -> Option<DisplayHandler> {
                 Some(self.display.clone())
             }
@@ -981,12 +1201,14 @@ mod imp {
         let view = Arc::new(Mutex::new(view_of(&options)));
         let format = Arc::new(Mutex::new((48_000, 2)));
         let css = Arc::new(Mutex::new(options.css.clone()));
+        let rules = Arc::new(Mutex::new(options.allow.as_ref().map(|allow| HostRules::new(&options.url, allow))));
         let mut client = PageClient::new(
             PageRender::new(view.clone(), sink, texture.clone()),
-            PageLife::new(id),
+            PageLife::new(id, rules.clone()),
             PageAudio::new(format, audio),
             PageLoad::new(css.clone(), early, script),
             PageDisplay::new(messages),
+            PageRequest::new(rules.clone()),
         );
         // shared textures: Chromium's GPU frames go to the scene as they are (no readback)
         let window = match &window_of {
@@ -1009,7 +1231,7 @@ mod imp {
         };
         let url = CefString::from(options.url.as_str());
         let visible = window_of.is_some();
-        PAGES.with(|pages| pages.borrow_mut().insert(id, Live { browser: None, view, css, options, visible }));
+        PAGES.with(|pages| pages.borrow_mut().insert(id, Live { browser: None, view, css, options, visible, rules }));
         if browser_host_create_browser(Some(&window), Some(&mut client), Some(&url), Some(&browser_settings), None, None) != 1 {
             tracing::warn!("Chromium didn't open a page");
         }
@@ -1022,6 +1244,9 @@ mod imp {
             let before = std::mem::replace(&mut live.options, options.clone());
             *live.view.lock() = view_of(&options);
             *live.css.lock() = options.css.clone();
+            if (&before.url, &before.allow) != (&options.url, &options.allow) {
+                *live.rules.lock() = options.allow.as_ref().map(|allow| HostRules::new(&options.url, allow));
+            }
             let Some(browser) = &live.browser else { return };
             if before.css != options.css && before.url == options.url {
                 restyle(browser, &options.css);

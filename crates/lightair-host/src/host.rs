@@ -151,6 +151,11 @@ fn page_options(s: &serde_json::Value) -> lightair_web::PageOptions {
         fps: int("fps", 30).clamp(1, 60) as u32,
         zoom: int("zoom", 100).clamp(25, 500) as f32 / 100.0,
         css: text(s, "css"),
+        // A page from a package reaches only the hosts its package declared (plugins.md §4.8).
+        allow: s.get("lightair_package").filter(|m| m.is_object()).map(|m| lightair_web::PageAllow {
+            owner: m["id"].as_str().unwrap_or("a package").to_string(),
+            hosts: m["hosts"].as_array().map(|a| a.iter().filter_map(|h| h.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+        }),
     }
 }
 

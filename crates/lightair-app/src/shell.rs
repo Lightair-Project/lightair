@@ -42,6 +42,7 @@ mod canvas_text;
 mod colour_field;
 mod connections;
 mod console_panel;
+mod plugin_activity_ui;
 mod panel_window;
 mod live_api;
 mod package_export;
@@ -461,6 +462,8 @@ pub struct StudioWindow {
     /// The devices connected now (looked at every few seconds) and whether the console is open.
     connected: Option<crate::console::Connected>,
     console_open: bool,
+    /// The status bar's plugin activity overlay is open.
+    plugin_activity_open: bool,
     /// The canvas in a window of its own (shell/panel_window), and its window.
     panel_windows: Vec<(gpui_kit::component::dock::PanelId, AnyWindowHandle, Entity<panel_window::PanelWindow>)>,
     /// Floating dock windows (shell/dock_windows) and their docks.
@@ -942,6 +945,7 @@ impl StudioWindow {
             perf_open: false,
             connected: None,
             console_open: false,
+            plugin_activity_open: false,
             panel_windows: Vec::new(),
             dock_windows: Vec::new(),
             layout_save: None,
@@ -5288,6 +5292,7 @@ impl StudioWindow {
             .text_size(px(11.))
             .text_color(tok::text_secondary())
             .children(self.console_chip(cx))
+            .children(self.plugin_activity_chip(cx))
             .children(issue.map(|i| div().child(i)))
             .child(div().flex_1())
             // the frame rate and frame time (their details open upward)

@@ -41,6 +41,7 @@ mod outputs_panel;
 mod packages;
 mod permissions;
 mod piair;
+mod plugin_activity;
 mod platforms;
 mod preflight;
 mod prefs;
@@ -103,6 +104,8 @@ fn main() {
         .init();
     // Chromium's profile (cookies: platforms signed in to) kept with Lightair's data
     lightair_web::set_profile_dir(lightair_platform::paths::data_dir().join("Chromium"));
+    // Plugins' refused requests and permission uses, for the notices and the activity panel.
+    plugin_activity::connect();
     // the chat readers that need a browser (Kick, the signed-in platforms) use Lightair's
     lightair_live::pages::set_host(Arc::new(chat_panel::HiddenPages));
 

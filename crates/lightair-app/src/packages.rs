@@ -399,7 +399,30 @@ pub fn widgets() -> Arc<Vec<WidgetItem>> {
 
 /// The settings value that marks a source as coming from `installed`.
 pub fn mark(id: &PackageId, version: &Version) -> Value {
-    serde_json::json!({"id": id.as_str(), "version": version.to_string()})
+    serde_json::json!({"id": id.as_str(), "version": version.to_string(), "hosts": hosts_of(id, version)})
+}
+
+/// A package's name for notices and the activity panel (its id when it isn't installed).
+pub fn display_name(id: &str) -> String {
+    installed().iter().find(|i| i.id().as_str() == id).map(|i| i.manifest.name.clone()).unwrap_or_else(|| id.to_string())
+}
+
+/// The internet hosts a package declared (`network:<host>`, `network:*` as `*`): the only ones
+/// its web pages may reach (`lightair_web::PageOptions::allow`).
+pub fn hosts_of(id: &PackageId, version: &Version) -> Vec<String> {
+    installed()
+        .iter()
+        .find(|i| i.id() == id && i.manifest.version == *version)
+        .map(|i| {
+            i.manifest
+                .permissions
+                .iter()
+                .filter_map(|p| p.strip_prefix("network:"))
+                .filter(|h| !h.starts_with("localhost"))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A widget's size from the `manifest.json` beside its files (a `.lwidget`'s), if it says.
