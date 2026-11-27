@@ -112,9 +112,10 @@ type Frame = lightair_host::buffers::Buffer;
 use crate::stinger::Player;
 use crate::widget_feed;
 
-/// Output buffers at most: the newest (the previews' and libobs's), the one before it (a window
-/// may still be showing it), one being drawn, and spares while something holds on to older ones.
-const MOST: usize = 6;
+/// Output buffers at most: the newest (the previews' and the outputs'), the one before it (a window
+/// may still be showing it), one being drawn, and spares while something holds on to older ones
+/// (encoders keep a few frames each while they reorder them for B-frames).
+const MOST: usize = 12;
 /// Buffers not drawn into again for this many frames after they're handed on (a window's layer
 /// shows a surface without holding its buffer).
 const RECENT: usize = 2;

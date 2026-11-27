@@ -3591,6 +3591,19 @@ mod pictures {
         }
     }
 
+    /// Whether `src` is already what `encoder` takes: its size, BGRA, IOSurface-backed.
+    fn takes_as_is(encoder: &VideoEncoder, src: &CVPixelBuffer) -> bool {
+        use objc2_core_video::{
+            CVPixelBufferGetHeight, CVPixelBufferGetIOSurface, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
+            kCVPixelFormatType_32BGRA,
+        };
+        let s = encoder.settings();
+        matches!(s.input, lightair_encode::apple::InputFormat::Bgra)
+            && (CVPixelBufferGetWidth(src), CVPixelBufferGetHeight(src)) == (s.width as usize, s.height as usize)
+            && CVPixelBufferGetPixelFormatType(src) == kCVPixelFormatType_32BGRA
+            && CVPixelBufferGetIOSurface(Some(src)).is_some()
+    }
+
     impl Copier {
         /// `fast`: scaled down by picking pixels, not averaging them (the plan's point scaler).
         pub fn new(fast: bool) -> Copier {
@@ -3614,9 +3627,15 @@ mod pictures {
         /// Copies `frame` into a buffer of `encoder`'s and encodes it (`None`: the last again).
         pub fn feed(&mut self, encoder: &VideoEncoder, frame: Option<&Buffer>, pts: i64, key: bool) -> Fed {
             if let Some(src) = frame {
-                match self.copy(encoder, src) {
-                    Some(dst) => self.last = Some(dst),
-                    None => return Fed::NotCopied,
+                // the compositor's frame as it is when it's already what the encoder takes (its
+                // size, BGRA): no copy; the compositor doesn't draw into it while it's held
+                if takes_as_is(encoder, src) {
+                    self.last = Some(src.clone());
+                } else {
+                    match self.copy(encoder, src) {
+                        Some(dst) => self.last = Some(dst),
+                        None => return Fed::NotCopied,
+                    }
                 }
             }
             let Some(buffer) = self.last.as_ref() else { return Fed::NoPicture };
