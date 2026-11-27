@@ -85,7 +85,8 @@ pub struct Use {
 #[derive(Clone, Debug)]
 pub struct Notice {
     pub plugin: String,
-    pub kind: Kind,
+    /// The permission it's about (none for notices about the package itself: withdrawn).
+    pub kind: Option<Kind>,
     pub text: String,
     pub refused: bool,
     /// Shows even while live or recording (a full-access plugin starting, a refused screen,
@@ -153,7 +154,7 @@ pub fn record(plugin: &str, kind: Kind, what: &str, allowed: bool, reason: &str)
     let notice = if !allowed {
         Some(Notice {
             plugin: plugin.into(),
-            kind,
+            kind: Some(kind),
             text: format!("{plugin} was refused {}: {what}", kind.label().to_lowercase()),
             refused: true,
             urgent: matches!(kind, Kind::Screen | Kind::Camera | Kind::Microphone),
@@ -162,7 +163,7 @@ pub fn record(plugin: &str, kind: Kind, what: &str, allowed: bool, reason: &str)
         // the first use of each kind, and every start of a sensitive one
         Some(Notice {
             plugin: plugin.into(),
-            kind,
+            kind: Some(kind),
             text: first_use_text(plugin, kind, what),
             refused: false,
             urgent: kind == Kind::FullAccess,
@@ -193,6 +194,18 @@ fn first_use_text(plugin: &str, kind: Kind, what: &str) -> String {
         Kind::Chat => format!("{plugin} is using chat"),
         Kind::FullAccess => format!("{plugin} is running with full access: Lightair can't see what it does"),
     }
+}
+
+/// A notice about a package itself (withdrawn by its catalog, switched off).
+pub fn notice(plugin: &str, text: &str, urgent: bool) {
+    let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
+    let n = Notice { plugin: plugin.into(), kind: None, text: text.into(), refused: true, urgent };
+    if s.notices.len() >= 100 {
+        s.notices.pop_front();
+    }
+    s.newest = Some((n.clone(), Instant::now()));
+    s.notices.push_back(n);
+    s.generation += 1;
 }
 
 /// How long the status bar shows a notice.
@@ -249,6 +262,9 @@ pub fn generation() -> u64 {
 /// Connects the sources Lightair has today: refused requests of pages from packages. Called
 /// once at start.
 pub fn connect() {
+    // pages from packages follow the current grants and withdrawals, not only what they were
+    // added with
+    lightair_web::set_policy(crate::packages::page_policy);
     lightair_web::on_blocked(|owner, url| {
         record(&crate::packages::display_name(owner), Kind::Network, &host_of(url), false, "not declared");
     });

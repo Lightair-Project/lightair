@@ -212,6 +212,13 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 	<key>NSSpeechRecognitionUsageDescription</key><string>Lightair listens for the phrases your automations run on (on this Mac where the language allows), and web pages in Lightair may ask to recognise speech.</string>
 	<key>NSAppleEventsUsageDescription</key><string>Lightair asks Spotify and Music what's playing, for the Now playing widget.</string>
 	<key>NSLocalNetworkUsageDescription</key><string>Lightair finds network video sources and serves the remote control API.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key><string>Lightair links</string>
+			<key>CFBundleURLSchemes</key><array><string>lightair</string></array>
+		</dict>
+	</array>
 </dict>
 </plist>
 "#;

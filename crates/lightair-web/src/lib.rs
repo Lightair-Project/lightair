@@ -123,6 +123,22 @@ pub fn on_blocked(f: impl Fn(&str, &str) + Send + Sync + 'static) {
     let _ = BLOCKED.set(Arc::new(f));
 }
 
+/// The app's live say over pages from packages: `(package, host, same origin) → allowed`, asked
+/// on every request after the page's own rules pass, so taking a permission back or a package's
+/// withdrawal applies to pages already open ([`set_policy`]).
+pub type Policy = Arc<dyn Fn(&str, &str, bool) -> bool + Send + Sync>;
+
+static POLICY: std::sync::OnceLock<Policy> = std::sync::OnceLock::new();
+
+/// Sets the app's policy for pages from packages (once, at start).
+pub fn set_policy(f: impl Fn(&str, &str, bool) -> bool + Send + Sync + 'static) {
+    let _ = POLICY.set(Arc::new(f));
+}
+
+fn policy_allows(owner: &str, host: &str, same_origin: bool) -> bool {
+    POLICY.get().is_none_or(|p| p(owner, host, same_origin))
+}
+
 fn report_blocked(owner: &str, url: &str) {
     tracing::info!(owner, url, "a page from a package asked for an address it didn't declare");
     if let Some(f) = BLOCKED.get() {
@@ -169,14 +185,14 @@ impl HostRules {
             let default = |s: &str| if secure(s) { 443 } else { 80 };
             let same_port = port.unwrap_or(default(&scheme)) == o_port.unwrap_or(default(o_scheme));
             if *o_host == host && same_port && secure(&scheme) == secure(o_scheme) {
-                return true;
+                return policy_allows(&self.owner, &host, true);
             }
         }
         self.hosts.iter().any(|r| match r.strip_prefix("*.") {
             _ if r == "*" => true,
             Some(base) => host == base || host.ends_with(&format!(".{base}")),
             None => *r == host,
-        })
+        }) && policy_allows(&self.owner, &host, false)
     }
 
     /// Reports `url` as refused.

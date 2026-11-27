@@ -276,6 +276,8 @@ impl StudioWindow {
                     .map(|c| c.levels().magnitude.iter().copied().fold(f32::NEG_INFINITY, f32::max));
                 tracing::info!(track = track.is_some(), ?level, "CHECK voice-level");
             }
+            // packages and catalogs (shell/packages/catalog_ui.rs, `package_check`)
+            c if c.starts_with("pkg-") => self.package_check(c, rest, window, cx),
             _ => tracing::warn!(line, "CHECK unknown command"),
         }
         cx.notify();

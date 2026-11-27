@@ -2411,6 +2411,10 @@ impl StudioWindow {
 impl Render for StudioWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.main_window = Some(window.window_handle());
+        // lightair:// links the system opened (install screens, adding a catalog)
+        if crate::links::waiting() {
+            self.handle_links(window, cx);
+        }
         self.main_bounds = window.bounds();
         self.main_display = window.display(cx).map(|d| u64::from(d.id()));
         let native = self.sync_native(window);

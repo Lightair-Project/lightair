@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use lightair_model::Workspace;
 use lightair_packages::{
-    Install, Installed, Kind, MANIFEST_FILE, Package, PackageId, Project, Resolution, Source, Store, Tier,
+    Install, Installed, Kind, Limits, MANIFEST_FILE, Manifest, Package, PackageId, Project, Resolution, Source, Store,
+    Tier,
 };
 use semver::Version;
 use serde_json::Value;
@@ -105,6 +106,33 @@ pub fn size(bytes: u64) -> String {
     crate::storage::bytes(bytes, false)
 }
 
+/// What this Lightair installs and runs: data, shaders and helpers (in their sandbox,
+/// `lightair-helpers`); scripts wait for their runtime (docs/13 stage D).
+pub fn limits() -> Limits {
+    Limits { max_tier: Tier::Native, ..Limits::default() }
+}
+
+/// Why this Lightair can't use a package, each a sentence (none: usable).
+pub fn problems_of(m: &Manifest) -> Vec<String> {
+    let mut out: Vec<String> = m.check_supported_up_to(Tier::Native).iter().map(|p| p.to_string()).collect();
+    if m.contents.iter().any(|c| c.kind.tier() == Some(Tier::Script)) {
+        out.push("needs a newer Lightair: this one doesn't run scripts yet".into());
+    }
+    out
+}
+
+/// What an installed package may do now: what it declares, minus what the user took back in the
+/// Packages panel (`grants`). Helpers are started with these.
+pub fn granted_permissions(i: &Installed) -> Vec<String> {
+    let id = i.id().as_str();
+    i.manifest.permissions.iter().filter(|p| crate::grants::is_granted(id, p)).cloned().collect()
+}
+
+/// [`problems_of`] for an installed package.
+pub fn problems(i: &Installed) -> Vec<String> {
+    problems_of(&i.manifest)
+}
+
 pub fn tier_label(tier: Option<Tier>) -> &'static str {
     match tier {
         Some(Tier::Data) => "Data",
@@ -119,7 +147,8 @@ pub fn tier_label(tier: Option<Tier>) -> &'static str {
 pub fn source_label(source: &Source) -> String {
     match source {
         Source::File { name } | Source::Folder { name } | Source::Lwidget { name } => name.clone(),
-        Source::Catalog { .. } => "The catalog".into(),
+        Source::Catalog { catalog, .. } if crate::catalogs::is_lightair(catalog) => "Lightair's catalog".into(),
+        Source::Catalog { catalog, .. } => crate::catalogs::name_of(catalog).unwrap_or_else(|| "A catalog".into()),
         Source::Git { url, rev } => format!("{url} at {rev}"),
         Source::Exported => "Exported on a computer".into(),
         Source::Unknown => "Unknown source".into(),
@@ -379,7 +408,7 @@ pub fn widgets() -> Arc<Vec<WidgetItem>> {
     }
     let mut out = Vec::new();
     for versions in by_package() {
-        let Some(newest) = versions.iter().find(|i| i.is_usable()) else { continue };
+        let Some(newest) = versions.iter().find(|i| problems(i).is_empty()) else { continue };
         for item in items(newest) {
             if let Use::Widget(dir) = item.how {
                 out.push(WidgetItem {
@@ -402,6 +431,31 @@ pub fn mark(id: &PackageId, version: &Version) -> Value {
     serde_json::json!({"id": id.as_str(), "version": version.to_string(), "hosts": hosts_of(id, version)})
 }
 
+/// Whether a page from package `id` may reach `host` now (`lightair_web::set_policy`): nothing
+/// once every installed version of it is withdrawn; its own origin otherwise; another host only
+/// while a granted `network:` permission of it covers that host.
+pub fn page_policy(id: &str, host: &str, same_origin: bool) -> bool {
+    let list = installed();
+    let versions: Vec<&Installed> = list.iter().filter(|i| i.id().as_str() == id).collect();
+    if !versions.is_empty() && versions.iter().all(|i| crate::catalogs::revoked_reason(id, i.version()).is_some()) {
+        return false;
+    }
+    if same_origin {
+        return true;
+    }
+    versions.iter().any(|i| {
+        i.manifest.permissions.iter().filter(|p| crate::grants::is_granted(id, p)).any(|p| match p.strip_prefix("network:") {
+            Some("*") => true,
+            Some(rule) if rule.starts_with("localhost") => false,
+            Some(rule) => match rule.strip_prefix("*.") {
+                Some(base) => host == base || host.ends_with(&format!(".{base}")),
+                None => rule == host,
+            },
+            None => false,
+        })
+    })
+}
+
 /// A package's name for notices and the activity panel (its id when it isn't installed).
 pub fn display_name(id: &str) -> String {
     installed().iter().find(|i| i.id().as_str() == id).map(|i| i.manifest.name.clone()).unwrap_or_else(|| id.to_string())
@@ -410,6 +464,10 @@ pub fn display_name(id: &str) -> String {
 /// The internet hosts a package declared (`network:<host>`, `network:*` as `*`): the only ones
 /// its web pages may reach (`lightair_web::PageOptions::allow`).
 pub fn hosts_of(id: &PackageId, version: &Version) -> Vec<String> {
+    // a withdrawn package's pages reach nothing
+    if crate::catalogs::revoked_reason(id.as_str(), version).is_some() {
+        return Vec::new();
+    }
     installed()
         .iter()
         .find(|i| i.id() == id && i.manifest.version == *version)
@@ -417,6 +475,7 @@ pub fn hosts_of(id: &PackageId, version: &Version) -> Vec<String> {
             i.manifest
                 .permissions
                 .iter()
+                .filter(|p| crate::grants::is_granted(id.as_str(), p))
                 .filter_map(|p| p.strip_prefix("network:"))
                 .filter(|h| !h.starts_with("localhost"))
                 .map(str::to_string)
@@ -434,7 +493,34 @@ pub fn widget_size(dir: &Path) -> Option<(u32, u32)> {
 
 // ------------------------------------------------------------ installing
 
-/// A package read for the install prompt: what it is and adds, its size and where it's from.
+/// Where a package being installed comes from, for the install screen (plugins.md §3.8).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Origin {
+    /// Lightair's catalog checked it; `reviewed` when an admin reviewed it too (native helpers).
+    Lightair { reviewed: bool },
+    Community { name: String },
+    File,
+    Folder,
+}
+
+impl Origin {
+    /// The install screen's line about it.
+    pub fn line(&self) -> String {
+        match self {
+            Origin::Lightair { reviewed: true } => "Checked by Lightair · Reviewed".into(),
+            Origin::Lightair { reviewed: false } => "Checked by Lightair".into(),
+            Origin::Community { name } => format!("From {name}, not checked by Lightair"),
+            Origin::File | Origin::Folder => "Not from a catalog, not checked by anyone".into(),
+        }
+    }
+
+    pub fn is_lightair(&self) -> bool {
+        matches!(self, Origin::Lightair { .. })
+    }
+}
+
+/// A package read for the install screen: what it is and adds, what it may do, its size and
+/// where it's from.
 pub struct Prepared {
     pub path: PathBuf,
     pub name: String,
@@ -446,8 +532,78 @@ pub struct Prepared {
     pub author: String,
     /// This version with these contents is installed already.
     pub already: bool,
+    pub origin: Origin,
+    /// What it declares (catalog formats §6).
+    pub permissions: Vec<String>,
+    /// What an installed version of it didn't declare (asked about on their own).
+    pub new_permissions: Vec<String>,
+    /// It runs outside the sandbox on this computer.
+    pub full_access: bool,
     /// The package read (folders and `.airpkg`s), installed as read; `None` for a `.lwidget`.
     package: Option<Package>,
+    /// The store's record of where it came from, when not its path (a catalog).
+    source: Option<Source>,
+    /// A download to delete once installed or cancelled.
+    temporary: bool,
+}
+
+impl Prepared {
+    /// A package downloaded from a catalog and checked against its attestation.
+    pub fn from_download(path: PathBuf, package: Package, origin: Origin, source: Source) -> Prepared {
+        let mut p = Prepared::of_package(path, package, origin);
+        p.source = Some(source);
+        p.temporary = true;
+        p
+    }
+
+    fn of_package(path: PathBuf, package: Package, origin: Origin) -> Prepared {
+        let m = &package.manifest;
+        let already = store()
+            .and_then(|s| s.get(&m.id, &m.version).ok().flatten())
+            .is_some_and(|i| i.record.content_sha256 == package.content_sha256);
+        let previous: Option<HashSet<String>> =
+            installed().iter().filter(|i| i.id() == &m.id).max_by(|a, b| a.version().cmp(b.version())).map(|i| i.manifest.permissions.iter().cloned().collect());
+        let new_permissions = match &previous {
+            Some(had) => m.permissions.iter().filter(|p| !had.contains(*p)).cloned().collect(),
+            None => Vec::new(),
+        };
+        Prepared {
+            name: m.name.clone(),
+            id: m.id.to_string(),
+            version: m.version.to_string(),
+            summary: m.summary(),
+            size: package.size,
+            licence: m.licence.clone(),
+            author: m.author.clone(),
+            already,
+            origin,
+            permissions: m.permissions.clone(),
+            new_permissions,
+            full_access: m.full_access_on(lightair_packages::catalog::Target::current()),
+            path,
+            package: Some(package),
+            source: None,
+            temporary: false,
+        }
+    }
+
+    /// Each permission in plain words, new ones marked.
+    pub fn permission_lines(&self) -> Vec<String> {
+        self.permissions
+            .iter()
+            .map(|p| {
+                let words = lightair_packages::Permission::parse(p).map_or_else(|_| p.clone(), |q| q.describe());
+                if self.new_permissions.contains(p) { format!("{words} (new)") } else { words }
+            })
+            .collect()
+    }
+
+    /// Deletes a download that wasn't installed.
+    pub fn discard(self) {
+        if self.temporary {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 /// Reads what's at `path` for the install prompt; the error is a sentence to show.
@@ -474,34 +630,38 @@ pub fn prepare(path: &Path) -> Result<Prepared, String> {
             licence: manifest.licence.clone(),
             author: manifest.author.clone(),
             already: false,
+            origin: Origin::File,
+            permissions: manifest.permissions.clone(),
+            new_permissions: Vec::new(),
+            full_access: false,
             package: None,
+            source: None,
+            temporary: false,
         });
     }
-    let package = Package::open(path).map_err(|e| e.to_string())?;
-    let m = &package.manifest;
-    let already =
-        store.get(&m.id, &m.version).ok().flatten().is_some_and(|i| i.record.content_sha256 == package.content_sha256);
-    Ok(Prepared {
-        path: path.to_path_buf(),
-        name: m.name.clone(),
-        id: m.id.to_string(),
-        version: m.version.to_string(),
-        summary: m.summary(),
-        size: package.size,
-        licence: m.licence.clone(),
-        author: m.author.clone(),
-        already,
-        package: Some(package),
-    })
+    let package = open_package(path)?;
+    let origin = if path.is_dir() { Origin::Folder } else { Origin::File };
+    Ok(Prepared::of_package(path.to_path_buf(), package, origin))
+}
+
+/// Reads a package with what this Lightair runs ([`limits`]), refusing scripts.
+pub fn open_package(path: &Path) -> Result<Package, String> {
+    let package = Package::open_with(path, limits()).map_err(|e| e.to_string())?;
+    match problems_of(&package.manifest).into_iter().next() {
+        Some(problem) => Err(problem),
+        None => Ok(package),
+    }
 }
 
 /// Installs what `prepare` read; the error is a sentence to show.
 pub fn install(prepared: Prepared) -> Result<Install, String> {
     let store = store().ok_or("the packages folder can't be made")?;
-    let result = match &prepared.package {
-        Some(package) => store.install(package, Source::for_path(&prepared.path)),
-        None => store.install_path(&prepared.path),
+    let result = match (&prepared.package, &prepared.source) {
+        (Some(package), Some(source)) => store.install(package, source.clone()),
+        (Some(package), None) => store.install(package, Source::for_path(&prepared.path)),
+        (None, _) => store.install_path(&prepared.path),
     };
+    prepared.discard();
     changed();
     result.map_err(|e| e.to_string())
 }
@@ -511,7 +671,10 @@ pub fn remove(id: &PackageId, version: Option<&Version>) -> Result<(), String> {
     let store = store().ok_or("the packages folder can't be made")?;
     let result = match version {
         Some(v) => store.remove(id, v),
-        None => store.remove_all(id).map(|_| ()),
+        None => {
+            crate::grants::forget(id.as_str());
+            store.remove_all(id).map(|_| ())
+        }
     };
     changed();
     result.map_err(|e| e.to_string())

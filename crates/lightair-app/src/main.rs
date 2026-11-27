@@ -41,6 +41,9 @@ mod outputs_panel;
 mod packages;
 mod permissions;
 mod piair;
+mod catalogs;
+mod grants;
+mod links;
 mod plugin_activity;
 mod platforms;
 mod preflight;
@@ -107,6 +110,8 @@ fn main() {
     lightair_web::set_profile_dir(lightair_platform::paths::data_dir().join("Chromium"));
     // Plugins' refused requests and permission uses, for the notices and the activity panel.
     plugin_activity::connect();
+    // Catalogs: loaded, checked now and every 6 hours, their revoked lists enforced.
+    catalogs::start();
     // the chat readers that need a browser (Kick, the signed-in platforms) use Lightair's
     lightair_live::pages::set_host(Arc::new(chat_panel::HiddenPages));
 
@@ -151,7 +156,10 @@ fn main() {
         tracing::warn!("the compositor didn't start: the program's preview stays empty");
     }
 
-    gpui_kit::application().with_assets(assets::Assets).run(move |cx: &mut App| {
+    let app = gpui_kit::application().with_assets(assets::Assets);
+    // lightair:// links from the website or another app (the window handles them)
+    app.on_open_urls(links::push);
+    app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
         // a camera (an iPhone's above all) that comes back: its captures start again
         lightair_platform::devices::watch_cameras(|uid| {

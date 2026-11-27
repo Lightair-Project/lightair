@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::PanelEvent;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -22,6 +23,8 @@ use serde_json::{Value, json};
 use super::StudioWindow;
 use super::assets::{Asset, AssetKind, DraggedAsset, Placement};
 use crate::packages::{self as pk, Item, Use};
+
+mod catalog_ui;
 use crate::studio::Studio;
 use crate::ui::{self, tok};
 
@@ -63,6 +66,10 @@ pub(crate) struct PackagesPanel {
     /// Packages something in the show comes from, and when that was last looked at (at most
     /// once a second, while the panel is drawn).
     used: (Option<Instant>, BTreeSet<PackageId>),
+    /// The Catalog tab's search.
+    search: Entity<InputState>,
+    /// A community catalog's address, to add.
+    catalog_url: Entity<InputState>,
 }
 
 /// A copy started by a check or screenshot hook: no prompts.
@@ -179,7 +186,35 @@ impl PackagesPanel {
         })
         .detach();
         cx.defer_in(window, |this, window, cx| this.check_show(window, cx));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search the catalogs"));
+        cx.subscribe_in(&search, window, |_, _, ev: &InputEvent, _, cx| {
+            if let InputEvent::Change = ev {
+                cx.notify();
+            }
+        })
+        .detach();
+        let catalog_url = cx.new(|cx| InputState::new(window, cx).placeholder("A catalog's address (https://…)"));
+        // catalogs fetched, packages installed or withdrawn: drawn again
+        cx.spawn(async move |this, cx| {
+            let mut seen = (0, 0);
+            loop {
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+                let now = (crate::catalogs::generation(), pk::generation());
+                if now != seen {
+                    seen = now;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+                if this.upgrade().is_none() {
+                    break;
+                }
+            }
+        })
+        .detach();
         PackagesPanel {
+            search,
+            catalog_url,
             shell: shell.downgrade(),
             studio,
             focus: cx.focus_handle(),
@@ -368,13 +403,28 @@ impl PackagesPanel {
                 )
                 .child(lines)
                 .when(!s.missing.is_empty(), |d| {
-                    d.child(div().child(
-                        Button::new("pkg-install-missing").label("Install from file…").xsmall().outline().on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.with_shell(cx, |w, cx| w.pick_package_files(window, cx))
-                            }),
-                        ),
-                    ))
+                    let from_catalogs = self.missing_from_catalogs();
+                    d.child(
+                        div()
+                            .flex()
+                            .gap_1p5()
+                            .when(!from_catalogs.is_empty(), |d| {
+                                d.child(Button::new("pkg-install-missing-catalog").label("Install").xsmall().primary().on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        for (catalog, id, version) in from_catalogs.clone() {
+                                            this.with_shell(cx, |w, cx| {
+                                                w.install_from_catalog(Some(catalog), id, Some(version), window, cx)
+                                            });
+                                        }
+                                    }),
+                                ))
+                            })
+                            .child(Button::new("pkg-install-missing").label("Install from file…").xsmall().outline().on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.with_shell(cx, |w, cx| w.pick_package_files(window, cx))
+                                }),
+                            )),
+                    )
                 }),
         )
     }
@@ -390,7 +440,10 @@ impl PackagesPanel {
         let m = &p.manifest;
         let id = m.id.clone();
         let open = self.open.contains(&id);
-        let problems = p.problems();
+        let mut problems = pk::problems(p);
+        if let Some(reason) = crate::catalogs::revoked_reason(m.id.as_str(), &m.version) {
+            problems.insert(0, format!("Withdrawn and switched off: {reason}"));
+        }
         let mut facts = vec![m.summary(), pk::tier_label(m.highest_tier()).to_string()];
         if !m.licence.is_empty() {
             facts.push(m.licence.clone());
@@ -480,7 +533,7 @@ impl PackagesPanel {
                             .text_size(px(11.))
                             .text_color(tok::warn())
                             .child(ui::icon("triangle-alert").size(px(11.)))
-                            .child(div().min_w_0().truncate().child(sentence(&problem.to_string()))),
+                            .child(div().min_w_0().truncate().child(sentence(problem))),
                         None => div()
                             .truncate()
                             .text_size(px(11.))
@@ -549,7 +602,7 @@ impl PackagesPanel {
 
     /// A package's contents, each with what can be done with it.
     fn contents(&self, i: usize, p: &Installed, cx: &mut Context<Self>) -> Div {
-        let usable = p.is_usable();
+        let usable = pk::problems(p).is_empty();
         let (id, version) = (p.id().clone(), p.version().clone());
         let mut list = div()
             .flex()
@@ -729,6 +782,7 @@ impl PackagesPanel {
             list = list.child(self.row(i, versions, in_show, cx));
             if self.open.contains(id) {
                 list = list.child(self.contents(i, &versions[0], cx));
+                list = list.children(self.permissions(i, &versions[0], cx));
             }
         }
         list.into_any_element()
@@ -739,10 +793,8 @@ impl Render for PackagesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match self.tab {
             Tab::Installed => self.installed_tab(cx),
-            Tab::Catalog => {
-                empty("store", "The catalog is coming", "For now, install packages from files.").into_any_element()
-            }
-            Tab::Updates => empty("refresh-cw", "Updates come with the catalog", "").into_any_element(),
+            Tab::Catalog => self.catalog_tab(cx),
+            Tab::Updates => self.updates_tab(cx),
         };
         div()
             .id("packages-panel")
@@ -912,46 +964,9 @@ impl StudioWindow {
                         continue;
                     }
                 };
-                if prepared.already {
-                    let note = format!("{} {} is already installed", prepared.name, prepared.version);
-                    let id = PackageId::new(&prepared.id).ok();
-                    let _ = this.update(cx, |this, cx| this.package_note(note, cx));
-                    last = id.or(last);
-                    continue;
+                if let Some(id) = StudioWindow::confirm_and_install(&this, cx, prepared).await {
+                    last = Some(id);
                 }
-                let title = format!("Install “{}” {}?", prepared.name, prepared.version);
-                let mut facts = vec![pk::size(prepared.size), format!("from {}", file_name(&prepared.path))];
-                if !prepared.licence.is_empty() {
-                    facts.push(prepared.licence.clone());
-                }
-                if !prepared.author.is_empty() {
-                    facts.push(format!("by {}", prepared.author));
-                }
-                let detail = format!("Adds {}.\n{}", prepared.summary, facts.join(" · "));
-                let answer = this.update_in(cx, |_, window, cx| {
-                    window.prompt(PromptLevel::Info, &title, Some(&detail), &["Install", "Cancel"], cx)
-                });
-                let Ok(answer) = answer else { return };
-                if answer.await != Ok(0) {
-                    continue;
-                }
-                let name = prepared.name.clone();
-                let result = cx.background_executor().spawn(async move { pk::install(prepared) }).await;
-                let note = match &result {
-                    Ok(install) => {
-                        last = Some(install.installed.id().clone());
-                        let m = &install.installed.manifest;
-                        let mut note = format!("Installed {} {}", m.name, m.version);
-                        if !install.missing_dependencies.is_empty() {
-                            let needs: Vec<String> =
-                                install.missing_dependencies.iter().map(|(id, r)| format!("{id} {r}")).collect();
-                            note.push_str(&format!(". It also needs {}, not installed", needs.join(", ")));
-                        }
-                        note
-                    }
-                    Err(e) => format!("Couldn't install {name}: {e}"),
-                };
-                let _ = this.update(cx, |this, cx| this.package_note(note, cx));
             }
             // the panel, showing what came in
             if let Some(id) = last {
