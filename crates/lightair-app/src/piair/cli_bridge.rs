@@ -278,3 +278,25 @@ fn spawn(name: &str, params: &Value, send: Send) -> Answer {
     });
     Ok(json!({"id": id}))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nothing() -> Send {
+        Arc::new(|_| {})
+    }
+
+    #[test]
+    fn piair_cant_start_a_program_other_than_the_four_ai_apps() {
+        for name in ["sh", "/bin/sh", "bash", "osascript", "claude; rm -rf ~", "../codex", ""] {
+            let r = call("cli.spawn", &json!({"name": name, "args": ["-c", "id"]}), nothing());
+            assert_eq!(r.map_err(|e| e.0), Err("not_allowed".to_string()), "{name:?} was started");
+        }
+    }
+
+    #[test]
+    fn piair_cant_look_up_where_other_programs_are() {
+        assert!(call("cli.which", &json!({"name": "ssh"}), nothing()).is_err());
+    }
+}
