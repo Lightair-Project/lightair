@@ -657,8 +657,8 @@ pub fn open_package(path: &Path) -> Result<Package, String> {
 pub fn install(prepared: Prepared) -> Result<Install, String> {
     let store = store().ok_or("the packages folder can't be made")?;
     let result = match (&prepared.package, &prepared.source) {
-        (Some(package), Some(source)) => store.install(package, source.clone()),
-        (Some(package), None) => store.install(package, Source::for_path(&prepared.path)),
+        (Some(package), Some(source)) => store.install_with(package, source.clone(), limits().max_tier),
+        (Some(package), None) => store.install_with(package, Source::for_path(&prepared.path), limits().max_tier),
         (None, _) => store.install_path(&prepared.path),
     };
     prepared.discard();

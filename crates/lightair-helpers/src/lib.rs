@@ -77,6 +77,12 @@ pub fn launch(spec: &Spec, launcher: &std::path::Path, events: Sender<Event>) ->
     if !spec.entry.starts_with(&spec.package_dir) {
         return Err(io::Error::other("the helper's program isn't inside its package"));
     }
+    // a package's files don't carry permissions: its program is made executable here
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&spec.entry, std::fs::Permissions::from_mode(0o755))?;
+    }
 
     if spec.grants.full_access {
         let env = full_access_env(spec);

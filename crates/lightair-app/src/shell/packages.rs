@@ -873,6 +873,7 @@ fn absolutise(value: &mut Value, base: &Path) {
 impl StudioWindow {
     fn package_note(&self, note: impl Into<SharedString>, cx: &mut Context<Self>) {
         let note = note.into();
+        tracing::info!(target: "packages", "{note}");
         self.studio.update(cx, |s, cx| {
             s.issue = Some(note);
             cx.notify();

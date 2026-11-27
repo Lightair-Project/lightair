@@ -134,6 +134,7 @@ fn serve(mut conn: TcpStream, helper: &str, rules: &Rules, events: &Sender<Event
         tracing::info!("helper {helper}: refused {host}:{port} ({reason})");
         return refuse(&mut conn, 403);
     }
+    tracing::debug!("helper {helper}: {host}:{port} ({reason})");
     let Some(addr) = addr else { return refuse(&mut conn, 502) };
     let Ok(mut up) = TcpStream::connect_timeout(&addr, Duration::from_secs(10)) else { return refuse(&mut conn, 502) };
     let _ = conn.set_read_timeout(None);

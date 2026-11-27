@@ -16,6 +16,7 @@ pub mod keys;
 #[cfg(target_os = "macos")]
 mod path;
 pub mod proc;
+mod cli_bridge;
 
 /// A subscription sign-in's PiAir: its run number, process and stdin.
 type SignIn = (u64, proc::Proc, Box<dyn Write + Send>);
@@ -461,6 +462,7 @@ impl Host {
     pub fn stop(&self) {
         self.0.wanted.store(false, Ordering::Relaxed);
         self.halt();
+        cli_bridge::kill_all();
         *self.0.stdin.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if let Some(mut c) = self.0.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
             // stdin closed: it leaves on its own; make sure
@@ -522,6 +524,7 @@ impl Host {
             return;
         }
         self.hush(None);
+        cli_bridge::kill_all();
         self.0.computer.ai_drives.store(false, Ordering::Relaxed);
         *self.0.stdin.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if let Some(mut c) = self.0.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -721,6 +724,11 @@ impl Host {
     /// Answers one of PiAir's calls: its own methods here, everything else through the remote
     /// API's dispatcher (the same methods MCP clients reach).
     pub(crate) fn answer(&self, method: &str, params: Value) -> Result<Value, (String, String)> {
+        // the streamer's own AI apps, which a sandboxed PiAir can't start itself
+        if method.starts_with("cli.") {
+            let host = self.clone();
+            return cli_bridge::call(method, &params, std::sync::Arc::new(move |m| host.send(m)));
+        }
         if method.starts_with("computer.") {
             let ask = |text: String| self.ask(text);
             let r = self.0.computer.call(method, &params, &ask).map_err(|r| (r.code.to_string(), r.message));

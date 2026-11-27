@@ -72,10 +72,22 @@ impl StudioWindow {
             return id;
         }
         let (title, detail) = install_screen(&prepared);
-        let answer = this
-            .update_in(cx, |_, window, cx| window.prompt(PromptLevel::Info, &title, Some(&detail), &["Install", "Cancel"], cx))
-            .ok()?;
-        if answer.await != Ok(0) {
+        // a check run (LIGHTAIR_OPEN) has nobody to answer: the screen's text goes to the log and
+        // it installs, so a script can check both
+        let unattended = std::env::var_os("LIGHTAIR_OPEN").is_some();
+        if unattended {
+            tracing::info!(target: "packages", "install screen: {title} {}", detail.replace('\n', " · "));
+        } else {
+            let answer = this
+                .update_in(cx, |_, window, cx| window.prompt(PromptLevel::Info, &title, Some(&detail), &["Install", "Cancel"], cx))
+                .ok()?;
+            if answer.await != Ok(0) {
+                prepared.discard();
+                return None;
+            }
+        }
+        if prepared.full_access && unattended {
+            tracing::info!(target: "packages", "full access asked: a check run doesn't give it");
             prepared.discard();
             return None;
         }

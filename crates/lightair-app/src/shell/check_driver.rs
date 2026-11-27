@@ -9,7 +9,8 @@
 //! object's source settings), `anchor-sheet`, `accessory <anchor key> <file>`, `pin <anchor key>`,
 //! `drop-tree <object name|-> <above|into|below> <paths…>`, `drop-assets <paths…>`, `save-scene`, `undo`,
 //! `scroll <px>`, `settings-shortcuts`, `settings-voices`, `say <text>`, `voice-level`, `test-event <kind>`,
-//! `assets-open <folder>`, `cohost-window <page>`.
+//! `assets-open <folder>`, `cohost-window <page>`, `cohost <avatar file>` (an AI co-host object),
+//! `install <package id>` (from Lightair's catalog, as the co-host's Install button does).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -60,6 +61,18 @@ impl StudioWindow {
             scene.object(studio.selected_object?)?.source
         };
         match cmd {
+            "cohost" => {
+                let id = self.avatar_library.for_file(std::path::Path::new(rest));
+                self.avatar_library.save();
+                if let Some(e) = self.avatar_library.get(id).cloned() {
+                    self.add_cohost_object(&e, cx);
+                }
+            }
+            "install" => {
+                crate::catalogs::request_install(rest, None, None);
+                // a window in the background may not draw: handle the link now
+                self.handle_links(window, cx);
+            }
             "add-avatar" => {
                 let id = self.avatar_library.for_file(std::path::Path::new(rest));
                 self.avatar_library.save();
