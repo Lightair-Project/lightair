@@ -92,6 +92,18 @@ fn json_get(url: &str, headers: &[(&str, &str)]) -> Result<Value, String> {
 /// The voices `vendor` offers this account.
 pub fn list(vendor: &str) -> Result<Vec<VoiceInfo>, String> {
     match vendor {
+        // the system's own voices: free and offline
+        "system" => Ok(lightair_platform::speech::voices()
+            .into_iter()
+            .map(|v| VoiceInfo {
+                id: v.id,
+                name: v.name,
+                detail: v.language.replace('_', "-"),
+                tags: vec![v.language.replace('_', "-")],
+                gender: None,
+                preview_url: None,
+            })
+            .collect()),
         "gemini" => Ok(GEMINI
             .iter()
             .map(|(n, d)| VoiceInfo {
@@ -191,6 +203,11 @@ pub fn preview(vendor: &str, voice: &VoiceInfo) -> Result<PathBuf, String> {
     let ext = if voice.preview_url.is_some() || vendor == "elevenlabs" { "mp3" } else { "wav" };
     let file = dir.join(format!("{vendor}-{safe}.{ext}"));
     if file.exists() {
+        return Ok(file);
+    }
+    if vendor == "system" {
+        let wav = lightair_platform::speech::synthesize(SAMPLE, &voice.id, 1.0)?;
+        std::fs::write(&file, wav).map_err(|e| e.to_string())?;
         return Ok(file);
     }
     let agent = lightair_live::net::agent();

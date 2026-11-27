@@ -201,41 +201,84 @@ fn captions(w: Widgets) {
     loop {
         std::thread::sleep(Duration::from_secs(1));
         let wanted = settings_of(&w, "captions");
-        if !cfg!(target_os = "macos") || wanted.is_empty() {
+        if wanted.is_empty() {
             continue;
         }
-        let Some(helper) = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.join("lightair-speech"))).filter(|p| p.exists())
-        else {
-            w.set_data("captions", json!({"lines": [], "partial": "", "error": "This build has no speech helper", "at": now_ms()}));
-            std::thread::sleep(Duration::from_secs(30));
-            continue;
-        };
-        // the first captions widget's choices: what's said in, and what to translate it to
+        // the first captions widget's choices: what hears, what's said in, what to translate it to
         let field = |k: &str| wanted[0].get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
-        let (language, translate) = (field("language"), field("translateTo"));
-        let mut cmd = std::process::Command::new(&helper);
-        cmd.arg(if language.is_empty() { "-" } else { language.as_str() }).arg("").arg(&translate);
-        let child = cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn();
-        let Ok(mut child) = child else { continue };
-        let Some(out) = child.stdout.take() else { continue };
+        let (kind, language, translate) = (field("engine"), field("language"), field("translateTo"));
+        let cloud = kind == "elevenlabs" || kind == "openrouter";
+        let started = (kind.clone(), language.clone(), translate.clone());
+        // the words come as the helper's lines: READY, TEXT, DONE, TRANSLATION, ERROR
         let (tx, rx) = std::sync::mpsc::channel::<String>();
-        std::thread::spawn(move || {
-            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
+        let mut child = None;
+        let mut _mic = None;
+        if cloud {
+            let Some(key) = crate::piair::keys::get(&kind) else {
+                let name = if kind == "elevenlabs" { "ElevenLabs" } else { "OpenRouter" };
+                w.set_data("captions", json!({"lines": [], "partial": "", "error": format!("Add your {name} key in Settings › Connections"), "at": now_ms()}));
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            };
+            let config = lightair_voice::HearConfig { engine: kind.clone(), model: String::new(), language: language.clone(), key };
+            let lines = tx.clone();
+            let hearer = lightair_voice::Hearer::start(
+                config,
+                Box::new(move |e| {
+                    let _ = lines.send(match e {
+                        lightair_voice::HearEvent::Ready(how) => format!("READY {how}"),
+                        lightair_voice::HearEvent::Text(t) => format!("TEXT {t}"),
+                        lightair_voice::HearEvent::Done => "DONE".into(),
+                        lightair_voice::HearEvent::Lang(l) => format!("LANG {l}"),
+                        lightair_voice::HearEvent::Error(why) => format!("ERROR {why}"),
+                    });
+                }),
+            );
+            match mic_16k(Box::new(move |pcm: &[i16]| hearer.push(pcm))) {
+                Ok(stream) => _mic = Some(stream),
+                Err(e) => {
+                    w.set_data("captions", json!({"lines": [], "partial": "", "error": format!("The microphone didn't open: {e}"), "at": now_ms()}));
+                    std::thread::sleep(Duration::from_secs(5));
+                    continue;
                 }
             }
-        });
+        } else {
+            if !cfg!(target_os = "macos") {
+                w.set_data("captions", json!({"lines": [], "partial": "", "error": "Hearing on this computer needs macOS: choose ElevenLabs or OpenRouter", "at": now_ms()}));
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+            let Some(helper) = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.join("lightair-speech"))).filter(|p| p.exists())
+            else {
+                w.set_data("captions", json!({"lines": [], "partial": "", "error": "This build has no speech helper", "at": now_ms()}));
+                std::thread::sleep(Duration::from_secs(30));
+                continue;
+            };
+            let mut cmd = std::process::Command::new(&helper);
+            cmd.arg(if language.is_empty() { "-" } else { language.as_str() }).arg("").arg(&translate);
+            let Ok(mut c) = cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn() else { continue };
+            let Some(out) = c.stdout.take() else { continue };
+            let lines = tx.clone();
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                    if lines.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+            child = Some(c);
+        }
+        drop(tx);
         let mut lines: Vec<Value> = Vec::new();
         let mut partial = String::new();
         let mut error = String::new();
-        let started = (language.clone(), translate.clone());
         let mut checked = Instant::now();
         loop {
             match rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(line) => {
                     if let Some(text) = line.strip_prefix("TEXT ") {
                         partial = text.to_string();
+                        error.clear();
                     } else if line == "DONE" {
                         if !partial.is_empty() {
                             lines.push(json!({"text": std::mem::take(&mut partial)}));
@@ -250,28 +293,82 @@ fn captions(w: Widgets) {
                     } else if let Some(why) = line.strip_prefix("ERROR ") {
                         error = why.to_string();
                         tracing::warn!(%why, "captions");
+                    } else if line.starts_with("READY ") {
+                        error.clear();
                     }
                     w.set_data("captions", json!({"lines": lines, "partial": partial, "error": error, "at": now_ms()}));
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => break,
             }
-            // stop with the last widget; start again when its languages change
+            // stop with the last widget; start again when its choices change
             if checked.elapsed() > Duration::from_secs(1) {
                 checked = Instant::now();
                 let now = settings_of(&w, "captions");
-                let langs = now.first().map(|f| {
+                let choices = now.first().map(|f| {
                     let g = |k: &str| f.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
-                    (g("language"), g("translateTo"))
+                    (g("engine"), g("language"), g("translateTo"))
                 });
-                if langs.as_ref() != Some(&started) {
+                if choices.as_ref() != Some(&started) {
                     break;
                 }
             }
         }
-        let _ = child.kill();
-        let _ = child.wait();
+        if let Some(mut c) = child {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
     }
+}
+
+/// Where samples go as they come.
+type SamplesOut = Box<dyn FnMut(&[i16]) + Send>;
+
+/// The default microphone, as 16 kHz mono samples handed to `out` as they come (until the stream
+/// is dropped).
+fn mic_16k(mut out: SamplesOut) -> Result<cpal::Stream, String> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    let device = cpal::default_host().default_input_device().ok_or("no microphone")?;
+    let config = device.default_input_config().map_err(|e| e.to_string())?;
+    let (rate, channels) = (config.sample_rate() as f64, config.channels().max(1) as usize);
+    let step = rate / lightair_voice::hear::RATE as f64;
+    let mut pos = 0.0f64;
+    let mut prev = 0.0f32;
+    let mut buf: Vec<i16> = Vec::with_capacity(2048);
+    let mut take = move |frames: &mut dyn Iterator<Item = f32>| {
+        buf.clear();
+        // linear interpolation down to 16 kHz, its position carried from block to block
+        for s in frames {
+            while pos < 1.0 {
+                let v = prev + (s - prev) * pos as f32;
+                buf.push((v.clamp(-1.0, 1.0) * 32767.0) as i16);
+                pos += step;
+            }
+            pos -= 1.0;
+            prev = s;
+        }
+        if !buf.is_empty() {
+            out(&buf);
+        }
+    };
+    let err = |e: cpal::Error| tracing::warn!(%e, "captions microphone");
+    let stream = match config.sample_format() {
+        cpal::SampleFormat::I16 => device.build_input_stream(
+            config.into(),
+            move |d: &[i16], _| take(&mut d.chunks(channels).map(|f| f.iter().map(|s| *s as f32 / 32768.0).sum::<f32>() / channels as f32)),
+            err,
+            None,
+        ),
+        _ => device.build_input_stream(
+            config.into(),
+            move |d: &[f32], _| take(&mut d.chunks(channels).map(|f| f.iter().sum::<f32>() / channels as f32)),
+            err,
+            None,
+        ),
+    }
+    .map_err(|e| e.to_string())?;
+    stream.play().map_err(|e| e.to_string())?;
+    Ok(stream)
 }
 
 // ---------------------------------------------------------------------------------------------

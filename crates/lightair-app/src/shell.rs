@@ -54,6 +54,7 @@ pub(crate) mod mixer_props;
 mod palette;
 mod screen_zoom_pointer;
 mod settings;
+mod voices_page;
 mod source;
 
 use crate::geometry::{self as geo, CORNERS, Corner};
@@ -1343,6 +1344,7 @@ impl StudioWindow {
                 }
             }
             A::PiAirStop => self.piair.kill_switch(),
+            A::SkipSpeech => crate::voice::stop(false),
             A::Automation(i) => {
                 if let Some(id) = crate::shortcuts::automation_for(i)
                     && let Err(e) = self.automations.run(&id, None, &[])

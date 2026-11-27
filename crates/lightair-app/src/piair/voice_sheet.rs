@@ -19,7 +19,8 @@ use super::{Host, KeyState, Voices, keys, voices};
 use crate::ui::{self, tok};
 
 /// The vendors with voices to pick, in the rail's order.
-const VENDORS: &[(&str, &str)] = &[("cartesia", "Cartesia"), ("elevenlabs", "ElevenLabs"), ("gemini", "Gemini")];
+const VENDORS: &[(&str, &str)] =
+    &[("cartesia", "Cartesia"), ("elevenlabs", "ElevenLabs"), ("gemini", "Gemini"), ("system", "System voice")];
 /// Tiles a row.
 const COLUMNS: usize = 2;
 
@@ -313,7 +314,7 @@ impl Render for VoiceSheet {
             let on = self.vendor == id;
             let service = keys::service_for_voice(id);
             let note = match (self.host.key_state(service), id) {
-                (KeyState::Missing, _) => "No key".to_string(),
+                (KeyState::Missing, v) if v != "system" => "No key".to_string(),
                 _ => match self.host.voices(id) {
                     Voices::Ready(l) => l.len().to_string(),
                     Voices::Loading => "…".to_string(),
@@ -355,7 +356,7 @@ impl Render for VoiceSheet {
         // the voices
         let voices = self.host.voices(self.vendor);
         let service = keys::service_for_voice(self.vendor);
-        let no_key = self.host.key_state(service) == KeyState::Missing;
+        let no_key = self.vendor != "system" && self.host.key_state(service) == KeyState::Missing;
         let all = match &voices {
             Voices::Ready(l) => l.clone(),
             _ => Vec::new(),

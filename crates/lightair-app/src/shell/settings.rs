@@ -39,6 +39,7 @@ pub(crate) enum Page {
     Connections,
     Permissions,
     CoHost,
+    Voices,
     About,
 }
 
@@ -55,6 +56,7 @@ const PAGES: &[(Page, &str, &str)] = &[
     (Page::Remote, "Remote API", "radio-tower"),
     (Page::Connections, "Connections", "plug"),
     (Page::Permissions, "Permissions", "shield-check"),
+    (Page::Voices, "Voices", "megaphone"),
     (Page::CoHost, "AI co-host", "bot"),
     (Page::About, "About", "info"),
 ];
@@ -330,6 +332,7 @@ impl StudioWindow {
             Page::Connections => self.connections_page(cx),
             Page::Permissions => self.permissions_page(cx),
             Page::CoHost => self.cohost_page(cx),
+            Page::Voices => self.voices_page(cx),
             Page::About => self.about_page(cx),
         };
         let title = PAGES.iter().find(|(p, ..)| *p == page).map_or("", |(_, l, _)| *l);

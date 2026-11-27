@@ -26,6 +26,7 @@ const VENDORS: &[(&str, &str)] = &[
     ("cartesia", "Cartesia"),
     ("elevenlabs", "ElevenLabs"),
     ("gemini", "Gemini"),
+    ("system", "System voice"),
     ("codex", "ChatGPT voice"),
     ("none", "None"),
 ];
@@ -557,7 +558,7 @@ impl CohostView {
         let mut body = vec![stacked(
             "Provider",
             Some(
-                "Cartesia and ElevenLabs answer in about a tenth of a second and give timings for the mouth. Gemini works with a Google key. ChatGPT voice: the live model hears and speaks over a call on your ChatGPT plan (no separate brain, hearing or key). None: it writes in Talk instead of speaking. It plays on the co-host's own mixer track.",
+                "Cartesia and ElevenLabs answer in about a tenth of a second and give timings for the mouth. Gemini works with a Google key. System voice: this computer's own, free and offline (it starts a little later). ChatGPT voice: the live model hears and speaks over a call on your ChatGPT plan (no separate brain, hearing or key). None: it writes in Talk instead of speaking. It plays on the co-host's own mixer track.",
             ),
             chips,
         )];
@@ -604,7 +605,9 @@ impl CohostView {
             Some("▶ plays a short sample on this computer, never on stream."),
             self.voice_picker(&vendor, &chosen, cx),
         ));
-        body.push(self.key_line(service, cx));
+        if vendor != "system" {
+            body.push(self.key_line(service, cx));
+        }
         body.push(mouth_row);
         self.section("Voice", body, cx)
     }

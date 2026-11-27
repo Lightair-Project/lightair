@@ -127,6 +127,32 @@ pub struct Shared {
     /// A subscription sign-in's own PiAir (it only signs in), with its run number.
     signin: Mutex<Option<(u64, Child, ChildStdin)>>,
     signin_gen: AtomicU64,
+    /// The co-host's speech: Lightair's own voices say the text PiAir sends (`say`).
+    speech: Mutex<Speech>,
+}
+
+/// The co-host's voice and the utterances it's saying.
+#[derive(Default)]
+struct Speech {
+    /// The voice made, with the profile and key it was made from.
+    made: Option<(lightair_voice::Profile, Option<String>, lightair_voice::Voice)>,
+    open: std::collections::HashMap<String, Box<dyn lightair_voice::Utterance>>,
+}
+
+/// The co-host's voice from its settings (`voice`: vendor, voice, speed; `persona.language`);
+/// `None` for no voice or ChatGPT's realtime voice (which speaks for itself).
+fn cohost_profile(settings: &Value) -> Option<lightair_voice::Profile> {
+    let v = &settings["voice"];
+    let vendor = lightair_voice::Vendor::parse(v["vendor"].as_str().unwrap_or("gemini"))?;
+    Some(lightair_voice::Profile {
+        id: "cohost".into(),
+        name: "AI co-host".into(),
+        vendor,
+        voice: v["voice"].as_str().unwrap_or("").to_string(),
+        voice_name: String::new(),
+        speed: v["speed"].as_f64().unwrap_or(1.0) as f32,
+        language: settings.pointer("/persona/language").and_then(Value::as_str).unwrap_or("").to_string(),
+    })
 }
 
 /// What a heard track is to the co-host.
@@ -203,13 +229,13 @@ pub fn hearing(w: &lightair_model::Workspace, cohost: &Value) -> Vec<crate::piai
     let echo: Vec<Id> = w
         .tracks
         .iter()
-        .filter(|t| w.sources.get(&t.source).is_some_and(|s| s.kind == lightair_host::piair_voice::KIND))
+        .filter(|t| w.sources.get(&t.source).is_some_and(|s| lightair_host::piair_voice::Channel::of_kind(&s.kind).is_some()))
         .map(|t| t.id)
         .collect();
     let make = |track: &str, role: Role| -> Option<Hearing> {
         let t = w.tracks.iter().find(|t| t.id.to_string() == track)?;
         let source = w.sources.get(&t.source)?;
-        (source.kind != lightair_host::piair_voice::KIND).then(|| Hearing {
+        lightair_host::piair_voice::Channel::of_kind(&source.kind).is_none().then(|| Hearing {
             track: t.id,
             source: t.source,
             name: t.name.clone(),
@@ -306,6 +332,7 @@ impl Host {
             hear_status: Mutex::new(std::collections::HashMap::new()),
             signin: Mutex::new(None),
             signin_gen: AtomicU64::new(0),
+            speech: Mutex::new(Speech::default()),
         });
         let host = Host(shared);
         *host.0.computer.allowed.lock().unwrap_or_else(|e| e.into_inner()) = ComputerPrefs::load().allowed;
@@ -461,7 +488,8 @@ impl Host {
         }
         self.send(json!({
             "t": "hello",
-            "version": 1,
+            // 2: PiAir sends text (`say`) and Lightair speaks it
+            "version": 2,
             "platform": std::env::consts::OS,
             "data_dir": self.0.data_dir,
             "lightair": {"version": env!("CARGO_PKG_VERSION")},
@@ -519,7 +547,7 @@ impl Host {
     /// Everything that must stop now, on Lightair's side.
     fn halt(&self) {
         self.0.computer.ai_drives.store(false, Ordering::Relaxed);
-        piair_voice::cancel(None);
+        self.hush(None);
         lightair_host::zoom_to::release();
         if let Some(q) = self.state().question.take() {
             let _ = q.answer.send(false);
@@ -533,7 +561,7 @@ impl Host {
         if self.0.generation.load(Ordering::Relaxed) != run_id {
             return;
         }
-        piair_voice::cancel(None);
+        self.hush(None);
         self.0.computer.ai_drives.store(false, Ordering::Relaxed);
         *self.0.stdin.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if let Some(mut c) = self.0.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -578,9 +606,18 @@ impl Host {
 
     fn on_message(&self, m: Incoming) {
         match m {
-            Incoming::Voice { utterance, rate, pcm, marks } => piair_voice::push(&utterance, rate, &pcm, &marks),
-            Incoming::VoiceEnd { utterance } => piair_voice::end(&utterance),
-            Incoming::VoiceCancel { utterance } => piair_voice::cancel(utterance.as_deref()),
+            Incoming::Voice { utterance, rate, pcm, marks } => piair_voice::push(piair_voice::Channel::Cohost, &utterance, rate, &pcm, &marks),
+            Incoming::VoiceEnd { utterance } => piair_voice::end(piair_voice::Channel::Cohost, &utterance),
+            Incoming::VoiceCancel { utterance } => piair_voice::cancel(piair_voice::Channel::Cohost, utterance.as_deref()),
+            Incoming::Say { utterance, text } => self.say(utterance, &text),
+            Incoming::SayEnd { utterance } => {
+                let open = self.0.speech.lock().unwrap_or_else(|e| e.into_inner()).open.remove(&utterance);
+                match open {
+                    Some(mut u) => u.end(),
+                    None => piair_voice::end(piair_voice::Channel::Cohost, &utterance),
+                }
+            }
+            Incoming::SayCancel { utterance } => self.hush(utterance.as_deref()),
             Incoming::Face { mood, look } => {
                 if let Some(mood) = mood {
                     face_drive::set_mood(&mood);
@@ -646,6 +683,79 @@ impl Host {
             Incoming::Other(_) => {}
         }
         self.touch();
+    }
+
+    /// Says a piece of PiAir's text with the co-host's voice, on its track (a new utterance
+    /// starts with its first piece).
+    fn say(&self, utterance: String, text: &str) {
+        let settings = self.state().settings.clone();
+        let Some(profile) = cohost_profile(&settings) else { return };
+        let mut sp = self.0.speech.lock().unwrap_or_else(|e| e.into_inner());
+        if !sp.open.contains_key(&utterance) {
+            let key = crate::voice::key_for(profile.vendor);
+            let voice = match &sp.made {
+                Some((p, k, v)) if *p == profile && *k == key => Ok(v.clone()),
+                _ => lightair_voice::Voice::new(&profile, key.clone()).inspect(|v| sp.made = Some((profile.clone(), key, v.clone()))),
+            };
+            let voice = match voice {
+                Ok(v) => v,
+                Err(why) => {
+                    drop(sp);
+                    let mut s = self.state();
+                    s.status = "error".into();
+                    s.detail = Some(why);
+                    drop(s);
+                    self.touch();
+                    return;
+                }
+            };
+            let (id, host) = (utterance.clone(), self.clone());
+            let u = voice.utterance(Box::new(move |e| match e {
+                lightair_voice::Event::Audio(c) => {
+                    let marks: Vec<(f32, piair_voice::Shape)> =
+                        c.marks.iter().filter_map(|(t, s)| Some((*t, piair_voice::Shape::parse(s.as_str())?))).collect();
+                    piair_voice::push_samples(piair_voice::Channel::Cohost, &id, c.rate, &c.pcm, &marks);
+                }
+                lightair_voice::Event::Done => piair_voice::end(piair_voice::Channel::Cohost, &id),
+                lightair_voice::Event::Failed(why) => {
+                    tracing::warn!(%why, "co-host voice");
+                    piair_voice::end(piair_voice::Channel::Cohost, &id);
+                    // (on a thread of its own: a voice may fail while it's being made, under the lock)
+                    let host = host.clone();
+                    std::thread::spawn(move || {
+                        host.0.speech.lock().unwrap_or_else(|e| e.into_inner()).made = None;
+                        let mut s = host.state();
+                        s.status = "error".into();
+                        s.detail = Some(why);
+                        drop(s);
+                        host.touch();
+                    });
+                }
+            }));
+            sp.open.insert(utterance.clone(), u);
+        }
+        if let Some(u) = sp.open.get_mut(&utterance) {
+            u.say(text);
+        }
+    }
+
+    /// Stops the co-host's speech: one utterance, or all of it.
+    fn hush(&self, utterance: Option<&str>) {
+        let mut sp = self.0.speech.lock().unwrap_or_else(|e| e.into_inner());
+        match utterance {
+            Some(u) => {
+                if let Some(mut x) = sp.open.remove(u) {
+                    x.cancel();
+                }
+            }
+            None => {
+                for (_, mut x) in sp.open.drain() {
+                    x.cancel();
+                }
+            }
+        }
+        drop(sp);
+        piair_voice::cancel(piair_voice::Channel::Cohost, utterance);
     }
 
     /// Answers one of PiAir's calls: its own methods here, everything else through the remote
@@ -740,7 +850,7 @@ impl Host {
                 let mut forwarders: std::collections::HashMap<Id, Forwarder> = std::collections::HashMap::new();
                 loop {
                     std::thread::sleep(Duration::from_millis(20));
-                    for e in piair_voice::take_events() {
+                    for e in piair_voice::take_events(piair_voice::Channel::Cohost) {
                         let (u, state) = match e {
                             piair_voice::Event::Playing(u) => (u, "playing"),
                             piair_voice::Event::Done(u) => (u, "done"),
@@ -931,6 +1041,17 @@ pub enum Incoming {
     VoiceCancel {
         utterance: Option<String>,
     },
+    /// A piece of text to say with the co-host's voice (Lightair makes the sound).
+    Say {
+        utterance: String,
+        text: String,
+    },
+    SayEnd {
+        utterance: String,
+    },
+    SayCancel {
+        utterance: Option<String>,
+    },
     Face {
         mood: Option<String>,
         look: Option<FaceLook>,
@@ -987,6 +1108,9 @@ pub fn parse_line(line: &str) -> Result<Incoming, String> {
         },
         "voice_end" => Incoming::VoiceEnd { utterance: text("utterance").unwrap_or_default() },
         "voice_cancel" => Incoming::VoiceCancel { utterance: text("utterance") },
+        "say" => Incoming::Say { utterance: text("utterance").unwrap_or_default(), text: text("text").unwrap_or_default() },
+        "say_end" => Incoming::SayEnd { utterance: text("utterance").unwrap_or_default() },
+        "say_cancel" => Incoming::SayCancel { utterance: text("utterance") },
         "face" => Incoming::Face {
             mood: text("mood"),
             look: match m.get("look") {
@@ -1618,10 +1742,15 @@ fn apple_locale(code: &str) -> &str {
     }
 }
 
-/// Listening to one heard track: Lightair taps its sound (`lightair_host::audio_tap`) and the
-/// bundled `lightair-speech` helper (Apple's on-device speech recognition) turns it into text.
+/// Where a listener's sound goes (false: it can't take more).
+type Feed = Box<dyn FnMut(&[i16]) -> bool + Send>;
+
+/// Listening to one heard track: Lightair taps its sound (`lightair_host::audio_tap`) and turns it
+/// into text with the bundled `lightair-speech` helper (Apple's on-device speech recognition) or a
+/// cloud engine (`lightair_voice::Hearer`: ElevenLabs Scribe, OpenRouter).
 struct Listener {
-    child: Child,
+    /// The on-device helper (none for a cloud engine, which runs here).
+    child: Option<Child>,
     role: Role,
     source: Id,
     name: String,
@@ -1654,66 +1783,88 @@ struct ListenState {
 impl Listener {
     /// Starts listening to a track, or says why it can't.
     fn start(engine: &std::sync::Arc<lightair_host::Engine>, h: &Hearing) -> Result<Listener, String> {
-        if !cfg!(target_os = "macos") {
-            return Err("Hearing needs macOS for now.".into());
+        let cloud = matches!(h.engine.kind.as_str(), "elevenlabs" | "openrouter");
+        if !cloud && !cfg!(target_os = "macos") {
+            return Err("On-device hearing needs macOS for now; choose ElevenLabs or OpenRouter to hear here.".into());
         }
-        // the helper for its engine: Apple's on this Mac, or PiAir's `hear` for a cloud one (its
-        // configuration, with the key, as the first line in: never on its command line)
-        let (mut command, config) = match h.engine.kind.as_str() {
-            "elevenlabs" | "openrouter" => {
-                let service = if h.engine.kind == "elevenlabs" { "elevenlabs" } else { "openrouter" };
-                let key = keys::get(service).ok_or_else(|| {
-                    format!("Add your {} key in Settings → Connections to hear with it.", keys::name_of(service))
-                })?;
-                let program = Host::program().ok_or("PiAir isn't in this build of Lightair.")?;
-                let mut c = Command::new(&program[0]);
-                c.args(&program[1..]).arg("hear");
-                let config = json!({"engine": h.engine.kind, "model": h.engine.model, "language": h.engine.language, "key": key});
-                (c, Some(config))
-            }
-            _ => {
-                let missing = || "Speech recognition isn't in this build of Lightair.".to_string();
-                let exe = std::env::current_exe().map_err(|_| missing())?;
-                let dir = exe.parent().ok_or_else(missing)?;
-                let helper = [dir.join("lightair-speech"), dir.join("../lightair-speech")]
-                    .into_iter()
-                    .find(|p| p.exists())
-                    .ok_or_else(missing)?;
-                let mut c = Command::new(helper);
-                c.arg(apple_locale(&h.engine.language)).arg("-pcm");
-                (c, None)
-            }
-        };
         let muted = std::sync::Arc::new(AtomicBool::new(h.muted));
         let (tap, mut consumer) =
             track_sound(engine, h.track, h.source, muted.clone()).ok_or("Couldn't take this track's sound (is its source on?).")?;
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Speech recognition didn't start: {e}"))?;
-        let (Some(mut stdin), Some(out)) = (child.stdin.take(), child.stdout.take()) else {
-            return Err("Speech recognition didn't start.".into());
+        // the helper's (or the cloud engine's) lines: READY, TEXT, DONE, LANG, ERROR
+        let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+        let read_all = std::sync::Arc::new(AtomicBool::new(false));
+        // where the sound goes
+        let (child, mut feed): (Option<Child>, Feed) = if cloud {
+            let service = if h.engine.kind == "elevenlabs" { "elevenlabs" } else { "openrouter" };
+            let key = keys::get(service)
+                .ok_or_else(|| format!("Add your {} key in Settings → Connections to hear with it.", keys::name_of(service)))?;
+            let config = lightair_voice::HearConfig {
+                engine: h.engine.kind.clone(),
+                model: h.engine.model.clone(),
+                language: h.engine.language.clone(),
+                key,
+            };
+            let tx = line_tx.clone();
+            let hearer = lightair_voice::Hearer::start(
+                config,
+                Box::new(move |e| {
+                    let line = match e {
+                        lightair_voice::HearEvent::Ready(how) => format!("READY {how}"),
+                        lightair_voice::HearEvent::Text(t) => format!("TEXT {t}"),
+                        lightair_voice::HearEvent::Done => "DONE".into(),
+                        lightair_voice::HearEvent::Lang(l) => format!("LANG {l}"),
+                        lightair_voice::HearEvent::Error(why) => format!("ERROR {why}"),
+                    };
+                    let _ = tx.send(line);
+                }),
+            );
+            (None, Box::new(move |pcm: &[i16]| {
+                hearer.push(pcm);
+                true
+            }))
+        } else {
+            let missing = || "Speech recognition isn't in this build of Lightair.".to_string();
+            let exe = std::env::current_exe().map_err(|_| missing())?;
+            let dir = exe.parent().ok_or_else(missing)?;
+            let helper = [dir.join("lightair-speech"), dir.join("../lightair-speech")]
+                .into_iter()
+                .find(|p| p.exists())
+                .ok_or_else(missing)?;
+            let mut command = Command::new(helper);
+            command.arg(apple_locale(&h.engine.language)).arg("-pcm");
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("Speech recognition didn't start: {e}"))?;
+            let (Some(mut stdin), Some(out)) = (child.stdin.take(), child.stdout.take()) else {
+                return Err("Speech recognition didn't start.".into());
+            };
+            let tx = line_tx.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(out).lines().map_while(Result::ok) {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+            let mut bytes = Vec::with_capacity(8192);
+            (Some(child), Box::new(move |pcm: &[i16]| {
+                bytes.clear();
+                bytes.extend(pcm.iter().flat_map(|s| s.to_le_bytes()));
+                stdin.write_all(&bytes).is_ok()
+            }))
         };
-        if let Some(config) = config {
-            let mut line = config.to_string();
-            line.push('\n');
-            stdin.write_all(line.as_bytes()).map_err(|e| format!("Speech recognition didn't start: {e}"))?;
-        }
+        drop(line_tx);
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let state =
             std::sync::Arc::new(Mutex::new(ListenState { started: Some(Instant::now()), ..Default::default() }));
-        // the track's sound into the helper
+        // the track's sound in
         let (s, st) = (stop.clone(), state.clone());
         std::thread::spawn(move || {
             let _tap = tap;
-            let mut bytes = Vec::with_capacity(8192);
+            let mut samples: Vec<i16> = Vec::with_capacity(4096);
             while !s.load(Ordering::Relaxed) && !consumer.is_abandoned() {
                 std::thread::sleep(Duration::from_millis(40));
                 let n = consumer.slots();
@@ -1726,9 +1877,9 @@ impl Listener {
                 if a.iter().chain(b).any(|v| v.unsigned_abs() > 330) {
                     st.lock().unwrap_or_else(|e| e.into_inner()).sound_at = Some(Instant::now());
                 }
-                bytes.clear();
-                bytes.extend(chunk.into_iter().flat_map(i16::to_le_bytes));
-                if stdin.write_all(&bytes).is_err() {
+                samples.clear();
+                samples.extend(chunk);
+                if !feed(&samples) {
                     break;
                 }
             }
@@ -1736,13 +1887,12 @@ impl Listener {
         // its words out
         let (tx, rx) = std::sync::mpsc::channel();
         let (st, name) = (state.clone(), h.name.clone());
-        let read_all = std::sync::Arc::new(AtomicBool::new(false));
         let done_reading = read_all.clone();
         std::thread::spawn(move || {
             let _done = Finally(done_reading);
             let mut last = String::new();
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                tracing::debug!(track = %name, %line, "piair: speech helper");
+            for line in line_rx {
+                tracing::debug!(track = %name, %line, "piair: hearing");
                 if let Some(text) = line.strip_prefix("TEXT ") {
                     last = text.to_string();
                     {
@@ -1761,9 +1911,11 @@ impl Listener {
                     st.lock().unwrap_or_else(|e| e.into_inner()).language = Some(code.trim().to_string());
                 } else if let Some(how) = line.strip_prefix("READY ") {
                     tracing::info!(track = %name, %how, "piair: listening");
-                    st.lock().unwrap_or_else(|e| e.into_inner()).ready = Some(how.to_string());
+                    let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
+                    g.ready = Some(how.to_string());
+                    g.problem = None;
                 } else if let Some(why) = line.strip_prefix("ERROR ") {
-                    tracing::warn!(track = %name, %why, "piair: speech recognition");
+                    tracing::warn!(track = %name, %why, "piair: hearing");
                     st.lock().unwrap_or_else(|e| e.into_inner()).problem = Some(why.to_string());
                 }
             }
@@ -1817,15 +1969,18 @@ impl Listener {
 
     /// It stopped, and what it said before stopping has been read.
     fn dead(&mut self) -> bool {
-        self.child.try_wait().ok().flatten().is_some() && self.read_all.load(Ordering::Relaxed)
+        // a cloud engine keeps trying by itself: it never dies
+        self.child.as_mut().is_some_and(|c| c.try_wait().ok().flatten().is_some()) && self.read_all.load(Ordering::Relaxed)
     }
 }
 
 impl Drop for Listener {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(c) = self.child.as_mut() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
     }
 }
 

@@ -18,6 +18,7 @@ fn text<'a>(p: &'a Value, key: &str) -> Option<&'a str> {
 
 /// Starts the automations; their steps call Lightair through `jobs` (the remote API's queue).
 pub(super) fn start_automations(hub: &lightair_live::Hub, jobs: super::remote::JobSender) -> Automations {
+    let voice_jobs = jobs.clone();
     // Twitch channel-points redemptions, while signed in to Twitch officially
     {
         let hub = hub.clone();
@@ -46,6 +47,16 @@ pub(super) fn start_automations(hub: &lightair_live::Hub, jobs: super::remote::J
             Err(_) => Err("Lightair didn't answer in time".into()),
         }
     });
+    // what other threads say aloud (the chat reader, the alert box) comes through `voice.say`
+    {
+        let jobs = voice_jobs;
+        crate::voice::set_caller(Box::new(move |method: &str, params: Value| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let call = Call { method: method.to_string(), params, client: "Voice", device: None };
+            let _ = jobs.unbounded_send((call, tx));
+        }));
+    }
+    crate::voice::start_chat_reader(hub.clone());
     lightair_live::integrations::set_dir(lightair_platform::paths::data_dir().join("integrations"));
     lightair_live::rules::set_dir(lightair_platform::paths::data_dir().join("rules"));
     // official sign-ins' tokens: the Keychain
@@ -111,6 +122,8 @@ pub(super) fn feed_widgets(automations: Automations, widgets: Option<lightair_wi
         let a = automations.clone();
         widgets.set_points_hook(Box::new(move |platform, id, name, delta| a.change_points(platform, id, name, delta)));
     }
+    // the alert box's read-aloud: a viewer's paid message, with Lightair's voice
+    widgets.set_speak_hook(Box::new(|text| crate::voice::call_say(text, crate::voice::settings().chat_reader.max_chars)));
     let _ = std::thread::Builder::new().name("lightair-widget-feed".into()).spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(4));
@@ -199,11 +212,32 @@ impl StudioWindow {
                 let w = self.studio.read(cx).workspace();
                 Ok(json!({"pads": w.show.pads.iter().map(|p| json!({"id": p.id, "name": p.name, "file": p.file, "looped": p.looped})).collect::<Vec<_>>()}))
             }
-            "widgets.speak" => match widgets {
-                Some(w) if w.speak(text(p, "text").unwrap_or("")) => Ok(json!({})),
-                Some(_) => Err(ApiError::new(ErrorKind::State, "there's no alert box on air to say it (add one in Add Object › Widgets)")),
-                None => Err(no_widgets()),
-            },
+            // said aloud on the Voice track (made when it's missing); `widgets.speak` is its old name
+            "voice.say" | "widgets.speak" => {
+                let Some(t) = text(p, "text") else {
+                    return Some(Err(ApiError::invalid("text is needed")));
+                };
+                let max = p.get("max_chars").and_then(Value::as_u64).map_or(1000, |m| m as usize).clamp(10, 5000);
+                if let Some(cmd) = voice_track_command(self.studio.read(cx).workspace()) {
+                    self.studio.update(cx, |s, cx| {
+                        let _ = s.execute(cmd, cx);
+                    });
+                }
+                match crate::voice::say(t, text(p, "profile"), max) {
+                    Ok(said) => Ok(json!({"said": said})),
+                    Err(e) => Err(ApiError::new(ErrorKind::State, e)),
+                }
+            }
+            "voice.stop" => {
+                crate::voice::stop(p.get("all").and_then(Value::as_bool).unwrap_or(false));
+                Ok(json!({}))
+            }
+            "voice.profiles" => {
+                let default = crate::voice::default_profile().id;
+                Ok(json!({"profiles": crate::voice::profiles().iter().map(|v| json!({
+                    "id": v.id, "name": v.name, "vendor": v.vendor.id(), "voice": v.voice_name, "default": v.id == default,
+                })).collect::<Vec<_>>()}))
+            }
             "widgets.sound" => match widgets {
                 Some(w) if w.sound(text(p, "file").unwrap_or(""), p.get("volume").and_then(Value::as_f64).unwrap_or(100.0)) => Ok(json!({})),
                 Some(_) => Err(ApiError::new(ErrorKind::State, "there's no alert box on air to play it (add one in Add Object › Widgets)")),
@@ -261,3 +295,16 @@ impl StudioWindow {
     }
 }
 
+/// Adds the Voice track (and its source) when the workspace has none.
+pub(super) fn voice_track_command(w: &lightair_model::Workspace) -> Option<lightair_model::Command> {
+    use lightair_host::piair_voice::VOICE_KIND;
+    if w.sources.values().any(|s| s.kind == VOICE_KIND) {
+        return None;
+    }
+    let source = lightair_model::Source::new("Voice", VOICE_KIND, json!({}));
+    let track = lightair_model::Track::new("Voice", source.id);
+    Some(lightair_model::Command::Batch {
+        label: "Add the Voice track".into(),
+        commands: vec![lightair_model::Command::AddSource { source }, lightair_model::Command::AddTrack { track, index: None }],
+    })
+}

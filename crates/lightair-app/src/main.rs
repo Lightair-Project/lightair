@@ -68,6 +68,7 @@ mod ui;
 mod widgets;
 
 use std::path::PathBuf;
+mod voice;
 use std::sync::Arc;
 use std::time::Duration;
 

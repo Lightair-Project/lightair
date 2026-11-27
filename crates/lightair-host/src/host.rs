@@ -55,7 +55,7 @@ enum Need {
     Ndi(String),
     /// Desktop sound (`None`) or one app's (a bundle id on macOS, an executable's path on Windows).
     SystemSound(Option<String>),
-    Voice,
+    Voice(crate::piair_voice::Channel),
     /// A link from another computer the compositor receives: its sound comes through a slot.
     Link,
     /// A phone camera: its streams decoded (macOS).
@@ -120,7 +120,8 @@ fn need(source: &Source) -> Need {
         "ffmpeg_source" => Need::Missing("media file"),
         "lightair_web" if cfg!(any(target_os = "macos", windows)) => Need::Web,
         crate::ndi::KIND => Need::Ndi(text(s, "ndi_name")),
-        crate::piair_voice::KIND => Need::Voice,
+        crate::piair_voice::KIND => Need::Voice(crate::piair_voice::Channel::Cohost),
+        crate::piair_voice::VOICE_KIND => Need::Voice(crate::piair_voice::Channel::Voice),
         crate::devices::DEVICE_KIND | kinds::MIC => Need::Device(text(s, "device")),
         // a loopback device (BlackHole and the like) is an input like any other
         kinds::DESKTOP_AUDIO if !crate::devices::is_system_default(&text(s, "device")) => {
@@ -772,7 +773,7 @@ impl Host {
             Need::SystemSound(app) => Runtime::SystemSound {
                 _sound: crate::system_audio::SystemSound::new(id, crate::system_audio::Settings { app: app.clone() }),
             },
-            Need::Voice => Runtime::Voice { _voice: crate::piair_voice::Voice::start(id, None) },
+            Need::Voice(channel) => Runtime::Voice { _voice: crate::piair_voice::Voice::start(id, *channel, None) },
             Need::Link => {
                 crate::audio_host::feed_slot(id);
                 Runtime::Link
@@ -1414,7 +1415,7 @@ impl Host {
         }
         let sound_only = matches!(
             self.needs.get(&source),
-            Some(Need::Device(_) | Need::SystemSound(_) | Need::Voice | Need::Soundboard)
+            Some(Need::Device(_) | Need::SystemSound(_) | Need::Voice(_) | Need::Soundboard)
         );
         sound_only && self.workspace.as_ref().is_some_and(|ws| ws.tracks.iter().any(|t| t.source == source))
     }

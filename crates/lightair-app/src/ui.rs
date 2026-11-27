@@ -249,6 +249,7 @@ pub fn source_icon(kind: &str) -> &'static str {
         "lightair_timer" => "timer",
         "lightair_web" => "globe",
         lightair_model::kinds::MIC | lightair_model::kinds::DESKTOP_AUDIO | lightair_model::kinds::APP_AUDIO => "mic",
+        lightair_host::piair_voice::VOICE_KIND => "megaphone",
         _ => "layers",
     }
 }

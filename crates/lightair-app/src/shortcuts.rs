@@ -35,6 +35,8 @@ pub enum GlobalAction {
     PushToTalk(u16),
     /// PiAir's kill switch: AI drives off, speech cut, PiAir stopped.
     PiAirStop,
+    /// Stops what the Voice track is saying (the next thing waiting is said).
+    SkipSpeech,
 }
 
 /// The kill switch's keys until the streamer picks others (⌃⌥⌘K; Ctrl+Alt+K on Windows).
@@ -74,6 +76,7 @@ impl GlobalAction {
         GlobalAction::Scene(4),
         GlobalAction::Scene(5),
         GlobalAction::PiAirStop,
+        GlobalAction::SkipSpeech,
     ];
 
     pub fn label(self) -> String {
@@ -94,6 +97,7 @@ impl GlobalAction {
             GlobalAction::Expression(_) => "An avatar's expression".into(),
             GlobalAction::PushToTalk(_) => "A PNGtuber's push to talk".into(),
             GlobalAction::PiAirStop => "Stop PiAir (kill switch)".into(),
+            GlobalAction::SkipSpeech => "Skip what's being said (Voice track)".into(),
         }
     }
 }

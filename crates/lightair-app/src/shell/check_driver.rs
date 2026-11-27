@@ -8,7 +8,8 @@
 //! `expression <i>` (as its global shortcut does), `set <json>` (merged into the selected
 //! object's source settings), `anchor-sheet`, `accessory <anchor key> <file>`, `pin <anchor key>`,
 //! `drop-tree <object name|-> <above|into|below> <paths…>`, `drop-assets <paths…>`, `save-scene`, `undo`,
-//! `scroll <px>`, `settings-shortcuts`, `assets-open <folder>`, `cohost-window <page>`.
+//! `scroll <px>`, `settings-shortcuts`, `settings-voices`, `say <text>`, `voice-level`, `test-event <kind>`,
+//! `assets-open <folder>`, `cohost-window <page>`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -256,6 +257,25 @@ impl StudioWindow {
                 }
             }
             "settings-shortcuts" => self.open_settings(super::settings::Page::Shortcuts, cx),
+            "settings-voices" => self.open_settings(super::settings::Page::Voices, cx),
+            // says text on the Voice track (made when it's missing), with the default voice
+            "say" => self.say_on_voice_track(rest, None, cx),
+            // a made-up chat event (follow, sub, paid, cheer, raid, message), as widgets.test sends
+            "test-event" => {
+                if let Some(w) = &self.studio.read(cx).widgets {
+                    w.test(rest, "twitch");
+                }
+            }
+            // logs the Voice track's loudest level now ("CHECK voice-level <dBFS>")
+            "voice-level" => {
+                let track = workspace.tracks.iter().find(|t| {
+                    workspace.sources.get(&t.source).is_some_and(|s| s.kind == lightair_host::piair_voice::VOICE_KIND)
+                });
+                let level = track
+                    .and_then(|t| lightair_host::meters::meters().get(t.id))
+                    .map(|c| c.levels().magnitude.iter().copied().fold(f32::NEG_INFINITY, f32::max));
+                tracing::info!(track = track.is_some(), ?level, "CHECK voice-level");
+            }
             _ => tracing::warn!(line, "CHECK unknown command"),
         }
         cx.notify();
