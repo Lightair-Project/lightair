@@ -308,6 +308,19 @@ impl Gop {
     }
 }
 
+/// A stream's own keyframe beat (not a multitrack stream's): whether the frame at `pts` is a
+/// keyframe, given when the next one is due (`i64::MIN`: none made yet). `Some` with when the one
+/// after it is due: a whole number of intervals `every` after the first keyframe, past `pts`
+/// (intervals no frame came in are skipped).
+fn own_key(next: i64, pts: i64, every: i64) -> Option<i64> {
+    if pts < next {
+        return None;
+    }
+    let after = if next == i64::MIN { pts } else { next };
+    let skipped = (pts - after).div_euclid(every);
+    Some(after + (skipped + 1) * every)
+}
+
 impl VideoPipe {
     fn open(
         key: VideoKey,
@@ -377,14 +390,18 @@ impl VideoPipe {
             // the interval sees the same one throughout)
             None => {
                 let every = self.key.keyint.max(1) as i64 * 1_000_000_000;
-                let next = self.next_key_ns.load(Ordering::Acquire);
-                let due = pts >= next;
-                if due {
-                    let after = if next == i64::MIN { pts } else { next };
-                    let skipped = (pts - after).div_euclid(every);
-                    self.next_key_ns.store(after + (skipped + 1) * every, Ordering::Release);
+                let was = self.next_key_ns.load(Ordering::Acquire);
+                match own_key(was, pts, every) {
+                    Some(next) => {
+                        // a keyframe asked for meanwhile (the beat restarted): this one answers
+                        // it, and the beat starts again here
+                        if self.next_key_ns.compare_exchange(was, next, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                            self.next_key_ns.store(pts + every, Ordering::Release);
+                        }
+                        true
+                    }
+                    None => false,
                 }
-                due
             }
         };
         match self.transfer.lock().feed(&self.encoder, frame, pts, key) {
@@ -426,13 +443,16 @@ impl VideoPipe {
         self.subs.lock().retain(|(s, _)| *s != id);
     }
 
-    /// A keyframe soon: on every track at once when it's a multitrack stream's.
+    /// A keyframe soon: on every track at once when it's a multitrack stream's. Otherwise the
+    /// next frame, and the beat starts again from it, so an output that joins (or a stream that
+    /// reconnects) sees its first interval as long as the others; outputs already running see one
+    /// short interval, not two (the old beat's next keyframe soon after).
     fn ask_keyframe(&self) {
         match &self.gop {
             Some((gop, _)) => {
                 gop.asked.fetch_add(1, Ordering::AcqRel);
             }
-            None => self.encoder.request_keyframe(),
+            None => self.next_key_ns.store(i64::MIN, Ordering::Release),
         }
     }
 

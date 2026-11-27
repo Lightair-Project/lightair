@@ -1,5 +1,5 @@
-//! Lightair's own outputs: keyframes on the program clock, every canvas's frames on the clock's
-//! own grid (so a multitrack stream's tracks from different canvases carry the same times, start
+//! Lightair's own outputs: keyframes on the program clock (whole intervals from the first), every
+//! canvas's frames on the clock's own grid (so a multitrack stream's tracks from different canvases carry the same times, start
 //! on one keyframe and answer a keyframe request together), and the platform's plan read into
 //! encoder settings (CRF as constant quality, spatial AQ, the point scaler).
 
@@ -29,14 +29,14 @@ fn ready(keyint_s: u32, steps: &[i64]) -> Gop {
     gop
 }
 
-/// A stream's keyframes fall every interval on the program clock (2 s, 4 s, …), not every
-/// interval counted from when the stream started: then the renditions and the platform's
-/// segment boundaries line up.
+/// A stream's keyframes fall every interval on the program clock counted from its first one
+/// (0.5 s, 2.5 s, 4.5 s, …), so the first interval is as long as the others: a platform checking
+/// the interval sees the same one from the start.
 #[test]
-fn keyframes_come_every_interval_on_the_program_clock() {
+fn keyframes_come_every_interval_from_the_first() {
     let gop = ready(2, &[1]);
     let at = keys(&gop, 0, &frames(60, 0.5, 9.0));
-    assert_eq!(at, vec![S / 2, 2 * S, 4 * S, 6 * S, 8 * S], "{at:?}");
+    assert_eq!(at, vec![S / 2, 5 * S / 2, 9 * S / 2, 13 * S / 2, 17 * S / 2], "{at:?}");
 }
 
 /// A track taking every other frame of its canvas (30 fps from 60) keys on the same moments as
@@ -52,7 +52,7 @@ fn tracks_at_different_rates_key_on_the_same_moments() {
         b.extend(keys(&gop, 1, std::slice::from_ref(s)));
     }
     assert_eq!(a, b, "the full-rate track keyed at {a:?}, the half-rate one at {b:?}");
-    assert_eq!(a, vec![S, 2 * S, 4 * S, 6 * S]);
+    assert_eq!(a, vec![S, 3 * S, 5 * S]);
 }
 
 /// A multitrack stream starts on one keyframe: a canvas whose frames run behind the one that
@@ -214,4 +214,106 @@ fn only_the_point_scaler_scales_by_picking_pixels() {
     let fast = |scale: Option<&str>| plan(serde_json::json!({}), scale).1.fast_scale;
     assert!(fast(Some("OBS_SCALE_POINT")));
     assert!(!fast(Some("OBS_SCALE_BICUBIC")) && !fast(Some("OBS_SCALE_LANCZOS")) && !fast(None));
+}
+
+// ---------------------------------------------------------------- a stream's own keyframe beat
+
+/// The keyframes a stream's own beat (no multitrack stream) makes on frames at `times`.
+fn own_keys(keyint_s: i64, times: impl IntoIterator<Item = i64>) -> Vec<i64> {
+    let mut next = i64::MIN;
+    let mut out = Vec::new();
+    for pts in times {
+        if let Some(after) = own_key(next, pts, keyint_s * S) {
+            assert!(after > pts, "the next keyframe is due after this one ({after} after {pts})");
+            next = after;
+            out.push(pts);
+        }
+    }
+    out
+}
+
+/// The first keyframe comes on the first frame, and the next a whole interval after it (not on
+/// the program clock's 2 s grid, which would make the first interval short).
+#[test]
+fn a_streams_first_keyframe_interval_is_as_long_as_the_others() {
+    let at = own_keys(2, frames(60, 0.5, 9.0).into_iter().map(|(_, pts)| pts));
+    assert_eq!(at, vec![S / 2, 5 * S / 2, 9 * S / 2, 13 * S / 2, 17 * S / 2], "{at:?}");
+    for w in at.windows(2) {
+        assert_eq!(w[1] - w[0], 2 * S, "every interval is the same: {at:?}");
+    }
+}
+
+/// A frame just short of the due time isn't a keyframe; the first one at or past it is.
+#[test]
+fn a_keyframe_is_due_from_its_time_not_before() {
+    assert_eq!(own_key(i64::MIN, 0, 2 * S), Some(2 * S), "the first frame is a keyframe");
+    assert_eq!(own_key(2 * S, 2 * S - 1, 2 * S), None);
+    assert_eq!(own_key(2 * S, 2 * S, 2 * S), Some(4 * S));
+    // a frame a little late: the beat stays on the first keyframe's grid
+    assert_eq!(own_key(2 * S, 2 * S + 7_000_000, 2 * S), Some(4 * S));
+}
+
+/// When no frame comes for a while (a stall, a dropped stretch), the next frame is a keyframe
+/// and the beat goes on from the first keyframe's grid, skipping the intervals nothing came in.
+#[test]
+fn skipped_keyframes_keep_the_first_ones_grid() {
+    // frames from 0.5 s to 3 s, then nothing until 9.3 s
+    let times = frames(30, 0.5, 3.0).into_iter().chain(frames(30, 9.3, 13.0)).map(|(_, pts)| pts);
+    let at = own_keys(2, times);
+    assert_eq!(at, vec![S / 2, 5 * S / 2, 93 * S / 10, 105 * S / 10, 125 * S / 10], "{at:?}");
+    // the one after the stall is due on the grid (10.5 s), not 2 s after the late keyframe
+    assert_eq!(own_key(9 * S / 2, 93 * S / 10, 2 * S), Some(105 * S / 10));
+    // several whole intervals skipped
+    assert_eq!(own_key(2 * S, 100 * S, 2 * S), Some(102 * S));
+}
+
+/// Frames before the program clock's zero (negative times) beat the same way.
+#[test]
+fn an_early_stream_beats_from_a_negative_time() {
+    let at = own_keys(2, frames(30, -1.5, 3.0).into_iter().map(|(_, pts)| pts));
+    assert_eq!(at, vec![-3 * S / 2, S / 2, 5 * S / 2], "{at:?}");
+    assert_eq!(own_key(i64::MIN, -7 * S / 10, 2 * S), Some(13 * S / 10));
+    // a frame far past a negative due time: whole intervals skipped, rounding down
+    assert_eq!(own_key(-S, 4 * S + S / 2, 2 * S), Some(5 * S));
+}
+
+/// A multitrack stream's first interval is as long as the others too: whole intervals from the
+/// stream's first keyframe, on every canvas.
+#[test]
+fn a_multitrack_streams_first_interval_is_as_long_as_the_others() {
+    let gop = ready(2, &[1, 2]);
+    let all = frames(60, 0.5, 7.0);
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    for f in &all {
+        a.extend(keys(&gop, 0, std::slice::from_ref(f)));
+        b.extend(keys(&gop, 1, std::slice::from_ref(f)));
+    }
+    assert_eq!(a, vec![S / 2, 5 * S / 2, 9 * S / 2, 13 * S / 2], "{a:?}");
+    assert_eq!(a, b, "every canvas keys on the same moments");
+}
+
+/// A multitrack stream that starts before the clock's zero rounds the same way (`div_euclid`).
+#[test]
+fn a_multitrack_stream_beats_from_a_negative_start() {
+    let gop = ready(2, &[1]);
+    let at = keys(&gop, 0, &frames(30, -1.5, 3.0));
+    assert_eq!(at, vec![-3 * S / 2, S / 2, 5 * S / 2], "{at:?}");
+}
+
+/// After frames stop for a while, the next is a keyframe and the beat goes on from the stream's
+/// first keyframe's grid; an asked-for keyframe doesn't move the grid either.
+#[test]
+fn a_multitrack_streams_grid_survives_a_stall_and_a_request() {
+    let gop = ready(2, &[1]);
+    let times: Vec<(i64, i64)> = frames(60, 0.0, 1.0).into_iter().chain(frames(60, 5.3, 7.0)).collect();
+    let at = keys(&gop, 0, &times);
+    assert_eq!(at, vec![0, 53 * S / 10, 6 * S], "{at:?}");
+
+    let gop = ready(2, &[1]);
+    let all = frames(60, 0.0, 5.0);
+    let mut at = keys(&gop, 0, &all[..60]);
+    gop.asked.fetch_add(1, Ordering::AcqRel);
+    at.extend(keys(&gop, 0, &all[60..]));
+    // asked at 1 s: answered a little ahead (1.05 s), then 2 s, 4 s as before
+    assert_eq!(at, vec![0, S + ASK_AHEAD_NS, 2 * S, 4 * S], "{at:?}");
 }
