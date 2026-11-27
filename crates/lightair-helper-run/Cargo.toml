@@ -1,0 +1,12 @@
+[package]
+name = "lightair-helper-run"
+description = "The check workflows' helper run: starts a package's helper in Lightair's own sandbox under a fake Lightair and reports what it did"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lightair-helpers = { path = "../lightair-helpers" }
+serde_json.workspace = true
+libc = "0.2"
