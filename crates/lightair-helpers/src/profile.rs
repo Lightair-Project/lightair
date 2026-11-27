@@ -13,6 +13,8 @@ pub fn macos(spec: &Spec, proxy_port: Option<u16>) -> String {
     let mut p = String::from("(version 1)\n(deny default)\n(import \"system.sb\")\n");
     let _ = writeln!(p, "(allow process-exec (literal {}))", q(&spec.entry));
     p.push_str("(allow process-fork)\n(allow file-read-metadata)\n(allow sysctl-read)\n");
+    // the system's certificates, which most network runtimes read to check servers
+    p.push_str("(allow file-read* (subpath \"/private/etc/ssl\") (literal \"/private/etc/ssl\"))\n");
 
     // The folders on the way to its program, package, data and picked folders: listed, not read.
     let mut parents: Vec<String> = Vec::new();

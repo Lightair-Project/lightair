@@ -74,6 +74,17 @@ impl Drop for Helper {
 /// Network attempts are sent to `events`.
 pub fn launch(spec: &Spec, launcher: &std::path::Path, events: Sender<Event>) -> io::Result<Helper> {
     std::fs::create_dir_all(spec.data_dir.join("tmp"))?;
+    // The sandbox matches real paths: a folder reached through a link (`/var` is `/private/var`
+    // on macOS) is written into the profile as where it really is.
+    let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let mut resolved = spec.clone();
+    resolved.entry = real(&spec.entry);
+    resolved.package_dir = real(&spec.package_dir);
+    resolved.data_dir = real(&spec.data_dir);
+    for picked in &mut resolved.grants.picked {
+        picked.path = real(&picked.path);
+    }
+    let spec = &resolved;
     if !spec.entry.starts_with(&spec.package_dir) {
         return Err(io::Error::other("the helper's program isn't inside its package"));
     }
