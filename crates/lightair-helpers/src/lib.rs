@@ -18,11 +18,17 @@ mod spawn;
 use std::io;
 use std::path::PathBuf;
 
-use crossbeam_channel::Sender;
+pub use crossbeam_channel::Sender;
 
+pub use crossbeam_channel::Receiver;
 pub use grants::{Device, Grants, Picked};
 pub use proxy::{Event, Lane, Rules};
 pub use spawn::Child;
+
+/// A channel for a helper's network events (what [`launch`] reports into).
+pub fn events() -> (Sender<Event>, Receiver<Event>) {
+    crossbeam_channel::unbounded()
+}
 
 /// A helper to start.
 #[derive(Clone, Debug)]

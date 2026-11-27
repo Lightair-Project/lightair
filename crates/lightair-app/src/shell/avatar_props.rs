@@ -548,7 +548,8 @@ impl StudioWindow {
             )
             .children(
                 body_line.map(|l| div().pl(px(15.)).text_size(px(11.)).text_color(tok::text_tertiary()).child(l)),
-            );
+            )
+            .children(self.cohost_install(source, cx));
         let action = self.cohost_switch(source, cx);
         self.section("Avatar", action, cx).child(card).child(state).into_any_element()
     }

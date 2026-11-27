@@ -15,6 +15,10 @@ pub mod input_mac;
 pub mod keys;
 #[cfg(target_os = "macos")]
 mod path;
+pub mod proc;
+
+/// A subscription sign-in's PiAir: its run number, process and stdin.
+type SignIn = (u64, proc::Proc, Box<dyn Write + Send>);
 pub mod view;
 pub mod voice_sheet;
 pub mod voices;
@@ -22,7 +26,7 @@ pub mod voices;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -92,15 +96,14 @@ pub struct State {
 
 pub struct Shared {
     pub state: Mutex<State>,
-    stdin: Mutex<Option<ChildStdin>>,
-    child: Mutex<Option<Child>>,
+    stdin: Mutex<Option<Box<dyn Write + Send>>>,
+    child: Mutex<Option<proc::Proc>>,
     pub computer: computer::Computer,
     jobs: Jobs,
     /// The remote API's own handler (set once the window exists), so PiAir's calls are answered
     /// exactly as MCP clients' are.
     handler: Mutex<Option<lightair_remote::Handler>>,
     hub: lightair_live::Hub,
-    data_dir: PathBuf,
     /// Something changed for the panel.
     pub dirty: AtomicBool,
     /// Bumped on every start, so threads of an old run stop.
@@ -125,7 +128,7 @@ pub struct Shared {
     /// How each heard track's listening is going, for the Inspector's Hears list.
     pub hear_status: Mutex<std::collections::HashMap<Id, HearStatus>>,
     /// A subscription sign-in's own PiAir (it only signs in), with its run number.
-    signin: Mutex<Option<(u64, Child, ChildStdin)>>,
+    signin: Mutex<Option<SignIn>>,
     signin_gen: AtomicU64,
     /// The co-host's speech: Lightair's own voices say the text PiAir sends (`say`).
     speech: Mutex<Speech>,
@@ -318,7 +321,6 @@ impl Host {
             jobs,
             handler: Mutex::new(None),
             hub,
-            data_dir: lightair_platform::paths::data_dir(),
             dirty: AtomicBool::new(true),
             generation: AtomicU64::new(0),
             mics: Mutex::new(Vec::new()),
@@ -391,33 +393,6 @@ impl Host {
         }
     }
 
-    /// Where PiAir's program is: `LIGHTAIR_PIAIR` (a path, or `bun` to run the piair checkout's
-    /// source), next to Lightair, or the piair checkout's build beside this repo.
-    fn program() -> Option<Vec<String>> {
-        let exe = if cfg!(windows) { "piair.exe" } else { "piair" };
-        let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../piair");
-        if let Ok(v) = std::env::var("LIGHTAIR_PIAIR") {
-            if v == "bun" {
-                let main = checkout.join("src/main.ts");
-                return main.exists().then(|| vec!["bun".into(), main.to_string_lossy().into_owned()]);
-            }
-            return Some(vec![v]);
-        }
-        if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(PathBuf::from)) {
-            let p = dir.join(exe);
-            if p.exists() {
-                return Some(vec![p.to_string_lossy().into_owned()]);
-            }
-        }
-        let target = match (std::env::consts::OS, std::env::consts::ARCH) {
-            ("macos", "aarch64") => "darwin-arm64",
-            ("macos", _) => "darwin-x64",
-            _ => "windows-x64",
-        };
-        let built = checkout.join("dist").join(target).join(exe);
-        built.exists().then(|| vec![built.to_string_lossy().into_owned()])
-    }
-
     /// Starts PiAir (if it isn't running) with the co-host object's settings.
     pub fn start(&self, settings: Value) {
         *self.0.start_settings.lock().unwrap_or_else(|e| e.into_inner()) = settings;
@@ -429,33 +404,18 @@ impl Host {
         if self.running() {
             return;
         }
-        let Some(cmd) = Self::program() else {
-            let mut s = self.state();
-            s.error = Some("PiAir isn't in this build of Lightair.".into());
-            drop(s);
-            self.touch();
-            return;
-        };
-        let mut c = Command::new(&cmd[0]);
-        c.args(&cmd[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        let mut child = match c.spawn() {
-            Ok(c) => c,
+        let spawned = match proc::spawn() {
+            Ok(s) => s,
             Err(e) => {
-                self.state().error = Some(format!("PiAir couldn't start: {e}"));
+                self.state().error = Some(e);
                 self.touch();
                 return;
             }
         };
         let run_id = self.0.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        *self.0.stdin.lock().unwrap_or_else(|e| e.into_inner()) = child.stdin.take();
-        *self.0.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+        let (stdout, stderr, data_dir) = (Some(spawned.stdout), Some(spawned.stderr), spawned.data_dir);
+        *self.0.stdin.lock().unwrap_or_else(|e| e.into_inner()) = Some(spawned.stdin);
+        *self.0.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(spawned.proc);
         {
             let mut s = self.state();
             s.running = true;
@@ -491,7 +451,7 @@ impl Host {
             // 2: PiAir sends text (`say`) and Lightair speaks it
             "version": 2,
             "platform": std::env::consts::OS,
-            "data_dir": self.0.data_dir,
+            "data_dir": data_dir,
             "lightair": {"version": env!("CARGO_PKG_VERSION")},
             "settings": self.0.start_settings.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         }));
@@ -507,13 +467,13 @@ impl Host {
             std::thread::spawn(move || {
                 let until = Instant::now() + Duration::from_secs(2);
                 while Instant::now() < until {
-                    if c.try_wait().ok().flatten().is_some() {
+                    if c.try_wait() {
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                let _ = c.kill();
-                let _ = c.wait();
+                c.kill();
+                c.wait();
             });
         }
         let mut s = self.state();
@@ -539,7 +499,7 @@ impl Host {
             let busy = matches!(host.state().status.as_str(), "acting" | "thinking");
             if busy && host.0.generation.load(Ordering::Relaxed) == run_id
                 && let Some(c) = host.0.child.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-                    let _ = c.kill();
+                    c.kill();
                 }
         });
     }
@@ -565,7 +525,7 @@ impl Host {
         self.0.computer.ai_drives.store(false, Ordering::Relaxed);
         *self.0.stdin.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if let Some(mut c) = self.0.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = c.wait();
+            c.wait();
         }
         let wanted = self.0.wanted.load(Ordering::Relaxed);
         let restart = {
@@ -1375,32 +1335,19 @@ impl Host {
             error,
             ..Auth::default()
         };
-        let Some(cmd) = Self::program() else {
-            self.set_sign_in_step(Some(step("PiAir isn't in this build of Lightair.", true)));
-            return;
-        };
-        let mut c = Command::new(&cmd[0]);
-        c.args(&cmd[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        let mut child = match c.spawn() {
-            Ok(c) => c,
+        let spawned = match proc::spawn() {
+            Ok(s) => s,
             Err(e) => {
                 self.set_sign_in_step(Some(step(&format!("Couldn't start the sign-in: {e}"), true)));
                 return;
             }
         };
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else { return };
-        if let Some(err) = child.stderr.take() {
-            std::thread::spawn(move || {
-                for line in BufReader::new(err).lines().map_while(Result::ok) {
-                    tracing::info!(target: "piair", "sign-in: {line}");
-                }
-            });
-        }
+        let (child, stdin, stdout, err) = (spawned.proc, spawned.stdin, spawned.stdout, spawned.stderr);
+        std::thread::spawn(move || {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                tracing::info!(target: "piair", "sign-in: {line}");
+            }
+        });
         let run = self.0.signin_gen.fetch_add(1, Ordering::Relaxed) + 1;
         *self.0.signin.lock().unwrap_or_else(|e| e.into_inner()) = Some((run, child, stdin));
         self.set_sign_in_step(Some(step("Opening the sign-in page…", false)));
@@ -1451,7 +1398,7 @@ impl Host {
                 let proc = host.0.signin.lock().unwrap_or_else(|e| e.into_inner()).take_if(|s| s.0 == run);
                 if let Some((_, mut c, stdin)) = proc {
                     drop(stdin);
-                    let _ = c.wait();
+                    c.wait();
                 }
                 let on = keys::signed_in(&provider);
                 {
@@ -1503,9 +1450,9 @@ impl Host {
         self.0.signin_gen.fetch_add(1, Ordering::Relaxed);
         if let Some((_, mut c, stdin)) = self.0.signin.lock().unwrap_or_else(|e| e.into_inner()).take() {
             drop(stdin);
-            let _ = c.kill();
+            c.kill();
             std::thread::spawn(move || {
-                let _ = c.wait();
+                c.wait();
             });
         }
         self.set_sign_in_step(None);

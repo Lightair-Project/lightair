@@ -201,6 +201,9 @@ impl StudioWindow {
         if source.settings[COHOST]["on"].as_bool() == Some(false) {
             return Some((tok::text_tertiary(), "Off".into()));
         }
+        if !crate::piair::proc::available() {
+            return Some((tok::warn(), "PiAir isn't installed".into()));
+        }
         let s = self.piair.state();
         if let Some(e) = &s.error {
             return Some((tok::error(), e.clone()));
@@ -218,6 +221,26 @@ impl StudioWindow {
             (true, "acting") => (tok::live(), "Using the computer".into()),
             _ => (tok::ok(), "Listening".into()),
         })
+    }
+
+    /// Under the co-host's status, when PiAir isn't installed: one button that opens its install
+    /// screen from Lightair's catalog (the permissions are shown before anything downloads).
+    pub(super) fn cohost_install(&self, source: &Source, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !is_cohost(source) || crate::piair::proc::available() {
+            return None;
+        }
+        let _ = cx;
+        Some(
+            div()
+                .pt_2()
+                .pl(px(15.))
+                .child(
+                    Button::new("cohost-install-piair")
+                        .label("Install PiAir…")
+                        .on_click(|_, _, _| crate::catalogs::request_install(crate::piair::proc::PACKAGE, None, None)),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The co-host's On switch for its Avatar card's heading, or "Make active" when another
