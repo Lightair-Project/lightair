@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Lightair's MSIX (cargo xtask dist): the folder cargo xtask dist makes, as a full-trust desktop
+     app. {VERSION} and {PUBLISHER} are filled in when it's packed; the publisher is the signing
+     certificate's subject (LIGHTAIR_MSIX_PUBLISHER, "CN=Lightair Project" otherwise). The virtual
+     camera isn't registered by the package (Windows' Frame Server reads cameras from HKLM, which a
+     package can't write): Lightair copies it to Program Files and registers it when it's first
+     turned on, as administrator. What Lightair writes to AppData and the registry isn't redirected
+     into the package (unvirtualizedResources): it's the same %APPDATA%\Lightair as the classic
+     installer's and the zip's, and it stays when the package is removed. -->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
+  IgnorableNamespaces="uap rescap desktop6">
+  <Identity Name="LightairProject.Lightair" Publisher="{PUBLISHER}" Version="{VERSION}" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Lightair</DisplayName>
+    <PublisherDisplayName>Lightair Project</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
+    <desktop6:RegistryWriteVirtualization>disabled</desktop6:RegistryWriteVirtualization>
+  </Properties>
+  <Dependencies>
+    <!-- Windows 10 1903: DirectML in the system -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.18362.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Applications>
+    <Application Id="Lightair" Executable="lightair.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Lightair"
+        Description="Live streaming, recording and editing"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <Capability Name="internetClientServer" />
+    <Capability Name="privateNetworkClientServer" />
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+    <DeviceCapability Name="webcam" />
+    <DeviceCapability Name="microphone" />
+  </Capabilities>
+</Package>

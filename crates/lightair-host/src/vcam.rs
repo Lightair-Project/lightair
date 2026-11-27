@@ -237,7 +237,10 @@ pub mod win {
         Ok(())
     }
 
-    /// Registers the camera DLL beside Lightair, as administrator.
+    /// Registers the camera DLL beside Lightair, as administrator. Installed from the MSIX,
+    /// Lightair's folder is one the Frame Server's service can't read, and moves with every
+    /// update, so the DLL is copied to Program Files (`Lightair Virtual Camera`) and that copy
+    /// is registered.
     pub fn install() -> Result<(), String> {
         use windows_sys::Win32::UI::Shell::ShellExecuteW;
         use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
@@ -245,8 +248,21 @@ pub mod win {
             return Err("Lightair's virtual camera needs Windows 11.".into());
         }
         let dll = dll().ok_or("The virtual camera's file (lightair_camera.dll) isn't beside Lightair.")?;
-        let args = format!("/s \"{}\"", dll.display());
-        let (verb, file, params) = (wide("runas"), wide("regsvr32.exe"), wide(&args));
+        let (program, args) = match packaged_copy_to() {
+            Some(folder) => {
+                let to = folder.join("lightair_camera.dll");
+                // (cmd keeps the quotes: the line doesn't start with one)
+                let line = format!(
+                    "/c mkdir \"{folder}\" 2>nul & copy /y \"{from}\" \"{to}\" >nul && regsvr32 /s \"{to}\"",
+                    folder = folder.display(),
+                    from = dll.display(),
+                    to = to.display(),
+                );
+                ("cmd.exe", line)
+            }
+            None => ("regsvr32.exe", format!("/s \"{}\"", dll.display())),
+        };
+        let (verb, file, params) = (wide("runas"), wide(program), wide(&args));
         // above 32: started (the user may still say no to the prompt)
         let r = unsafe {
             ShellExecuteW(
@@ -259,6 +275,15 @@ pub mod win {
             )
         };
         if r as isize > 32 { Ok(()) } else { Err("Windows didn't start the installation.".into()) }
+    }
+
+    /// Where the camera is copied to when Lightair runs from its MSIX (installed under
+    /// `WindowsApps`); `None` otherwise.
+    fn packaged_copy_to() -> Option<std::path::PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let packaged = exe.components().any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"));
+        let program_files = std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"))?;
+        packaged.then(|| std::path::PathBuf::from(program_files).join("Lightair Virtual Camera"))
     }
 
     /// The camera's memory, there while an app has the camera open (the camera makes it).

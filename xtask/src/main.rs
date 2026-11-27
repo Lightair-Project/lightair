@@ -345,7 +345,9 @@ fn dev(release: bool) -> anyhow::Result<()> {
 /// `lightair.exe`: Chromium for web sources, the MSVC runtime, the Effect Stack's trackers
 /// (`lightair-tracker.dll` with ONNX Runtime and their models; DirectML is the system's), the virtual camera's
 /// `lightair_camera.dll`, the command-line tools some features run (FFmpeg; whisper.cpp when
-/// it's installed) and PiAir. Nothing of libobs or OBS is in it.
+/// it's installed) and PiAir. Nothing of libobs or OBS is in it. From it, the installers: the
+/// classic one (`packaging/windows/lightair.iss`, when Inno Setup is installed) and the MSIX
+/// (`packaging/windows/AppxManifest.xml`, with the Windows SDK's makeappx).
 ///
 /// Signed with Authenticode (`signtool`) when `LIGHTAIR_SIGN_CERT` names a certificate's SHA-1
 /// thumbprint in the user's store; unsigned otherwise (SmartScreen warns on first run).
@@ -406,7 +408,8 @@ fn dist_windows() -> anyhow::Result<()> {
         eprintln!("PiAir isn't in the app: {e}");
     }
     // signed, when there's a certificate
-    if let Ok(thumbprint) = std::env::var("LIGHTAIR_SIGN_CERT") {
+    let signing = std::env::var("LIGHTAIR_SIGN_CERT").ok();
+    if let Some(thumbprint) = &signing {
         for entry in std::fs::read_dir(&out)? {
             let path = entry?.path();
             let ours = path.file_name().is_some_and(|n| {
@@ -414,10 +417,7 @@ fn dist_windows() -> anyhow::Result<()> {
                 n.starts_with("lightair") || n == "piair.exe"
             });
             if ours {
-                run(Command::new("signtool")
-                    .args(["sign", "/fd", "SHA256", "/tr", "http://timestamp.digicert.com", "/td", "SHA256", "/sha1"])
-                    .arg(&thumbprint)
-                    .arg(&path))?;
+                sign(thumbprint, &path)?;
             }
         }
     } else {
@@ -429,7 +429,104 @@ fn dist_windows() -> anyhow::Result<()> {
     // (Windows' own tar writes zip files)
     run(Command::new("tar").arg("-a").arg("-c").arg("-f").arg(&zip).arg("-C").arg(&dist).arg("Lightair"))?;
     eprintln!("built {} and {}", out.display(), zip.display());
+    // the installers: the classic one (Inno Setup) and the MSIX
+    match installed_tool("iscc") {
+        Some(iscc) => {
+            let setup = dist.join(format!("Lightair-{version}-windows-x64-setup.exe"));
+            let _ = std::fs::remove_file(&setup);
+            run(Command::new(iscc)
+                .current_dir(root.join("packaging/windows"))
+                .arg("/Q")
+                .arg(format!("/DVersion={version}"))
+                .arg(format!("/DSource={}", out.display()))
+                .arg(format!("/DOutput={}", dist.display()))
+                .arg("lightair.iss"))?;
+            if let Some(thumbprint) = &signing {
+                sign(thumbprint, &setup)?;
+            }
+            eprintln!("built {}", setup.display());
+        }
+        None => eprintln!("no installer: Inno Setup isn't installed (scoop install extras/inno-setup)"),
+    }
+    match windows_sdk_tool("makeappx.exe") {
+        Some(makeappx) => {
+            let msix = msix(&root, &out, &dist, &version, &makeappx)?;
+            match &signing {
+                Some(thumbprint) => sign(thumbprint, &msix)?,
+                None => eprintln!("the MSIX installs only once signed (or registered unpacked in Developer Mode)"),
+            }
+            eprintln!("built {}", msix.display());
+        }
+        None => eprintln!("no MSIX: the Windows SDK's makeappx isn't installed"),
+    }
     Ok(())
+}
+
+/// Signs a file with Authenticode (`signtool`), with the certificate of that SHA-1 thumbprint
+/// in the user's store, timestamped.
+#[cfg(windows)]
+fn sign(thumbprint: &str, file: &Path) -> anyhow::Result<()> {
+    let signtool = windows_sdk_tool("signtool.exe").unwrap_or_else(|| PathBuf::from("signtool"));
+    run(Command::new(signtool)
+        .args(["sign", "/fd", "SHA256", "/tr", "http://timestamp.digicert.com", "/td", "SHA256", "/sha1"])
+        .arg(thumbprint)
+        .arg(file))
+}
+
+/// A tool of the newest Windows SDK installed (`bin\<version>\x64`).
+#[cfg(windows)]
+fn windows_sdk_tool(name: &str) -> Option<PathBuf> {
+    let bin = PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\bin");
+    let mut found: Vec<PathBuf> = std::fs::read_dir(bin)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|v| v.path().join("x64").join(name))
+        .filter(|p| p.is_file())
+        .collect();
+    found.sort();
+    found.pop()
+}
+
+/// The MSIX: `out` as it is (listed in a mapping file, not copied), with
+/// `packaging/windows/AppxManifest.xml` (its version and publisher filled in) and its tiles.
+#[cfg(windows)]
+fn msix(root: &Path, out: &Path, dist: &Path, version: &str, makeappx: &Path) -> anyhow::Result<PathBuf> {
+    let packaging = root.join("packaging/windows");
+    // MSIX versions have four parts
+    let mut parts: Vec<&str> = version.split(['.', '-', '+']).take(4).collect();
+    parts.resize(4, "0");
+    let publisher = std::env::var("LIGHTAIR_MSIX_PUBLISHER").unwrap_or_else(|_| "CN=Lightair Project".into());
+    let manifest = std::fs::read_to_string(packaging.join("AppxManifest.xml"))?
+        .replace("{VERSION}", &parts.join("."))
+        .replace("{PUBLISHER}", &publisher);
+    let filled = dist.join("AppxManifest.xml");
+    std::fs::write(&filled, manifest)?;
+    let mut map = String::from("[Files]\n");
+    let mut line = |from: &Path, to: &str| map.push_str(&format!("\"{}\" \"{}\"\n", from.display(), to));
+    line(&filled, "AppxManifest.xml");
+    for entry in std::fs::read_dir(packaging.join("Assets"))? {
+        let path = entry?.path();
+        line(&path, &format!("Assets\\{}", path.file_name().unwrap().to_string_lossy()));
+    }
+    fn walk(dir: &Path, base: &Path, line: &mut dyn FnMut(&Path, &str)) -> anyhow::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                walk(&path, base, line)?;
+            } else {
+                let rel = path.strip_prefix(base)?.to_string_lossy().replace('/', "\\");
+                line(&path, &rel);
+            }
+        }
+        Ok(())
+    }
+    walk(out, out, &mut line)?;
+    let mapping = dist.join("msix.map");
+    std::fs::write(&mapping, map)?;
+    let msix = dist.join(format!("Lightair-{version}-windows-x64.msix"));
+    run(Command::new(makeappx).args(["pack", "/o", "/f"]).arg(&mapping).arg("/p").arg(&msix))?;
+    Ok(msix)
 }
 
 /// A command-line tool as installed: on PATH (through a Scoop shim, the program it points at).
