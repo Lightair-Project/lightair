@@ -43,6 +43,9 @@ pub struct Layer {
     /// Signalled when the swap chain can take a frame without blocking (`Present` would wait
     /// otherwise); null where the system doesn't give one.
     ready: HANDLE,
+    /// A turn taken from `ready` and not presented with (a failed resize, copy or scale, a
+    /// present that failed): the next frame uses it without waiting.
+    kept: std::sync::atomic::AtomicBool,
     /// The back buffers' size, packed (width << 32 | height).
     size: AtomicU64,
     /// The back buffers' format (the presenting thread).
@@ -177,6 +180,7 @@ impl Layer {
         Some(Self {
             swap,
             ready,
+            kept: std::sync::atomic::AtomicBool::new(false),
             size: AtomicU64::new(pack(START, START)),
             format: Mutex::new(DXGI_FORMAT_B8G8R8A8_UNORM),
             wanted: AtomicU64::new(0),
@@ -239,8 +243,13 @@ impl Layer {
     }
 
     /// Whether the swap chain can take a frame now, without `Present` waiting.
+    /// The waitable object counts the frames the swap chain can take, and a wait that succeeds
+    /// takes one, given back only when a frame is presented: a turn taken but not presented with
+    /// is kept ([`Layer::kept`]) for the next frame, or the preview would stop for good.
     fn can_take(&self) -> bool {
-        self.ready.is_invalid() || unsafe { WaitForSingleObject(self.ready, 0) } == WAIT_OBJECT_0
+        self.ready.is_invalid()
+            || self.kept.swap(false, Ordering::Relaxed)
+            || unsafe { WaitForSingleObject(self.ready, 0) } == WAIT_OBJECT_0
     }
 
     /// Copies one of Lightair's own pictures (a frame of its compositor, finished on the GPU)
@@ -286,6 +295,15 @@ impl Layer {
         if !self.can_take() {
             return false;
         }
+        let presented = unsafe { self.present_taken(src, format, w, h) };
+        if !presented {
+            self.kept.store(true, Ordering::Relaxed);
+        }
+        presented
+    }
+
+    /// [`Layer::present_resource`] once the swap chain can take a frame (under `lock`).
+    unsafe fn present_taken(&self, src: &ID3D11Resource, format: DXGI_FORMAT, w: u32, h: u32) -> bool {
         // smaller: scaled down by the video processor (BGRA only), else copied as it is
         let to = if format == DXGI_FORMAT_B8G8R8A8_UNORM { self.presented_size((w, h)) } else { (w, h) };
         unsafe {
