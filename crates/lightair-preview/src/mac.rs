@@ -79,8 +79,11 @@ pub(crate) struct Shared {
     layer: Mutex<Option<LayerRef>>,
     /// The scene shown instead of the program, if any (Lightair's own compositor draws it).
     scene: Mutex<Shown>,
-    /// The most frames a second the compositor draws a scene shown here (0: none set).
+    /// The most frames a second the compositor draws a scene shown here, and the program is
+    /// shown at (0: none set).
     rate: AtomicU32,
+    /// Keeps the program's frames to `rate`.
+    pace: crate::pace::Pace,
 }
 
 /// The scene shown instead of the program.
@@ -115,7 +118,7 @@ impl Shared {
     /// The compositor's newest finished program frame (BGRA): to the UI and the layer. Ignored
     /// while a scene is shown instead of the program.
     pub(crate) fn feed(&self, frame: &Frame) {
-        if self.source.lock().is_some() {
+        if self.source.lock().is_some() || !self.pace.due(self.rate.load(Ordering::Relaxed)) {
             return;
         }
         // a buffer drawn into again: the NV12 copy of its last picture goes (see `nv12`)
@@ -262,6 +265,7 @@ impl Preview {
             layer: Mutex::new(None),
             scene: Mutex::new(Shown::default()),
             rate: AtomicU32::new(0),
+            pace: crate::pace::Pace::default(),
         });
         Self(Arc::new(Handle { shared, composed: AtomicBool::new(false), scenes: AtomicBool::new(false) }))
     }
@@ -313,8 +317,10 @@ impl Preview {
     }
 
     /// The most frames a second Lightair's own compositor draws a scene shown here
-    /// (`set_source`), for thumbnails and other views that needn't move smoothly. `None`: the
-    /// canvas's rate, or at most 30 for a view a quarter of the canvas's area or smaller.
+    /// (`set_source`), for thumbnails and other views that needn't move smoothly, and the most
+    /// the program is shown at (it's drawn at the canvas's rate for the outputs; frames are left
+    /// out). `None`: the canvas's rate, or at most 30 for a scene in a view a quarter of the
+    /// canvas's area or smaller.
     pub fn set_rate(&self, fps: Option<u32>) {
         self.0.shared.rate.store(fps.unwrap_or(0), Ordering::Relaxed);
     }

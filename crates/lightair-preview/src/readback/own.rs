@@ -47,6 +47,9 @@ pub(crate) struct Shared {
     size: AtomicU64,
     /// The most frames a second asked for; 0: the canvas's rate.
     rate: AtomicU32,
+    /// Keeps the program's frames to `rate`.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pace: crate::pace::Pace,
     own_size: AtomicBool,
     active: AtomicBool,
     latest: Mutex<Option<Frame>>,
@@ -124,6 +127,7 @@ impl Preview {
             scene: Mutex::new(Shown::default()),
             size: AtomicU64::new(0),
             rate: AtomicU32::new(0),
+            pace: crate::pace::Pace::default(),
             own_size: AtomicBool::new(false),
             active: AtomicBool::new(true),
             latest: Mutex::new(None),
@@ -194,7 +198,8 @@ impl Preview {
         }
     }
 
-    /// The most frames a second a scene shown here is drawn; `None`: the canvas's rate.
+    /// The most frames a second shown here: a scene shown is drawn at this rate, and the program
+    /// (drawn at the canvas's rate for the outputs) has frames left out. `None`: the canvas's rate.
     pub fn set_rate(&self, fps: Option<u32>) {
         self.0.shared.rate.store(fps.unwrap_or(0), Ordering::Relaxed);
     }
@@ -254,7 +259,7 @@ impl Shared {
 
     /// The compositor's newest finished program frame. Ignored while a scene is shown instead.
     pub(crate) fn feed(&self, frame: &lightair_host::buffers::Buffer) {
-        if self.scene.lock().at.is_some() {
+        if self.scene.lock().at.is_some() || !self.pace.due(self.rate.load(Ordering::Relaxed)) {
             return;
         }
         self.show(frame);

@@ -53,7 +53,13 @@ pub struct Preferences {
     pub ndi_output: String,
     /// The program served over RTSP (Settings › Streaming).
     pub rtsp_output: bool,
+    /// The most frames a second the canvases' previews show (Settings › General); `None`: the
+    /// canvas's rate. Fewer cost less GPU work; the program and outputs keep the canvas's rate.
+    pub preview_fps: Option<u32>,
 }
+
+/// The preview rates Settings offers, after the canvas's own.
+pub const PREVIEW_RATES: [u32; 2] = [30, 15];
 
 /// The remote API's server (its password is in the Keychain: `secrets`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +146,7 @@ impl Default for Preferences {
             midi_maps: Vec::new(),
             ndi_output: String::new(),
             rtsp_output: false,
+            preview_fps: None,
         }
     }
 }

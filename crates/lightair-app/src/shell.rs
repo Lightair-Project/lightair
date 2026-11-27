@@ -1485,6 +1485,7 @@ impl StudioWindow {
             let canvas = self.studio.read(cx).engine().call(move |s| s.reconciler.canvas_ref(id));
             if let Some(canvas) = canvas {
                 let preview = Preview::attach_canvas(canvas);
+                preview.set_rate(self.prefs.preview_fps);
                 // Lightair's own compositor draws the canvas's program, as it does its outputs
                 #[cfg(any(target_os = "macos", windows))]
                 if lightair_host::bridge::own() && !preview.compose_program() {

@@ -264,6 +264,14 @@ impl StudioWindow {
         self.studio.read(cx).engine().call(move |s| s.reconciler.set_headphones(device, program));
     }
 
+    /// The most frames a second the canvases' previews show, now and from now on.
+    fn set_preview_fps(&mut self, fps: Option<u32>, cx: &mut Context<Self>) {
+        for preview in self.previews.values() {
+            preview.set_rate(fps);
+        }
+        self.set_pref(|p| p.preview_fps = fps, cx);
+    }
+
     fn set_pref(&mut self, f: impl FnOnce(&mut crate::prefs::Preferences), cx: &mut Context<Self>) {
         f(&mut self.prefs);
         if let Err(e) = crate::prefs::save_to(&crate::prefs::path(), &self.prefs) {
@@ -423,7 +431,24 @@ impl StudioWindow {
         let studio = self.studio.read(cx);
         let workspace_dir = studio.workspace_dir();
         let name = studio.workspace().name.clone();
+        let canvas = studio.workspace().primary_canvas();
+        let canvas_fps = canvas.fps_num as f64 / canvas.fps_den.max(1) as f64;
+        let fps = self.prefs.preview_fps;
+        let mut rates = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
+        let choices = std::iter::once((None, format!("{canvas_fps:.0} fps · canvas")))
+            .chain(crate::prefs::PREVIEW_RATES.into_iter().map(|r| (Some(r), format!("{r} fps"))));
+        for (i, (r, label)) in choices.enumerate() {
+            rates = rates.child(
+                pref_chip(("preview-fps", i), label, fps == r)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_preview_fps(r, cx))),
+            );
+        }
         pages()
+            .child(group("Preview").child(row(
+                "Preview frame rate",
+                Some("Fewer frames in the window cost less graphics work, on laptops with two graphics chips above all. Recording and streaming keep the canvas's rate."),
+                rates,
+            )))
             .child(
                 group("Going live")
                     .child(row(

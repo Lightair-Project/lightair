@@ -20,6 +20,8 @@ mod buffer_gpu;
 mod pointer;
 #[cfg(any(target_os = "macos", windows))]
 mod timed;
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+mod pace;
 #[cfg(any(target_os = "macos", windows))]
 mod compose;
 #[cfg(any(target_os = "macos", windows))]

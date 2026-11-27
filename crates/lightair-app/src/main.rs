@@ -140,6 +140,7 @@ fn main() {
     // iPhones and iPads by USB, among the cameras
     lightair_platform::devices::allow_ios_screens();
     let preview = Preview::attach();
+    preview.set_rate(prefs.preview_fps);
     // Lightair's own compositor draws the program in the window
     #[cfg(any(target_os = "macos", windows))]
     if lightair_host::bridge::own() && !preview.compose_program() {
