@@ -841,3 +841,47 @@ fn same_camera(device: &str, camera: &camera::Camera) -> bool {
     }
     !name.is_empty() && camera.name == name
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn game(settings: serde_json::Value) -> Option<Plan> {
+        let source = Source { id: Id::new(), name: "Game".into(), kind: kinds::SCREEN.into(), settings, effects: vec![] };
+        Plan::of(&source, &Workspace::new("Show"))
+    }
+
+    fn aim(plan: Option<Plan>) -> Option<Aim> {
+        match plan? {
+            Plan::Screen { aim, .. } => Some(aim),
+            _ => None,
+        }
+    }
+
+    /// A Game source with no game chosen (no window, an empty one, or the picker's `null`)
+    /// captures any full-screen application; with one chosen, that game by its executable.
+    #[test]
+    fn a_game_with_none_chosen_is_any_full_screen_application() {
+        for settings in [
+            json!({ "mode": kinds::GAME }),
+            json!({ "mode": kinds::GAME, "window": null }),
+            json!({ "mode": kinds::GAME, "window": "" }),
+            json!({ "mode": kinds::GAME, "window": "   " }),
+        ] {
+            assert_eq!(aim(game(settings.clone())), Some(Aim::AnyGame), "{settings}");
+        }
+        let chosen = json!({ "mode": kinds::GAME, "window": "Elden Ring:ELDEN RING#3A NIGHTREIGN:eldenring.exe" });
+        assert_eq!(aim(game(chosen)), Some(Aim::Game("eldenring.exe".into())));
+        assert_eq!(aim(game(json!({ "mode": kinds::GAME, "window": "game.exe" }))), Some(Aim::Game("game.exe".into())));
+    }
+
+    /// Only a game falls back to any full-screen application: a window capture with no window
+    /// chosen captures nothing.
+    #[test]
+    fn a_window_with_none_chosen_is_nothing() {
+        assert_eq!(aim(game(json!({ "mode": kinds::WINDOW }))), None);
+        assert_eq!(screen_aim(kinds::WINDOW, |_| None), None);
+        assert_eq!(screen_aim(kinds::GAME, |_| None), Some(Aim::AnyGame));
+    }
+}

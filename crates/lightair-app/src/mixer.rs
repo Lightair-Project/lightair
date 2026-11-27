@@ -2558,3 +2558,74 @@ mod layout_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod track_source_tests {
+    use super::{TrackSource, desktop_label};
+    use lightair_model::{Id, Source, kinds};
+    use serde_json::json;
+
+    fn source(kind: &str, settings: serde_json::Value) -> Source {
+        Source { id: Id::new(), name: "Track".into(), kind: kind.into(), settings, effects: vec![] }
+    }
+
+    /// An output that isn't here (so the test doesn't depend on this computer's devices).
+    const GONE: &str = "{0.0.0.00000000}.{aaaaaaaa-0000-0000-0000-00000000dead}";
+
+    /// Desktop audio's settings: no device, "" or "default" is plain desktop audio; an output's id
+    /// is what that output plays.
+    #[test]
+    fn desktop_audio_is_read_from_its_device_setting() {
+        for settings in [json!({}), json!({ "device": "" }), json!({ "device": "default" }), json!({ "device": null })] {
+            let s = source(kinds::DESKTOP_AUDIO, settings.clone());
+            assert!(TrackSource::of(&s) == TrackSource::Desktop(String::new()), "{settings}");
+        }
+        let s = source(kinds::DESKTOP_AUDIO, json!({ "device": GONE }));
+        assert!(TrackSource::of(&s) == TrackSource::Desktop(GONE.into()));
+        // an interface's input isn't desktop audio, whatever its device
+        let s = source(lightair_host::devices::DEVICE_KIND, json!({ "device": GONE }));
+        assert!(TrackSource::of(&s) == TrackSource::Device(GONE.into()));
+    }
+
+    /// Plain desktop audio writes an empty device (settings merge: an output chosen before
+    /// doesn't stay); one output's writes its id, named after it.
+    #[test]
+    fn desktop_audio_writes_its_device() {
+        let (name, kind, settings) = TrackSource::Desktop(String::new()).source("");
+        assert_eq!((name.as_str(), kind, settings), ("Desktop audio", kinds::DESKTOP_AUDIO, json!({ "device": "" })));
+        let (name, kind, settings) = TrackSource::Desktop(GONE.into()).source("");
+        assert_eq!(kind, kinds::DESKTOP_AUDIO);
+        assert_eq!(settings, json!({ "device": GONE }));
+        assert_eq!(name, "Desktop audio · Disconnected output");
+    }
+
+    /// What's written reads back as what was chosen, also over settings chosen before (merged
+    /// in as the source menu does).
+    #[test]
+    fn desktop_audio_settings_round_trip() {
+        let merged = |old: serde_json::Value, new: serde_json::Value| {
+            let mut s = old;
+            for (k, v) in new.as_object().unwrap() {
+                s[k] = v.clone();
+            }
+            s
+        };
+        for to in [TrackSource::Desktop(String::new()), TrackSource::Desktop(GONE.into())] {
+            let (_, kind, settings) = to.source("");
+            assert!(TrackSource::of(&source(kind, settings.clone())) == to, "{settings}");
+            for before in [json!({}), json!({ "device": GONE }), json!({ "device": "{0.0.0.00000000}.{other}", "volume": 1 })] {
+                let s = merged(before.clone(), settings.clone());
+                assert!(TrackSource::of(&source(kind, s.clone())) == to, "{before} then {settings}: {s}");
+            }
+        }
+    }
+
+    /// An output's label: "Desktop audio · <its name>"; the system's default is plain.
+    #[test]
+    fn desktop_labels() {
+        assert_eq!(desktop_label(""), "Desktop audio");
+        assert_eq!(desktop_label("default"), "Desktop audio");
+        assert_eq!(desktop_label(GONE), "Desktop audio · Disconnected output");
+        assert_eq!(desktop_label("Loopback Audio"), "Desktop audio · Loopback Audio");
+    }
+}

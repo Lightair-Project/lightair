@@ -844,3 +844,45 @@ impl Editor {
         cx.notify();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{FORMATS, offered_here, same_format};
+    use lightair_render::exporter::{Container, PRESETS, VideoCodec};
+
+    /// HEVC with transparency (Apple's encoder) is offered on macOS only; every other format,
+    /// transparent ones included, everywhere.
+    #[test]
+    fn hevc_with_transparency_is_offered_only_on_macos() {
+        let mac = cfg!(target_os = "macos");
+        for (name, i) in FORMATS {
+            let preset = &PRESETS[*i].2;
+            let apple_alpha = preset.alpha && (preset.container, preset.video) == (Container::Mov, VideoCodec::Hevc);
+            let expected = !apple_alpha || mac;
+            assert_eq!(offered_here(preset), expected, "{name}");
+        }
+        let offered: Vec<&str> = FORMATS.iter().filter(|(_, i)| offered_here(&PRESETS[*i].2)).map(|(n, _)| *n).collect();
+        for kept in ["MOV · ProRes 4444 (transparent)", "WebM · VP9 (transparent)", "MP4 · HEVC, smaller file"] {
+            assert!(offered.contains(&kept), "{kept} is offered: {offered:?}");
+        }
+        assert_eq!(offered.contains(&"MOV · HEVC (transparent, Mac)"), mac, "{offered:?}");
+    }
+
+    /// Whatever's offered keeps the transparency it asks for, and is its own preset's format.
+    #[test]
+    fn an_offered_transparent_format_keeps_its_transparency() {
+        for (name, i) in FORMATS {
+            let preset = &PRESETS[*i].2;
+            if offered_here(preset) {
+                assert_eq!(preset.keeps_alpha(), preset.alpha, "{name}");
+                assert!(same_format(preset, preset), "{name} is its own format");
+            }
+        }
+        // a preset not asking for transparency is always offered
+        for (name, _, preset) in PRESETS {
+            if !preset.alpha {
+                assert!(offered_here(preset), "{name}");
+            }
+        }
+    }
+}

@@ -38,6 +38,18 @@ fn merged(settings: &Value, key: &str, value: Value) -> Value {
     s
 }
 
+/// A game source's first choice: no game in particular ("any full-screen application", its window
+/// unset), when it matches the search `query` (lowercase). `None` for any other source.
+fn any_game(source: &Source, query: &str) -> Option<Choice> {
+    let game = source.kind == kinds::SCREEN && source.settings["mode"].as_i64() == Some(kinds::GAME);
+    (game && (query.is_empty() || "any full-screen application".contains(query))).then(|| Choice {
+        title: "Any full-screen application".into(),
+        detail: String::new(),
+        group: "Any".into(),
+        value: Value::Null,
+    })
+}
+
 /// "[App] Title" (macOS) or "[app.exe]: Title" (Windows): the app and the window's title.
 fn app_and_title(label: &str) -> (String, String) {
     match label.strip_prefix('[').and_then(|r| r.split_once(']')) {
@@ -376,17 +388,8 @@ impl StudioWindow {
             })
             .collect();
         // a game: first, no game in particular (whatever is full screen in front)
-        let game = source.kind == kinds::SCREEN && source.settings["mode"].as_i64() == Some(kinds::GAME);
-        if game && (query.is_empty() || "any full-screen application".contains(&query)) {
-            list.insert(
-                0,
-                Choice {
-                    title: "Any full-screen application".into(),
-                    detail: String::new(),
-                    group: "Any".into(),
-                    value: Value::Null,
-                },
-            );
+        if let Some(any) = any_game(&source, &query) {
+            list.insert(0, any);
         }
         let icon = source_icon(&source.kind, &source.settings);
         let title = match key {
@@ -586,8 +589,53 @@ fn source_icon(kind: &str, settings: &Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::choices;
-    use serde_json::json;
+    use super::{any_game, choices, merged};
+    use lightair_model::{Id, Source, kinds};
+    use serde_json::{Value, json};
+
+    fn screen(settings: Value) -> Source {
+        Source { id: Id::new(), name: "Game".into(), kind: kinds::SCREEN.into(), settings, effects: vec![] }
+    }
+
+    /// A game source's picker starts with "Any full-screen application" (no game chosen); a
+    /// window, display or app capture's doesn't.
+    #[test]
+    fn a_game_can_be_any_full_screen_application() {
+        let game = screen(json!({ "mode": kinds::GAME, "window": "Game:UnityWndClass:game.exe" }));
+        let any = any_game(&game, "").expect("offered to a game source");
+        assert_eq!((any.title.as_str(), any.group.as_str(), &any.value), ("Any full-screen application", "Any", &Value::Null));
+        for mode in [kinds::WINDOW, kinds::DISPLAY, kinds::APP] {
+            assert!(any_game(&screen(json!({ "mode": mode })), "").is_none(), "mode {mode}");
+        }
+        assert!(any_game(&screen(json!({})), "").is_none(), "a screen source with no mode is a display");
+        let camera = Source { kind: kinds::CAMERA.into(), ..screen(json!({ "mode": kinds::GAME })) };
+        assert!(any_game(&camera, "").is_none(), "only screen captures have games");
+    }
+
+    /// The search keeps it when it matches its title (the query is lowercase), not otherwise.
+    #[test]
+    fn any_full_screen_application_follows_the_search() {
+        let game = screen(json!({ "mode": kinds::GAME }));
+        for query in ["any", "full-screen", "application", "any full-screen application"] {
+            assert!(any_game(&game, query).is_some(), "{query}");
+        }
+        for query in ["game.exe", "fullscreen", "any game"] {
+            assert!(any_game(&game, query).is_none(), "{query}");
+        }
+    }
+
+    /// Choosing it clears the chosen game (the window `null`), which is what it's shown chosen
+    /// for; the source's other settings stay.
+    #[test]
+    fn choosing_any_full_screen_application_clears_the_game() {
+        let settings = json!({ "mode": kinds::GAME, "window": "Game:UnityWndClass:game.exe", "capture_cursor": true });
+        let any = any_game(&screen(settings.clone()), "").unwrap();
+        let chosen = merged(&settings, "window", any.value.clone());
+        assert_eq!(chosen, json!({ "mode": kinds::GAME, "window": null, "capture_cursor": true }));
+        assert_eq!(chosen["window"], any.value, "shown as the choice made");
+        // and with none chosen yet, it's the one shown chosen
+        assert_eq!(json!({ "mode": kinds::GAME })["window"], any.value);
+    }
 
     #[test]
     fn labels_become_titles() {

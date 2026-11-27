@@ -801,3 +801,125 @@ impl Decoder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffers_small::Shrinker;
+
+    /// NV12 of `w` × `h`, every pixel (y, u, v).
+    fn flat_nv12(w: usize, h: usize, (y, u, v): (u8, u8, u8)) -> Vec<u8> {
+        let mut data = vec![y; w * h];
+        for _ in 0..w * h / 4 {
+            data.extend_from_slice(&[u, v]);
+        }
+        data
+    }
+
+    fn near(a: &[u8], b: [u8; 4], tolerance: u8) -> bool {
+        a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= tolerance)
+    }
+
+    /// The in-memory conversion (BT.709, limited range): black, white and red come out as they
+    /// should, cut to the size shown.
+    #[test]
+    fn nv12_in_memory_converts_to_bgra() {
+        let black = nv12_to_bgra(&flat_nv12(32, 16, (16, 128, 128)), 32, 16, (32, 16));
+        assert_eq!(black.len(), 32 * 16 * 4);
+        assert!(black.as_chunks::<4>().0.iter().all(|px| near(px, [0, 0, 0, 255], 0)));
+        let white = nv12_to_bgra(&flat_nv12(32, 16, (235, 128, 128)), 32, 16, (32, 16));
+        assert!(white.as_chunks::<4>().0.iter().all(|px| near(px, [255, 255, 255, 255], 1)), "{:?}", &white[..4]);
+        // BT.709 red: Y 63, Cb 102, Cr 240
+        let red = nv12_to_bgra(&flat_nv12(32, 16, (63, 102, 240)), 32, 16, (16, 8));
+        assert_eq!(red.len(), 16 * 8 * 4, "the coded margin cut off");
+        assert!(red.as_chunks::<4>().0.iter().all(|px| near(px, [0, 0, 255, 255], 2)), "{:?}", &red[..4]);
+    }
+
+    /// An NV12 texture on `device`, every pixel (y, u, v), as a decoder's output might be.
+    fn nv12_texture(device: &ID3D11Device, (w, h): (u32, u32), yuv: (u8, u8, u8)) -> Option<ID3D11Texture2D> {
+        let data = flat_nv12(w as usize, h as usize, yuv);
+        let initial = D3D11_SUBRESOURCE_DATA { pSysMem: data.as_ptr().cast(), SysMemPitch: w, SysMemSlicePitch: 0 };
+        // (as a decoder makes them: an NV12 shader resource alone takes no video processor input view)
+        for bind in [D3D11_BIND_DECODER.0 as u32, 0] {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: w,
+                Height: h,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_NV12,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: bind,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut texture = None;
+            // SAFETY: `data` is `h` luma rows of `w` bytes then `h / 2` chroma rows, alive for the call
+            if unsafe { device.CreateTexture2D(&desc, Some(&initial), Some(&mut texture)) }.is_ok() && texture.is_some() {
+                return texture;
+            }
+        }
+        None
+    }
+
+    /// The decoder's GPU side, or `None` (said) where there's none.
+    fn gpu(test: &str) -> Option<Gpu> {
+        let gpu = Gpu::new();
+        if gpu.is_none() {
+            eprintln!("{test}: no Direct3D 11 video device here: skipped");
+        }
+        gpu
+    }
+
+    /// A decoded picture converted on the GPU: straight into a buffer of Lightair's when they
+    /// share the device (`Copier::draw`), and through the conversion's own texture otherwise;
+    /// both give the same picture, its colours right (SD's BT.601 below 720 lines).
+    #[test]
+    fn nv12_on_the_gpu_converts_straight_into_a_buffer() {
+        let Some(mut gpu) = gpu("nv12_on_the_gpu_converts_straight_into_a_buffer") else { return };
+        let (coded, shown) = ((640, 480), (640, 480));
+        // BT.601 red: Y 81, Cb 90, Cr 240
+        let Some(texture) = nv12_texture(&gpu.device, coded, (81, 90, 240)) else {
+            eprintln!("no NV12 texture on this device: skipped");
+            return;
+        };
+        let mut copier = Copier::new();
+        let mut reader = Shrinker::new();
+        let red = [0, 0, 255, 255];
+        if gpu.shares_buffers() {
+            let out = gpu.out_size(&texture, shown, 0).expect("a conversion");
+            assert_eq!(out, shown);
+            let direct = copier.draw(out, |_, target| gpu.bgra_into(&texture, 0, shown, 0, target)).expect("converted straight");
+            assert_eq!(direct.size(), shown);
+            let bytes = reader.read(&direct, shown).expect("read back");
+            assert!(bytes.as_chunks::<4>().0.iter().all(|px| near(px, red, 8)), "direct: {:?}", &bytes[..4]);
+        } else {
+            eprintln!("the decoder's device isn't the buffers': only the copy is tried");
+        }
+        let (handle, size) = gpu.bgra_of(&texture, 0, shown, 0).expect("converted into its own texture");
+        assert_eq!(size, shown);
+        let copied = copier.copy(handle, size, None).expect("copied into a buffer");
+        let bytes = reader.read(&copied, shown).expect("read back");
+        assert!(bytes.as_chunks::<4>().0.iter().all(|px| near(px, red, 8)), "copied: {:?}", &bytes[..4]);
+    }
+
+    /// Turned a quarter, a picture converts at its turned size; the coded margin is cut off.
+    #[test]
+    fn a_turned_picture_converts_at_its_turned_size() {
+        let Some(mut gpu) = gpu("a_turned_picture_converts_at_its_turned_size") else { return };
+        // a 1080p picture is coded 1088 high
+        let Some(texture) = nv12_texture(&gpu.device, (1920, 1088), (235, 128, 128)) else { return };
+        let shown = (1920, 1080);
+        for (rotation, out) in [(0, (1920, 1080)), (90, (1080, 1920)), (180, (1920, 1080)), (270, (1080, 1920))] {
+            assert_eq!(gpu.out_size(&texture, shown, rotation), Some(out), "turned {rotation}");
+        }
+        if !gpu.shares_buffers() {
+            return;
+        }
+        let mut copier = Copier::new();
+        let turned = copier.draw((1080, 1920), |_, target| gpu.bgra_into(&texture, 0, shown, 90, target)).expect("converted");
+        assert_eq!(turned.size(), (1080, 1920));
+        let bytes = Shrinker::new().read(&turned, (108, 192)).expect("read back");
+        assert!(bytes.as_chunks::<4>().0.iter().all(|px| near(px, [255, 255, 255, 255], 6)), "{:?}", &bytes[..4]);
+    }
+}

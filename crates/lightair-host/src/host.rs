@@ -1481,3 +1481,54 @@ impl Host {
         out
     }
 }
+
+#[cfg(test)]
+mod runs_here_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn source(kind: &str, settings: serde_json::Value) -> Source {
+        Source { id: Id::new(), name: kind.into(), kind: kind.into(), settings, effects: vec![] }
+    }
+
+    /// What a runtime of the host's plays here: its pictures come once that runtime makes the
+    /// first, so the compositor doesn't call them missing.
+    #[test]
+    fn a_runtimes_sources_run_here() {
+        let here = cfg!(any(target_os = "macos", windows));
+        for (kind, settings) in [
+            ("ffmpeg_source", json!({ "local_file": "C:/clips/intro.mkv" })),
+            ("ffmpeg_source", json!({ "playlist": ["a.mp4", "b.mp4"] })),
+            ("lightair_web", json!({ "url": "https://example.com" })),
+            (crate::avatar::KIND, json!({})),
+            (crate::phone_camera::KIND, json!({})),
+            (crate::soundboard::KIND, json!({})),
+            (kinds::DESKTOP_AUDIO, json!({ "device": "" })),
+            (kinds::APP_AUDIO, json!({ "app": "game.exe" })),
+        ] {
+            assert_eq!(runs_here(&source(kind, settings.clone())), here, "{kind} {settings}");
+        }
+        // everywhere: timers, NDI, the co-host's voice, audio interfaces
+        for (kind, settings) in [
+            (TIMER_KIND, json!({})),
+            (crate::ndi::KIND, json!({ "ndi_name": "STUDIO (Cam 1)" })),
+            (crate::piair_voice::KIND, json!({})),
+            (crate::devices::DEVICE_KIND, json!({ "device": "" })),
+            (kinds::MIC, json!({ "device": "usb" })),
+            (kinds::DESKTOP_AUDIO, json!({ "device": "{0.0.0.00000000}.{headphones}" })),
+        ] {
+            assert!(runs_here(&source(kind, settings.clone())), "{kind} {settings}");
+        }
+    }
+
+    /// What the compositor or a capture makes itself, and what has no runtime here, doesn't run
+    /// here.
+    #[test]
+    fn what_the_compositor_makes_or_nothing_plays_doesnt_run_here() {
+        for kind in ["image_source", "color_source", "text_gdiplus", kinds::SCREEN, kinds::CAMERA] {
+            assert!(!runs_here(&source(kind, json!({}))), "{kind}");
+        }
+        // a camera over USB only plays on macOS
+        assert_eq!(runs_here(&source(crate::dslr::KIND, json!({}))), cfg!(target_os = "macos"));
+    }
+}

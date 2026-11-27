@@ -333,27 +333,47 @@ impl Drop for Devices {
     }
 }
 
+/// The device a setting `name` is captured from, and whether it's an output captured as it plays
+/// (loopback): the input it names (`input`), else, where outputs can be (`loopback`: Windows'
+/// WASAPI), the output it names (`output`). The system's default is always an input.
+fn capture_from<D>(
+    name: &str,
+    input: Option<D>,
+    output: impl FnOnce() -> Option<D>,
+    loopback: bool,
+) -> Result<(D, bool), String> {
+    match input {
+        Some(d) => Ok((d, false)),
+        None if loopback && !is_system_default(name) => {
+            Ok((output().ok_or_else(|| format!("no audio input or output \"{name}\""))?, true))
+        }
+        None => Err(format!("no audio input \"{name}\"")),
+    }
+}
+
+/// The format a device is opened in, from what it supports (`configs`): all its channels (the
+/// most any config has), and whether a config with that many takes `sample_rate` (else the
+/// device's default rate, resampled). `None` when it supports nothing.
+fn stream_format(configs: &[cpal::SupportedStreamConfigRange], sample_rate: u32) -> Option<(u16, bool)> {
+    let channels = configs.iter().map(|c| c.channels()).max()?;
+    let at_rate = configs.iter().any(|c| {
+        c.channels() == channels && c.min_sample_rate() <= sample_rate && c.max_sample_rate() >= sample_rate
+    });
+    Some((channels, at_rate))
+}
+
 fn open(name: &str, sample_rate: u32, mut ring: rtrb::Producer<f32>) -> Result<(cpal::Stream, u16), String> {
     // Windows: an output is captured as it plays (WASAPI loopback: an input stream on it, in
     // the output's own formats)
-    let (device, loopback) = match find_input(name) {
-        Some(d) => (d, false),
-        None if cfg!(windows) && !is_system_default(name) => {
-            (find_output(name).ok_or_else(|| format!("no audio input or output \"{name}\""))?, true)
-        }
-        None => return Err(format!("no audio input \"{name}\"")),
-    };
+    let (device, loopback) = capture_from(name, find_input(name), || find_output(name), cfg!(windows))?;
     // all its channels, at the engine's rate if it can, in 32-bit float
     let configs: Vec<_> = if loopback {
         device.supported_output_configs().map_err(|e| e.to_string())?.collect()
     } else {
         device.supported_input_configs().map_err(|e| e.to_string())?.collect()
     };
-    let channels = configs.iter().map(|c| c.channels()).max().ok_or("the device has no inputs")?;
-    let at_rate = configs.iter().find(|c| {
-        c.channels() == channels && c.min_sample_rate() <= sample_rate && c.max_sample_rate() >= sample_rate
-    });
-    let rate = if at_rate.is_some() {
+    let (channels, at_rate) = stream_format(&configs, sample_rate).ok_or("the device has no inputs")?;
+    let rate = if at_rate {
         sample_rate
     } else {
         let default = if loopback { device.default_output_config() } else { device.default_input_config() };
@@ -454,6 +474,83 @@ mod tests {
         assert!((r.out.len() as i32 - 480).abs() <= 1, "{} frames", r.out.len());
         for w in r.out[2..].windows(2) {
             assert!((w[1] - w[0] - 44_100.0 / 48_000.0).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn an_input_is_captured_before_an_output_of_that_name() {
+        let never = || -> Option<&str> { panic!("an output isn't looked for when the input is there") };
+        assert_eq!(capture_from("usb", Some("mic"), never, true), Ok(("mic", false)));
+        assert_eq!(capture_from("", Some("default mic"), never, true), Ok(("default mic", false)));
+    }
+
+    /// Windows: a setting naming an output (desktop audio from one output) is captured from it as
+    /// it plays (loopback); elsewhere, or with no such output, it's missing.
+    #[test]
+    fn an_output_is_captured_by_loopback_only_where_it_can_be() {
+        let output = "{0.0.0.00000000}.{headphones}";
+        assert_eq!(capture_from(output, None, || Some("headphones"), true), Ok(("headphones", true)));
+        assert_eq!(
+            capture_from(output, None, || None::<&str>, true),
+            Err(format!("no audio input or output \"{output}\""))
+        );
+        assert_eq!(capture_from(output, None, || Some("headphones"), false), Err(format!("no audio input \"{output}\"")));
+    }
+
+    /// The system's default ("" or "default") is never an output's loopback: plain desktop audio is
+    /// the process loopback's, not the default output's.
+    #[test]
+    fn the_system_default_is_never_an_outputs_loopback() {
+        for name in ["", "default"] {
+            let never = || -> Option<&str> { panic!("the default isn't looked for among outputs") };
+            assert_eq!(capture_from(name, None, never, true), Err(format!("no audio input \"{name}\"")));
+        }
+    }
+
+    fn range(channels: u16, min: u32, max: u32) -> cpal::SupportedStreamConfigRange {
+        cpal::SupportedStreamConfigRange::new(channels, min, max, cpal::SupportedBufferSize::Unknown, cpal::SampleFormat::F32)
+    }
+
+    /// A device (an output's loopback as much as an input) opens with all its channels, at the
+    /// engine's rate when a config with that many channels takes it.
+    #[test]
+    fn a_device_opens_with_all_its_channels_at_the_engines_rate_when_it_can() {
+        // a shared-mode WASAPI output: one format, its mix format
+        assert_eq!(stream_format(&[range(2, 48_000, 48_000)], 48_000), Some((2, true)));
+        assert_eq!(stream_format(&[range(2, 44_100, 44_100)], 48_000), Some((2, false)), "resampled from its own rate");
+        // a 7.1 output: eight channels, even though stereo is offered at the engine's rate
+        let surround = [range(2, 48_000, 48_000), range(8, 44_100, 44_100)];
+        assert_eq!(stream_format(&surround, 48_000), Some((8, false)));
+        // a range taking the rate
+        assert_eq!(stream_format(&[range(1, 8_000, 96_000), range(2, 8_000, 96_000)], 48_000), Some((2, true)));
+        assert_eq!(stream_format(&[], 48_000), None, "a device with no formats");
+    }
+
+    /// A Windows endpoint that isn't here is called by its kind (an output: what desktop audio from
+    /// an unplugged output is called), not its GUID.
+    #[test]
+    fn a_missing_output_is_called_by_its_kind() {
+        assert_eq!(missing_name("{0.0.0.00000000}.{aaaaaaaa-0000-0000-0000-000000000000}"), "Disconnected output");
+        assert_eq!(missing_name("{0.0.1.00000000}.{aaaaaaaa-0000-0000-0000-000000000000}"), "Disconnected microphone");
+        assert_eq!(missing_name("BlackHole 2ch"), "BlackHole 2ch");
+        assert_eq!(device_name(""), None);
+        assert_eq!(device_name("default"), None);
+        assert_eq!(
+            device_name("{0.0.0.00000000}.{aaaaaaaa-0000-0000-0000-00000000dead}").as_deref(),
+            Some("Disconnected output")
+        );
+    }
+
+    /// The outputs listed (desktop audio's choices on Windows) each have an id and channels, and
+    /// at most one is the default; each is found again by its id. Passes with no outputs.
+    #[test]
+    fn listed_outputs_are_found_by_their_ids() {
+        let outputs = output_devices();
+        assert!(outputs.iter().filter(|d| d.default).count() <= 1, "{outputs:?}");
+        for d in &outputs {
+            assert!(!d.id.is_empty() && d.channels > 0 && d.sample_rate > 0, "{d:?}");
+            let found = find_output(&d.id).and_then(|o| id_of(&o));
+            assert_eq!(found.as_deref(), Some(d.id.as_str()), "{} is found by its id", d.name);
         }
     }
 }
