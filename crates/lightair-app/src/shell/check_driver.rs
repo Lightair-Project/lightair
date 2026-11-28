@@ -10,7 +10,8 @@
 //! `drop-tree <object name|-> <above|into|below> <paths…>`, `drop-assets <paths…>`, `save-scene`, `undo`,
 //! `scroll <px>`, `settings-shortcuts`, `settings-voices`, `say <text>`, `voice-level`, `test-event <kind>`,
 //! `assets-open <folder>`, `cohost-window <page>`, `cohost <avatar file>` (an AI co-host object),
-//! `install <package id>` (from Lightair's catalog, as the co-host's Install button does).
+//! `install <package id>` (from Lightair's catalog, as the co-host's Install button does),
+//! `full-access-ask` (the full-access question with sample text; nothing installs).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -271,6 +272,16 @@ impl StudioWindow {
             }
             "settings-shortcuts" => self.open_settings(super::settings::Page::Shortcuts, cx),
             "settings-voices" => self.open_settings(super::settings::Page::Voices, cx),
+            // the full-access question as a full-access package would open it (nothing installs)
+            "full-access-ask" => {
+                let (tx, _rx) = futures_channel::oneshot::channel::<bool>();
+                self.ask_full_access(
+                    "Give \u{201c}Stage Lights Pro\u{201d} full access?".into(),
+                    "This plugin runs like any app you install: it can read your files, use the network and your devices. Lightair can't limit or watch what it does.\n\nIt isn't checked by Lightair.".into(),
+                    tx,
+                    cx,
+                );
+            }
             // says text on the Voice track (made when it's missing), with the default voice
             "say" => self.say_on_voice_track(rest, None, cx),
             // a made-up chat event (follow, sub, paid, cheer, raid, message), as widgets.test sends
