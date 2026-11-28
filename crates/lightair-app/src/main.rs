@@ -46,6 +46,7 @@ mod grants;
 mod helpers_host;
 mod links;
 mod plugin_activity;
+mod scripts_host;
 mod platforms;
 mod preflight;
 mod prefs;

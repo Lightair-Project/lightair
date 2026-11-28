@@ -18,24 +18,39 @@ use crate::shell::StudioWindow;
 use crate::ui::tok;
 
 impl PackagesPanel {
-    /// The section, for a helper package other than PiAir (PiAir is the co-host's).
+    /// The section, for a helper package other than PiAir (PiAir is the co-host's), or a script.
     pub(super) fn helper_section(&self, i: usize, p: &Installed, cx: &mut Context<Self>) -> Option<Div> {
         let id = p.id().as_str().to_string();
-        if id == crate::piair::proc::PACKAGE || !p.manifest.contents.iter().any(|c| c.kind == Kind::Helper) {
+        let script = p.manifest.contents.iter().any(|c| c.kind == Kind::Extension);
+        if id == crate::piair::proc::PACKAGE || !(script || p.manifest.contents.iter().any(|c| c.kind == Kind::Helper)) {
             return None;
         }
         let on = hh::enabled(&id);
-        let status = hh::status(&id);
-        let (colour, line) = match (&status, on) {
-            (_, false) => (tok::text_tertiary(), "Off".to_string()),
-            (Some(s), true) if s.error.is_some() => (tok::error(), s.error.clone().unwrap_or_default()),
-            (Some(s), true) if s.ready && s.full_access => (tok::warn(), "Running with full access".to_string()),
-            (Some(s), true) if s.ready => (tok::ok(), "Running".to_string()),
-            (Some(s), true) if s.running => (tok::warn(), "Starting…".to_string()),
-            (Some(_), true) => (tok::text_tertiary(), "Stopped".to_string()),
-            (None, true) => (tok::text_tertiary(), "Not running".to_string()),
+        let (colour, line, gave_up) = if script {
+            use lightair_script::State;
+            match (crate::scripts_host::status(&id), on) {
+                (_, false) => (tok::text_tertiary(), "Off".to_string(), false),
+                (Some(State::Running), true) => (tok::ok(), "Running".to_string(), false),
+                (Some(State::Starting), true) => (tok::warn(), "Starting…".to_string(), false),
+                (Some(State::Suspended(why)), true) => (tok::error(), format!("Suspended: {why}"), true),
+                (Some(State::Failed(why)), true) if why != "held" => (tok::error(), format!("Didn't start: {why}"), true),
+                (Some(_), true) => (tok::text_tertiary(), "Stopped".to_string(), true),
+                (None, true) => (tok::text_tertiary(), "Not running".to_string(), false),
+            }
+        } else {
+            let status = hh::status(&id);
+            let (colour, line) = match (&status, on) {
+                (_, false) => (tok::text_tertiary(), "Off".to_string()),
+                (Some(s), true) if s.error.is_some() => (tok::error(), s.error.clone().unwrap_or_default()),
+                (Some(s), true) if s.ready && s.full_access => (tok::warn(), "Running with full access".to_string()),
+                (Some(s), true) if s.ready => (tok::ok(), "Running".to_string()),
+                (Some(s), true) if s.running => (tok::warn(), "Starting…".to_string()),
+                (Some(_), true) => (tok::text_tertiary(), "Stopped".to_string()),
+                (None, true) => (tok::text_tertiary(), "Not running".to_string()),
+            };
+            let gave_up = status.as_ref().and_then(|s| s.error.as_ref()).is_some_and(|e| e.contains("three times"));
+            (colour, line, gave_up)
         };
-        let gave_up = status.as_ref().and_then(|s| s.error.as_ref()).is_some_and(|e| e.contains("three times"));
         let toggle_id = id.clone();
         let mut section = div()
             .flex()
@@ -57,7 +72,7 @@ impl PackagesPanel {
                             .text_size(px(11.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(tok::text_secondary())
-                            .child("Helper"),
+                            .child(if script { "Script" } else { "Helper" }),
                     )
                     .child(div().size(px(7.)).rounded_full().bg(colour))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(tok::text()).child(line))
@@ -65,7 +80,11 @@ impl PackagesPanel {
                         let id = id.clone();
                         d.child(Button::new(("helper-start", i)).label("Start again").xsmall().ghost().on_click(
                             cx.listener(move |_, _, _, cx| {
-                                hh::start_again(&id);
+                                if script {
+                                    crate::scripts_host::start_again(&id);
+                                } else {
+                                    hh::start_again(&id);
+                                }
                                 cx.notify();
                             }),
                         ))
@@ -202,6 +221,39 @@ impl StudioWindow {
                 let ok = this.update(cx, |this, cx| {
                     let w = this.studio.read(cx).workspace().clone();
                     hh::set_tracks(w.tracks.iter().map(|t| (t.id, t.name.clone())).collect());
+                    // script plugins: the widget server (overlays' messages), the show's overlay
+                    // objects, and a file a script asked the user to pick
+                    if let Some(widgets) = this.studio.read(cx).widgets.clone() {
+                        crate::scripts_host::set_widgets(widgets);
+                    }
+                    crate::scripts_host::set_overlays(
+                        w.sources
+                            .values()
+                            .filter_map(|s| {
+                                let o = s.settings.get("lightair_overlay")?;
+                                Some((
+                                    o["package"].as_str()?.to_string(),
+                                    o["overlay"].as_str()?.to_string(),
+                                    s.settings["widget"]["id"].as_str()?.to_string(),
+                                ))
+                            })
+                            .collect(),
+                    );
+                    if crate::scripts_host::wants_pick() && !this.script_pick_open {
+                        this.script_pick_open = true;
+                        let paths = cx.prompt_for_paths(PathPromptOptions {
+                            files: true,
+                            directories: true,
+                            multiple: false,
+                            prompt: Some("Choose".into()),
+                        });
+                        cx.spawn(async move |this, cx| {
+                            let path = paths.await.ok().and_then(|r| r.ok()).flatten().and_then(|mut v| v.pop());
+                            crate::scripts_host::answer_pick(path);
+                            let _ = this.update(cx, |this, _| this.script_pick_open = false);
+                        })
+                        .detach();
+                    }
                 });
                 if ok.is_err() {
                     break;

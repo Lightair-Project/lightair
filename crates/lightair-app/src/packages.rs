@@ -106,19 +106,15 @@ pub fn size(bytes: u64) -> String {
     crate::storage::bytes(bytes, false)
 }
 
-/// What this Lightair installs and runs: data, shaders and helpers (in their sandbox,
-/// `lightair-helpers`); scripts wait for their runtime (docs/13 stage D).
+/// What this Lightair installs and runs: data, shaders, scripts (in their isolate,
+/// `lightair-script`) and helpers (in their sandbox, `lightair-helpers`).
 pub fn limits() -> Limits {
     Limits { max_tier: Tier::Native, ..Limits::default() }
 }
 
 /// Why this Lightair can't use a package, each a sentence (none: usable).
 pub fn problems_of(m: &Manifest) -> Vec<String> {
-    let mut out: Vec<String> = m.check_supported_up_to(Tier::Native).iter().map(|p| p.to_string()).collect();
-    if m.contents.iter().any(|c| c.kind.tier() == Some(Tier::Script)) {
-        out.push("needs a newer Lightair: this one doesn't run scripts yet".into());
-    }
-    out
+    m.check_supported_up_to(Tier::Native).iter().map(|p| p.to_string()).collect()
 }
 
 /// What an installed package may do now: what it declares, minus what the user took back in the
@@ -380,6 +376,8 @@ pub struct WidgetItem {
     pub id: PackageId,
     pub version: Version,
     pub dir: PathBuf,
+    /// A script plugin's overlay (its id): the page talks to the script.
+    pub overlay: Option<String>,
 }
 
 /// The same text, kept for the rest of the run (Add Object's lists take `&'static str`); each
@@ -417,13 +415,32 @@ pub fn widgets() -> Arc<Vec<WidgetItem>> {
                     id: newest.id().clone(),
                     version: newest.version().clone(),
                     dir,
+                    overlay: None,
                 });
             }
         }
     }
     let list = Arc::new(out);
     *cache = Some((now, list.clone()));
-    list
+    drop(cache);
+    // running scripts' overlays (they change as scripts start: not cached)
+    let overlays = crate::scripts_host::overlays();
+    if overlays.is_empty() {
+        return list;
+    }
+    let mut all = (*list).clone();
+    for (pkg, version, o, dir) in overlays {
+        let (Ok(id), Ok(version)) = (PackageId::new(&pkg), Version::parse(&version)) else { continue };
+        all.push(WidgetItem {
+            name: intern(&o.title),
+            package: intern(&display_name(&pkg)),
+            id,
+            version,
+            dir,
+            overlay: Some(o.id),
+        });
+    }
+    Arc::new(all)
 }
 
 /// The settings value that marks a source as coming from `installed`.
@@ -705,7 +722,7 @@ pub fn prepare(path: &Path) -> Result<Prepared, String> {
     Ok(Prepared::of_package(path.to_path_buf(), package, origin))
 }
 
-/// Reads a package with what this Lightair runs ([`limits`]), refusing scripts.
+/// Reads a package with what this Lightair runs ([`limits`]).
 pub fn open_package(path: &Path) -> Result<Package, String> {
     let package = Package::open_with(path, limits()).map_err(|e| e.to_string())?;
     match problems_of(&package.manifest).into_iter().next() {

@@ -39,6 +39,7 @@ lightair-store.workspace = true
 # Lightair packages: the installed store, a show's packages, install and export (packages.rs)
 lightair-packages.workspace = true
 lightair-voice.workspace = true
+lightair-script.workspace = true
 semver = "1"
 serde_json.workspace = true
 lightair-platform.workspace = true

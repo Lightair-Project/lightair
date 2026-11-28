@@ -51,6 +51,7 @@ pub(super) const PANELS: &[&[(&str, &str, DockPlacement)]] = &[
         ("automations", "Automations", DockPlacement::Bottom),
         ("ptz", "PTZ", DockPlacement::Bottom),
         ("packages", "Packages", DockPlacement::Bottom),
+        ("plugin-panels", "Plugin panels", DockPlacement::Right),
     ],
 ];
 
@@ -351,6 +352,7 @@ actions!(
         WindowAutomations,
         WindowPtz,
         WindowPackages,
+        WindowPluginPanels,
         ResetLayout
     ]
 );
@@ -372,6 +374,7 @@ fn panel_item(name: &str, title: &str, checked: bool) -> MenuItem {
         "notes" => MenuItem::action(title.to_string(), WindowNotes),
         "automations" => MenuItem::action(title.to_string(), WindowAutomations),
         "ptz" => MenuItem::action(title.to_string(), WindowPtz),
+        "plugin-panels" => MenuItem::action(title.to_string(), WindowPluginPanels),
         _ => MenuItem::action(title.to_string(), WindowPackages),
     };
     item.checked(checked)
@@ -409,6 +412,7 @@ pub(super) fn bind(cx: &mut App) {
     show!(WindowAutomations, "automations");
     show!(WindowPtz, "ptz");
     show!(WindowPackages, "packages");
+    show!(WindowPluginPanels, "plugin-panels");
     cx.on_action(|_: &ResetLayout, cx| {
         let Some((main, me)) = SHELL.with(|s| s.borrow().clone()) else { return };
         cx.defer(move |cx| {

@@ -40,6 +40,7 @@ pub(super) struct DockPanels {
     rundown: Entity<crate::show_panel::RundownPanel>,
     ptz: Entity<crate::show_panel::PtzPanel>,
     pub(super) packages: Entity<super::packages::PackagesPanel>,
+    pub(super) plugin_panels: Entity<super::plugin_panels::PluginPanels>,
 }
 
 /// A panel entity of any kind, as the dock holds it.
@@ -56,7 +57,7 @@ impl<P: Panel> AnyPanel for Entity<P> {
 impl DockPanels {
     /// Every panel, as the dock holds them.
     fn all(&self) -> Vec<Arc<dyn gpui_kit::component::dock::BasePanelView>> {
-        let all: [&dyn AnyPanel; 16] = [
+        let all: [&dyn AnyPanel; 17] = [
             &self.objects,
             &self.scenes,
             &self.canvas,
@@ -73,6 +74,7 @@ impl DockPanels {
             &self.rundown,
             &self.ptz,
             &self.packages,
+            &self.plugin_panels,
         ];
         all.into_iter().map(|p| p.handle()).collect()
     }
@@ -108,6 +110,7 @@ impl DockPanels {
         reg!("rundown", self.rundown);
         reg!("ptz", self.ptz);
         reg!("packages", self.packages);
+        reg!("plugin-panels", self.plugin_panels);
     }
 }
 
@@ -427,6 +430,7 @@ impl StudioWindow {
                 let (shell, studio) = (cx.entity(), self.studio.clone());
                 cx.new(|cx| super::packages::PackagesPanel::new(shell, studio, window, cx))
             },
+            plugin_panels: cx.new(|cx| super::plugin_panels::PluginPanels::new(window, cx)),
         };
         // the look and tab menu every dock shares (shell/dock_windows: floating windows too)
         let (dock, skin) = DockSkin::dock_area("lightair-studio", Some(1), window, cx);

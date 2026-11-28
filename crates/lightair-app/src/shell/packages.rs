@@ -24,7 +24,7 @@ use super::StudioWindow;
 use super::assets::{Asset, AssetKind, DraggedAsset, Placement};
 use crate::packages::{self as pk, Item, Use};
 
-mod catalog_ui;
+pub(crate) mod catalog_ui;
 mod helper_ui;
 use crate::studio::Studio;
 use crate::ui::{self, tok};
@@ -1011,7 +1011,7 @@ impl StudioWindow {
         cx: &mut Context<Self>,
     ) {
         match &item.how {
-            Use::Widget(dir) => self.add_widget_from_package(dir, &item.name, id, version, window, cx),
+            Use::Widget(dir) => self.add_widget_from_package(dir, &item.name, id, version, None, window, cx),
             Use::Scene(file) => self.add_scene_from_package(file, id, version, cx),
             Use::Place(files) => {
                 let assets: Vec<Asset> =
@@ -1030,12 +1030,14 @@ impl StudioWindow {
 
     /// Adds a package's widget to the scene, its code copied in and the source marked as from
     /// the package (so the show records it).
+    #[allow(clippy::too_many_arguments)]
     fn add_widget_from_package(
         &mut self,
         dir: &Path,
         name: &str,
         id: &PackageId,
         version: &Version,
+        overlay: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1047,6 +1049,10 @@ impl StudioWindow {
         let instance = lightair_widgets::Instance::new("custom", Some(custom));
         let mut settings = json!({"url": instance.address(), "width": w, "height": h, "fps": 30, "widget": instance});
         settings[pk::MARK] = pk::mark(id, version);
+        // a script plugin's overlay: its page and the script exchange messages
+        if let Some(overlay) = overlay {
+            settings["lightair_overlay"] = json!({"package": id.as_str(), "overlay": overlay});
+        }
         self.add_placed_object(name, lightair_host::web::KIND, settings, (w as f32, h as f32), (0.5, 0.5), true, cx);
         if self.add_object.is_some() {
             self.close_add_object(window, cx);
@@ -1056,7 +1062,7 @@ impl StudioWindow {
     /// Add Object › Widgets › From packages: the `index`th of the packages' widgets.
     pub(super) fn add_package_widget(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(w) = pk::widgets().get(index).cloned() else { return };
-        self.add_widget_from_package(&w.dir, w.name, &w.id, &w.version, window, cx);
+        self.add_widget_from_package(&w.dir, w.name, &w.id, &w.version, w.overlay.as_deref(), window, cx);
     }
 
     /// Adds a package's template as a new scene after the selected one: its media from the

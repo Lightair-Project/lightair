@@ -302,6 +302,8 @@ impl StudioWindow {
             }
             // packages and catalogs (shell/packages/catalog_ui.rs, `package_check`)
             c if c.starts_with("pkg-") => self.package_check(c, rest, window, cx),
+            // script plugins (crate::scripts_host)
+            c if c.starts_with("script") => crate::scripts_host::check(c, rest),
             _ => tracing::warn!(line, "CHECK unknown command"),
         }
         cx.notify();

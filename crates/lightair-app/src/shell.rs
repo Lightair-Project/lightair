@@ -43,10 +43,16 @@ mod colour_field;
 mod connections;
 mod console_panel;
 mod plugin_activity_ui;
+mod plugin_panels;
+
+/// The install screen's title and text for a prepared package (development checks).
+pub(crate) fn install_screen_text(p: &crate::packages::Prepared) -> (String, String) {
+    packages::catalog_ui::install_screen(p)
+}
 mod panel_window;
 mod live_api;
 mod package_export;
-mod packages;
+pub(crate) mod packages;
 mod widget_props;
 mod menus;
 mod modes;
@@ -465,6 +471,8 @@ pub struct StudioWindow {
     console_open: bool,
     /// The status bar's plugin activity overlay is open.
     plugin_activity_open: bool,
+    /// A script plugin's file picker is up.
+    pub(crate) script_pick_open: bool,
     /// The canvas in a window of its own (shell/panel_window), and its window.
     panel_windows: Vec<(gpui_kit::component::dock::PanelId, AnyWindowHandle, Entity<panel_window::PanelWindow>)>,
     /// Floating dock windows (shell/dock_windows) and their docks.
@@ -823,6 +831,8 @@ impl StudioWindow {
             this.piair.set_handler(this.api_handler(cx));
             // third-party helpers' calls: answered the same way, each checked against its permissions
             crate::helpers_host::init(this.api_handler(cx), this.studio.read(cx).chat.clone());
+            // script plugins (their calls go through the same handler)
+            crate::scripts_host::init();
             this.keep_helpers_told(cx);
             this.load_connections(cx);
             // what's connected (for the console): looked at every few seconds
@@ -950,6 +960,7 @@ impl StudioWindow {
             connected: None,
             console_open: false,
             plugin_activity_open: false,
+            script_pick_open: false,
             panel_windows: Vec::new(),
             dock_windows: Vec::new(),
             layout_save: None,

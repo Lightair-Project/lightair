@@ -171,6 +171,7 @@ pub fn set_setting(id: &str, key: &str, value: Value) {
     if let Some(r) = running(id) {
         r.send(json!({"t": "settings", "values": setting_values(id)}));
     }
+    crate::scripts_host::settings_changed(id);
     bump();
 }
 
@@ -616,6 +617,19 @@ fn client_name(name: &str) -> &'static str {
     s
 }
 
+/// The chat hub (once the window exists), for script plugins' chat.
+pub fn hub() -> Option<lightair_live::Hub> {
+    host().hub.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// One of Lightair's methods, answered as MCP clients' are, as client `name` (script plugins:
+/// already checked against their permissions).
+pub fn call_as(name: &str, method: &str, params: Value) -> Result<Value, String> {
+    let handler = host().handler.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let Some(h) = handler else { return Err("Lightair isn't ready yet".into()) };
+    h(Call { method: method.to_string(), params, client: client_name(name), device: None }).map_err(|e| e.message)
+}
+
 fn lightair_call(r: &Running, method: &str, params: Value) -> Result<Value, Refusal> {
     let handler = host().handler.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let Some(h) = handler else { return Err(("not_ready".into(), "Lightair isn't ready yet".into())) };
@@ -779,9 +793,23 @@ fn provides(id: &str) -> Option<Provides> {
     running(id)?.provides.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// What a helper declared (for the panel's settings section), once it's said.
+/// What a helper or script declared (for the panel's settings section), once it's said.
 pub fn declared(id: &str) -> Option<Provides> {
-    provides(id)
+    provides(id).or_else(|| crate::scripts_host::declared(id).map(|d| from_script(&d)))
+}
+
+/// A script's declarations in the helper protocol's shape.
+fn from_script(d: &lightair_script::Declared) -> Provides {
+    let setting = |v: &Value| serde_json::from_value::<Setting>(v.clone()).ok();
+    Provides {
+        commands: d.commands.iter().chain(&d.hotkeys).map(|c| CommandDecl { id: c.id.clone(), title: c.title.clone() }).collect(),
+        steps: d
+            .steps
+            .iter()
+            .map(|s| StepDecl { id: s.id.clone(), title: s.title.clone(), fields: s.fields.iter().filter_map(setting).collect() })
+            .collect(),
+        settings: d.settings.iter().filter_map(setting).collect(),
+    }
 }
 
 /// Every running helper's commands: (package id, package name, command).
@@ -798,6 +826,11 @@ pub fn commands() -> Vec<(String, String, CommandDecl)> {
             }
         }
     }
+    for (id, name, d) in crate::scripts_host::everything() {
+        for c in from_script(&d).commands {
+            out.push((id.clone(), name.clone(), c));
+        }
+    }
     out
 }
 
@@ -812,17 +845,28 @@ pub fn steps() -> Vec<(String, String, StepDecl)> {
             }
         }
     }
+    for (id, name, d) in crate::scripts_host::everything() {
+        for s in from_script(&d).steps {
+            out.push((id.clone(), name.clone(), s));
+        }
+    }
     out
 }
 
 /// Runs a helper's command (the palette, `plugins.command`).
 pub fn run_command(id: &str, command: &str) -> Result<Value, String> {
+    if crate::scripts_host::is_running(id) {
+        return crate::scripts_host::run_command(id, command);
+    }
     let r = running(id).ok_or_else(|| format!("{id} isn't running"))?;
     r.request(json!({"t": "command", "command": command}), Duration::from_secs(20))
 }
 
 /// Runs a helper's automation step with its fields (`plugins.step`, from automations).
 pub fn run_step(id: &str, step: &str, params: Value) -> Result<Value, String> {
+    if crate::scripts_host::is_running(id) {
+        return crate::scripts_host::run_step(id, step, params);
+    }
     let r = running(id).ok_or_else(|| format!("{id} isn't running"))?;
     r.request(json!({"t": "step", "step": step, "params": params}), Duration::from_secs(30))
 }
@@ -847,6 +891,7 @@ pub fn api(method: &str, params: &Value) -> Option<Result<Value, String>> {
                 .unwrap_or_else(|e| e.into_inner())
                 .values()
                 .map(|r| json!({"package": r.id, "name": r.name, "version": r.version, "running": r.alive(), "ready": r.ready.load(Ordering::Relaxed)}))
+                .chain(crate::scripts_host::everything().into_iter().map(|(id, name, _)| json!({"package": id, "name": name, "script": true, "running": true, "ready": true})))
                 .collect::<Vec<_>>()
         )),
         _ => return None,
