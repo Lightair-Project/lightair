@@ -14,12 +14,52 @@ pub struct Child {
     pub stderr: Option<File>,
     #[cfg(not(target_os = "macos"))]
     inner: Option<std::process::Child>,
+    /// A process started in a sandbox (Windows), not through `std::process`.
+    #[cfg(windows)]
+    process: Option<std::os::windows::io::OwnedHandle>,
     done: bool,
 }
 
 impl Child {
     pub fn pid(&self) -> i32 {
         self.pid
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn contained(
+        pid: i32,
+        process: std::os::windows::io::OwnedHandle,
+        stdin: File,
+        stdout: File,
+        stderr: File,
+    ) -> Child {
+        Child {
+            pid,
+            stdin: Some(stdin),
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+            inner: None,
+            process: Some(process),
+            done: false,
+        }
+    }
+
+    /// Windows: the exit code of a process started in a sandbox, waiting up to `ms`.
+    #[cfg(windows)]
+    fn contained_exit(&mut self, ms: u32) -> Option<Option<i32>> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+        let h = self.process.as_ref()?.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        unsafe {
+            if WaitForSingleObject(h, ms) != WAIT_OBJECT_0 {
+                return Some(None);
+            }
+            let mut code = 0u32;
+            GetExitCodeProcess(h, &mut code);
+            self.done = true;
+            Some(Some(code as i32))
+        }
     }
 
     /// Ends the process (it's asked to stop by closing stdin first; this is the hard stop).
@@ -30,6 +70,11 @@ impl Child {
         #[cfg(target_os = "macos")]
         unsafe {
             libc::kill(self.pid, libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        if let Some(p) = &self.process {
+            use std::os::windows::io::AsRawHandle;
+            unsafe { windows_sys::Win32::System::Threading::TerminateProcess(p.as_raw_handle() as _, 1) };
         }
         #[cfg(not(target_os = "macos"))]
         if let Some(c) = &mut self.inner {
@@ -53,6 +98,10 @@ impl Child {
             }
             None
         }
+        #[cfg(windows)]
+        if let Some(r) = self.contained_exit(0) {
+            return r;
+        }
         #[cfg(not(target_os = "macos"))]
         {
             let code = self.inner.as_mut()?.try_wait().ok()??.code().unwrap_or(-1);
@@ -72,6 +121,10 @@ impl Child {
             let r = unsafe { libc::waitpid(self.pid, &mut status, 0) };
             self.done = true;
             (r == self.pid).then(|| if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) } else { -1 })
+        }
+        #[cfg(windows)]
+        if let Some(r) = self.contained_exit(windows_sys::Win32::System::Threading::INFINITE) {
+            return r;
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -192,7 +245,16 @@ pub fn spawn(program: &Path, args: &[String], cwd: &Path, env: &[(String, String
     let stdin = to_file(c.stdin.take());
     let stdout = c.stdout.take().map(file_from_stdout);
     let stderr = c.stderr.take().map(file_from_stderr);
-    Ok(Child { pid, stdin, stdout, stderr, inner: Some(c), done: false })
+    Ok(Child {
+        pid,
+        stdin,
+        stdout,
+        stderr,
+        inner: Some(c),
+        #[cfg(windows)]
+        process: None,
+        done: false,
+    })
 }
 
 #[cfg(windows)]

@@ -4691,6 +4691,7 @@ dependencies = [
  "crossbeam-channel",
  "libc",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4951,6 +4952,9 @@ dependencies = [
 [[package]]
 name = "lightair-sandbox"
 version = "0.1.0"
+dependencies = [
+ "lightair-helpers",
+]
 
 [[package]]
 name = "lightair-script"
