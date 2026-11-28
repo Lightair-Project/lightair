@@ -576,6 +576,7 @@ mod tests {
             name: name.into(),
             code: code.into(),
             permissions: granted.iter().map(|g| g.to_string()).collect(),
+            optional: vec![],
             data_dir: None,
             settings: json!({}),
         };

@@ -262,3 +262,106 @@ pub fn bring_app(app: &str) -> Result<Value, (String, String)> {
     let r: std::io::Result<std::process::Child> = Err(std::io::Error::other("not on this platform"));
     r.map(|_| json!({})).map_err(|e| ("failed".to_string(), e.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(mode: &str) -> Policy {
+        Policy {
+            mode: mode.into(),
+            sites: vec!["youtube.com".into()],
+            scenes: vec!["Gameplay".into(), "Just chatting".into()],
+            games: vec!["com.example.racer".into()],
+            chat_browse: true,
+            chat_plays: vec!["com.example.racer".into()],
+        }
+    }
+
+    /// The policy's answer when PiAir holds everything AI streamer mode asks for.
+    fn decide(p: &Policy, method: &str, params: Value, front: Option<&str>) -> Result<(), String> {
+        check(p, method, &params, front, &|_| true).map_err(|(code, _)| code)
+    }
+
+    #[test]
+    fn chat_may_pick_a_scene_on_the_list_and_nothing_else() {
+        let p = policy("autonomous");
+        assert_eq!(decide(&p, "streamer.scene", json!({"name": "gameplay", "cause": "chat"}), None), Ok(()));
+        assert_eq!(
+            decide(&p, "streamer.scene", json!({"name": "Desktop", "cause": "chat"}), None),
+            Err("chat_not_allowed".into())
+        );
+    }
+
+    #[test]
+    fn a_site_off_the_list_is_refused_whoever_asks() {
+        let p = policy("autonomous");
+        for cause in ["chat", "self", "streamer"] {
+            let r = decide(&p, "computer.open_url", json!({"url": "https://bank.example/login", "cause": cause}), None);
+            assert_eq!(r, Err("site_not_allowed".into()), "{cause}");
+        }
+        assert_eq!(
+            decide(&p, "computer.open_url", json!({"url": "https://www.youtube.com/watch", "cause": "chat"}), None),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn chat_cant_open_even_an_allowed_site_when_browsing_is_off() {
+        let p = Policy { chat_browse: false, ..policy("autonomous") };
+        let r = decide(&p, "computer.open_url", json!({"url": "https://youtube.com/", "cause": "chat"}), None);
+        assert_eq!(r, Err("chat_not_allowed".into()));
+    }
+
+    #[test]
+    fn chat_plays_sends_keys_only_into_the_named_game_while_it_is_in_front() {
+        let p = policy("autonomous");
+        let key = json!({"keys": "w", "cause": "chat"});
+        assert_eq!(decide(&p, "computer.key", key.clone(), Some("com.example.racer")), Ok(()));
+        assert_eq!(decide(&p, "computer.key", key.clone(), Some("com.apple.Safari")), Err("chat_not_allowed".into()));
+        assert_eq!(decide(&p, "computer.key", key, None), Err("chat_not_allowed".into()));
+        let drag = json!({"cause": "chat"});
+        assert_eq!(decide(&p, "computer.drag", drag, Some("com.example.racer")), Err("chat_not_allowed".into()));
+    }
+
+    #[test]
+    fn chat_cant_change_lightair_itself() {
+        let p = policy("autonomous");
+        assert_eq!(decide(&p, "scene.remove", json!({"cause": "chat"}), None), Err("chat_not_allowed".into()));
+        assert_eq!(decide(&p, "scene.remove", json!({"cause": "guest"}), None), Err("chat_not_allowed".into()));
+    }
+
+    #[test]
+    fn streaming_and_recording_need_outputs_control() {
+        let p = policy("autonomous");
+        let holds_none_of_outputs = |perm: &str| perm != "outputs.control";
+        let r = check(&p, "stream.start", &json!({"cause": "self"}), None, &holds_none_of_outputs);
+        assert_eq!(r.map_err(|(c, _)| c), Err("not_granted".into()));
+        assert_eq!(decide(&p, "stream.start", json!({"cause": "self"}), None), Ok(()));
+    }
+
+    #[test]
+    fn acting_on_its_own_needs_computer_autonomous() {
+        let p = policy("autonomous");
+        let without = |perm: &str| perm != "computer.autonomous";
+        let r = check(&p, "streamer.scene", &json!({"name": "Gameplay", "cause": "self"}), None, &without);
+        assert_eq!(r.map_err(|(c, _)| c), Err("not_granted".into()));
+    }
+
+    #[test]
+    fn the_modes_own_actions_are_refused_while_the_mode_is_off() {
+        let p = policy("off");
+        let r = decide(&p, "streamer.scene", json!({"name": "Gameplay", "cause": "streamer"}), None);
+        assert_eq!(r, Err("mode_off".into()));
+    }
+
+    #[test]
+    fn a_site_rule_covers_its_subdomains_but_not_lookalikes() {
+        let p = policy("producer");
+        assert!(p.site_allowed("https://m.youtube.com/x"));
+        assert!(!p.site_allowed("https://youtube.com.evil.example/"));
+        assert!(!p.site_allowed("https://notyoutube.com/"));
+        assert!(!p.site_allowed("file:///etc/passwd"));
+    }
+
+}
