@@ -35,6 +35,8 @@ use crate::ui::{self, tok};
 pub(super) struct PackagesUi {
     pub(super) export: Option<super::package_export::ExportSheet>,
     last_drop: Option<(Vec<PathBuf>, Instant)>,
+    /// The full-access question while it's open (catalog_ui.rs).
+    pub(super) full_access: Option<catalog_ui::FullAccessAsk>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -2,12 +2,13 @@
 //! and removing community catalogs, and installing from a catalog (or a `lightair://` link)
 //! through the one install screen (plugins.md §3.5–3.8, §4.8).
 
-use gpui_kit::component::Sizable;
+use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input as TextInput;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use lightair_packages::{Installed, Permission};
+use std::time::{Duration, Instant};
 
 use super::{PackagesPanel, Tab, empty, file_name, sentence};
 use crate::catalogs::{self, Offer};
@@ -56,7 +57,119 @@ pub(crate) fn full_access_screen(p: &Prepared) -> (String, String) {
     (format!("Give “{}” full access?", p.name), detail)
 }
 
+/// How long "Give full access" stays unavailable after the question opens: time to read it.
+const FULL_ACCESS_WAIT: Duration = Duration::from_secs(3);
+
+/// The full-access question (plugins.md §4.12): Lightair's own sheet rather than a system
+/// prompt, so its Give full access button can wait a few seconds before it can be pressed.
+pub(crate) struct FullAccessAsk {
+    title: String,
+    detail: String,
+    opened: Instant,
+    answer: Option<futures_channel::oneshot::Sender<bool>>,
+}
+
 impl StudioWindow {
+    /// Opens the full-access question; `answer` gets the choice (dropping it is a no).
+    pub(crate) fn ask_full_access(
+        &mut self,
+        title: String,
+        detail: String,
+        answer: futures_channel::oneshot::Sender<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        self.packages.full_access = Some(FullAccessAsk { title, detail, opened: Instant::now(), answer: Some(answer) });
+        cx.notify();
+        // redrawn while the button waits, so it becomes pressable on its own
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let waiting = this
+                    .update(cx, |this, cx| {
+                        cx.notify();
+                        this.packages.full_access.as_ref().is_some_and(|a| a.opened.elapsed() < FULL_ACCESS_WAIT)
+                    })
+                    .unwrap_or(false);
+                if !waiting {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn answer_full_access(&mut self, give: bool, cx: &mut Context<Self>) {
+        if let Some(mut ask) = self.packages.full_access.take()
+            && let Some(tx) = ask.answer.take()
+        {
+            let _ = tx.send(give);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn full_access_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ask = self.packages.full_access.as_ref()?;
+        let left = FULL_ACCESS_WAIT.saturating_sub(ask.opened.elapsed());
+        let ready = left.is_zero();
+        let label = if ready { "Give full access".to_string() } else { format!("Give full access ({})", left.as_secs() + 1) };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(tok::scrim())
+                .occlude()
+                .child(
+                    div()
+                        .id("full-access-question")
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .w(px(420.))
+                        .p_5()
+                        .rounded(px(14.))
+                        .bg(tok::bg_panel())
+                        .border_1()
+                        .border_color(tok::border_strong())
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(ui::icon("shield-alert").size(px(18.)).text_color(tok::warn()))
+                                .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(ask.title.clone())),
+                        )
+                        .child(div().text_size(px(12.5)).text_color(tok::text_secondary()).child(ask.detail.clone()))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("full-access-cancel")
+                                        .label("Cancel")
+                                        .small()
+                                        .primary()
+                                        .on_click(cx.listener(|this, _, _, cx| this.answer_full_access(false, cx))),
+                                )
+                                .child(
+                                    Button::new("full-access-give")
+                                        .label(label)
+                                        .small()
+                                        .ghost()
+                                        .disabled(!ready)
+                                        .on_click(cx.listener(|this, _, _, cx| this.answer_full_access(true, cx))),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Installs a prepared package after the install screen (and the full-access question when it
     /// asks for it). Shared by files, folders and catalogs.
     pub(crate) async fn confirm_and_install(
@@ -93,12 +206,9 @@ impl StudioWindow {
         }
         if prepared.full_access {
             let (title, detail) = full_access_screen(&prepared);
-            let answer = this
-                .update_in(cx, |_, window, cx| {
-                    window.prompt(PromptLevel::Critical, &title, Some(&detail), &["Cancel", "Give full access"], cx)
-                })
-                .ok()?;
-            if answer.await != Ok(1) {
+            let (tx, rx) = futures_channel::oneshot::channel::<bool>();
+            this.update(cx, |this, cx| this.ask_full_access(title, detail, tx, cx)).ok()?;
+            if rx.await != Ok(true) {
                 prepared.discard();
                 return None;
             }
