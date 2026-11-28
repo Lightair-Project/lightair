@@ -766,16 +766,15 @@ impl Host {
     /// runs as the installed package; a refusal is a `not_granted` error PiAir reads as a tool
     /// error, and goes to the plugin activity.
     pub(crate) fn answer(&self, method: &str, params: Value) -> Result<Value, (String, String)> {
-        let (need, kind) = Self::needs(method, &params);
-        let allowed = need.is_empty() || self.holds(&need);
-        if let Some((kind, what)) = &kind {
-            let reason = if allowed { "" } else { "not granted" };
-            crate::plugin_activity::record("PiAir", *kind, what, allowed, reason);
+        let verdict = {
+            let granted = self.0.granted.lock().unwrap_or_else(|e| e.into_inner());
+            permitted(granted.as_deref(), method, &params)
+        };
+        if let (_, Some((kind, what))) = Self::needs(method, &params) {
+            let reason = if verdict.is_ok() { "" } else { "not granted" };
+            crate::plugin_activity::record("PiAir", kind, &what, verdict.is_ok(), reason);
         }
-        if !allowed {
-            let words = lightair_packages::Permission::parse(&need).map(|p| p.describe()).unwrap_or(need.clone());
-            return Err(("not_granted".into(), format!("PiAir wasn't given this permission: {words}.")));
-        }
+        verdict?;
         // the streamer's own AI apps, which a sandboxed PiAir can't start itself
         if method.starts_with("cli.") {
             let host = self.clone();
@@ -1977,6 +1976,18 @@ fn track_sound(
     })
 }
 
+/// Whether PiAir may make a call holding `granted` (`None`: it isn't the installed package, so
+/// everything): a refusal is `not_granted` with the permission in words, for PiAir to read as a
+/// tool error.
+pub(crate) fn permitted(granted: Option<&[String]>, method: &str, params: &Value) -> Result<(), (String, String)> {
+    let (need, _) = Host::needs(method, params);
+    if need.is_empty() || granted.is_none_or(|g| g.contains(&need)) {
+        return Ok(());
+    }
+    let words = lightair_packages::Permission::parse(&need).map(|p| p.describe()).unwrap_or(need.clone());
+    Err(("not_granted".into(), format!("PiAir wasn't given this permission: {words}.")))
+}
+
 /// Makes sure the workspace has PiAir's voice source and its "PiAir" track: the commands to add
 /// them, or `None` when they're there. (From before the co-host object, which has a voice track
 /// of its own; kept while a test still names it.)
@@ -2000,7 +2011,7 @@ pub fn voice_track_commands(w: &lightair_model::Workspace) -> Option<lightair_mo
 mod tests {
     use serde_json::json;
 
-    use super::{Auth, FaceLook, Incoming, Line, parse_line, voice_track_commands};
+    use super::{Auth, FaceLook, Incoming, Line, hearing, parse_line, permitted, voice_track_commands};
     use lightair_host::piair_voice::Shape;
 
     /// Turning PiAir on adds its voice source and the "PiAir" track once; a workspace that has
@@ -2062,5 +2073,84 @@ mod tests {
         for line in ["", "not json", "[1, 2]", r#"{"utterance": "u1"}"#, r#"{"t": 5}"#] {
             assert!(parse_line(line).is_err(), "{line:?}");
         }
+    }
+
+    /// A workspace with a mic track per name (and a co-host voice track, never heard).
+    fn mics(names: &[&str]) -> lightair_model::Workspace {
+        let mut w = lightair_model::Workspace::new("Show");
+        voice_track_commands(&w).unwrap().apply(&mut w).unwrap();
+        for name in names {
+            let source = lightair_model::Source::new(*name, lightair_model::kinds::MIC, json!({}));
+            let track = lightair_model::Track::new(*name, source.id);
+            lightair_model::Command::AddSource { source }.apply(&mut w).unwrap();
+            lightair_model::Command::AddTrack { track, index: None }.apply(&mut w).unwrap();
+        }
+        w
+    }
+
+    fn track(w: &lightair_model::Workspace, name: &str) -> String {
+        w.tracks.iter().find(|t| t.name == name).unwrap().id.to_string()
+    }
+
+    fn streamers(w: &lightair_model::Workspace, cohost: serde_json::Value) -> Vec<String> {
+        hearing(w, &cohost).into_iter().filter(|h| h.streamer).map(|h| h.name).collect()
+    }
+
+    /// Nothing set: the first mic is heard, as the streamer (a co-host's own voice never is).
+    #[test]
+    fn with_nothing_set_the_first_mic_is_the_streamer() {
+        let w = mics(&["My mic", "Guest mic"]);
+        assert_eq!(streamers(&w, json!({})), ["My mic"]);
+    }
+
+    /// A list from before the streamer role (everyone as conversation): its first mic stays the
+    /// streamer, so a solo setup keeps working; the others are guests.
+    #[test]
+    fn a_list_with_no_streamer_marked_trusts_only_its_first_mic() {
+        let w = mics(&["Guest mic", "My mic"]);
+        let hears = json!({"hears": [
+            {"track": track(&w, "Guest mic"), "role": "conversation"},
+            {"track": track(&w, "My mic"), "role": "conversation"},
+        ]});
+        assert_eq!(streamers(&w, hears), ["Guest mic"]);
+    }
+
+    /// The track marked as the streamer is the only one, wherever it is in the list.
+    #[test]
+    fn the_track_marked_as_the_streamer_is_the_only_streamer() {
+        let w = mics(&["Guest mic", "My mic"]);
+        let hears = json!({"hears": [
+            {"track": track(&w, "Guest mic"), "role": "conversation"},
+            {"track": track(&w, "My mic"), "role": "streamer"},
+        ]});
+        assert_eq!(streamers(&w, hears), ["My mic"]);
+    }
+
+    /// As the installed package, PiAir's calls need the permission each one is about; anything
+    /// else is refused as not granted. A PiAir that isn't the package (bundled, development) keeps
+    /// everything.
+    #[test]
+    fn as_a_package_each_kind_of_call_needs_its_own_permission() {
+        let granted: Vec<String> = ["screen.capture", "apps.run:codex", "api.call", "secrets"].map(String::from).to_vec();
+        let g = Some(granted.as_slice());
+        let refused = |m: &str, p: serde_json::Value| permitted(g, m, &p).map_err(|e| e.0).err();
+        assert_eq!(refused("computer.click", json!({"x": 1, "y": 2})).as_deref(), Some("not_granted"));
+        assert_eq!(refused("computer.screenshot", json!({})), None);
+        assert_eq!(refused("cli.spawn", json!({"name": "codex"})), None);
+        assert_eq!(refused("cli.spawn", json!({"name": "claude"})).as_deref(), Some("not_granted"));
+        assert_eq!(refused("scene.switch", json!({"scene": "Main"})), None);
+
+        let none: Vec<String> = Vec::new();
+        assert!(permitted(Some(none.as_slice()), "scene.switch", &json!({})).is_err());
+        assert!(permitted(Some(none.as_slice()), "computer.screenshot", &json!({})).is_err());
+        assert!(permitted(None, "computer.click", &json!({})).is_ok(), "a bundled PiAir keeps everything");
+    }
+
+    /// The refusal says which permission is missing, in the install screen's words.
+    #[test]
+    fn a_refusal_names_the_missing_permission() {
+        let none: Vec<String> = Vec::new();
+        let (_, message) = permitted(Some(none.as_slice()), "computer.type", &json!({"text": "hi"})).unwrap_err();
+        assert!(message.contains("mouse and keyboard"), "{message}");
     }
 }
