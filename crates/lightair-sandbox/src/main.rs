@@ -1,6 +1,10 @@
 //! `lightair-sandbox <profile file> <program> [arguments…]`: applies the seatbelt profile in the
 //! file to this process, then replaces itself with the program, which keeps the sandbox (and the
 //! responsibility Lightair disclaimed when it started this launcher).
+//!
+//! On Windows, `lightair-sandbox.exe bridge <pipe>` is a helper's network bridge: Lightair starts
+//! it in the helper's AppContainer, where it listens on 127.0.0.1 and carries each connection
+//! over the named pipe to the helper's proxy lane (lightair-helpers' `windows` module).
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -47,8 +51,21 @@ fn main() {
     std::process::exit(72);
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 fn main() {
-    eprintln!("lightair-sandbox is the macOS launcher; Windows helpers are started in an AppContainer instead");
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() != 3 || args[1] != "bridge" {
+        eprintln!("usage: lightair-sandbox bridge <pipe>");
+        std::process::exit(64);
+    }
+    if let Err(e) = lightair_helpers::windows::bridge_main(&args[2]) {
+        eprintln!("lightair-sandbox bridge: {e}");
+        std::process::exit(71);
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn main() {
+    eprintln!("lightair-sandbox is the macOS launcher");
     std::process::exit(64);
 }

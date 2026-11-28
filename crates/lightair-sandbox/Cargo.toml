@@ -1,9 +1,12 @@
 [package]
 name = "lightair-sandbox"
-description = "Applies a sandbox profile to itself, then becomes a package helper (macOS)"
+description = "Applies a sandbox profile to itself, then becomes a package helper (macOS); a package helper's network bridge inside its AppContainer (Windows)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
+
+[target.'cfg(windows)'.dependencies]
+lightair-helpers = { path = "../lightair-helpers" }

@@ -8,12 +8,18 @@
 //! chat, Lightair's methods) it asks Lightair for over its protocol, where the caller checks
 //! the permission. A full-access helper starts as a plain program.
 //!
+//! On Windows a sandboxed helper runs in an AppContainer of its own, at low integrity, in a job
+//! object ([`windows`]): its package folder to read, its data folder to read and write, and its
+//! proxy lane reached through a bridge in the same AppContainer as its only network.
+//!
 //! The helper's stdin and stdout are pipes for its protocol; stderr is its log.
 
 pub mod grants;
 pub mod profile;
 pub mod proxy;
 mod spawn;
+#[cfg(windows)]
+pub mod windows;
 
 use std::io;
 use std::path::PathBuf;
@@ -52,12 +58,33 @@ pub struct Helper {
     pub child: Child,
     lane: Option<Lane>,
     profile_file: Option<PathBuf>,
+    #[cfg(windows)]
+    sandbox: Option<windows::Sandbox>,
 }
 
 impl Helper {
     /// Its proxy port, when it has network.
     pub fn proxy_port(&self) -> Option<u16> {
         self.lane.as_ref().map(Lane::port)
+    }
+
+    /// CPU seconds and peak memory (MB) of all its processes so far, where the sandbox counts
+    /// them (Windows' job object).
+    pub fn usage(&self) -> Option<(f64, f64)> {
+        #[cfg(windows)]
+        if let Some(s) = &self.sandbox {
+            return s.usage();
+        }
+        None
+    }
+
+    /// Its AppContainer's SID (Windows), for logs.
+    pub fn container(&self) -> Option<String> {
+        #[cfg(windows)]
+        if let Some(s) = &self.sandbox {
+            return Some(s.sid_string());
+        }
+        None
     }
 }
 
@@ -70,7 +97,8 @@ impl Drop for Helper {
     }
 }
 
-/// Starts a helper. `launcher` is `lightair-sandbox` beside Lightair's executable (macOS).
+/// Starts a helper. `launcher` is `lightair-sandbox` beside Lightair's executable: the sandbox
+/// launcher on macOS, the network bridge on Windows.
 /// Network attempts are sent to `events`.
 pub fn launch(spec: &Spec, launcher: &std::path::Path, events: Sender<Event>) -> io::Result<Helper> {
     std::fs::create_dir_all(spec.data_dir.join("tmp"))?;
@@ -101,7 +129,13 @@ pub fn launch(spec: &Spec, launcher: &std::path::Path, events: Sender<Event>) ->
         let spec = &spec;
         let env = full_access_env(spec);
         let child = spawn::spawn(&spec.entry, &spec.args, &spec.data_dir, &env)?;
-        return Ok(Helper { child, lane: None, profile_file: None });
+        return Ok(Helper {
+            child,
+            lane: None,
+            profile_file: None,
+            #[cfg(windows)]
+            sandbox: None,
+        });
     }
 
     sandboxed(spec, launcher, events)
@@ -134,7 +168,12 @@ fn sandboxed(spec: &Spec, launcher: &std::path::Path, events: Sender<Event>) -> 
     Ok(Helper { child, lane, profile_file: Some(profile_file) })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn sandboxed(spec: &Spec, launcher: &std::path::Path, events: Sender<Event>) -> io::Result<Helper> {
+    windows::launch(spec, launcher, events)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn sandboxed(_spec: &Spec, _launcher: &std::path::Path, _events: Sender<Event>) -> io::Result<Helper> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "sandboxed helpers aren't available on this platform yet"))
 }
@@ -158,6 +197,7 @@ fn listen_ports(spec: &mut Spec) -> io::Result<()> {
 }
 
 /// A sandboxed helper's environment: nothing of Lightair's own, its data folder as home.
+#[cfg(target_os = "macos")]
 fn base_env(spec: &Spec) -> Vec<(String, String)> {
     let data = spec.data_dir.to_string_lossy().into_owned();
     let mut env = vec![
@@ -179,6 +219,7 @@ fn full_access_env(spec: &Spec) -> Vec<(String, String)> {
     env
 }
 
+#[cfg(target_os = "macos")]
 fn sanitize(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect()
 }

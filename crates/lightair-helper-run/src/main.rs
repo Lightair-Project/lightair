@@ -5,12 +5,16 @@
 //! saw in the check report's shape (catalog formats §8): the check's results, every connection it
 //! tried, the sandbox's refusals, its CPU time and memory.
 //!
-//! On Windows helpers aren't sandboxed yet (AppContainer isn't built): the helper runs as a plain
-//! program in the throwaway machine, and the report says so.
+//! On Windows the helper runs in its AppContainer, at low integrity, in a job object, with the
+//! network bridge to its proxy lane (lightair-helpers' `windows` module); its CPU time and memory
+//! are the job's.
 //!
 //!   lightair-helper-run --package-dir <dir> --entry <program> --id <id> --platform <platform>
 //!       --permission <p> [--permission <p> …] [--launcher <lightair-sandbox>] [--json <out>]
-//!       [--ready-secs <n>]
+//!       [--ready-secs <n>] [--picked <path>] [--picked-write <path>]
+//!
+//! `--picked` and `--picked-write` stand for folders or files the user picked for it
+//! (`fs.read:picked`, `fs.write:picked`).
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -28,6 +32,7 @@ struct Args {
     launcher: Option<PathBuf>,
     json: Option<PathBuf>,
     ready_secs: u64,
+    picked: Vec<(PathBuf, bool)>,
 }
 
 fn args() -> Result<Args, String> {
@@ -41,6 +46,7 @@ fn args() -> Result<Args, String> {
         launcher: None,
         json: None,
         ready_secs: 15,
+        picked: Vec::new(),
     };
     let mut i = 0;
     while i < raw.len() {
@@ -53,6 +59,8 @@ fn args() -> Result<Args, String> {
             "--permission" => a.permissions.push(v),
             "--launcher" => a.launcher = Some(v.into()),
             "--json" => a.json = Some(v.into()),
+            "--picked" => a.picked.push((v.into(), false)),
+            "--picked-write" => a.picked.push((v.into(), true)),
             "--ready-secs" => a.ready_secs = v.parse().map_err(|_| "--ready-secs needs a number")?,
             other => return Err(format!("unknown argument {other}")),
         }
@@ -103,12 +111,11 @@ fn run(a: &Args) -> Value {
 
     let mut grants = lightair_helpers::Grants::from_permissions(a.permissions.iter().map(String::as_str));
     grants.jit = signature_allows_jit(&entry);
-    let sandboxed = cfg!(target_os = "macos") && !grants.full_access;
-    if cfg!(windows) && !grants.full_access {
-        note(&mut results, "not sandboxed: Windows' helper sandbox (AppContainer) isn't built yet, so the helper ran as a plain program in this throwaway machine".into());
-        grants.full_access = true;
+    for (path, write) in &a.picked {
+        grants.pick(path.canonicalize().unwrap_or_else(|_| path.clone()), *write);
     }
-    if grants.full_access && !cfg!(windows) {
+    let sandboxed = (cfg!(target_os = "macos") || cfg!(windows)) && !grants.full_access;
+    if grants.full_access {
         note(&mut results, "full access: the helper ran outside any sandbox, observed only".into());
     }
     let spec = lightair_helpers::Spec {
@@ -121,7 +128,8 @@ fn run(a: &Args) -> Value {
         env: vec![("LIGHTAIR_CHECK".into(), "1".into())],
     };
     let launcher = a.launcher.clone().or_else(|| {
-        std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("lightair-sandbox"))).filter(|p| p.exists())
+        let name = if cfg!(windows) { "lightair-sandbox.exe" } else { "lightair-sandbox" };
+        std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(name))).filter(|p| p.exists())
     });
     let (tx, rx) = lightair_helpers::events();
     let started_at = SystemTime::now();
@@ -138,6 +146,9 @@ fn run(a: &Args) -> Value {
         }
     };
     let pid = helper.child.pid();
+    if let Some(sid) = helper.container() {
+        note(&mut results, format!("AppContainer {sid}"));
+    }
 
     // its log, and its answers
     let (lines_tx, lines_rx) = mpsc::channel::<String>();
@@ -227,7 +238,10 @@ fn run(a: &Args) -> Value {
         helper.child.kill();
     }
 
-    let usage = children_usage().minus(&before);
+    let usage = match helper.usage() {
+        Some((cpu_s, max_rss_mb)) => Usage { cpu_s, max_rss_mb },
+        None => children_usage().minus(&before),
+    };
     if usage.max_rss_mb > 2048.0 {
         fail(&mut results, format!("it used {:.0} MB of memory", usage.max_rss_mb));
     }
@@ -249,7 +263,8 @@ fn run(a: &Args) -> Value {
             ),
         );
     }
-    let violations = if sandboxed { sandbox_refusals(pid, started_at) } else { Ok(Vec::new()) };
+    let violations =
+        if sandboxed && cfg!(target_os = "macos") { sandbox_refusals(pid, started_at) } else { Ok(Vec::new()) };
     let violations = match violations {
         Ok(v) => v,
         Err(e) => {
@@ -269,7 +284,11 @@ fn run(a: &Args) -> Value {
         }
     }
     if sandboxed {
-        note(&mut results, "ran in Lightair's own sandbox (deny by default, its proxy as the only way out, none of Lightair's privacy permissions)".into());
+        if cfg!(windows) {
+            note(&mut results, "ran in Lightair's own sandbox (its own AppContainer at low integrity, in a job object; its folders only; its proxy, through the bridge, as the only way out)".into());
+        } else {
+            note(&mut results, "ran in Lightair's own sandbox (deny by default, its proxy as the only way out, none of Lightair's privacy permissions)".into());
+        }
     }
     let processes = log.lock().map(|l| l.iter().take(20).cloned().collect()).unwrap_or_default();
     drop(helper);
