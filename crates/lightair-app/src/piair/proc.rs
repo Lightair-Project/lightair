@@ -64,6 +64,9 @@ pub struct Spawned {
     pub stderr: Box<dyn Read + Send>,
     /// The folder to give it as `data_dir` (it keeps its memory and settings in `PiAir/` there).
     pub data_dir: PathBuf,
+    /// What it may do when it runs as the installed package (its granted permissions); `None`:
+    /// a bundled or development PiAir, which has everything.
+    pub granted: Option<Vec<String>>,
 }
 
 /// The installed PiAir this Lightair can run (the newest usable version), if any.
@@ -164,6 +167,7 @@ fn plain(cmd: &[String], data_dir: PathBuf) -> Result<Spawned, String> {
         stdout: Box::new(stdout),
         stderr: Box::new(stderr),
         data_dir,
+        granted: None,
     })
 }
 
@@ -178,6 +182,7 @@ fn sandboxed(i: &Installed) -> Result<Spawned, String> {
     move_old_data(&data_dir);
     let granted = crate::packages::granted_permissions(i);
     let mut grants = lightair_helpers::Grants::from_permissions(granted.iter().map(String::as_str));
+    let held = granted.clone();
     // Bun compiles JavaScript as it runs; its notarized signature allows that.
     grants.jit = true;
     let spec = lightair_helpers::Spec {
@@ -217,6 +222,7 @@ fn sandboxed(i: &Installed) -> Result<Spawned, String> {
         stdout: Box::new(stdout),
         stderr: Box::new(stderr),
         data_dir,
+        granted: Some(held),
     })
 }
 

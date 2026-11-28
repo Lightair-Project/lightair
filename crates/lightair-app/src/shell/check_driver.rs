@@ -11,6 +11,7 @@
 //! `scroll <px>`, `settings-shortcuts`, `settings-voices`, `say <text>`, `voice-level`, `test-event <kind>`,
 //! `assets-open <folder>`, `cohost-window <page>`, `cohost <avatar file>` (an AI co-host object),
 //! `install <package id>` (from Lightair's catalog, as the co-host's Install button does),
+//! `revoke <package id> <permission>` (Take back), `piair-call <method> <json>` (one of PiAir's calls),
 //! `full-access-ask` (the full-access question with sample text; nothing installs).
 
 use std::path::PathBuf;
@@ -68,6 +69,23 @@ impl StudioWindow {
                 if let Some(e) = self.avatar_library.get(id).cloned() {
                     self.add_cohost_object(&e, cx);
                 }
+            }
+            // take a package's permission back, as the Packages panel's Take back does
+            "revoke" => {
+                if let Some((id, permission)) = rest.split_once(' ') {
+                    crate::grants::revoke(id, permission.trim());
+                }
+            }
+            // one of PiAir's calls, answered as PiAir's would be (its permissions checked)
+            "piair-call" => {
+                let (method, params) = rest.split_once(' ').unwrap_or((rest, "{}"));
+                let params = serde_json::from_str(params).unwrap_or(serde_json::json!({}));
+                // off the UI thread, as PiAir's own calls arrive (some wait for the window)
+                let (host, method) = (self.piair.clone(), method.to_string());
+                std::thread::spawn(move || {
+                    let result = host.answer(&method, params);
+                    tracing::info!(method, ?result, "CHECK piair-call");
+                });
             }
             "install" => {
                 crate::catalogs::request_install(rest, None, None);

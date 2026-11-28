@@ -25,6 +25,8 @@ pub enum Kind {
     Files,
     Devices,
     OtherApp,
+    /// The mouse and keyboard (the AI co-host using the computer).
+    Computer,
     Chat,
     FullAccess,
 }
@@ -32,7 +34,10 @@ pub enum Kind {
 impl Kind {
     /// Starting to use it always raises a notice (not only the first time).
     pub fn sensitive(self) -> bool {
-        matches!(self, Kind::Screen | Kind::Camera | Kind::Microphone | Kind::Files | Kind::OtherApp | Kind::FullAccess)
+        matches!(
+            self,
+            Kind::Screen | Kind::Camera | Kind::Microphone | Kind::Files | Kind::OtherApp | Kind::Computer | Kind::FullAccess
+        )
     }
 
     pub fn label(self) -> &'static str {
@@ -45,6 +50,7 @@ impl Kind {
             Kind::Files => "Files",
             Kind::Devices => "Devices",
             Kind::OtherApp => "Another app",
+            Kind::Computer => "Mouse and keyboard",
             Kind::Chat => "Chat",
             Kind::FullAccess => "Full access",
         }
@@ -60,7 +66,9 @@ impl Kind {
             "mic" => Kind::Microphone,
             _ if p.starts_with("fs.") => Kind::Files,
             _ if p.starts_with("device.") => Kind::Devices,
-            _ if p.starts_with("ipc:") || p.starts_with("automation:") => Kind::OtherApp,
+            _ if p.starts_with("ipc:") || p.starts_with("automation:") || p.starts_with("apps.run:") => Kind::OtherApp,
+            "computer.control" => Kind::Computer,
+            "speech.read" => Kind::Microphone,
             "chat.read" | "chat.write" => Kind::Chat,
             _ if p.starts_with("full-access") => Kind::FullAccess,
             _ => return None,
@@ -192,6 +200,7 @@ fn first_use_text(plugin: &str, kind: Kind, what: &str) -> String {
         Kind::Devices => format!("{plugin} opened {what}"),
         Kind::OtherApp => format!("{plugin} is talking to {what}"),
         Kind::Chat => format!("{plugin} is using chat"),
+        Kind::Computer => format!("{plugin} is using your mouse and keyboard"),
         Kind::FullAccess => format!("{plugin} is running with full access: Lightair can't see what it does"),
     }
 }

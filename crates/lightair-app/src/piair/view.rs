@@ -27,11 +27,8 @@ const VENDORS: &[(&str, &str)] = &[
     ("elevenlabs", "ElevenLabs"),
     ("gemini", "Gemini"),
     ("system", "System voice"),
-    ("codex", "ChatGPT voice"),
     ("none", "None"),
 ];
-/// ChatGPT realtime voices offered for the co-host (OpenAI's live voices).
-const CHATGPT_VOICES: &[&str] = &["cove", "marin", "cedar", "ember", "breeze", "juniper", "maple", "vale"];
 const CHATTINESS: &[&str] = &["Quiet", "Normal", "Lively", "Chatty"];
 /// What moves the co-host's mouth (`cohost.mouth`).
 const MOUTHS: &[(&str, &str)] = &[("data", "Voice data"), ("audio", "Sound"), ("tracking", "Face tracking")];
@@ -577,24 +574,6 @@ impl CohostView {
             ),
             mouth_chips,
         );
-        // ChatGPT realtime voice: the live model is the whole co-host, so no voice picker or key
-        if vendor == "codex" {
-            let realtime_voice = if chosen.is_empty() { "cove".to_string() } else { chosen.clone() };
-            let voices = CHATGPT_VOICES.iter().map(|v| (v.to_string(), realtime_voice == *v)).collect();
-            body.push(stacked(
-                "Voice",
-                Some("The ChatGPT voice the co-host speaks in."),
-                crate::piair::view::chips("cohost-rt-voice", voices, cx, |this, i, cx| {
-                    this.set(json!({"voice": {"voice": CHATGPT_VOICES[i]}}), cx)
-                }),
-            ));
-            body.push(status_line(
-                tok::warn(),
-                "Uses your ChatGPT sign-in in the Codex app on this computer. Experimental and for your own machine; it talks and listens itself, so the Brain and Hears settings don't apply.".into(),
-            ));
-            body.push(mouth_row);
-            return self.section("Voice", body, cx);
-        }
         if vendor == "none" {
             body.push(mouth_row);
             return self.section("Voice", body, cx);
@@ -768,16 +747,10 @@ impl CohostView {
             .on_click(cx.listener(move |this, _, _, cx| this.set(json!({"behaviour": {"stopWhenStreamerTalks": !on}}), cx)))
             .into_any_element();
         let mut body = Vec::new();
-        if self.setting("/voice/vendor", cx).as_str() == Some("codex") {
-            body.push(status_line(
-                tok::text_tertiary(),
-                "With ChatGPT voice, the live model hears the conversation tracks itself: content tracks and Hearing with don't apply.".into(),
-            ));
-        }
         body.extend([
             stacked(
                 "Hears",
-                Some("Mixer tracks it listens to. Conversation: people talking with it (your mic, a guest's): it answers what they say. Content: something playing (a video, a game): it follows along, may react now and then, and never takes it as someone talking to it."),
+                Some("Mixer tracks it listens to. Me: your own mic; only your words can make it act (use the computer, change Lightair). Guest: someone else talking with it: it answers them, but they can't make it act. Content: something playing (a video, a game): it follows along, may react now and then, and never takes it as someone talking to it."),
                 self.hears_list(cx),
             ),
             stacked(
@@ -919,7 +892,14 @@ impl CohostView {
         // as it'll be saved: [{track, role}]
         let saved: Vec<Value> = hears
             .iter()
-            .map(|h| json!({"track": h.track.to_string(), "role": if h.role == super::Role::Content { "content" } else { "conversation" }}))
+            .map(|h| {
+                let role = match h.role {
+                    super::Role::Content => "content",
+                    _ if h.streamer => "streamer",
+                    _ => "conversation",
+                };
+                json!({"track": h.track.to_string(), "role": role})
+            })
             .collect();
         let status = self.host.0.hear_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let running = self.active && self.host.running();
@@ -955,7 +935,9 @@ impl CohostView {
                     this.set_cohost(json!({"hears": s}), cx);
                 }
             };
-            let (to_conv, to_content) = (set_role.clone(), set_role);
+            let (to_me, to_conv, to_content) = (set_role.clone(), set_role.clone(), set_role);
+            let me = !content && h.streamer;
+            let guest = !content && !h.streamer;
             let remove = {
                 let mut s = saved.clone();
                 s.remove(i);
@@ -1000,7 +982,12 @@ impl CohostView {
                             .p_0p5()
                             .rounded(px(6.))
                             .bg(tok::bg_panel())
-                            .child(seg("cohost-hears-conv", "Conversation", !content).when(content, |d| {
+                            // "Me": the streamer's own track, the only one whose words can make the
+                            // co-host act; a guest can talk with it, nothing more
+                            .child(seg("cohost-hears-me", "Me", me).when(!me, |d| {
+                                d.on_click(cx.listener(move |this, _, _, cx| to_me(this, "streamer", cx)))
+                            }))
+                            .child(seg("cohost-hears-conv", "Guest", guest).when(!guest, |d| {
                                 d.on_click(cx.listener(move |this, _, _, cx| to_conv(this, "conversation", cx)))
                             }))
                             .child(seg("cohost-hears-content", "Content", content).when(!content, |d| {
@@ -1067,11 +1054,8 @@ impl CohostView {
         drop(st);
         let vendor = self.setting("/voice/vendor", cx).as_str().unwrap_or("gemini").to_string();
         let voice_name = VENDORS.iter().find(|(id, _)| *id == vendor).map_or(vendor.clone(), |(_, n)| n.to_string());
-        let realtime = vendor == "codex";
         let model = self.setting("/model", cx).as_str().unwrap_or("").to_string();
-        let brain = if realtime {
-            "ChatGPT voice".to_string()
-        } else if provider_name.is_empty() {
+        let brain = if provider_name.is_empty() {
             "Not chosen".to_string()
         } else if model.is_empty() || model == "default" {
             provider_name

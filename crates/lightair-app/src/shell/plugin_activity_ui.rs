@@ -19,6 +19,7 @@ fn kind_icon(k: Kind) -> &'static str {
         Kind::Files => "folder-open",
         Kind::Devices => "usb",
         Kind::OtherApp => "app-window",
+        Kind::Computer => "mouse-pointer-click",
         Kind::Chat => "message-square",
         Kind::FullAccess => "shield-alert",
     }
