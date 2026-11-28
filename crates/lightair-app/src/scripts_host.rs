@@ -548,3 +548,75 @@ pub fn check(cmd: &str, rest: &str) {
         _ => tracing::warn!(cmd, "CHECK unknown script command"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_host(name: &str, granted: &[&str]) -> Arc<AppHost> {
+        Arc::new(AppHost {
+            id: format!("io.github.test.{name}"),
+            name: name.into(),
+            granted: granted.iter().map(|g| g.to_string()).collect(),
+        })
+    }
+
+    fn start(name: &str, code: &str, granted: &[&str], budget: Budget) -> Script {
+        let package = Package {
+            id: format!("io.github.test.{name}"),
+            name: name.into(),
+            code: code.into(),
+            permissions: granted.iter().map(|g| g.to_string()).collect(),
+            data_dir: None,
+            settings: json!({}),
+        };
+        Script::start(package, app_host(name, granted), budget)
+    }
+
+    fn notices_of(name: &str) -> Vec<pa::Notice> {
+        pa::notices().into_iter().filter(|n| n.plugin == name).collect()
+    }
+
+    #[test]
+    fn any_host_doesnt_let_a_script_fetch_this_computer_or_the_home_network() {
+        use lightair_script::Host as _;
+        let h = app_host("Fetcher", &["network:*"]);
+        let get = |url: &str| FetchRequest { url: url.into(), method: "GET".into(), ..Default::default() };
+        let local = h.fetch(&get("http://localhost:9/")).expect_err("this computer needs network:localhost:<port>");
+        assert!(local.contains("network:localhost:9"), "{local}");
+        let lan = h.fetch(&get("http://10.20.30.40/")).expect_err("the home network needs network.lan");
+        assert!(lan.contains("network.lan"), "{lan}");
+    }
+
+    #[test]
+    fn a_refused_call_raises_a_notice_naming_the_plugin() {
+        let s = start(
+            "Refused Caller",
+            r#"lightair.command({ id: "go", title: "Go", run: () => lightair.call("scene.switch", { scene: "Main" }) });"#,
+            &["project.read"],
+            Budget::default(),
+        );
+        assert!(s.command("go").is_err());
+        let notices = notices_of("Refused Caller");
+        assert!(notices.iter().any(|n| n.refused && n.text.contains("scene.switch")), "{notices:?}");
+    }
+
+    #[test]
+    fn a_suspended_script_raises_a_notice_that_shows_even_while_live() {
+        let s = start(
+            "Spinner",
+            r#"lightair.command({ id: "spin", title: "Spin", run: () => { for (;;) {} } });"#,
+            &[],
+            Budget { per_call: Duration::from_millis(30), overruns: 2, ..Budget::default() },
+        );
+        assert!(s.command("spin").is_err());
+        assert!(s.command("spin").is_err());
+        assert!(matches!(s.state(), State::Suspended(_)), "{:?}", s.state());
+        let notices = notices_of("Spinner");
+        assert!(notices.iter().any(|n| n.text.contains("ran too long")), "each overrun is announced: {notices:?}");
+        assert!(
+            notices.iter().any(|n| n.urgent && n.text.contains("was suspended")),
+            "suspension is announced even while live: {notices:?}"
+        );
+    }
+}
