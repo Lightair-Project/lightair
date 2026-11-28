@@ -69,10 +69,10 @@ mod system_effects;
 #[path = "system_effects_win.rs"]
 mod system_effects;
 mod ui;
+mod voice;
 mod widgets;
 
 use std::path::PathBuf;
-mod voice;
 use std::sync::Arc;
 use std::time::Duration;
 
