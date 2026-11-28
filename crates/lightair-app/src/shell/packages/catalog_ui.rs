@@ -31,6 +31,13 @@ pub(crate) fn install_screen(p: &Prepared) -> (String, String) {
             detail.push_str(&format!("\n• {l}"));
         }
     }
+    let later = p.optional_lines();
+    if !later.is_empty() {
+        detail.push_str("\n\nMay ask later for (only when you turn a feature on, and you decide then):");
+        for l in later {
+            detail.push_str(&format!("\n• {l}"));
+        }
+    }
     let mut facts = vec![p.origin.line(), pk::size(p.size)];
     if matches!(p.origin, pk::Origin::File | pk::Origin::Folder) {
         facts.push(format!("from {}", file_name(&p.path)));
@@ -70,6 +77,148 @@ pub(crate) struct FullAccessAsk {
 }
 
 impl StudioWindow {
+    /// Shows running packages' requests for optional permissions as they come (one at a time).
+    pub(crate) fn watch_permission_asks(cx: &mut Context<Self>) {
+        let (wake, mut woken) = futures_channel::mpsc::unbounded::<()>();
+        let wake = parking_lot::Mutex::new(wake);
+        crate::permission_ask::set_waker(move || {
+            let _ = wake.lock().unbounded_send(());
+        });
+        cx.spawn(async move |this, cx| {
+            use futures_util::StreamExt;
+            loop {
+                let timer = cx.background_executor().timer(Duration::from_secs(1));
+                let _ = futures_util::future::select(timer, woken.next()).await;
+                let alive = this.update(cx, |this, cx| {
+                    if this.packages.permission_ask.is_none()
+                        && let Some(r) = crate::permission_ask::take()
+                    {
+                        let ticks = vec![true; r.permissions.len()];
+                        this.packages.permission_ask = Some((r, ticks));
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn answer_permission_ask(&mut self, allow: bool, cx: &mut Context<Self>) {
+        if let Some((r, ticks)) = self.packages.permission_ask.take() {
+            let allowed: Vec<String> = if allow {
+                r.permissions.iter().zip(&ticks).filter(|(_, t)| **t).map(|(p, _)| p.clone()).collect()
+            } else {
+                Vec::new()
+            };
+            r.answer(allowed);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn permission_ask_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (r, ticks) = self.packages.permission_ask.as_ref()?;
+        let mut list = div().flex().flex_col().gap_1p5();
+        for (i, (p, on)) in r.permissions.iter().zip(ticks).enumerate() {
+            let words = Permission::parse(p).map_or_else(|_| p.clone(), |q| q.describe());
+            let on = *on;
+            list = list.child(
+                div()
+                    .id(("permission-ask", i))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .p_2()
+                    .rounded(px(6.))
+                    .bg(tok::bg_raised())
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some((_, ticks)) = this.packages.permission_ask.as_mut()
+                            && let Some(t) = ticks.get_mut(i)
+                        {
+                            *t = !*t;
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        ui::icon(if on { "square-check" } else { "square" })
+                            .size(px(15.))
+                            .text_color(if on { tok::interactive() } else { tok::text_tertiary() }),
+                    )
+                    .child(div().flex_1().text_size(px(12.5)).child(words)),
+            );
+        }
+        let any = ticks.iter().any(|t| *t);
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(tok::scrim())
+                .occlude()
+                .child(
+                    div()
+                        .id("permission-ask-sheet")
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .w(px(420.))
+                        .p_5()
+                        .rounded(px(14.))
+                        .bg(tok::bg_panel())
+                        .border_1()
+                        .border_color(tok::border_strong())
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .text_size(px(16.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(format!("“{}” asks for more", r.name)),
+                        )
+                        .children((!r.reason.trim().is_empty()).then(|| {
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(tok::text_secondary())
+                                .child(format!("It says: “{}”", r.reason.trim()))
+                        }))
+                        .child(list)
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(tok::text_tertiary())
+                                .child("You can take these back any time in the Packages panel."),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("permission-ask-no")
+                                        .label("Don't allow")
+                                        .small()
+                                        .ghost()
+                                        .on_click(cx.listener(|this, _, _, cx| this.answer_permission_ask(false, cx))),
+                                )
+                                .child(
+                                    Button::new("permission-ask-yes")
+                                        .label("Allow")
+                                        .small()
+                                        .primary()
+                                        .disabled(!any)
+                                        .on_click(cx.listener(|this, _, _, cx| this.answer_permission_ask(true, cx))),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Opens the full-access question; `answer` gets the choice (dropping it is a no).
     pub(crate) fn ask_full_access(
         &mut self,
@@ -866,7 +1015,8 @@ impl PackagesPanel {
     /// An installed package's permissions, each in plain words with Take back / Allow again.
     pub(super) fn permissions(&self, i: usize, p: &Installed, cx: &mut Context<Self>) -> Option<Div> {
         let declared = &p.manifest.permissions;
-        if declared.is_empty() {
+        let optional = &p.manifest.optional_permissions;
+        if declared.is_empty() && optional.is_empty() {
             return None;
         }
         let id = p.id().as_str().to_string();
@@ -917,6 +1067,51 @@ impl PackagesPanel {
                             })),
                     ),
             );
+        }
+        if !optional.is_empty() {
+            let held = crate::grants::optional_granted(&id);
+            list = list.child(
+                div()
+                    .pt_2()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(tok::text_secondary())
+                    .child("Asked for while it runs"),
+            );
+            for (j, perm) in optional.iter().enumerate() {
+                let words = Permission::parse(perm).map_or_else(|_| perm.clone(), |q| q.describe());
+                let on = held.contains(perm);
+                let (id, perm) = (id.clone(), perm.clone());
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .h(px(24.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.))
+                                .text_color(if on { tok::text() } else { tok::text_tertiary() })
+                                .child(words),
+                        )
+                        .child(if on {
+                            Button::new(("pkg-opt-perm", i * 1000 + j))
+                                .label("Take back")
+                                .xsmall()
+                                .ghost()
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    crate::grants::release_optional(&id, std::slice::from_ref(&perm));
+                                    cx.notify();
+                                }))
+                                .into_any_element()
+                        } else {
+                            div().text_size(px(11.)).text_color(tok::text_tertiary()).child("not given").into_any_element()
+                        }),
+                );
+            }
         }
         Some(list)
     }

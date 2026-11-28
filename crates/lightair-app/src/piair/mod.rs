@@ -16,6 +16,7 @@ pub mod keys;
 #[cfg(target_os = "macos")]
 mod path;
 pub mod proc;
+pub mod streamer;
 mod cli_bridge;
 
 /// A subscription sign-in's PiAir: its run number, process and stdin.
@@ -102,6 +103,8 @@ pub struct Shared {
     /// What the running PiAir may do: its granted permissions when it runs as the installed
     /// package; `None` for a bundled or development PiAir (everything).
     granted: Mutex<Option<Vec<String>>>,
+    /// AI streamer mode and its stream policy (from `lightair.json`).
+    policy: Mutex<streamer::Policy>,
     pub computer: computer::Computer,
     jobs: Jobs,
     /// The remote API's own handler (set once the window exists), so PiAir's calls are answered
@@ -340,6 +343,7 @@ impl Host {
             stdin: Mutex::new(None),
             child: Mutex::new(None),
             granted: Mutex::new(None),
+            policy: Mutex::new(ComputerPrefs::load().streamer),
             computer: computer::Computer::default(),
             jobs,
             handler: Mutex::new(None),
@@ -464,12 +468,14 @@ impl Host {
         self.send(json!({
             "t": "hello",
             // 2: PiAir sends text (`say`) and Lightair speaks it; 3: `heard` says whether it's the
-            // streamer's own track (`streamer`), and there's no realtime audio
-            "version": 3,
+            // streamer's own track (`streamer`), and there's no realtime audio; 4: AI streamer mode
+            // (`mode` and its policy), optional permissions (`permissions.request`)
+            "version": 4,
             "platform": std::env::consts::OS,
             "data_dir": data_dir,
             "lightair": {"version": env!("CARGO_PKG_VERSION")},
             "settings": self.0.start_settings.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            "mode": {"mode": if self.policy().mode.is_empty() { "off".to_string() } else { self.policy().mode }, "policy": self.policy()},
         }));
     }
 
@@ -766,6 +772,57 @@ impl Host {
     /// runs as the installed package; a refusal is a `not_granted` error PiAir reads as a tool
     /// error, and goes to the plugin activity.
     pub(crate) fn answer(&self, method: &str, params: Value) -> Result<Value, (String, String)> {
+        // its optional permissions (AI streamer mode): asked for on a second screen
+        if method == "permissions.request" || method == "permissions.release" {
+            return self.answer_permissions(method, &params);
+        }
+        // AI streamer mode's stream policy, enforced here whatever PiAir's prompt says
+        let policy = self.policy();
+        if policy.on() || streamer::streamer_only(method) {
+            let front = self.front_app();
+            let holds = |p: &str| self.holds(p);
+            let cause = streamer::cause_of(&params);
+            let what = params.get("url").or(params.get("name")).or(params.get("app")).or(params.get("keys")).or(params.get("text")).and_then(Value::as_str).unwrap_or("").to_string();
+            if let Err((code, why)) = streamer::check(&policy, method, &params, front.as_deref(), &holds) {
+                streamer::log(method, &what, &cause, false, &why);
+                crate::plugin_activity::record("PiAir", crate::plugin_activity::Kind::Computer, &format!("{method} {what}"), false, &why);
+                return Err((code, why));
+            }
+            if method.starts_with("computer.") || streamer::streamer_only(method) || !method.contains('.') || method.contains("switch") || method.contains("start") || method.contains("stop") || method == "chat.send" {
+                streamer::log(method, &what, &cause, true, "");
+            }
+            match method {
+                "computer.open_url" => {
+                    crate::plugin_activity::record("PiAir", crate::plugin_activity::Kind::Network, &what, true, "");
+                    return streamer::open_url(&what);
+                }
+                "streamer.app" => {
+                    if !self.allowed().iter().any(|a| a.eq_ignore_ascii_case(&what)) {
+                        return Err(("not_allowed_app".into(), format!("{what} isn't on PiAir's list of allowed apps.")));
+                    }
+                    return streamer::bring_app(&what);
+                }
+                "streamer.scene" => {
+                    return self.answer_granted("scene.switch", json!({"name": what, "scene": what}));
+                }
+                // in AI streamer mode, with chat.write, it may write in chat
+                "chat.send" if self.holds("chat.write") => {
+                    let call = Call { method: method.to_string(), params, client: "PiAir", device: None };
+                    let handler = self.0.handler.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    return match handler {
+                        Some(h) => h(call).map_err(|e| (code_of(&e).into(), e.message)),
+                        None => Err(("closing".into(), "Lightair isn't ready".into())),
+                    };
+                }
+                _ => {}
+            }
+        }
+        self.answer_granted(method, params)
+    }
+
+    /// Answers a call the stream policy has passed (or that it doesn't apply to): the permission
+    /// check, then the call itself.
+    fn answer_granted(&self, method: &str, params: Value) -> Result<Value, (String, String)> {
         let verdict = {
             let granted = self.0.granted.lock().unwrap_or_else(|e| e.into_inner());
             permitted(granted.as_deref(), method, &params)
@@ -833,6 +890,11 @@ impl Host {
 
     /// Puts a yes/no question to the streamer in the panel; no answer in 30 s is a no.
     fn ask(&self, text: String) -> bool {
+        // autonomous: nobody to confirm, so the risky action is refused, never approved
+        if self.policy().autonomous() {
+            streamer::log("confirm", &text, "self", false, "nobody to confirm in autonomous mode");
+            return false;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         if let Some(old) = self.state().question.replace(Question { text, answer: tx }) {
             let _ = old.answer.send(false);
@@ -1601,6 +1663,8 @@ impl Host {
 pub struct ComputerPrefs {
     /// Bundle ids (macOS) or executable names (Windows) PiAir may act in.
     pub allowed: Vec<String>,
+    /// AI streamer mode and its stream policy.
+    pub streamer: streamer::Policy,
 }
 
 impl ComputerPrefs {
@@ -1628,13 +1692,90 @@ impl Host {
     pub fn set_allowed(&self, mut allowed: Vec<String>) {
         let mut seen = std::collections::HashSet::new();
         allowed.retain(|a| seen.insert(a.to_lowercase()));
-        ComputerPrefs { allowed: allowed.clone() }.save();
+        let mut prefs = ComputerPrefs::load();
+        prefs.allowed = allowed.clone();
+        prefs.save();
         *self.0.computer.allowed.lock().unwrap_or_else(|e| e.into_inner()) = allowed;
         self.touch();
     }
 
     pub fn allowed(&self) -> Vec<String> {
         self.0.computer.allowed.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// AI streamer mode's policy, as saved.
+    pub fn policy(&self) -> streamer::Policy {
+        self.0.policy.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Saves the policy, tells PiAir, and turns AI drives on when the user switches the mode on
+    /// (switching the mode on is the user asking it to use the computer).
+    pub fn set_policy(&self, p: streamer::Policy) {
+        let was_on = self.policy().on();
+        let mut prefs = ComputerPrefs::load();
+        prefs.streamer = p.clone();
+        prefs.save();
+        *self.0.policy.lock().unwrap_or_else(|e| e.into_inner()) = p.clone();
+        if p.on() && !was_on {
+            let _ = self.set_ai_drives(true);
+        }
+        if !p.on() && was_on {
+            // the mode's optional permissions go with it, whether or not PiAir is running to
+            // give them back itself
+            let _ = self.answer_permissions("permissions.release", &json!({"permissions": streamer::MODE_PERMISSIONS}));
+        }
+        streamer::log("mode", &p.mode, "streamer", true, "");
+        self.send(json!({"t": "mode", "mode": if p.mode.is_empty() { "off" } else { p.mode.as_str() }, "policy": p}));
+        self.touch();
+    }
+
+    /// Whether PiAir holds `permission` (a bundled or development PiAir holds everything).
+    pub fn holds_permission(&self, permission: &str) -> bool {
+        self.holds(permission)
+    }
+
+    /// The frontmost app's id, for chat plays.
+    fn front_app(&self) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        {
+            input_mac::frontmost().map(|(_, bundle, _)| bundle)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
+
+    /// `permissions.request` / `permissions.release` from PiAir.
+    fn answer_permissions(&self, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let list: Vec<String> = params["permissions"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let packaged = self.0.granted.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        if !packaged {
+            // a bundled or development PiAir holds everything
+            return Ok(if method == "permissions.request" { json!({"granted": list}) } else { json!({"released": list}) });
+        }
+        if method == "permissions.release" {
+            let gone = crate::permission_ask::release(proc::PACKAGE, &list);
+            if let Some(g) = self.0.granted.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                g.retain(|p| !gone.contains(p));
+            }
+            return Ok(json!({"released": gone}));
+        }
+        let reason = params["reason"].as_str().unwrap_or_default();
+        let given = crate::permission_ask::ask(proc::PACKAGE, "PiAir", &list, reason);
+        let mut g = self.0.granted.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(g) = g.as_mut() {
+            for p in given {
+                if !g.contains(&p) {
+                    g.push(p);
+                }
+            }
+        }
+        let held: Vec<String> = list.iter().filter(|p| g.as_ref().is_none_or(|g| g.contains(p))).cloned().collect();
+        Ok(json!({"granted": held}))
     }
 
     pub fn ai_drives(&self) -> bool {

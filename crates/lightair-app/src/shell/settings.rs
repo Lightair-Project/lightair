@@ -307,9 +307,12 @@ impl StudioWindow {
                     .when(!on, |d| d.text_color(tok::text_secondary()).hover(|d| d.bg(tok::bg_raised())))
                     .child(ui::icon(icon).size(px(14.)))
                     .child(*label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         this.settings_page = p;
                         this.shortcut_capture = None;
+                        if p == Page::CoHost && this.streamer_site.is_none() {
+                            this.streamer_site = Some(cx.new(|cx| InputState::new(window, cx).placeholder("example.com")));
+                        }
                         if p == Page::Audio {
                             this.headphones_devices =
                                 this.studio.read(cx).engine().call(|_| lightair_host::monitoring::devices());
@@ -673,7 +676,7 @@ impl StudioWindow {
                 })),
             ));
         }
-        pages().child(computer).child(
+        pages().child(computer).child(self.streamer_group(cx)).child(
             group("Kill switch").child(row(
                 "Stop everything",
                 Some("Turns AI drives off, cuts its speech and stops whatever it's doing, from any app. Change the keys in Shortcuts."),
@@ -685,6 +688,149 @@ impl StudioWindow {
                     .child(Button::new("cohost-keys").label("Change").xsmall().outline().on_click(cx.listener(|this, _, _, cx| this.open_settings(Page::Shortcuts, cx)))),
             )),
         )
+    }
+
+    /// AI streamer mode: PiAir runs the stream on its own within a stream policy Lightair
+    /// enforces (piair/streamer.rs).
+    fn streamer_group(&self, cx: &mut Context<Self>) -> Div {
+        let policy = self.piair.policy();
+        let mode = if policy.mode.is_empty() { "off".to_string() } else { policy.mode.clone() };
+        let set = |f: Box<dyn Fn(&mut crate::piair::streamer::Policy)>| {
+            cx.listener(move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                let mut p = this.piair.policy();
+                f(&mut p);
+                this.piair.set_policy(p);
+                cx.notify();
+            })
+        };
+        let mut chips = div().flex().gap_0p5().p_0p5().rounded(px(7.)).bg(tok::bg_panel());
+        for (i, (key, label)) in [("off", "Off"), ("producer", "Producer"), ("autonomous", "Autonomous")].into_iter().enumerate() {
+            chips = chips.child(
+                pref_chip(("streamer-mode", i), label.to_string(), mode == key)
+                    .on_click(set(Box::new(move |p| p.mode = key.to_string()))),
+            );
+        }
+        let mut g = group_tip(
+            "AI streamer mode",
+            "PiAir runs the stream as an AI VTuber: it decides what to do next and acts on chat's requests, only within the policy below, which Lightair enforces whatever it's told. Producer: someone is around, and risky actions are asked first. Autonomous: nobody is watching, so risky actions are refused. Switching it on turns AI drives on; the kill switch and Lightair Live's remote stop it at any time.",
+        )
+        .child(row("Mode", None, chips));
+        if !policy.on() {
+            return g;
+        }
+        g = g.child(
+            div()
+                .px_3()
+                .py_2()
+                .text_size(px(11.5))
+                .text_color(tok::warn())
+                .child("Best on its own user account or computer: one with no saved passwords or personal files, signed in only to the accounts it streams with. Anything it can see on screen, chat can try to talk it into."),
+        );
+        let given = self.piair.holds_permission("computer.autonomous");
+        g = g.child(row(
+            "Acting on its own",
+            Some(if given { "Given. Take it back in the Packages panel." } else { "PiAir asks for it when the mode starts." }),
+            div().text_size(px(12.)).text_color(if given { tok::ok() } else { tok::text_tertiary() }).child(if given { "Given" } else { "Not given yet" }),
+        ));
+        let browse = policy.chat_browse;
+        g = g.child(row(
+            "Chat may open sites",
+            Some("Only the allowed sites."),
+            switch("streamer-browse", browse).on_click(set(Box::new(move |p| p.chat_browse = !browse))),
+        ));
+        // allowed sites
+        let mut sites = div().flex().flex_col().gap_1();
+        for (i, site) in policy.sites.iter().enumerate() {
+            let gone = site.clone();
+            sites = sites.child(row(
+                site,
+                None,
+                Button::new(("streamer-site-x", i))
+                    .icon(ui::icon("x"))
+                    .xsmall()
+                    .ghost()
+                    .on_click(set(Box::new(move |p| p.sites.retain(|s| *s != gone)))),
+            ));
+        }
+        if let Some(input) = &self.streamer_site {
+            let input2 = input.clone();
+            sites = sites.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .child(div().flex_1().child(Input::new(input).small()))
+                    .child(Button::new("streamer-site-add").label("Add site").xsmall().outline().on_click(cx.listener(
+                        move |this, _, window, cx| {
+                            let raw = input2.read(cx).value().trim().to_ascii_lowercase();
+                            let host = raw
+                                .trim_start_matches("https://")
+                                .trim_start_matches("http://")
+                                .split(['/', '?', '#'])
+                                .next()
+                                .unwrap_or("")
+                                .to_string();
+                            if host.contains('.') {
+                                let mut p = this.piair.policy();
+                                if !p.sites.contains(&host) {
+                                    p.sites.push(host);
+                                }
+                                this.piair.set_policy(p);
+                                input2.update(cx, |i, cx| i.set_value("", window, cx));
+                            }
+                            cx.notify();
+                        },
+                    ))),
+            );
+        }
+        g = g.child(row("Allowed sites", Some("The only sites it opens, for itself or for chat."), div())).child(sites);
+        // scenes chat may pick
+        let scenes: Vec<String> = self.studio.read(cx).workspace().scenes.iter().map(|s| s.name.clone()).collect();
+        let mut picks = div().flex().flex_wrap().gap_1().px_3();
+        for (i, name) in scenes.iter().enumerate() {
+            let on = policy.scenes.iter().any(|s| s.eq_ignore_ascii_case(name));
+            let n = name.clone();
+            picks = picks.child(pref_chip(("streamer-scene", i), name.clone(), on).on_click(set(Box::new(move |p| {
+                if on {
+                    p.scenes.retain(|s| !s.eq_ignore_ascii_case(&n));
+                } else {
+                    p.scenes.push(n.clone());
+                }
+            }))));
+        }
+        g = g.child(row("Scenes chat may pick", None, div())).child(picks);
+        // games and apps: switch to, chat plays
+        let allowed = self.piair.allowed();
+        let name_of = |id: &str| id.rsplit('.').next().unwrap_or(id).to_string();
+        let mut games = div().flex().flex_col().gap_1();
+        for (i, app) in allowed.iter().enumerate() {
+            let switch_on = policy.games.iter().any(|g| g.eq_ignore_ascii_case(app));
+            let plays_on = policy.chat_plays.iter().any(|g| g.eq_ignore_ascii_case(app));
+            let (a1, a2) = (app.clone(), app.clone());
+            games = games.child(
+                row(&name_of(app), None, div().flex().gap_1()
+                    .child(pref_chip(("streamer-game", i), "Chat may switch to".into(), switch_on).on_click(set(Box::new(move |p| {
+                        if switch_on { p.games.retain(|g| !g.eq_ignore_ascii_case(&a1)) } else { p.games.push(a1.clone()) }
+                    }))))
+                    .child(pref_chip(("streamer-plays", i), "Chat plays".into(), plays_on).on_click(set(Box::new(move |p| {
+                        if plays_on { p.chat_plays.retain(|g| !g.eq_ignore_ascii_case(&a2)) } else { p.chat_plays.push(a2.clone()) }
+                    }))))),
+            );
+        }
+        g = g.child(row("Allowed apps for chat", Some("From the allowed apps above."), div())).child(games);
+        // the action log
+        let mut log = div().flex().flex_col().gap_0p5().px_3().pb_2().text_size(px(11.)).font_family(ui::MONO);
+        let entries = crate::piair::streamer::recent(15);
+        if entries.is_empty() {
+            log = log.child(div().text_color(tok::text_tertiary()).child("Nothing yet."));
+        }
+        for e in entries.iter().rev() {
+            let time = e.at.get(11..19).unwrap_or(&e.at).to_string();
+            let line = format!("{time}  {}  {} {}{}", e.cause, e.method, e.what, if e.allowed { String::new() } else { format!("  refused: {}", e.reason) });
+            log = log.child(div().truncate().text_color(if e.allowed { tok::text_secondary() } else { tok::warn() }).child(line));
+        }
+        g.child(row("Action log", Some("Everything it did or was refused, newest first."), div())).child(log)
     }
 
     fn camera_page(&self, cx: &mut Context<Self>) -> Div {

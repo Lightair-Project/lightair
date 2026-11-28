@@ -45,6 +45,7 @@ mod catalogs;
 mod grants;
 mod helpers_host;
 mod links;
+mod permission_ask;
 mod plugin_activity;
 mod scripts_host;
 mod platforms;

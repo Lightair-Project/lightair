@@ -212,8 +212,10 @@ struct Running {
     id: String,
     name: String,
     version: String,
-    /// What it was started with: a change restarts it.
+    /// What it was started with (declared, not taken back): a change restarts it.
     granted: Vec<String>,
+    /// What it may ask for while running; held ones are checked live (no restart).
+    optional: Vec<String>,
     full_access: bool,
     proc: Mutex<Option<lightair_helpers::Helper>>,
     stdin: Mutex<Option<Box<dyn Write + Send>>>,
@@ -252,6 +254,8 @@ impl Running {
 
     fn has(&self, permission: &str) -> bool {
         self.granted.iter().any(|g| g == permission)
+            || (self.optional.iter().any(|o| o == permission)
+                && crate::grants::optional_granted(&self.id).contains(permission))
     }
 
     /// Asks it to stop: `stop`, stdin closed, killed after two seconds.
@@ -371,7 +375,7 @@ fn sync() {
         .iter()
         .filter(|(id, r)| match want.get(*id) {
             None => true,
-            Some(i) => r.version != i.version().to_string() || r.granted != crate::packages::granted_permissions(i),
+            Some(i) => r.version != i.version().to_string() || r.granted != crate::packages::declared_granted(i),
         })
         .map(|(id, _)| id.clone())
         .collect();
@@ -389,7 +393,8 @@ fn sync() {
                 id: id.clone(),
                 name: i.manifest.name.clone(),
                 version: i.version().to_string(),
-                granted: crate::packages::granted_permissions(i),
+                granted: crate::packages::declared_granted(i),
+                optional: i.manifest.optional_permissions.clone(),
                 full_access: i.manifest.full_access_on(Target::current())
                     && crate::packages::granted_permissions(i).iter().any(|p| p.starts_with("full-access")),
                 proc: Mutex::new(None),
@@ -473,7 +478,9 @@ fn start(r: &Arc<Running>, i: &Installed) {
         }
     }
     let data_dir = lightair_platform::paths::data_dir().join("PackageData").join(&r.id);
-    let mut grants = lightair_helpers::Grants::from_permissions(r.granted.iter().map(String::as_str));
+    // optional permissions it already holds open their sandbox holes too (new ones at the next start)
+    let held: Vec<String> = r.optional.iter().filter(|p| r.has(p)).cloned().collect();
+    let mut grants = lightair_helpers::Grants::from_permissions(r.granted.iter().chain(&held).map(String::as_str));
     grants.full_access = r.full_access;
     grants.jit = wants_jit(&entry);
     let spec = lightair_helpers::Spec {
@@ -640,6 +647,21 @@ fn lightair_call(r: &Running, method: &str, params: Value) -> Result<Value, Refu
 /// Answers one call, each checked against what it holds now.
 fn answer(r: &Running, method: &str, params: Value) -> Result<Value, Refusal> {
     match method {
+        // some of its optional permissions: the person answers on a second screen
+        "permissions.request" => {
+            let wanted = string_list(&params["permissions"]);
+            if let Some(p) = wanted.iter().find(|p| !r.optional.contains(p)) {
+                return Err(("not_optional".into(), format!("{p} isn't one of the permissions this helper may ask for")));
+            }
+            let reason = params["reason"].as_str().unwrap_or_default();
+            crate::permission_ask::ask(&r.id, &r.name, &wanted, reason);
+            let held: Vec<&String> = r.optional.iter().filter(|p| r.has(p)).collect();
+            Ok(json!({ "granted": held }))
+        }
+        "permissions.release" => {
+            let gone = crate::permission_ask::release(&r.id, &string_list(&params["permissions"]));
+            Ok(json!({ "released": gone }))
+        }
         "api.call" => {
             if !r.has("api.call") {
                 return Err(refuse(r, None, "Lightair's methods", "api.call"));
@@ -896,4 +918,9 @@ pub fn api(method: &str, params: &Value) -> Option<Result<Value, String>> {
         )),
         _ => return None,
     })
+}
+
+/// A JSON array of strings (anything else left out).
+fn string_list(v: &Value) -> Vec<String> {
+    v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
 }

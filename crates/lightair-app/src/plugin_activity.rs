@@ -27,6 +27,8 @@ pub enum Kind {
     OtherApp,
     /// The mouse and keyboard (the AI co-host using the computer).
     Computer,
+    /// Starting and stopping streaming and recording.
+    Outputs,
     Chat,
     FullAccess,
 }
@@ -36,7 +38,14 @@ impl Kind {
     pub fn sensitive(self) -> bool {
         matches!(
             self,
-            Kind::Screen | Kind::Camera | Kind::Microphone | Kind::Files | Kind::OtherApp | Kind::Computer | Kind::FullAccess
+            Kind::Screen
+                | Kind::Camera
+                | Kind::Microphone
+                | Kind::Files
+                | Kind::OtherApp
+                | Kind::Computer
+                | Kind::Outputs
+                | Kind::FullAccess
         )
     }
 
@@ -51,6 +60,7 @@ impl Kind {
             Kind::Devices => "Devices",
             Kind::OtherApp => "Another app",
             Kind::Computer => "Mouse and keyboard",
+            Kind::Outputs => "Streaming and recording",
             Kind::Chat => "Chat",
             Kind::FullAccess => "Full access",
         }
@@ -67,7 +77,8 @@ impl Kind {
             _ if p.starts_with("fs.") => Kind::Files,
             _ if p.starts_with("device.") => Kind::Devices,
             _ if p.starts_with("ipc:") || p.starts_with("automation:") || p.starts_with("apps.run:") => Kind::OtherApp,
-            "computer.control" => Kind::Computer,
+            "computer.control" | "computer.autonomous" => Kind::Computer,
+            "outputs.control" => Kind::Outputs,
             "speech.read" => Kind::Microphone,
             "chat.read" | "chat.write" => Kind::Chat,
             _ if p.starts_with("full-access") => Kind::FullAccess,
@@ -201,6 +212,7 @@ fn first_use_text(plugin: &str, kind: Kind, what: &str) -> String {
         Kind::OtherApp => format!("{plugin} is talking to {what}"),
         Kind::Chat => format!("{plugin} is using chat"),
         Kind::Computer => format!("{plugin} is using your mouse and keyboard"),
+        Kind::Outputs => format!("{plugin} {what}"),
         Kind::FullAccess => format!("{plugin} is running with full access: Lightair can't see what it does"),
     }
 }

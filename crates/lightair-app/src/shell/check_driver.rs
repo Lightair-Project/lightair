@@ -12,7 +12,10 @@
 //! `assets-open <folder>`, `cohost-window <page>`, `cohost <avatar file>` (an AI co-host object),
 //! `install <package id>` (from Lightair's catalog, as the co-host's Install button does),
 //! `revoke <package id> <permission>` (Take back), `piair-call <method> <json>` (one of PiAir's calls),
-//! `full-access-ask` (the full-access question with sample text; nothing installs).
+//! `full-access-ask` (the full-access question with sample text; nothing installs),
+//! `streamer-policy <json>` (AI streamer mode's policy), `streamer-log` (the action log, logged),
+//! `permission-allow` / `permission-deny` (answer the optional-permission sheet), `api <method> <json>`,
+//! `grants <package id>`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -77,6 +80,34 @@ impl StudioWindow {
                 }
             }
             // one of PiAir's calls, answered as PiAir's would be (its permissions checked)
+            // answers the open request for optional permissions: every one ticked is allowed
+            "permission-allow" | "permission-deny" => {
+                let allow = cmd == "permission-allow";
+                if let Some((r, ticks)) = self.packages.permission_ask.take() {
+                    let allowed: Vec<String> = if allow {
+                        r.permissions.iter().zip(&ticks).filter(|(_, t)| **t).map(|(p, _)| p.clone()).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    tracing::info!(package = %r.name, reason = %r.reason, asked = ?r.permissions, ?allowed, "CHECK permission sheet");
+                    r.answer(allowed);
+                } else {
+                    tracing::info!("CHECK permission sheet: none open");
+                }
+            }
+            // a remote API method, as Lightair Live's Remote calls it
+            "api" => {
+                let (method, params) = rest.split_once(' ').unwrap_or((rest, "{}"));
+                let params = serde_json::from_str(params).unwrap_or(serde_json::json!({}));
+                let call = lightair_remote::Call { method: method.to_string(), params, client: "check", device: None };
+                let result = self.live_call(&call, cx);
+                tracing::info!(method, ?result, "CHECK api");
+            }
+            "grants" => {
+                for i in crate::packages::installed().iter().filter(|i| i.id().as_str() == rest.trim()) {
+                    tracing::info!(id = %rest.trim(), granted = ?crate::packages::granted_permissions(i), optional = ?crate::grants::optional_granted(rest.trim()), "CHECK grants");
+                }
+            }
             "piair-call" => {
                 let (method, params) = rest.split_once(' ').unwrap_or((rest, "{}"));
                 let params = serde_json::from_str(params).unwrap_or(serde_json::json!({}));
@@ -290,6 +321,16 @@ impl StudioWindow {
             }
             "settings-shortcuts" => self.open_settings(super::settings::Page::Shortcuts, cx),
             "settings-voices" => self.open_settings(super::settings::Page::Voices, cx),
+            // AI streamer mode's whole policy, as JSON (mode, sites, scenes, games, chat_browse, chat_plays)
+            "streamer-policy" => match serde_json::from_str::<crate::piair::streamer::Policy>(rest) {
+                Ok(p) => self.piair.set_policy(p),
+                Err(e) => tracing::warn!("CHECK streamer-policy: {e}"),
+            },
+            "streamer-log" => {
+                for e in crate::piair::streamer::recent(20) {
+                    tracing::info!(cause = %e.cause, method = %e.method, what = %e.what, allowed = e.allowed, reason = %e.reason, "CHECK action");
+                }
+            }
             // the full-access question as a full-access package would open it (nothing installs)
             "full-access-ask" => {
                 let (tx, _rx) = futures_channel::oneshot::channel::<bool>();

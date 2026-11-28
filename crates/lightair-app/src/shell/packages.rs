@@ -37,6 +37,8 @@ pub(super) struct PackagesUi {
     last_drop: Option<(Vec<PathBuf>, Instant)>,
     /// The full-access question while it's open (catalog_ui.rs).
     pub(super) full_access: Option<catalog_ui::FullAccessAsk>,
+    /// A running package's request for optional permissions, with which ones are ticked.
+    pub(super) permission_ask: Option<(crate::permission_ask::Request, Vec<bool>)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

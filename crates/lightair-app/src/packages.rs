@@ -121,6 +121,20 @@ pub fn problems_of(m: &Manifest) -> Vec<String> {
 /// Packages panel (`grants`). Helpers are started with these.
 pub fn granted_permissions(i: &Installed) -> Vec<String> {
     let id = i.id().as_str();
+    let optional = crate::grants::optional_granted(id);
+    i.manifest
+        .permissions
+        .iter()
+        .filter(|p| crate::grants::is_granted(id, p))
+        .chain(i.manifest.optional_permissions.iter().filter(|p| optional.contains(*p)))
+        .cloned()
+        .collect()
+}
+
+/// What it declared and still holds, without the optional permissions it was given while running
+/// (a change in these restarts a helper; optional ones are checked as it asks).
+pub fn declared_granted(i: &Installed) -> Vec<String> {
+    let id = i.id().as_str();
     i.manifest.permissions.iter().filter(|p| crate::grants::is_granted(id, p)).cloned().collect()
 }
 
@@ -557,6 +571,8 @@ pub struct Prepared {
     pub permissions: Vec<String>,
     /// What an installed version of it didn't declare (asked about on their own).
     pub new_permissions: Vec<String>,
+    /// What it may ask for later, while it runs (not granted now).
+    pub optional_permissions: Vec<String>,
     /// It runs outside the sandbox on this computer.
     pub full_access: bool,
     /// The package read (folders and `.airpkg`s), installed as read; `None` for a `.lwidget`.
@@ -599,6 +615,7 @@ impl Prepared {
             origin,
             permissions: m.permissions.clone(),
             new_permissions,
+            optional_permissions: m.optional_permissions.clone(),
             full_access: m.full_access_on(lightair_packages::catalog::Target::current()),
             path,
             package: Some(package),
@@ -615,6 +632,14 @@ impl Prepared {
                 let words = lightair_packages::Permission::parse(p).map_or_else(|_| p.clone(), |q| q.describe());
                 if self.new_permissions.contains(p) { format!("{words} (new)") } else { words }
             })
+            .collect()
+    }
+
+    /// What it may ask for later, in words (the install screen's "May ask later for").
+    pub fn optional_lines(&self) -> Vec<String> {
+        self.optional_permissions
+            .iter()
+            .map(|p| lightair_packages::Permission::parse(p).map_or_else(|_| p.clone(), |q| q.describe()))
             .collect()
     }
 
@@ -711,6 +736,7 @@ pub fn prepare(path: &Path) -> Result<Prepared, String> {
             origin: Origin::File,
             permissions: manifest.permissions.clone(),
             new_permissions: Vec::new(),
+            optional_permissions: Vec::new(),
             full_access: false,
             package: None,
             source: None,
@@ -751,6 +777,7 @@ pub fn remove(id: &PackageId, version: Option<&Version>) -> Result<(), String> {
         Some(v) => store.remove(id, v),
         None => {
             crate::grants::forget(id.as_str());
+            crate::grants::forget_optional(id.as_str());
             store.remove_all(id).map(|_| ())
         }
     };

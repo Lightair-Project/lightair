@@ -228,6 +228,24 @@ impl StudioWindow {
                     Err(e) => Err(ApiError::new(ErrorKind::State, e)),
                 }
             }
+            // the AI streamer's off switch from anywhere (Lightair Live's Remote): the kill switch
+            "piair.stop" => {
+                // the kill switch, then PiAir itself stops (the streamer starts it again)
+                self.piair.stop();
+                crate::piair::streamer::log("stop", "remote stop", "streamer", true, "");
+                Ok(json!({"stopped": true}))
+            }
+            "piair.status" => {
+                let st = self.piair.state();
+                let policy = self.piair.policy();
+                Ok(json!({
+                    "running": st.running,
+                    "status": st.status,
+                    "mode": if policy.mode.is_empty() { "off".to_string() } else { policy.mode.clone() },
+                    "ai_drives": self.piair.ai_drives(),
+                    "last_actions": crate::piair::streamer::recent(5),
+                }))
+            }
             "voice.stop" => {
                 crate::voice::stop(p.get("all").and_then(Value::as_bool).unwrap_or(false));
                 Ok(json!({}))

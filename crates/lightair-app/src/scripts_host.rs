@@ -193,6 +193,7 @@ fn sync() {
             name: i.manifest.name.clone(),
             code,
             permissions: granted.clone(),
+            optional: i.manifest.optional_permissions.clone(),
             data_dir: Some(lightair_platform::paths::data_dir().join("PackageData").join(&id)),
             settings: Value::Object(crate::helpers_host::setting_values(&id)),
         };
@@ -355,6 +356,14 @@ impl lightair_script::Host for AppHost {
 
     fn notify(&self, text: &str) {
         pa::message(&self.name, &format!("{}: {text}", self.name));
+    }
+
+    fn request_permissions(&self, permissions: &[String], reason: &str) -> Vec<String> {
+        crate::permission_ask::ask(&self.id, &self.name, permissions, reason)
+    }
+
+    fn release_permissions(&self, permissions: &[String]) {
+        crate::permission_ask::release(&self.id, permissions);
     }
 
     fn pick(&self) -> Option<PathBuf> {

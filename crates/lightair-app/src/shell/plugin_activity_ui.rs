@@ -20,6 +20,7 @@ fn kind_icon(k: Kind) -> &'static str {
         Kind::Devices => "usb",
         Kind::OtherApp => "app-window",
         Kind::Computer => "mouse-pointer-click",
+        Kind::Outputs => "radio",
         Kind::Chat => "message-square",
         Kind::FullAccess => "shield-alert",
     }

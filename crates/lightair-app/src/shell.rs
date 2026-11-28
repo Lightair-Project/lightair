@@ -531,6 +531,8 @@ pub struct StudioWindow {
     canvas_edit: Option<settings::CanvasEdit>,
     /// Settings › Shortcuts is waiting for the keys of this global shortcut.
     shortcut_capture: Option<crate::shortcuts::GlobalAction>,
+    /// Settings › AI co-host: the field for adding an allowed site (AI streamer mode).
+    streamer_site: Option<Entity<gpui_kit::component::input::InputState>>,
     shortcut_note: Option<String>,
     /// Monitoring devices, read when the Audio page opens.
     headphones_devices: Vec<(String, String)>,
@@ -658,6 +660,8 @@ impl StudioWindow {
         // are open, and now and then to pick up the first one asked for.
         // It runs when Chromium asks (CEF's external pump): a page that animates asks often, a
         // still page now and then, none never.
+        // running packages asking for optional permissions: shown one at a time
+        Self::watch_permission_asks(cx);
         let (wake, mut woken) = futures_channel::mpsc::unbounded::<()>();
         let wake = parking_lot::Mutex::new(wake);
         lightair_web::set_waker(move || {
@@ -990,6 +994,7 @@ impl StudioWindow {
             settings_page: settings::Page::General,
             canvas_edit: None,
             shortcut_capture: None,
+            streamer_site: None,
             shortcut_note: None,
             headphones_devices: Vec::new(),
             dock: None,
@@ -1277,6 +1282,7 @@ impl StudioWindow {
             || self.go_live_sheet.is_some()
             || self.packages.export.is_some()
             || self.packages.full_access.is_some()
+            || self.packages.permission_ask.is_some()
             || self.source_picker.is_some()
             || self.library_sheet.is_some()
             || self.anchor_sheet.is_some()
@@ -2735,6 +2741,7 @@ impl Render for StudioWindow {
             .children(self.go_live_overlay(cx))
             .children(self.package_export_overlay(cx))
             .children(self.full_access_overlay(cx))
+            .children(self.permission_ask_overlay(cx))
             .children(self.start_failure_overlay(cx))
             .children(self.plan_warning_overlay(cx))
             .children(self.settings_overlay(cx))
