@@ -16,7 +16,11 @@
 //!   and carries each connection over a named pipe to Lightair, which passes it to the helper's
 //!   proxy lane. The pipe admits only that AppContainer. The helper gets the bridge's address as
 //!   `HTTPS_PROXY` and the like, exactly as on macOS.
+//! - **Listening:** apps outside can't connect into an AppContainer either. A helper listens on
+//!   an inside port Lightair gives it (`LIGHTAIR_LISTEN_<port>`, `LIGHTAIR_LISTEN_ANY`); while it
+//!   does, Lightair holds the outside port and passes each connection through the bridge to it.
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -27,11 +31,16 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_IO_PENDING, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError,
     HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation,
+};
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
@@ -58,9 +67,10 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
     JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
     JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectBasicAccountingInformation, JobObjectBasicUIRestrictions, JobObjectCpuRateControlInformation,
-    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
+    JobObjectBasicUIRestrictions, JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation,
+    QueryInformationJobObject, SetInformationJobObject,
 };
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, CreatePipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
@@ -68,10 +78,10 @@ use windows_sys::Win32::System::Pipes::{
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, DETACHED_PROCESS, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess,
     PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-    UpdateProcThreadAttribute,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW, STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
 };
 use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
 
@@ -95,11 +105,15 @@ pub(crate) struct Sandbox {
     /// Picked paths granted for this run, taken back when it stops.
     picked: Vec<PathBuf>,
     bridge: Option<Bridge>,
+    listening: Option<Listening>,
 }
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
         // the job, closed after this, kills whatever of the helper is left
+        if let Some(l) = &mut self.listening {
+            l.stop();
+        }
         if let Some(b) = &mut self.bridge {
             b.stop();
         }
@@ -169,23 +183,28 @@ pub(crate) fn launch(spec: &Spec, launcher: &Path, events: Sender<Event>) -> io:
 
     let job = Job::new().map_err(ctx("its job object"))?;
     let mut env = base_env(spec);
-    let (lane, bridge) = if g.uses_network() {
-        let lane = Lane::open(&spec.id, Rules::from(g), events)?;
+    let (listens, listen_env) = listen_ports(g).map_err(ctx("its listening ports"))?;
+    env.extend(listen_env);
+    let lane = if g.uses_network() { Some(Lane::open(&spec.id, Rules::from(g), events.clone())?) } else { None };
+    let bridge = if lane.is_some() || !listens.is_empty() {
         let launcher = exe_path(launcher);
         grant_file_read(&launcher, &sid).map_err(ctx("granting the bridge's program"))?;
-        let (bridge, port) = Bridge::start(&spec.id, &launcher, &sid, &job, lane.port(), &spec.data_dir)
-            .map_err(ctx("its network bridge"))?;
-        let url = format!("http://127.0.0.1:{port}");
-        for k in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"] {
-            env.push((k.into(), url.clone()));
+        let (bridge, port) =
+            Bridge::start(&spec.id, &launcher, &sid, &job, lane.as_ref().map(Lane::port), &spec.data_dir)
+                .map_err(ctx("its network bridge"))?;
+        if lane.is_some() {
+            let url = format!("http://127.0.0.1:{port}");
+            for k in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"] {
+                env.push((k.into(), url.clone()));
+            }
+            env.push(("NO_PROXY".into(), String::new()));
         }
-        env.push(("NO_PROXY".into(), String::new()));
-        (Some(lane), Some(bridge))
+        Some(bridge)
     } else {
-        (None, None)
+        None
     };
 
-    let mut sandbox = Sandbox { job, sid, picked, bridge };
+    let mut sandbox = Sandbox { job, sid, picked, bridge, listening: None };
     let child = spawn_contained(&spec.entry, &spec.args, &spec.data_dir, &env, &sandbox.sid, &caps, &sandbox.job)
         .inspect_err(|_| {
             if let Some(b) = &mut sandbox.bridge {
@@ -193,6 +212,11 @@ pub(crate) fn launch(spec: &Spec, launcher: &Path, events: Sender<Event>) -> io:
             }
         })
         .map_err(ctx("starting it in its AppContainer"))?;
+    if let (false, Some(b)) = (listens.is_empty(), &sandbox.bridge) {
+        // on the LAN too when the home network is granted
+        let listening = Listening::start(&spec.id, listens, sandbox.job.handle(), b.shared.clone(), events, g.lan);
+        sandbox.listening = Some(listening.map_err(ctx("watching its listening ports"))?);
+    }
     tracing::info!("helper {} started in AppContainer {}", spec.id, sandbox.sid_string());
     Ok(Helper { child, lane, profile_file: None, sandbox: Some(sandbox) })
 }
@@ -343,9 +367,9 @@ fn capability(name: &str) -> io::Result<Sid> {
 /// the bridge, files are granted to the container itself.
 fn capabilities(g: &Grants) -> io::Result<Vec<Sid>> {
     let mut names: Vec<&str> = Vec::new();
-    // multicast discovery, and being connected to from the home network, need the private
-    // network capability, which also lets it reach the home network directly
-    if g.lan_discovery || (g.lan && !g.listen.is_empty()) {
+    // multicast discovery needs the private network capability, which also lets it reach the
+    // home network directly (listening ports, even on the home network, are held by Lightair)
+    if g.lan_discovery {
         names.push("privateNetworkClientServer");
     }
     for d in &g.devices {
@@ -784,19 +808,42 @@ fn env_block(env: &[(String, String)]) -> Vec<u16> {
 
 // ---- The network bridge ----
 
-/// Lightair's side of a helper's network bridge: a named pipe only its AppContainer may open,
-/// each connection passed to the helper's proxy lane.
+/// Lightair's side of a helper's network bridge: a named pipe only its AppContainer may open.
+///
+/// Each pipe connection starts with one line saying what it is:
+/// - `out`: the helper's outgoing connection, passed to its proxy lane;
+/// - `control`: the bridge's channel for Lightair's requests (`connect <inside port> <token>`:
+///   connect to the helper's listening port for the connection waiting as `<token>`);
+/// - `in <token>`: the bridge connected to the helper for that waiting connection;
+/// - `fail <token>`: it couldn't.
 struct Bridge {
-    stop: Arc<AtomicBool>,
+    shared: Arc<Shared>,
     pipe: String,
     /// The bridge's process (the job ends it with the helper).
     child: Option<Child>,
 }
 
+/// What the pipe's server and the listening ports share.
+struct Shared {
+    lane_port: Option<u16>,
+    control: Mutex<Option<Arc<OverlappedPipe>>>,
+    /// Connections accepted on outside ports, waiting for the bridge's `in <token>`.
+    waiting: Mutex<HashMap<u64, (TcpStream, Instant)>>,
+    next_token: AtomicU64,
+    stop: AtomicBool,
+}
+
 impl Bridge {
     /// Opens the pipe, starts `lightair-sandbox.exe bridge <pipe>` in the AppContainer and job,
     /// and returns its port inside the container.
-    fn start(id: &str, launcher: &Path, sid: &Sid, job: &Job, lane_port: u16, cwd: &Path) -> io::Result<(Bridge, u16)> {
+    fn start(
+        id: &str,
+        launcher: &Path,
+        sid: &Sid,
+        job: &Job,
+        lane_port: Option<u16>,
+        cwd: &Path,
+    ) -> io::Result<(Bridge, u16)> {
         let pipe = format!(
             r"\\.\pipe\lightair-helper-{}-{}-{:x}",
             std::process::id(),
@@ -809,16 +856,22 @@ impl Bridge {
         // only the user (who owns Lightair) and this AppContainer; low label so the container
         // (low integrity) may write
         let sddl = format!("D:P(A;;GA;;;OW)(A;;GRGW;;;{sid})S:(ML;;NW;;;LW)");
-        let stop = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(Shared {
+            lane_port,
+            control: Mutex::new(None),
+            waiting: Mutex::new(HashMap::new()),
+            next_token: AtomicU64::new(1),
+            stop: AtomicBool::new(false),
+        });
         // the first instance is made here, so a squatter can't own the name first
         let first = PipeServer::create(&pipe, &sddl, true).map_err(ctx("its pipe"))?;
         {
-            let (stop, pipe, sddl) = (stop.clone(), pipe.clone(), sddl.clone());
+            let (shared, pipe, sddl) = (shared.clone(), pipe.clone(), sddl.clone());
             std::thread::Builder::new()
                 .name(format!("helper bridge {id}"))
-                .spawn(move || serve_pipe(first, &pipe, &sddl, lane_port, &stop))?;
+                .spawn(move || serve_pipe(first, &pipe, &sddl, &shared))?;
         }
-        let mut bridge = Bridge { stop, pipe: pipe.clone(), child: None };
+        let mut bridge = Bridge { shared, pipe: pipe.clone(), child: None };
         let mut child = spawn_contained(launcher, &["bridge".into(), pipe.clone()], cwd, &bridge_env(), sid, &[], job)
             .inspect_err(|_| bridge.stop())
             .map_err(ctx("starting the bridge"))?;
@@ -850,7 +903,7 @@ impl Bridge {
         if let Some(c) = &mut self.child {
             c.kill();
         }
-        if self.stop.swap(true, Ordering::Relaxed) {
+        if self.shared.stop.swap(true, Ordering::Relaxed) {
             return;
         }
         // wakes the waiting ConnectNamedPipe
@@ -875,10 +928,10 @@ fn bridge_env() -> Vec<(String, String)> {
     env
 }
 
-/// Accepts the bridge's connections one by one and passes each to the lane.
-fn serve_pipe(first: PipeServer, name: &str, sddl: &str, lane_port: u16, stop: &AtomicBool) {
+/// Accepts the bridge's pipe connections and handles each by its first line.
+fn serve_pipe(first: PipeServer, name: &str, sddl: &str, shared: &Arc<Shared>) {
     let mut next = Some(first);
-    while !stop.load(Ordering::Relaxed) {
+    while !shared.stop.load(Ordering::Relaxed) {
         let server = match next.take() {
             Some(s) => s,
             None => match PipeServer::create(name, sddl, false) {
@@ -893,14 +946,314 @@ fn serve_pipe(first: PipeServer, name: &str, sddl: &str, lane_port: u16, stop: &
             tracing::warn!("helper bridge pipe: {e}");
             continue;
         }
-        if stop.load(Ordering::Relaxed) {
+        if shared.stop.load(Ordering::Relaxed) {
             return;
         }
         let conn = Arc::new(server.0);
+        let shared = shared.clone();
         let _ = std::thread::Builder::new().name("helper bridge connection".into()).spawn(move || {
-            let Ok(up) = TcpStream::connect(("127.0.0.1", lane_port)) else { return };
-            relay(conn, up);
+            let Some(head) = read_line(&conn) else { return };
+            let mut words = head.split(' ');
+            match (words.next(), words.next().and_then(|t| t.parse::<u64>().ok())) {
+                (Some("out"), _) => {
+                    let Some(port) = shared.lane_port else { return };
+                    let Ok(up) = TcpStream::connect(("127.0.0.1", port)) else { return };
+                    relay(conn, up);
+                }
+                (Some("control"), _) => {
+                    *shared.control.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn);
+                }
+                (Some("in"), Some(token)) => {
+                    let waiting = shared.waiting.lock().unwrap_or_else(|e| e.into_inner()).remove(&token);
+                    if let Some((tcp, _)) = waiting {
+                        relay(conn, tcp);
+                    }
+                }
+                (Some("fail"), Some(token)) => {
+                    shared.waiting.lock().unwrap_or_else(|e| e.into_inner()).remove(&token);
+                }
+                _ => {}
+            }
         });
+    }
+}
+
+/// One line (without its `\n`) from a pipe, read byte by byte so nothing after it is taken.
+fn read_line(pipe: &OverlappedPipe) -> Option<String> {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while line.len() < 128 {
+        match pipe.read(&mut byte) {
+            Ok(1) if byte[0] == b'\n' => return String::from_utf8(line).ok(),
+            Ok(1) => line.push(byte[0]),
+            _ => return None,
+        }
+    }
+    None
+}
+
+// ---- Listening ports (plugins.md §4.11, "Listening ports") ----
+
+/// Environment variables, in order.
+type Env = Vec<(String, String)>;
+
+/// One port the helper may listen on: it listens on `inside`, inside its AppContainer, and
+/// Lightair holds `outside` for it while it does.
+#[derive(Clone, Debug)]
+struct Listen {
+    /// The declared port (`network.listen:<port>`), or none for `network.listen:any`.
+    declared: Option<u16>,
+    inside: u16,
+    outside: u16,
+}
+
+/// The helper's listening ports and the environment that tells it where to listen:
+/// `LIGHTAIR_LISTEN_<port>`, and `LIGHTAIR_LISTEN_ANY` with `LIGHTAIR_LISTEN_ANY_OUTSIDE`.
+fn listen_ports(g: &Grants) -> io::Result<(Vec<Listen>, Env)> {
+    let mut listens = Vec::new();
+    let mut env = Vec::new();
+    for &port in &g.listen {
+        let inside = free_port()?;
+        env.push((format!("LIGHTAIR_LISTEN_{port}"), inside.to_string()));
+        listens.push(Listen { declared: Some(port), inside, outside: port });
+    }
+    if g.listen_any {
+        let (inside, outside) = (free_port()?, free_port()?);
+        env.push(("LIGHTAIR_LISTEN_ANY".into(), inside.to_string()));
+        env.push(("LIGHTAIR_LISTEN_ANY_OUTSIDE".into(), outside.to_string()));
+        listens.push(Listen { declared: None, inside, outside });
+    }
+    Ok((listens, env))
+}
+
+/// A loopback port free right now.
+fn free_port() -> io::Result<u16> {
+    Ok(std::net::TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
+}
+
+/// Watches whether the helper listens on its inside ports, and holds the outside ones meanwhile.
+struct Listening {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Listening {
+    fn start(
+        helper: &str,
+        listens: Vec<Listen>,
+        job: HANDLE,
+        shared: Arc<Shared>,
+        events: Sender<Event>,
+        lan: bool,
+    ) -> io::Result<Listening> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (stop2, helper, job) = (stop.clone(), helper.to_string(), job as usize);
+        let thread = std::thread::Builder::new()
+            .name(format!("helper listening {helper}"))
+            .spawn(move || watch(&helper, &listens, job as HANDLE, &shared, &events, lan, &stop2))?;
+        Ok(Listening { stop, thread: Some(thread) })
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// An outside port Lightair holds for the helper. Dropping it closes the port.
+struct Held {
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Every 250 ms: which inside ports a process of the helper's job listens on. Without
+/// connecting to them (a sign-in server takes a stray connection badly), from the system's table
+/// of listening sockets and their owners.
+fn watch(
+    helper: &str,
+    listens: &[Listen],
+    job: HANDLE,
+    shared: &Arc<Shared>,
+    events: &Sender<Event>,
+    lan: bool,
+    stop: &AtomicBool,
+) {
+    let mut held: Vec<Option<Held>> = listens.iter().map(|_| None).collect();
+    // "in use" is said once each time the helper starts listening, not at every look
+    let mut told: Vec<bool> = vec![false; listens.len()];
+    while !stop.load(Ordering::Relaxed) && !shared.stop.load(Ordering::Relaxed) {
+        let table = tcp_listeners();
+        let ours = job_pids(job);
+        for (i, l) in listens.iter().enumerate() {
+            let listening = table.iter().any(|r| {
+                r.port == l.inside && ours.contains(&r.pid) && (r.addr == [127, 0, 0, 1] || r.addr == [0, 0, 0, 0])
+            });
+            if !listening {
+                if held[i].take().is_some() {
+                    tracing::info!("helper {helper}: stopped listening; port {} closed", l.outside);
+                }
+                told[i] = false;
+                continue;
+            }
+            if held[i].is_some() {
+                continue;
+            }
+            let addr = if lan { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
+            match std::net::TcpListener::bind((std::net::Ipv4Addr::from(addr), l.outside)) {
+                Ok(listener) => {
+                    tracing::info!("helper {helper}: listening; Lightair holds port {}", l.outside);
+                    held[i] = hold(helper, l, listener, shared, events).ok();
+                }
+                Err(_) if !told[i] => {
+                    told[i] = true;
+                    let owner = table
+                        .iter()
+                        .find(|r| r.port == l.outside && !ours.contains(&r.pid))
+                        .map(|r| program_name(r.pid).unwrap_or_else(|| format!("process {}", r.pid)));
+                    let _ = events.send(Event {
+                        helper: helper.to_string(),
+                        host: owner.unwrap_or_else(|| "another program".into()),
+                        port: l.outside,
+                        allowed: false,
+                        reason: "port in use by another program",
+                        at: SystemTime::now(),
+                    });
+                    tracing::warn!("helper {helper}: port {} is in use", l.outside);
+                }
+                Err(_) => {}
+            }
+        }
+        // connections the bridge never took (it couldn't reach the helper)
+        shared
+            .waiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (_, at)| at.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Accepts on an outside port and passes each connection to the helper through the bridge.
+fn hold(
+    helper: &str,
+    l: &Listen,
+    listener: std::net::TcpListener,
+    shared: &Arc<Shared>,
+    events: &Sender<Event>,
+) -> io::Result<Held> {
+    listener.set_nonblocking(true)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let (stop2, helper, l, shared, events) =
+        (stop.clone(), helper.to_string(), l.clone(), shared.clone(), events.clone());
+    std::thread::Builder::new().name(format!("helper port {}", l.outside)).spawn(move || {
+        while !stop2.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((conn, peer)) => {
+                    let _ = conn.set_nonblocking(false);
+                    let _ = events.send(Event {
+                        helper: helper.clone(),
+                        host: peer.ip().to_string(),
+                        port: l.declared.unwrap_or(l.outside),
+                        allowed: true,
+                        reason: "inbound connection",
+                        at: SystemTime::now(),
+                    });
+                    let token = shared.next_token.fetch_add(1, Ordering::Relaxed);
+                    let control = shared.control.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let Some(control) = control else { continue };
+                    shared.waiting.lock().unwrap_or_else(|e| e.into_inner()).insert(token, (conn, Instant::now()));
+                    if control.write_all(format!("connect {} {token}\n", l.inside).as_bytes()).is_err() {
+                        shared.waiting.lock().unwrap_or_else(|e| e.into_inner()).remove(&token);
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(30)),
+                Err(e) => {
+                    tracing::warn!("helper {helper}: port {}: {e}", l.outside);
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        }
+    })?;
+    Ok(Held { stop })
+}
+
+/// A listening IPv4 TCP socket: its address, port and owning process.
+struct TcpListenerRow {
+    addr: [u8; 4],
+    port: u16,
+    pid: u32,
+}
+
+/// The system's listening IPv4 TCP sockets.
+fn tcp_listeners() -> Vec<TcpListenerRow> {
+    unsafe {
+        let mut size = 0u32;
+        GetExtendedTcpTable(null_mut(), &mut size, 0, 2 /* AF_INET */, TCP_TABLE_OWNER_PID_LISTENER, 0);
+        for _ in 0..3 {
+            let mut buf = vec![0u32; (size as usize).div_ceil(4) + 64];
+            size = (buf.len() * 4) as u32;
+            let rc = GetExtendedTcpTable(buf.as_mut_ptr() as _, &mut size, 0, 2, TCP_TABLE_OWNER_PID_LISTENER, 0);
+            if rc == 0 {
+                let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+                let rows = std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize);
+                return rows
+                    .iter()
+                    .map(|r| TcpListenerRow {
+                        addr: r.dwLocalAddr.to_ne_bytes(),
+                        port: u16::from_be(r.dwLocalPort as u16),
+                        pid: r.dwOwningPid,
+                    })
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
+}
+
+/// The ids of the processes in a job.
+fn job_pids(job: HANDLE) -> Vec<u32> {
+    unsafe {
+        // the header (two u32s) then the ids, as pointer-sized values
+        let mut buf = vec![0usize; 2 + 256];
+        if QueryInformationJobObject(
+            job,
+            JobObjectBasicProcessIdList,
+            buf.as_mut_ptr() as _,
+            (buf.len() * size_of::<usize>()) as u32,
+            null_mut(),
+        ) == 0
+        {
+            return Vec::new();
+        }
+        let list = &*(buf.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST);
+        let n = list.NumberOfProcessIdsInList as usize;
+        std::slice::from_raw_parts(list.ProcessIdList.as_ptr(), n).iter().map(|&p| p as u32).collect()
+    }
+}
+
+/// A process's program file name (`Codex.exe`), when this user may ask.
+fn program_name(pid: u32) -> Option<String> {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len);
+        CloseHandle(h);
+        if ok == 0 {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        Some(Path::new(&path).file_name()?.to_string_lossy().into_owned())
     }
 }
 
@@ -1127,9 +1480,38 @@ unsafe fn from_wide_ptr(p: *const u16) -> String {
 }
 
 /// The bridge's side, run by `lightair-sandbox.exe bridge <pipe>` inside the helper's
-/// AppContainer: listens on 127.0.0.1, says `port <n>` on stdout, and carries each connection
-/// to Lightair over `pipe`.
+/// AppContainer: opens its control channel to Lightair, listens on 127.0.0.1, says `port <n>` on
+/// stdout, and carries each connection to Lightair over `pipe`. When Lightair asks, it connects to
+/// the helper's own listening port for a connection Lightair accepted outside. It ends when
+/// Lightair closes the control channel.
 pub fn bridge_main(pipe: &str) -> io::Result<()> {
+    let control = OverlappedPipe::open(pipe)?;
+    control.write_all(b"control\n")?;
+    {
+        let pipe = pipe.to_string();
+        std::thread::spawn(move || {
+            while let Some(line) = read_line(&control) {
+                let mut w = line.split(' ');
+                let (Some("connect"), Some(port), Some(token)) = (w.next(), w.next(), w.next()) else { continue };
+                let (Ok(port), token, pipe) = (port.parse::<u16>(), token.to_string(), pipe.clone()) else { continue };
+                std::thread::spawn(move || {
+                    let Ok(p) = OverlappedPipe::open(&pipe) else { return };
+                    match TcpStream::connect(("127.0.0.1", port)) {
+                        Ok(tcp) => {
+                            if p.write_all(format!("in {token}\n").as_bytes()).is_ok() {
+                                relay(Arc::new(p), tcp);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("lightair-sandbox bridge: the helper's port {port}: {e}");
+                            let _ = p.write_all(format!("fail {token}\n").as_bytes());
+                        }
+                    }
+                });
+            }
+            std::process::exit(0);
+        });
+    }
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     {
@@ -1141,7 +1523,11 @@ pub fn bridge_main(pipe: &str) -> io::Result<()> {
         let Ok(conn) = conn else { continue };
         let pipe = pipe.to_string();
         std::thread::spawn(move || match OverlappedPipe::open(&pipe) {
-            Ok(p) => relay(Arc::new(p), conn),
+            Ok(p) => {
+                if p.write_all(b"out\n").is_ok() {
+                    relay(Arc::new(p), conn);
+                }
+            }
             Err(e) => eprintln!("lightair-sandbox bridge: {e}"),
         });
     }

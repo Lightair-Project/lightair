@@ -39,6 +39,8 @@ pub struct Grants {
     pub lan_discovery: bool,
     /// `network.listen:<port>`: other apps may connect to it (on the LAN too when `lan`).
     pub listen: Vec<u16>,
+    /// `network.listen:any`: the same on a free port Lightair picks when the helper starts.
+    pub listen_any: bool,
     /// `ipc:<name>`: another app's socket (an absolute path, or `tmp:<name>` in the temporary folder).
     pub ipc: Vec<String>,
     /// `automation:<app id>`: Apple Events to that app.
@@ -105,6 +107,8 @@ impl Grants {
                 g.lan = true;
             } else if p == "network.lan.discovery" {
                 g.lan_discovery = true;
+            } else if p == "network.listen:any" {
+                g.listen_any = true;
             } else if let Some(port) = p.strip_prefix("network.listen:") {
                 match port.parse() {
                     Ok(port) => g.listen.push(port),
