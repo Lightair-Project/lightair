@@ -28,27 +28,27 @@ lightair-phone-camera = { path = "crates/lightair-phone-camera" }
 # (`cargo xtask core-pin <rev>` moves it). To work on lightair-core and the desktop together,
 # `cargo xtask core-link` builds against the checkout beside this repo (`../lightair-core`) until
 # `cargo xtask core-unlink`; `cargo xtask check` refuses while it's linked.
-lightair-model = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-encode = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-capture = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-packages = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-feed = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-store = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-audio = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-render = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-live = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-widgets = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-automation = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-remote = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-platform = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-pngtuber = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
+lightair-model = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-encode = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-capture = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-packages = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-feed = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-store = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-audio = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-render = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-live = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-widgets = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-automation = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-remote = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-platform = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-pngtuber = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
 # voices and hearing: text to speech, cloud speech to text, the filter for what's said aloud
-lightair-voice = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
-lightair-script = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
+lightair-voice = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
+lightair-script = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
 # the faces lightair-render draws text with (the compositor gives it the system's)
-lightair-fonts = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
+lightair-fonts = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
 # Lightair's own engine: the compositor's native pictures and the keyers
-lightair-engine = { git = "https://github.com/Lightair-Project/lightair-core", rev = "594952a9c7e86582c93c043875c1daf5056f0ab8" }
+lightair-engine = { git = "https://github.com/Lightair-Project/lightair-core", rev = "b848d37b1f4e215b96c37714d63732fae9525dae" }
 
 anyhow = "1"
 thiserror = "2"
