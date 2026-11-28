@@ -96,6 +96,9 @@ pub fn launch(spec: &Spec, launcher: &std::path::Path, events: Sender<Event>) ->
     }
 
     if spec.grants.full_access {
+        let mut spec = spec.clone();
+        listen_ports(&mut spec)?;
+        let spec = &spec;
         let env = full_access_env(spec);
         let child = spawn::spawn(&spec.entry, &spec.args, &spec.data_dir, &env)?;
         return Ok(Helper { child, lane: None, profile_file: None });
@@ -106,6 +109,9 @@ pub fn launch(spec: &Spec, launcher: &std::path::Path, events: Sender<Event>) ->
 
 #[cfg(target_os = "macos")]
 fn sandboxed(spec: &Spec, launcher: &std::path::Path, events: Sender<Event>) -> io::Result<Helper> {
+    let mut spec = spec.clone();
+    listen_ports(&mut spec)?;
+    let spec = &spec;
     let lane =
         if spec.grants.uses_network() { Some(Lane::open(&spec.id, Rules::from(&spec.grants), events)?) } else { None };
     let profile = profile::macos(spec, lane.as_ref().map(Lane::port));
@@ -131,6 +137,24 @@ fn sandboxed(spec: &Spec, launcher: &std::path::Path, events: Sender<Event>) -> 
 #[cfg(not(target_os = "macos"))]
 fn sandboxed(_spec: &Spec, _launcher: &std::path::Path, _events: Sender<Event>) -> io::Result<Helper> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "sandboxed helpers aren't available on this platform yet"))
+}
+
+/// Tells the helper which ports to listen on (plugins.md §4.11, listening ports), where it
+/// listens on them directly: `LIGHTAIR_LISTEN_<port>` for each fixed port, and for
+/// `network.listen:any` a free port picked now, in `LIGHTAIR_LISTEN_ANY` (where it listens) and
+/// `LIGHTAIR_LISTEN_ANY_OUTSIDE` (where others reach it; the same port here). The picked port is
+/// added to the ports its sandbox may listen on.
+fn listen_ports(spec: &mut Spec) -> io::Result<()> {
+    for port in &spec.grants.listen {
+        spec.env.push((format!("LIGHTAIR_LISTEN_{port}"), port.to_string()));
+    }
+    if spec.grants.listen_any {
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+        spec.env.push(("LIGHTAIR_LISTEN_ANY".into(), port.to_string()));
+        spec.env.push(("LIGHTAIR_LISTEN_ANY_OUTSIDE".into(), port.to_string()));
+        spec.grants.listen.push(port);
+    }
+    Ok(())
 }
 
 /// A sandboxed helper's environment: nothing of Lightair's own, its data folder as home.
